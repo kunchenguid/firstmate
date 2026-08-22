@@ -39,6 +39,7 @@ SHARD_BRIDGE = ROOT / "bin" / "fm-azure-validation-shard-bridge.py"
 CREDENTIAL_EXPIRY = ROOT / "bin" / "fm-credential-expiry.py"
 CONTAINER = "validation-shards"
 SCHEMA = "fm.azure-validation/v1"
+PURGE_SCHEMA = "fm.azure-validation-purge/v1"
 RESULT_SCHEMA = "fm.azure-validation-result/v1"
 CREDENTIALS_SCHEMA = "fm.azure-validation-credentials/v1"
 RUNTIME_SCHEMA = "fm.azure-validation-runtime/v1"
@@ -240,8 +241,12 @@ def canonical_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def sha256_hex(value):
+    return hashlib.sha256(value).hexdigest()
+
+
 def sha256_bytes(value):
-    return "sha256:" + hashlib.sha256(value).hexdigest()
+    return "sha256:" + sha256_hex(value)
 
 
 def sha256_file(path):
@@ -2111,6 +2116,21 @@ def runner_module():
     return _RUNNER_MODULE
 
 
+_WORKER_LIFECYCLE_MODULE = None
+
+
+def worker_lifecycle_module():
+    global _WORKER_LIFECYCLE_MODULE
+    if _WORKER_LIFECYCLE_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "worker_lifecycle_module", str(ROOT / "bin" / "fm-worker-lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WORKER_LIFECYCLE_MODULE = module
+    return _WORKER_LIFECYCLE_MODULE
+
+
 _CREDENTIAL_EXPIRY_MODULE = None
 
 
@@ -2404,6 +2424,23 @@ def release_shape_constituent(env, state, reservation_id, evidence):
             return
         raise ValidationError("shared capacity release refused for {}: {}".format(
             reservation_id, detail[-400:]
+        ))
+
+
+def retire_purge_capacity_fence(env, retirement):
+    arguments = [
+        "capacity-retire-fence",
+        "--fence-binding", retirement["fence_binding"],
+        "--retirement-receipt", retirement["retirement_receipt"],
+        "--confirm-subscription", env["subscription"],
+    ]
+    for reservation_id in retirement["reservation_ids"]:
+        arguments += ["--reservation-id", reservation_id]
+    result = lifecycle_command(env, arguments)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise ValidationError("shared capacity fence retirement refused: {}".format(
+            detail[-500:]
         ))
 
 
@@ -3997,6 +4034,883 @@ def fail_retain(env, args):
     print("AZURE VALIDATION RETAINED cell={} compute=zero worktree=retained".format(state["cell"]))
 
 
+def purge_role_identity(item):
+    identity = {
+        "id": str(item.get("id", "")),
+        "scope": str(item.get("scope", "")),
+        "principal_id": str(item.get("principalId", "")),
+        "role_definition_id": str(item.get("roleDefinitionId", "")),
+    }
+    if any(not value for value in identity.values()):
+        raise ValidationError("purge RBAC identity is incomplete")
+    return identity
+
+
+def same_purge_role(left, right):
+    return all(
+        str(left.get(key, "")).lower() == str(right.get(key, "")).lower()
+        for key in ("id", "scope", "principal_id", "role_definition_id")
+    )
+
+
+def purge_compute_ids(resources):
+    required = (
+        ("vm", resources.get("vm_id")),
+        ("nic", resources.get("nic_id")),
+        ("disk", resources.get("os_disk_id")),
+        ("ttl-schedule", resources.get("ttl_schedule_id")),
+    )
+    if any(not resource_id for _, resource_id in required):
+        raise ValidationError("purge compute identity inventory is incomplete")
+    values = list(required)
+    safety = resources.get("safety_run_command_id")
+    if safety:
+        values.append(("run-command", safety))
+    elif resources.get("vm_id"):
+        values.append(("run-command", resources["vm_id"] + "/runCommands/safety-shutdown"))
+    for record in resources.get("run_commands") or []:
+        if not isinstance(record, dict) or not record.get("id"):
+            raise ValidationError("purge run-command inventory is incomplete")
+        values.append(("run-command", record["id"]))
+    managed = resources.get("run_command_name")
+    if managed:
+        values.append(("run-command", resources["vm_id"] + "/runCommands/" + managed))
+    return sorted(set(values))
+
+
+def prove_compute_zero(env, compute_ids, label):
+    for kind, resource_id in compute_ids:
+        exists, _ = read_resource(env, resource_id, kind)
+        if exists:
+            raise ValidationError("{} still has live {} compute".format(label, kind))
+
+
+def shared_capacity_authority(env):
+    configured = Path(os.environ.get(
+        "FM_AZURE_VALIDATION_LIFECYCLE", str(ROOT / "bin" / "fm-worker-lifecycle.sh")
+    )).resolve()
+    if configured != (ROOT / "bin" / "fm-worker-lifecycle.sh").resolve():
+        raise ValidationError("purge cannot inspect an overridden shared capacity authority")
+    module = worker_lifecycle_module()
+    try:
+        lifecycle_env = module.environment()
+        if lifecycle_env["subscription"] != env["subscription"]:
+            raise ValidationError("shared capacity authority subscription differs during purge")
+        return module, lifecycle_env
+    except module.LifecycleError as exc:
+        raise ValidationError("shared capacity authority is unreadable during purge: {}".format(exc))
+
+
+def capacity_authority_snapshot(env):
+    module, lifecycle_env = shared_capacity_authority(env)
+    try:
+        with module.controller_lock(lifecycle_env):
+            lifecycle_state = module.load_state(lifecycle_env)
+            reservations = lifecycle_state.get("capacity_reservations") or {}
+            reservations = json.loads(json.dumps(reservations))
+        response = module.provider_call(lifecycle_env, "inventory")
+        provider_reservations = response["inventory"]["capacity_reservations"]
+        return reservations, json.loads(json.dumps(provider_reservations))
+    except module.LifecycleError as exc:
+        raise ValidationError("shared capacity authority is unreadable during purge: {}".format(exc))
+
+
+def require_complete_purge_capacity_census(
+    reservations, provider_reservations, fence, allowed_ids, boundary
+):
+    provider_active = {
+        item.get("reservation_id"): item
+        for item in provider_reservations
+        if isinstance(item, dict) and item.get("active") is True
+    }
+    for reservation_id, provider in provider_active.items():
+        controller = reservations.get(reservation_id)
+        if (
+            not isinstance(controller, dict)
+            or controller.get("schema") != "fm.capacity-reservation/v1"
+            or controller.get("reservation_id") != reservation_id
+            or not isinstance(controller.get("fence_binding"), str)
+            or not controller.get("fence_binding")
+            or not isinstance(controller.get("workload_role"), str)
+            or not controller.get("workload_role")
+            or controller.get("discretionary") is not True
+            or controller.get("role") != provider.get("role")
+            or controller.get("sku") != provider.get("sku")
+            or str(controller.get("sku_family", "")).lower()
+            != str(provider.get("sku_family", "")).lower()
+            or controller.get("vcpus") != provider.get("vcpus")
+            or isinstance(controller.get("amount_usd"), bool)
+            or not isinstance(controller.get("amount_usd"), (int, float))
+            or abs(
+                float(controller["amount_usd"])
+                - float(provider.get("amount_usd", -1.0))
+            ) > 1e-6
+        ):
+            raise ValidationError(
+                "provider-active capacity constituent {} lacks exact controller "
+                "identity at the {} boundary".format(reservation_id, boundary)
+            )
+    for reservation_key, reservation in reservations.items():
+        if (
+            isinstance(reservation, dict)
+            and reservation.get("fence_binding") == fence
+            and (
+                reservation.get("reservation_id") != reservation_key
+                or reservation_key not in allowed_ids
+            )
+        ):
+            raise ValidationError(
+                "same-fence capacity constituent {} is outside the exact "
+                "purge census at the {} boundary".format(reservation_key, boundary)
+            )
+
+
+def exact_purge_capacity_constituents(
+    state, shard_plan, runner_states, reservations, provider_reservations
+):
+    admission = state["admission"]
+    allocation = state.get("allocation") or {}
+    expected = [{
+        "reservation_id": state["cell"],
+        "sku": allocation.get("sku"),
+        "sku_family": allocation.get("sku_family"),
+        "vcpus": 8,
+        "amount_usd": admission.get("control_amount_usd"),
+    }] + [{
+        "reservation_id": entry.get("invocation"),
+        "sku": entry.get("sku"),
+        "sku_family": entry.get("sku_family"),
+        "vcpus": 4,
+        "amount_usd": entry.get("amount_usd"),
+    } for entry in shard_plan]
+    fence = state["request"]["fence"].split(":", 1)[-1]
+    census = {item["reservation_id"] for item in expected} | set(runner_states)
+    require_complete_purge_capacity_census(
+        reservations, provider_reservations, fence, census, "initial-plan"
+    )
+    snapshots = {}
+    for item in expected:
+        reservation = reservations.get(item["reservation_id"])
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("schema") != "fm.capacity-reservation/v1"
+            or reservation.get("reservation_id") != item["reservation_id"]
+            or reservation.get("fence_binding") != fence
+            or reservation.get("shape_id") != state["cell"]
+            or reservation.get("role") != "specialized"
+            or reservation.get("workload_role") != "validation"
+            or reservation.get("discretionary") is not True
+            or reservation.get("sku") != item["sku"]
+            or str(reservation.get("sku_family", "")).lower() != str(item["sku_family"] or "").lower()
+            or reservation.get("vcpus") != item["vcpus"]
+            or not isinstance(item["amount_usd"], (int, float))
+            or isinstance(item["amount_usd"], bool)
+            or abs(float(reservation.get("amount_usd", -1.0)) - float(item["amount_usd"])) > 1e-6
+            or reservation.get("status") not in ("queued", "reserved", "released")
+            or (
+                reservation.get("status") == "released"
+                and not re.match(
+                    r"^(?:sha256:)?[0-9a-f]{64}$",
+                    str(reservation.get("cleanup_receipt", "")),
+                )
+            )
+        ):
+            raise ValidationError(
+                "shared capacity constituent {} has no exact durable shape identity".format(
+                    item["reservation_id"]
+                )
+            )
+        snapshots[item["reservation_id"]] = {
+            key: reservation.get(key) for key in (
+                "schema", "reservation_id", "fence_binding", "shape_id", "role",
+                "workload_role", "discretionary", "sku", "sku_family", "vcpus", "amount_usd",
+                "status", "cleanup_receipt",
+            )
+        }
+    return snapshots
+
+
+def bind_purge_provider_capacity_absence(capacity, provider_reservations):
+    by_id = {
+        item["reservation_id"]: item
+        for item in provider_reservations
+        if isinstance(item, dict) and isinstance(item.get("reservation_id"), str)
+    }
+    for reservation_id, expected in capacity.items():
+        observed = by_id.get(reservation_id)
+        if observed is None:
+            expected["provider"] = {"present": False, "active": False}
+            continue
+        if (
+            observed.get("reservation_id") != reservation_id
+            or observed.get("role") != expected.get("role")
+            or observed.get("sku") != expected.get("sku")
+            or str(observed.get("sku_family", "")).lower()
+            != str(expected.get("sku_family", "")).lower()
+            or observed.get("vcpus") != expected.get("vcpus")
+            or isinstance(observed.get("amount_usd"), bool)
+            or not isinstance(observed.get("amount_usd"), (int, float))
+            or abs(
+                float(observed["amount_usd"])
+                - float(expected.get("amount_usd", -1.0))
+            ) > 1e-6
+            or observed.get("active") is not False
+        ):
+            raise ValidationError(
+                "provider capacity constituent {} is active or has drifted from "
+                "the exact purge lineage".format(reservation_id)
+            )
+        expected["provider"] = {
+            key: observed.get(key) for key in (
+                "reservation_id", "role", "sku", "sku_family", "vcpus",
+                "amount_usd", "active",
+            )
+        }
+
+
+def prove_purge_capacity_released(
+    env, capacity_constituents, release_ids, require_released=True
+):
+    reservations, provider_reservations = capacity_authority_snapshot(env)
+    expected = {
+        item["reservation_id"]: json.loads(json.dumps(item))
+        for item in capacity_constituents
+    }
+    fences = {item.get("fence_binding") for item in expected.values()}
+    if len(fences) != 1 or not next(iter(fences)):
+        raise ValidationError("sealed purge capacity fence is incomplete")
+    require_complete_purge_capacity_census(
+        reservations, provider_reservations, next(iter(fences)), set(expected),
+        "retry/pre-artifact",
+    )
+    release_ids = set(release_ids)
+    for reservation_id, planned in expected.items():
+        observed = reservations.get(reservation_id)
+        receipt = str((observed or {}).get("cleanup_receipt", ""))
+        if (
+            (reservation_id in release_ids and not isinstance(observed, dict))
+            or (
+                isinstance(observed, dict)
+                and any(
+                    str(observed.get(key) or "").lower()
+                    != str(planned.get(key) or "").lower()
+                    for key in (
+                        "schema", "reservation_id", "fence_binding", "shape_id", "role",
+                        "workload_role", "sku", "sku_family",
+                    )
+                )
+            )
+            or (
+                isinstance(observed, dict)
+                and (
+                    observed.get("discretionary") is not True
+                    or observed.get("vcpus") != planned.get("vcpus")
+                    or isinstance(observed.get("amount_usd"), bool)
+                    or not isinstance(observed.get("amount_usd"), (int, float))
+                    or abs(
+                        float(observed["amount_usd"])
+                        - float(planned.get("amount_usd", -1.0))
+                    ) > 1e-6
+                )
+            )
+            or (
+                isinstance(observed, dict)
+                and reservation_id in release_ids
+                and require_released
+                and (
+                    observed.get("status") != "released"
+                    or not re.match(r"^(?:sha256:)?[0-9a-f]{64}$", receipt)
+                )
+            )
+            or (
+                isinstance(observed, dict)
+                and reservation_id in release_ids
+                and not require_released
+                and (
+                    observed.get("status") not in ("queued", "reserved", "released")
+                    or (
+                        observed.get("status") == "released"
+                        and not re.match(r"^(?:sha256:)?[0-9a-f]{64}$", receipt)
+                    )
+                )
+            )
+            or (
+                isinstance(observed, dict)
+                and reservation_id not in release_ids
+                and (
+                    observed.get("status") != "released"
+                    or not re.match(r"^(?:sha256:)?[0-9a-f]{64}$", receipt)
+                )
+            )
+        ):
+            raise ValidationError(
+                "purge capacity constituent {} lacks its exact durable {} identity".format(
+                    reservation_id,
+                    "release" if require_released or reservation_id not in release_ids
+                    else "pre-release",
+                )
+            )
+    bind_purge_provider_capacity_absence(expected, provider_reservations)
+
+
+def exact_purge_retry_constituent(state, value, reservations):
+    invocation = value["invocation"]
+    request = value.get("request") or {}
+    limits = request.get("limits") or {}
+    runner_reservation = value.get("shared_capacity_reservation") or {}
+    reservation = reservations.get(invocation)
+    fence = state["request"]["fence"].split(":", 1)[-1]
+    if (
+        not isinstance(reservation, dict)
+        or reservation.get("schema") != "fm.capacity-reservation/v1"
+        or reservation.get("reservation_id") != invocation
+        or reservation.get("fence_binding") != fence
+        or reservation.get("shape_id") is not None
+        or reservation.get("role") != "specialized"
+        or reservation.get("workload_role") != "validation"
+        or reservation.get("discretionary") is not True
+        or reservation.get("sku") != limits.get("sku")
+        or str(reservation.get("sku_family", "")).lower() != str(limits.get("sku_family", "")).lower()
+        or reservation.get("vcpus") != 4
+        or not isinstance(runner_reservation.get("amount_usd"), (int, float))
+        or isinstance(runner_reservation.get("amount_usd"), bool)
+        or abs(
+            float(reservation.get("amount_usd", -1.0))
+            - float(runner_reservation["amount_usd"])
+        ) > 1e-6
+        or reservation.get("status") != "released"
+        or reservation.get("cleanup_receipt") != runner_reservation.get("cleanup_receipt")
+    ):
+        raise ValidationError(
+            "retry shard constituent {} has no exact durable released identity".format(invocation)
+        )
+    return {
+        key: reservation.get(key) for key in (
+            "schema", "reservation_id", "fence_binding", "shape_id", "role",
+            "workload_role", "discretionary", "sku", "sku_family", "vcpus", "amount_usd",
+            "status", "cleanup_receipt",
+        )
+    }
+
+
+def load_purge_runner_states(env, state):
+    directory = runner_state_dir(env)
+    if not directory.is_dir():
+        raise ValidationError("shard runner state directory is absent")
+    values = {}
+    for path in sorted(directory.glob("azr-*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValidationError("shard runner state is unreadable during purge: {}".format(exc))
+        invocation = value.get("invocation")
+        if value.get("schema") != "fm.azure-command/v1" or not RUNNER_INVOCATION.match(str(invocation or "")):
+            raise ValidationError("shard runner state identity is corrupt during purge")
+        if path.stem != invocation or invocation in values:
+            raise ValidationError("shard runner state filename or invocation is ambiguous")
+        values[invocation] = value
+    return {
+        invocation: value
+        for invocation, value in values.items()
+        if (value.get("request") or {}).get("capacity_parent") == state["cell"]
+    }
+
+
+def purge_runner_compute_ids(value):
+    resources = value.get("resources") or {}
+    values = purge_compute_ids(resources)
+    vm_id = resources.get("vm_id")
+    execute_name = resources.get("run_command_name") or "execute"
+    safety_name = resources.get("safety_run_command_name") or "safety-shutdown"
+    values.extend((
+        ("run-command", vm_id + "/runCommands/" + execute_name),
+        ("run-command", vm_id + "/runCommands/" + safety_name),
+    ))
+    return sorted(set(values))
+
+
+def plan_purge_shards(env, state):
+    admission = state.get("admission") or {}
+    shard_plan = admission.get("shard_plan") or []
+    roots = [entry.get("invocation") for entry in shard_plan]
+    expected_shards = (state.get("request") or {}).get("limits", {}).get("behavior_shards")
+    if (
+        admission.get("shape_id") != state["cell"]
+        or not isinstance(expected_shards, int)
+        or len(shard_plan) != expected_shards
+        or {entry.get("shard") for entry in shard_plan} != set(range(1, expected_shards + 1))
+        or any(not RUNNER_INVOCATION.match(str(root or "")) for root in roots)
+        or len(roots) != len(set(roots))
+    ):
+        raise ValidationError("purge shard capacity plan is incomplete or ambiguous")
+    runner_states = load_purge_runner_states(env, state)
+    reservations, provider_reservations = capacity_authority_snapshot(env)
+    capacity = exact_purge_capacity_constituents(
+        state, shard_plan, runner_states, reservations, provider_reservations
+    )
+    fence = state["request"]["fence"].split(":", 1)[-1]
+    planned = []
+    for invocation, value in sorted(runner_states.items()):
+        request = value.get("request") or {}
+        root = request.get("lineage_root_invocation") or invocation
+        parent = value.get("parent_invocation")
+        reservation = value.get("shared_capacity_reservation") or {}
+        if invocation not in capacity:
+            capacity[invocation] = exact_purge_retry_constituent(state, value, reservations)
+        if (
+            root not in roots
+            or request.get("schema") != "fm.azure-command/v1"
+            or request.get("invocation") != invocation
+            or request.get("parent_invocation") != parent
+            or request.get("capacity_fence") != fence
+            or value.get("request_digest") != request.get("request_digest")
+            or not SHA256.match(str(request.get("request_digest", "")))
+            or not SHA256.match(str(request.get("command_digest", "")))
+            or value.get("phase") not in ("complete", "absent-fenced")
+            or reservation.get("reservation_id") != invocation
+            or reservation.get("fence_binding") != fence
+            or reservation.get("status") != "released"
+            or not re.match(r"^(?:sha256:)?[0-9a-f]{64}$", str(reservation.get("cleanup_receipt", "")))
+            or capacity[invocation].get("status") != "released"
+            or capacity[invocation].get("cleanup_receipt") != reservation.get("cleanup_receipt")
+        ):
+            raise ValidationError("shard lineage {} is not terminal, compute-zero, and released".format(invocation))
+        if parent:
+            parent_state = runner_states.get(parent)
+            if not parent_state or (parent_state.get("request") or {}).get("lineage_root_invocation", parent) != root:
+                raise ValidationError("shard retry lineage is incomplete during purge")
+        elif invocation != root:
+            raise ValidationError("shard lineage root identity is inconsistent")
+        compute_ids = purge_runner_compute_ids(value)
+        prove_compute_zero(env, compute_ids, "shard {}".format(invocation))
+        planned.append({
+            "invocation": invocation,
+            "lineage_root_invocation": root,
+            "parent_invocation": parent,
+            "phase": value["phase"],
+            "request_digest": request["request_digest"],
+            "command_digest": request["command_digest"],
+            "cleanup_receipt": reservation["cleanup_receipt"],
+            "compute_ids": [[kind, resource_id] for kind, resource_id in compute_ids],
+        })
+    shard_runs = state.get("shard_runs") or {}
+    if not isinstance(shard_runs, dict):
+        raise ValidationError("cell shard dispatch ledger is corrupt")
+    for record in shard_runs.values():
+        if not isinstance(record, dict):
+            raise ValidationError("cell shard dispatch record is corrupt")
+        live = runner_states.get(record.get("invocation"))
+        if not live or (live.get("request") or {}).get("command_digest") != record.get("command_digest"):
+            raise ValidationError("dispatched shard lineage lacks exact terminal runner evidence")
+    dispatched_roots = {
+        (value.get("request") or {}).get("lineage_root_invocation") or invocation
+        for invocation, value in runner_states.items()
+    }
+    releases = []
+    if capacity[state["cell"]]["status"] != "released":
+        releases.append({"reservation_id": state["cell"], "evidence": "purge-control-compute-absent"})
+    recorded_invocations = {record.get("invocation") for record in shard_runs.values()}
+    for root in roots:
+        if root not in dispatched_roots:
+            if root in recorded_invocations:
+                raise ValidationError("recorded shard dispatch has no runner lineage")
+            if capacity[root]["status"] != "released":
+                releases.append({"reservation_id": root, "evidence": "purge-shard-never-dispatched"})
+    bind_purge_provider_capacity_absence(capacity, provider_reservations)
+    ordered_capacity = [state["cell"]] + roots + sorted(set(capacity) - {state["cell"]} - set(roots))
+    return planned, releases, [capacity[key] for key in ordered_capacity]
+
+
+def purge_container_scope(env, state):
+    return (
+        "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Storage/storageAccounts/{}"
+        "/blobServices/default/containers/{}"
+    ).format(env["subscription"], env["resource_group"], env["storage"], state["staging"]["container"])
+
+
+def build_purge_plan(env, state):
+    control_compute = purge_compute_ids(state["resources"])
+    prove_compute_zero(env, control_compute, "control cell")
+    recorded_worktree = (state.get("resources") or {}).get("identities", {}).get("worktree")
+    worktree_id = state["resources"].get("worktree_disk_id")
+    exists, worktree = read_resource(env, worktree_id, "disk")
+    if not exists:
+        raise ValidationError("retained worktree disk is absent before purge planning")
+    verify_cleanup_resource(state, worktree, "disk", "worktree")
+    worktree_identity = immutable_identity(worktree, "disk")
+    worktree_etag = worktree.get("etag") or worktree.get("properties", {}).get("etag")
+    if (
+        not same_stable_identity(recorded_worktree, worktree_identity, "disk")
+        or not worktree_etag
+        or worktree.get("managedBy")
+        or worktree.get("properties", {}).get("managedBy")
+    ):
+        raise ValidationError("retained worktree disk is not exact and detached")
+    worktree_identity["etag"] = worktree_etag
+    identity_id = state["resources"].get("identity_id")
+    exists, identity_resource = read_resource(env, identity_id, "identity")
+    if not exists:
+        raise ValidationError("cell storage identity is absent before purge planning")
+    verify_cleanup_resource(state, identity_resource, "identity")
+    identity = immutable_identity(identity_resource, "identity")
+    principal = identity["principal_id"]
+    if principal.lower() != str(state["resources"].get("identity_principal_id", "")).lower():
+        raise ValidationError("cell storage principal changed before purge planning")
+    scope = purge_container_scope(env, state)
+    exists, container = read_resource(env, scope, "container")
+    if not exists:
+        raise ValidationError("cell private container is absent before purge planning")
+    properties = container.get("properties", container)
+    container_etag = container.get("etag") or properties.get("etag")
+    if properties.get("publicAccess") not in (None, "None") or not container_etag:
+        raise ValidationError("cell container is not private with an exact ETag")
+    blob_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
+        env["subscription"], BLOB_DATA_CONTRIBUTOR_ROLE
+    )
+    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
+    direct = [
+        purge_role_identity(item) for item in assignments or []
+        if str(item.get("scope", "")).lower() == scope.lower()
+    ]
+    expected_principals = {env["operator_object_id"].lower(), principal.lower()}
+    if (
+        len(direct) != 2
+        or {item["principal_id"].lower() for item in direct} != expected_principals
+        or any(item["role_definition_id"].lower() != blob_role.lower() for item in direct)
+    ):
+        raise ValidationError("cell container RBAC is foreign or incomplete before purge")
+    account_scope = storage_account_scope(env)
+    file_role = "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(
+        env["subscription"], FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE
+    )
+    account_assignments, _, _ = az_command(
+        env, ["role", "assignment", "list", "--scope", account_scope, "--all"]
+    )
+    auth_roles = [
+        purge_role_identity(item) for item in account_assignments or []
+        if str(item.get("scope", "")).lower() == account_scope.lower()
+        and str(item.get("principalId", "")).lower() == principal.lower()
+    ]
+    expected_auth_count = 1 if auth_share_name() else 0
+    if len(auth_roles) != expected_auth_count or any(
+        item["role_definition_id"].lower() != file_role.lower() for item in auth_roles
+    ):
+        raise ValidationError("cell auth-share RBAC is foreign or incomplete before purge")
+    effective, _, _ = az_command(env, [
+        "role", "assignment", "list", "--assignee-object-id", principal,
+        "--all", "--include-inherited", "--include-groups",
+    ])
+    expected_effective = [item for item in direct if item["principal_id"].lower() == principal.lower()] + auth_roles
+    effective_roles = [purge_role_identity(item) for item in effective or []]
+    if len(effective_roles) != len(expected_effective) or any(
+        not any(same_purge_role(item, expected) for expected in expected_effective)
+        for item in effective_roles
+    ):
+        raise ValidationError("cell identity effective RBAC exceeds the purge plan")
+    shard_lineages, capacity_releases, capacity_constituents = plan_purge_shards(env, state)
+    capacity_fences = {item.get("fence_binding") for item in capacity_constituents}
+    if len(capacity_fences) != 1 or not next(iter(capacity_fences)):
+        raise ValidationError("purge capacity fence identity is incomplete")
+    retirement_identity = {
+        "schema": "fm.azure-validation-capacity-retirement/v1",
+        "cell": state["cell"],
+        "request_digest": state["request_digest"],
+        "fence_binding": next(iter(capacity_fences)),
+        "reservation_ids": sorted(
+            item["reservation_id"] for item in capacity_constituents
+        ),
+    }
+    immutable = {
+        "cell": state["cell"],
+        "subscription": env["subscription"],
+        "request_digest": state["request_digest"],
+        "control_compute_ids": [[kind, resource_id] for kind, resource_id in control_compute],
+        "shard_lineages": shard_lineages,
+        "capacity_constituents": capacity_constituents,
+        "capacity_fence_retirement": dict(
+            retirement_identity,
+            # The shared allocator's binding contract is deliberately the
+            # narrow raw lowercase digest, unlike validation protocol digests
+            # that carry an explicit sha256: prefix.
+            retirement_receipt=sha256_hex(canonical_bytes(retirement_identity)),
+        ),
+        "worktree": {"resource_id": worktree_id, "identity": worktree_identity},
+        "storage": {
+            "container_scope": scope,
+            "container_etag": container_etag,
+            "container_roles": sorted(direct, key=lambda item: item["id"].lower()),
+            "auth_share_roles": sorted(auth_roles, key=lambda item: item["id"].lower()),
+            "identity_resource_id": identity_id,
+            "identity": identity,
+        },
+        "capacity_releases": capacity_releases,
+    }
+    return {
+        "schema": PURGE_SCHEMA,
+        "created_at": iso_utc(),
+        "plan": immutable,
+        "plan_digest": sha256_bytes(canonical_bytes(immutable)),
+        "progress": {
+            "worktree_absent": False,
+            "container_roles_absent": False,
+            "container_absent": False,
+            "auth_share_roles_absent": False,
+            "identity_absent": False,
+            "capacity_fence_retired": False,
+            "released_capacity": [],
+        },
+    }
+
+
+def verify_purge_record(state, env):
+    purge = state.get("purge") or {}
+    plan = purge.get("plan") or {}
+    if (
+        purge.get("schema") != PURGE_SCHEMA
+        or purge.get("plan_digest") != sha256_bytes(canonical_bytes(plan))
+        or plan.get("cell") != state["cell"]
+        or plan.get("subscription") != env["subscription"]
+        or plan.get("request_digest") != state.get("request_digest")
+        or not isinstance(purge.get("progress"), dict)
+    ):
+        raise ValidationError("stored retained-purge plan is corrupt or rebound")
+    if state.get("phase") == "purged":
+        terminal = purge.get("terminal") or {}
+        if (
+            terminal.get("phase") != "purged"
+            or terminal.get("plan_digest") != purge["plan_digest"]
+            or not terminal.get("completed_at")
+        ):
+            raise ValidationError("terminal retained-purge tombstone is incomplete")
+    return purge
+
+
+def save_purge_progress(env, state, key, value=True):
+    state["purge"]["progress"][key] = value
+    save_state(env, state)
+
+
+def delete_planned_purge_resource(env, state, resource_id, kind, planned_identity, label):
+    exists, resource = read_resource(env, resource_id, kind)
+    if not exists:
+        return
+    verify_cleanup_resource(state, resource, kind, "worktree" if label == "worktree" else None)
+    live = immutable_identity(resource, kind)
+    if not same_stable_identity(planned_identity, live, kind):
+        raise ValidationError("planned {} stable identity changed".format(label))
+    if planned_identity.get("etag"):
+        raw_etag = resource.get("etag") or resource.get("properties", {}).get("etag")
+        if raw_etag != planned_identity["etag"]:
+            raise ValidationError("planned {} ETag changed".format(label))
+    if kind == "disk" and (resource.get("managedBy") or resource.get("properties", {}).get("managedBy")):
+        raise ValidationError("planned {} disk reattached before deletion".format(label))
+    arguments = [
+        "rest", "--method", "delete",
+        "--url", "https://management.azure.com{}?api-version={}".format(resource_id, RESOURCE_API[kind]),
+    ]
+    if planned_identity.get("etag"):
+        arguments += ["--headers", "If-Match={}".format(planned_identity["etag"])]
+    _, rc, stderr = az_command(env, arguments, check=False)
+    if rc != 0:
+        raise ValidationError("exact planned {} deletion failed: {}".format(label, stderr))
+    for _ in range(60):
+        remains, _ = read_resource(env, resource_id, kind)
+        if not remains:
+            return
+        time.sleep(5)
+    raise ValidationError("exact planned {} remains after bounded deletion".format(label))
+
+
+def current_planned_roles(env, state, plan):
+    storage = plan["storage"]
+    scope = storage["container_scope"]
+    assignments, _, _ = az_command(env, ["role", "assignment", "list", "--scope", scope, "--all"])
+    current_container = [
+        purge_role_identity(item) for item in assignments or []
+        if str(item.get("scope", "")).lower() == scope.lower()
+    ]
+    planned_container = storage["container_roles"]
+    if any(not any(same_purge_role(item, expected) for expected in planned_container) for item in current_container):
+        raise ValidationError("cell container gained foreign RBAC after purge planning")
+    account_scope = storage_account_scope(env)
+    account, _, _ = az_command(env, ["role", "assignment", "list", "--scope", account_scope, "--all"])
+    principal = storage["identity"]["principal_id"]
+    current_auth = [
+        purge_role_identity(item) for item in account or []
+        if str(item.get("scope", "")).lower() == account_scope.lower()
+        and str(item.get("principalId", "")).lower() == principal.lower()
+    ]
+    planned_auth = storage["auth_share_roles"]
+    if any(not any(same_purge_role(item, expected) for expected in planned_auth) for item in current_auth):
+        raise ValidationError("cell identity gained foreign auth-share RBAC after purge planning")
+    effective, _, _ = az_command(env, [
+        "role", "assignment", "list", "--assignee-object-id", principal,
+        "--all", "--include-inherited", "--include-groups",
+    ])
+    planned_effective = [
+        item for item in planned_container if item["principal_id"].lower() == principal.lower()
+    ] + planned_auth
+    current_effective = [purge_role_identity(item) for item in effective or []]
+    if any(not any(same_purge_role(item, expected) for expected in planned_effective) for item in current_effective):
+        raise ValidationError("cell identity gained foreign effective RBAC after purge planning")
+    return current_container, current_auth
+
+
+def purge_storage(env, state, purge):
+    plan = purge["plan"]
+    progress = purge["progress"]
+    storage = plan["storage"]
+    container_roles, auth_roles = current_planned_roles(env, state, plan)
+    for item in container_roles:
+        _, rc, stderr = az_command(env, ["role", "assignment", "delete", "--ids", item["id"]], check=False)
+        if rc != 0:
+            raise ValidationError("planned container RBAC deletion failed: {}".format(stderr))
+    for _ in range(60):
+        remaining, _ = current_planned_roles(env, state, plan)
+        if not remaining:
+            break
+        time.sleep(5)
+    else:
+        raise ValidationError("planned container RBAC remains after bounded deletion")
+    if not progress.get("container_roles_absent"):
+        save_purge_progress(env, state, "container_roles_absent")
+    exists, container = read_resource(env, storage["container_scope"], "container")
+    if exists:
+        properties = container.get("properties", container)
+        live_etag = container.get("etag") or properties.get("etag")
+        if live_etag != storage["container_etag"] or properties.get("publicAccess") not in (None, "None"):
+            raise ValidationError("planned private container changed before deletion")
+        _, rc, stderr = az_command(env, [
+            "rest", "--method", "delete",
+            "--url", "https://management.azure.com{}?api-version={}".format(
+                storage["container_scope"], RESOURCE_API["container"]
+            ),
+            "--headers", "If-Match={}".format(storage["container_etag"]),
+        ], check=False)
+        if rc != 0:
+            raise ValidationError("planned private container deletion failed: {}".format(stderr))
+    for _ in range(60):
+        remains, _ = read_resource(env, storage["container_scope"], "container")
+        if not remains:
+            break
+        time.sleep(5)
+    else:
+        raise ValidationError("planned private container remains after bounded deletion")
+    if not progress.get("container_absent"):
+        save_purge_progress(env, state, "container_absent")
+    _, auth_roles = current_planned_roles(env, state, plan)
+    for item in auth_roles:
+        _, rc, stderr = az_command(env, ["role", "assignment", "delete", "--ids", item["id"]], check=False)
+        if rc != 0:
+            raise ValidationError("planned auth-share RBAC deletion failed: {}".format(stderr))
+    for _ in range(60):
+        _, remaining = current_planned_roles(env, state, plan)
+        if not remaining:
+            break
+        time.sleep(5)
+    else:
+        raise ValidationError("planned auth-share RBAC remains after bounded deletion")
+    if not progress.get("auth_share_roles_absent"):
+        save_purge_progress(env, state, "auth_share_roles_absent")
+    delete_planned_purge_resource(
+        env, state, storage["identity_resource_id"], "identity", storage["identity"], "storage identity"
+    )
+    if not progress.get("identity_absent"):
+        save_purge_progress(env, state, "identity_absent")
+
+
+def execute_purge_plan(env, state, purge):
+    plan = purge["plan"]
+    progress = purge["progress"]
+    prove_compute_zero(env, [(kind, resource_id) for kind, resource_id in plan["control_compute_ids"]], "control cell")
+    for lineage in plan["shard_lineages"]:
+        prove_compute_zero(
+            env, [(kind, resource_id) for kind, resource_id in lineage["compute_ids"]],
+            "shard {}".format(lineage["invocation"]),
+        )
+    released = set(progress.get("released_capacity") or [])
+    planned_release_ids = [entry["reservation_id"] for entry in plan["capacity_releases"]]
+    prove_purge_capacity_released(
+        env, plan["capacity_constituents"], planned_release_ids,
+        require_released=False,
+    )
+    for entry in plan["capacity_releases"]:
+        reservation_id = entry["reservation_id"]
+        if reservation_id not in released:
+            release_shape_constituent(env, state, reservation_id, entry["evidence"])
+            released.add(reservation_id)
+            save_purge_progress(env, state, "released_capacity", sorted(released))
+    prove_purge_capacity_released(
+        env, plan["capacity_constituents"], planned_release_ids
+    )
+    # This command performs one last entire allocator/provider census while
+    # holding the shared admission lock, then durably retires the exact fence.
+    # Both reserve entry points reject the tombstone before they can insert or
+    # re-admit capacity, closing the former proof-to-disk-delete race.
+    retire_purge_capacity_fence(env, plan["capacity_fence_retirement"])
+    if not progress.get("capacity_fence_retired"):
+        save_purge_progress(env, state, "capacity_fence_retired")
+    worktree = plan["worktree"]
+    delete_planned_purge_resource(
+        env, state, worktree["resource_id"], "disk", worktree["identity"], "worktree"
+    )
+    if not progress.get("worktree_absent"):
+        save_purge_progress(env, state, "worktree_absent")
+    purge_storage(env, state, purge)
+
+
+def purge_retained(env, args):
+    cell = require_cell(args.cell)
+    if (
+        not args.confirm_purge
+        or args.confirm_subscription != env["subscription"]
+        or args.confirm_cell != cell
+    ):
+        raise ValidationError("purge-retained requires exact purge, subscription, and cell confirmation")
+    require_sha256("purge request digest confirmation", args.confirm_request_digest)
+    with lock(env, cell + "-shards"):
+        with lock(env, cell):
+            state = load_state(env, cell)
+            if args.confirm_request_digest != state.get("request_digest"):
+                raise ValidationError("purge request digest confirmation does not match the retained cell")
+            if (state.get("result") or {}).get("outcome") in ("passed", "checks-passed"):
+                raise ValidationError("a passed result cannot enter retained-failure purge")
+            if state["phase"] == "purged":
+                purge = verify_purge_record(state, env)
+                print("AZURE VALIDATION PURGED cell={} plan={} compute=zero retained=zero".format(
+                    cell, purge["plan_digest"]
+                ))
+                return
+            if state["phase"] == "failed-retained":
+                purge = build_purge_plan(env, state)
+                transition(
+                    env, state, "purging",
+                    "immutable retained-resource purge plan sealed before destructive mutation",
+                    purge=purge,
+                )
+            elif state["phase"] == "purging":
+                purge = verify_purge_record(state, env)
+            else:
+                raise ValidationError("purge-retained owns only an exact failed-retained cell or its purge retry")
+            try:
+                execute_purge_plan(env, state, purge)
+            except ValidationError as exc:
+                state.setdefault("events", []).append({
+                    "at": iso_utc(), "phase": "purging",
+                    "note": "retained purge remains resumable: {}".format(str(exc)[:300]),
+                })
+                save_state(env, state)
+                raise
+            purge["terminal"] = {
+                "phase": "purged", "completed_at": iso_utc(),
+                "plan_digest": purge["plan_digest"],
+            }
+            transition(env, state, "purged", "sealed retained-resource purge completed", purge=purge)
+    print("AZURE VALIDATION PURGED cell={} plan={} compute=zero retained=zero".format(
+        cell, state["purge"]["plan_digest"]
+    ))
+
+
 def list_cell_blobs(env, state, prefix="shards/"):
     values, _, _ = az_command(env, [
         "storage", "blob", "list", "--auth-mode", "login", "--account-name", env["storage"],
@@ -4596,6 +5510,12 @@ def parser():
     retain_parser.add_argument("--cell", required=True)
     retain_parser.add_argument("--confirm-retain", action="store_true")
     retain_parser.add_argument("--confirm-subscription")
+    purge_parser = commands.add_parser("purge-retained")
+    purge_parser.add_argument("--cell", required=True)
+    purge_parser.add_argument("--confirm-purge", action="store_true")
+    purge_parser.add_argument("--confirm-subscription")
+    purge_parser.add_argument("--confirm-cell", required=True)
+    purge_parser.add_argument("--confirm-request-digest", required=True)
     commands.add_parser("queue")
     seed_parser = commands.add_parser("auth-seed")
     seed_parser.add_argument("--codex")
@@ -4617,7 +5537,10 @@ def main():
         if args.command == "build-runtime-bundle":
             build_runtime_bundle(args)
             return 0
-        cloud = args.command in ("dispatch", "drive", "observe", "collect", "respond", "replace", "close", "retain-failure")
+        cloud = args.command in (
+            "dispatch", "drive", "observe", "collect", "respond", "replace",
+            "close", "retain-failure", "purge-retained",
+        )
         # Planning a seed is a purely local credential read; only the upload
         # needs a cloud scope, so a plan works without Azure environment.
         if args.command == "auth-seed" and args.apply:
@@ -4641,6 +5564,8 @@ def main():
             close(env, args)
         elif args.command == "retain-failure":
             fail_retain(env, args)
+        elif args.command == "purge-retained":
+            purge_retained(env, args)
         elif args.command == "queue":
             queue(env)
         elif args.command == "status":

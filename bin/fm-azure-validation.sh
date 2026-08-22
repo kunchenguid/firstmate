@@ -48,6 +48,9 @@
 #     --confirm-subscription <exact-id> --confirm-head <exact-sha>
 #   fm-azure-validation.sh retain-failure --cell <azv-id> --confirm-retain \
 #     --confirm-subscription <exact-id>
+#   fm-azure-validation.sh purge-retained --cell <azv-id> --confirm-purge \
+#     --confirm-subscription <exact-id> --confirm-cell <azv-id> \
+#     --confirm-request-digest <sha256:digest>
 #   fm-azure-validation.sh queue
 #   fm-azure-validation.sh auth-seed [--codex <profile>] [--claude <profile>]
 #     [--apply --confirm-seed --confirm-subscription <exact-id>]
@@ -63,14 +66,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 usage() {
-  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
   help|-h|--help|"")
     usage
     ;;
-  build-runtime-bundle|submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue|auth-seed)
+  build-runtime-bundle|submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|purge-retained|queue|auth-seed)
     exec python3 "$SCRIPT_DIR/fm-azure-validation.py" "$@"
     ;;
   *)

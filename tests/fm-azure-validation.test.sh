@@ -1145,6 +1145,471 @@ PY
   pass "partial container/role cleanup resumes idempotently from its exact persisted plan"
 }
 
+purge_retained_contract() {
+  local tmp
+  fm_test_tmproot_into tmp fm-azure-validation-purge
+  python3 - "$HOST" "$tmp" <<'PY' || fail "retained-failure purge contract failed"
+import contextlib,copy,hashlib,importlib.util,json,pathlib,sys,types
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[2]); state_dir=root/"state"/"azure-validation"
+runner_dir=root/"state"/"azure-runner"
+state_dir.mkdir(parents=True); runner_dir.mkdir(parents=True)
+cell="azv-aaaaaaaaaaaa"; fence="sha256:"+"a"*64; request_digest="sha256:"+"b"*64
+sub="11111111-1111-4111-8111-111111111111"
+principal="33333333-3333-4333-8333-333333333333"
+client="44444444-4444-4444-8444-444444444444"
+operator="22222222-2222-4222-8222-222222222222"
+root_one="azr-111111111111"; root_two="azr-222222222222"; retry_one="azr-333333333333-a2"
+command_digest="sha256:"+"c"*64
+env={"home":root,"state_dir":state_dir,"subscription":sub,"resource_group":"rg",
+     "storage":"storage","operator_object_id":operator}
+worktree_id="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Compute/disks/work".format(sub)
+identity_id="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/cell".format(sub)
+container_scope="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/storage/blobServices/default/containers/fmvalaaaaaaaaaaaa".format(sub)
+account_scope="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/storage".format(sub)
+blob_role="/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(sub,m.BLOB_DATA_CONTRIBUTOR_ROLE)
+file_role="/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(sub,m.FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE)
+state={
+ "schema":m.SCHEMA,"cell":cell,"phase":"failed-retained","request_digest":request_digest,
+ "request":{"fence":fence,"limits":{"behavior_shards":2}},
+ "staging":{"container":"fmvalaaaaaaaaaaaa"},
+ "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDasv6Family"},
+ "resources":{
+   "vm_id":"/control/vm","nic_id":"/control/nic","os_disk_id":"/control/os",
+   "ttl_schedule_id":"/control/ttl","safety_run_command_id":"/control/safety",
+   "worktree_disk_id":worktree_id,"identity_id":identity_id,"identity_principal_id":principal,
+   "identities":{
+     "worktree":{"id":worktree_id.lower(),"etag":"work-etag","unique_id":"work-unique"},
+     "identity":{"id":identity_id.lower(),"etag":None,"client_id":client,"principal_id":principal},
+   },
+ },
+ "admission":{"shape_id":cell,"control_amount_usd":25.0,"shard_plan":[
+   {"invocation":root_one,"shard":1,"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family","amount_usd":10.0},
+   {"invocation":root_two,"shard":2,"sku":"Standard_D4ds_v6","sku_family":"standardDdsv6Family","amount_usd":11.0},
+ ]},
+ "shard_runs":{"sha256:"+"d"*64:{"invocation":root_one,"command_digest":command_digest}},
+ "events":[],
+}
+m.ensure_dirs(env); m.save_state(env,state,create=True)
+runner_resources={
+ "vm_id":"/runner/vm","nic_id":"/runner/nic","os_disk_id":"/runner/os",
+ "ttl_schedule_id":"/runner/ttl","safety_run_command_id":"/runner/safety",
+ "run_command_name":"execute","safety_run_command_name":"safety-shutdown",
+}
+runner={
+ "schema":"fm.azure-command/v1","invocation":root_one,"parent_invocation":None,"phase":"complete",
+ "request_digest":"sha256:"+"e"*64,
+ "request":{"schema":"fm.azure-command/v1","invocation":root_one,"parent_invocation":None,
+            "request_digest":"sha256:"+"e"*64,"command_digest":command_digest,
+            "capacity_parent":cell,"capacity_fence":fence.split(":",1)[1],
+            "lineage_root_invocation":root_one},
+ "resources":runner_resources,
+ "shared_capacity_reservation":{"reservation_id":root_one,"fence_binding":fence.split(":",1)[1],
+                                 "status":"released","cleanup_receipt":"sha256:"+"f"*64},
+}
+(runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+retry_runner=copy.deepcopy(runner)
+retry_runner.update({"invocation":retry_one,"parent_invocation":root_one})
+retry_runner["request"].update({"invocation":retry_one,"parent_invocation":root_one,
+                                "request_digest":"sha256:"+"7"*64,
+                                "limits":{"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family"}})
+retry_runner["request_digest"]="sha256:"+"7"*64
+retry_runner["resources"]={key:value.replace("/runner/","/retry/") if isinstance(value,str) else value
+                           for key,value in runner_resources.items()}
+retry_runner["shared_capacity_reservation"]={"reservation_id":retry_one,
+ "fence_binding":fence.split(":",1)[1],"status":"released","amount_usd":9.0,
+ "cleanup_receipt":"sha256:"+"8"*64}
+(runner_dir/(retry_one+".json")).write_text(json.dumps(retry_runner))
+resources={
+ worktree_id:{"id":worktree_id,"etag":"work-etag","properties":{"uniqueId":"work-unique"},
+              "tags":{"validation-cell":cell,"fence":fence}},
+ identity_id:{"id":identity_id,"properties":{"clientId":client,"principalId":principal},
+              "tags":{"validation-cell":cell,"fence":fence}},
+ container_scope:{"id":container_scope,"etag":"container-etag","properties":{"publicAccess":"None"}},
+}
+roles=[
+ {"id":"/roles/operator","scope":container_scope,"principalId":operator,"roleDefinitionId":blob_role},
+ {"id":"/roles/cell","scope":container_scope,"principalId":principal,"roleDefinitionId":blob_role},
+ {"id":"/roles/auth","scope":account_scope,"principalId":principal,"roleDefinitionId":file_role},
+]
+mutations=[]; lock_stack=[]; lock_events=[]; release_fail=[True]
+retired_fences=set(); retirement_tombstones={}; delete_seam_attempts=[]
+def read_resource(_env,resource_id,kind):
+ value=resources.get(resource_id)
+ return (value is not None,copy.deepcopy(value) if value is not None else None)
+def assert_sealed_before_mutation():
+ durable=json.loads((state_dir/(cell+".json")).read_text())
+ assert durable["phase"]=="purging", "destructive mutation preceded the durable purging transition"
+ purge=durable["purge"]
+ assert purge["plan_digest"]==m.sha256_bytes(m.canonical_bytes(purge["plan"]))
+def az(_env,args,**kwargs):
+ if args[:3]==["role","assignment","list"]:
+  if "--assignee-object-id" in args:
+   wanted=args[args.index("--assignee-object-id")+1].lower()
+   return ([copy.deepcopy(item) for item in roles if item["principalId"].lower()==wanted],0,"")
+  scope=args[args.index("--scope")+1].lower()
+  return ([copy.deepcopy(item) for item in roles if item["scope"].lower()==scope],0,"")
+ if args[:3]==["role","assignment","delete"]:
+  assert_sealed_before_mutation(); wanted=args[-1]
+  mutations.append(("role",wanted)); roles[:]=[item for item in roles if item["id"]!=wanted]
+  return (None,0,"")
+ if args[:2]==["rest","--method"] and args[2]=="delete":
+  assert_sealed_before_mutation(); url=args[args.index("--url")+1]
+  wanted=next(resource_id for resource_id in list(resources) if resource_id in url)
+  if wanted==worktree_id:
+   assert "If-Match=work-etag" in args
+   # Reproduce the former TOCTOU at the exact first irreversible artifact
+   # mutation. The allocator must already have made this fence permanently
+   # inadmissible, so the attempted reserve cannot enter the fresh census.
+   if fence.split(":",1)[1] in retired_fences:
+    delete_seam_attempts.append("refused-retired-fence")
+   else:
+    late_id="azr-delete-seam0001"
+    capacity_records[late_id]=reservation(
+     late_id,"Standard_D4s_v6","standardDsv6Family",4,13.5,"reserved"
+    )
+    delete_seam_attempts.append("admitted")
+   assert delete_seam_attempts[-1]=="refused-retired-fence"
+  if wanted==container_scope:
+   assert "If-Match=container-etag" in args
+  mutations.append(("resource",wanted)); resources.pop(wanted)
+  return (None,0,"")
+ raise AssertionError(args)
+@contextlib.contextmanager
+def lock(_env,name="queue"):
+ if name==cell+"-shards":
+  assert not lock_stack
+ else:
+  assert name==cell and lock_stack==[cell+"-shards"]
+ lock_stack.append(name); lock_events.append(("enter",name))
+ try: yield
+ finally:
+  lock_events.append(("exit",name)); assert lock_stack.pop()==name
+def release(_env,_state,reservation_id,evidence):
+ assert_sealed_before_mutation(); mutations.append(("capacity",reservation_id,evidence))
+ if release_fail[0]:
+  release_fail[0]=False
+  raise m.ValidationError("injected capacity release boundary")
+ capacity_records[reservation_id]["status"]="released"
+ capacity_records[reservation_id]["cleanup_receipt"]="sha256:"+"6"*64
+ provider_capacity_records[reservation_id]["active"]=False
+def retire(_env,retirement):
+ assert_sealed_before_mutation()
+ exact_fence=fence.split(":",1)[1]
+ assert retirement["fence_binding"]==exact_fence
+ prior=retirement_tombstones.get(exact_fence)
+ if prior is not None and prior!=retirement:
+  raise m.ValidationError("conflicting durable retirement tombstone")
+ assert retirement["reservation_ids"]==sorted(
+  key for key,value in capacity_records.items() if value.get("fence_binding")==exact_fence
+ )
+ assert all(
+  capacity_records[key]["status"]=="released"
+  and provider_capacity_records[key]["active"] is False
+  for key in retirement["reservation_ids"]
+ )
+ retirement_tombstones.setdefault(exact_fence,copy.deepcopy(retirement))
+ retired_fences.add(exact_fence); mutations.append(("retire",exact_fence))
+m.read_resource=read_resource; m.az_command=az; m.lock=lock
+m.release_shape_constituent=release; m.time.sleep=lambda _seconds:None
+real_retire_purge_capacity_fence=m.retire_purge_capacity_fence
+m.retire_purge_capacity_fence=retire
+def reservation(reservation_id,sku,family,vcpus,amount,status,receipt=None):
+ return {"schema":"fm.capacity-reservation/v1","reservation_id":reservation_id,
+         "fence_binding":fence.split(":",1)[1],"shape_id":cell,"role":"specialized",
+         "workload_role":"validation","discretionary":True,"sku":sku,"sku_family":family,
+         "vcpus":vcpus,"amount_usd":amount,"status":status,"cleanup_receipt":receipt}
+capacity_records={
+ cell:reservation(cell,"Standard_D8as_v6","standardDasv6Family",8,25.0,"reserved"),
+ root_one:reservation(root_one,"Standard_D4s_v6","standardDsv6Family",4,10.0,"released","sha256:"+"f"*64),
+ root_two:reservation(root_two,"Standard_D4ds_v6","standardDdsv6Family",4,11.0,"reserved"),
+ retry_one:reservation(retry_one,"Standard_D4s_v6","standardDsv6Family",4,9.0,"released","sha256:"+"8"*64),
+}
+capacity_records[retry_one].pop("shape_id")
+def provider_capacity(record,active=False):
+ return {key:record[key] for key in (
+  "reservation_id","role","sku","sku_family","vcpus","amount_usd"
+ )}|{"active":active}
+provider_capacity_records={
+ key:provider_capacity(value) for key,value in capacity_records.items()
+}
+unrelated="azr-555555555555"
+capacity_records[unrelated]=reservation(
+ unrelated,"Standard_D4s_v6","standardDsv6Family",4,12.0,"reserved"
+)
+capacity_records[unrelated]["fence_binding"]="4"*64
+capacity_records[unrelated]["shape_id"]="azv-cccccccccccc"
+provider_capacity_records[unrelated]=provider_capacity(
+ capacity_records[unrelated],active=True
+)
+m.capacity_authority_snapshot=lambda _env:(
+ copy.deepcopy(capacity_records),copy.deepcopy(list(provider_capacity_records.values()))
+)
+def args(**updates):
+ values={"cell":cell,"confirm_purge":True,"confirm_subscription":sub,
+         "confirm_cell":cell,"confirm_request_digest":request_digest}
+ values.update(updates); return types.SimpleNamespace(**values)
+
+# An already-released control constituent is accepted only through the same
+# exact id/fence/shape ledger proof, and is not planned for a second release.
+capacity_records[cell]["status"]="released"
+capacity_records[cell]["cleanup_receipt"]="sha256:"+"9"*64
+_, released_control_plan, _=m.plan_purge_shards(env,m.load_state(env,cell))
+assert [item["reservation_id"] for item in released_control_plan]==[root_two]
+capacity_records[cell]["status"]="reserved"; capacity_records[cell]["cleanup_receipt"]=None
+
+# Admit-red confirmations and phase checks perform no destructive mutation.
+for bad in (
+ args(confirm_purge=False),args(confirm_subscription="99999999-9999-4999-8999-999999999999"),
+ args(confirm_cell="azv-bbbbbbbbbbbb"),args(confirm_request_digest="sha256:"+"0"*64),
+):
+ try: m.purge_retained(env,bad)
+ except m.ValidationError: pass
+ else: raise AssertionError("purge admitted an inexact destructive confirmation")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+state=m.load_state(env,cell); state["phase"]="running"; m.save_state(env,state)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "only an exact failed-retained" in str(exc)
+else: raise AssertionError("purge admitted a live phase")
+assert not mutations
+state=m.load_state(env,cell); state["phase"]="failed-retained"; m.save_state(env,state)
+
+# A corrupt phase cannot convert a passing result into purge authority.
+state=m.load_state(env,cell); state["result"]={"outcome":"checks-passed"}; m.save_state(env,state)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "passed result" in str(exc)
+else: raise AssertionError("purge admitted a passed result under a corrupt retained phase")
+assert not mutations
+state=m.load_state(env,cell); state.pop("result"); m.save_state(env,state)
+
+# Provider inventory is not fence-bound, so an active id without an exact
+# controller row cannot be classified as unrelated and must refuse. The
+# unrelated active id above remains admissible because its controller fence is
+# exact and different.
+orphan="azr-666666666666"
+provider_capacity_records[orphan]=provider_capacity(capacity_records[root_one],active=True)
+provider_capacity_records[orphan]["reservation_id"]=orphan
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "lacks exact controller identity" in str(exc)
+else: raise AssertionError("purge admitted provider-active capacity with no controller identity")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+provider_capacity_records.pop(orphan)
+
+# A live allocator reservation on this cell's exact fence cannot disappear
+# merely because its retry runner file is missing. The preflight must refuse
+# before sealing a plan or deleting any retained resource.
+untracked_retry="azr-444444444444-a3"
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"reserved"
+)
+capacity_records[untracked_retry].pop("shape_id")
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge ignored a live same-fence retry without runner state")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry)
+
+# A released allocator row cannot hide provider drift either. If the same exact
+# reservation remains provider-active without runner evidence, purge still
+# refuses before sealing or deleting anything.
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"released","sha256:"+"5"*64
+)
+capacity_records[untracked_retry].pop("shape_id")
+provider_capacity_records[untracked_retry]=provider_capacity(
+ capacity_records[untracked_retry],active=True
+)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge ignored provider-active capacity hidden by a released allocator row")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry); provider_capacity_records.pop(untracked_retry)
+
+# Released and provider-inactive does not make an untracked same-fence row
+# safe to omit: the permanent allocator retirement performs the same entire
+# fence census and would refuse it after the cell had already entered purging.
+# Reject it before the immutable plan and non-replaceable transition instead.
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"released","sha256:"+"5"*64
+)
+capacity_records[untracked_retry].pop("shape_id")
+provider_capacity_records[untracked_retry]=provider_capacity(
+ capacity_records[untracked_retry],active=False
+)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge omitted released provider-inactive same-fence history")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry); provider_capacity_records.pop(untracked_retry)
+
+# Even a fully tracked terminal retry cannot pass while provider inventory
+# still observes its exact capacity id active.
+provider_capacity_records[retry_one]["active"]=True
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "active or has drifted" in str(exc)
+else: raise AssertionError("purge ignored provider-active tracked retry capacity")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+provider_capacity_records[retry_one]["active"]=False
+
+# A nonterminal shard is an admit-red condition before the immutable plan.
+runner["phase"]="running"; (runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not terminal" in str(exc)
+else: raise AssertionError("purge admitted a nonterminal shard lineage")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+runner["phase"]="complete"; (runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+
+# The first destructive attempt fails at capacity release before artifact
+# cleanup. It must stay non-replaceable and retain the same plan and resources.
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "injected capacity" in str(exc)
+else: raise AssertionError("injected destructive boundary did not fail")
+partial=m.load_state(env,cell); assert partial["phase"]=="purging"
+sealed=copy.deepcopy(partial["purge"]["plan"]); digest=partial["purge"]["plan_digest"]
+assert digest==m.sha256_bytes(m.canonical_bytes(sealed))
+assert partial["purge"]["progress"]=={
+ "worktree_absent":False,"container_roles_absent":False,"container_absent":False,
+ "auth_share_roles_absent":False,"identity_absent":False,
+ "capacity_fence_retired":False,"released_capacity":[],
+}
+assert m.replacement_allowed(partial,"absent-proven")[0] is False
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+assert lock_events[-4:]==[("enter",cell+"-shards"),("enter",cell),("exit",cell),("exit",cell+"-shards")]
+
+# Exercise the real bridge end to end: this retirement was emitted by the real
+# build_purge_plan above, then the real validation helper constructs argv for
+# the actual lifecycle parser and command against a private controller state.
+# A prefixed receipt passes the mocked purge path but fails require_binding;
+# pinning the raw digest here prevents that false green.
+retirement=sealed["capacity_fence_retirement"]
+assert len(retirement["retirement_receipt"])==64
+assert all(ch in "0123456789abcdef" for ch in retirement["retirement_receipt"])
+lifecycle=m.worker_lifecycle_module(); bridge_dir=root/"bridge-workers"
+bridge_env={
+ "home_binding":"1"*64,"subscription":sub,"deployment_generation":"dep-one",
+ "owner":"owner","prefix":"fmtest","state_dir":bridge_dir,
+ "state_path":bridge_dir/"controller.json","lock_path":bridge_dir/".lock",
+}
+with lifecycle.controller_lock(bridge_env):
+ bridge_state=lifecycle.load_state(bridge_env)
+ for planned in sealed["capacity_constituents"]:
+  # Released history is bounded and may be absent by retirement time. Keep
+  # two real sealed shape rows here so the command still exercises its locked
+  # same-fence census while legitimately treating the remaining ids as pruned.
+  if planned["reservation_id"] not in (root_one,root_two): continue
+  item=copy.deepcopy(planned); item["status"]="released"
+  item["released_at"]="2026-08-22T00:00:00Z"; item["cleanup_receipt"]="5"*64
+  bridge_state["capacity_reservations"][item["reservation_id"]]=item
+ outsider=copy.deepcopy(bridge_state["capacity_reservations"][root_one])
+ outsider["reservation_id"]="azr-untracked0001"
+ bridge_state["capacity_reservations"][outsider["reservation_id"]]=outsider
+ lifecycle.save_state(bridge_env,bridge_state)
+saved_provider_call=lifecycle.provider_call; saved_lifecycle_command=m.lifecycle_command
+lifecycle.provider_call=lambda _env,_operation:{
+ "inventory":{"capacity_reservations":[]}
+}
+def actual_retirement_bridge(_env,arguments):
+ parsed=lifecycle.parser().parse_args(arguments)
+ assert parsed.command=="capacity-retire-fence"
+ lifecycle.command_capacity_retire_fence(bridge_env,parsed)
+ return types.SimpleNamespace(returncode=0,stdout="",stderr="")
+m.lifecycle_command=actual_retirement_bridge
+try:
+ try: real_retire_purge_capacity_fence(env,retirement)
+ except lifecycle.LifecycleError as exc: assert "unplanned reservation" in str(exc)
+ else: raise AssertionError("real retirement accepted omitted released same-fence history")
+ with lifecycle.controller_lock(bridge_env):
+  bridge_state=lifecycle.load_state(bridge_env)
+  del bridge_state["capacity_reservations"]["azr-untracked0001"]
+  lifecycle.save_state(bridge_env,bridge_state)
+ real_retire_purge_capacity_fence(env,retirement)
+finally:
+ m.lifecycle_command=saved_lifecycle_command; lifecycle.provider_call=saved_provider_call
+with lifecycle.controller_lock(bridge_env):
+ retired=lifecycle.load_state(bridge_env)["retired_capacity_fences"]
+assert retired[retirement["fence_binding"]]["retirement_receipt"]==retirement["retirement_receipt"]
+
+# A retry must re-census the entire fresh authority before repeating the
+# failed release or touching artifacts. A new same-fence active retry appearing
+# after the sealed boundary refuses with no additional mutation.
+late_retry="azr-777777777777-a4"
+capacity_records[late_retry]=reservation(
+ late_retry,"Standard_D4s_v6","standardDsv6Family",4,13.0,"reserved"
+)
+capacity_records[late_retry].pop("shape_id")
+provider_capacity_records[late_retry]=provider_capacity(
+ capacity_records[late_retry],active=True
+)
+before_late=copy.deepcopy(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge retry ignored a late same-fence capacity reservation")
+late=m.load_state(env,cell)
+assert mutations==before_late and late["phase"]=="purging"
+assert late["purge"]["plan"]==sealed and late["purge"]["plan_digest"]==digest
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+capacity_records.pop(late_retry); provider_capacity_records.pop(late_retry)
+
+# A retry cannot alter, widen, or rediscover a deletion target after the
+# irreversible boundary; the stored digest fences the entire immutable plan.
+tampered=copy.deepcopy(partial); tampered["purge"]["plan"]["worktree"]["resource_id"]="/foreign"
+m.save_state(env,tampered); before_tamper=copy.deepcopy(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "plan is corrupt or rebound" in str(exc)
+else: raise AssertionError("purge retry accepted a widened stored plan")
+assert mutations==before_tamper
+m.save_state(env,partial)
+
+# Crash after the shared allocator durably retires the fence but before the
+# cell progress save must leave every artifact intact. The next invocation
+# presents the same sealed identity/receipt, gets the idempotent retirement,
+# and continues without reopening admission.
+original_save_progress=m.save_purge_progress; fail_retirement_progress=[True]
+def save_progress(_env,_state,key,value=True):
+ if key=="capacity_fence_retired" and fail_retirement_progress[0]:
+  fail_retirement_progress[0]=False
+  raise m.ValidationError("injected post-retirement progress crash")
+ return original_save_progress(_env,_state,key,value)
+m.save_purge_progress=save_progress
+before_retirement=len(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "post-retirement progress crash" in str(exc)
+else: raise AssertionError("purge crossed an injected post-retirement crash")
+after_retirement=m.load_state(env,cell)
+assert after_retirement["phase"]=="purging"
+assert after_retirement["purge"]["progress"]["capacity_fence_retired"] is False
+assert fence.split(":",1)[1] in retired_fences
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+assert not any(item[0] in ("resource","role") for item in mutations[before_retirement:])
+
+# The crashing invocation released control plus the one never-dispatched
+# constituent once and never released the dispatched child.
+capacity=[item[1] for item in mutations[before_retirement:] if item[0]=="capacity"]
+assert capacity==[cell,root_two], capacity
+assert root_one not in capacity
+
+# Retry consumes only the stored plan, presents the exact retirement receipt,
+# and does not release any constituent twice.
+before_retry=len(mutations); m.purge_retained(env,args())
+done=m.load_state(env,cell); assert done["phase"]=="purged"
+assert done["purge"]["plan"]==sealed and done["purge"]["plan_digest"]==digest
+capacity=[item[1] for item in mutations[before_retry:] if item[0]=="capacity"]
+assert capacity==[], capacity
+assert done["purge"]["progress"]["released_capacity"]==sorted([cell,root_two])
+assert done["purge"]["progress"]["capacity_fence_retired"] is True
+assert delete_seam_attempts==["refused-retired-fence"]
+retirements=[item for item in mutations if item[0]=="retire"]
+assert retirements==[("retire",fence.split(":",1)[1])]*2
+
+# The terminal tombstone is an idempotent no-op under the same exact locks.
+before=copy.deepcopy(mutations); m.purge_retained(env,args())
+again=m.load_state(env,cell); assert mutations==before
+assert again["phase"]=="purged" and again["purge"]["plan_digest"]==digest
+PY
+  pass "retained purge admits only exact terminal cells, seals before mutation, resumes boundaries, and is idempotent"
+}
+
 multi_lane_queue_contract() {
   local tmp home out rc
   fm_test_tmproot_into tmp fm-azure-validation-lanes
@@ -2092,6 +2557,7 @@ identity_and_recovery_contract
 trusted_manifest_verifier_contract
 shard_runner_integration_contract
 cleanup_recovery_contract
+purge_retained_contract
 multi_lane_queue_contract
 operator_documentation_contract
 shard_receipt_demotion_contract

@@ -56,6 +56,7 @@ A heavy validation request reserves its complete 40-vCPU peak atomically through
 Shard constituents never use the selected control family, so the complete shape fits the exact 10-vCPU families.
 If any constituent fails regional, exact-family, specialized-envelope, or budget admission, no constituent is reserved and the complete request stays durably queued with the exact refusal.
 Child runner VMs re-admit their exact pre-reserved constituent ids idempotently through the same allocator, so their live processors are covered once without double-counting, and each child's exact first-day cost bound may re-admit at or below its cushioned constituent amount.
+An explicit purge of a failed-retained cell first releases its sealed remaining constituents, then atomically retires the exact validation fence in the shared allocator. Retirement holds the allocator admission lock across a fresh entire-ledger and provider-inventory zero proof and the durable tombstone save; every later single or shape reserve on that fence refuses. Retained disk, private container, RBAC, and identity deletion begins only after that permanent barrier succeeds, including on retries after a crash.
 The one-shot runner independently refuses any child beyond the parent's reserved shard slots.
 An author worker must match the foundation's exact general-worker resource class before its processor count is trusted.
 Quota is only a live upper bound and never turns into a warm allocation.
@@ -450,6 +451,41 @@ bin/fm-azure-validation.sh retain-failure \
 
 No failure path deletes a worktree disk, credential disk, private container, or result object.
 No command names or deletes a resource group, subnet, foundation identity, another cell, another shard, another task prefix, or a local daemon.
+
+### Explicit retained-failure purge
+
+`purge-retained` is the deliberate, irreversible exception for a failed cell whose retained diagnosis is no longer needed.
+It accepts only `failed-retained`, its own resumable `purging` phase, or the terminal `purged` tombstone.
+The operator must repeat the exact subscription, cell, and request digest in addition to the destructive confirmation:
+
+```sh
+bin/fm-azure-validation.sh purge-retained \
+  --cell '<azv-id>' \
+  --confirm-purge \
+  --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID" \
+  --confirm-cell '<same-azv-id>' \
+  --confirm-request-digest '<sha256:exact-request-digest>'
+```
+
+The command acquires the cell's shard-driver lock before its cell-state lock, so it cannot purge while the same cell is driving child invocations.
+Before any destructive call, it proves the control VM, NIC, OS disk, Run Commands, and shutdown schedule absent.
+It also reads every runner state owned by the cell, requires every retry lineage to be terminal with Azure compute absent, and requires every dispatched reservation to carry a durable released receipt.
+Every control and shard constituent must still have the exact durable allocator id, fence, shape, SKU, family, vCPU, and cost identity recorded at admission.
+The allocator's entire exact-fence ledger must be inside the sealed control, planned-root, and runner-state census; any outside row refuses before the purge plan is sealed, regardless of release status, provider inactivity, or recorded workload role.
+The pinned shared-provider inventory must show every exact censused reservation inactive or absent with matching SKU, family, vCPU, and cost identity; a provider-active exact id, including one hidden behind a stale released allocator row, refuses.
+Because provider inventory is not fence-bound, any provider-active id without an exact controller reservation also refuses; an unrelated active reservation is ignored only when its controller record proves a different fence.
+An already-released exact constituent is accepted with its cleanup receipt, while any admitted constituent with no dispatch lineage and a queued or reserved status is listed separately for exact release.
+
+It then proves the worktree disk is detached with its recorded stable identity and current ETag, proves the private container and its complete two-role inventory, and proves the cell identity has only its exact container and auth-share grants.
+Those identities, every verified shard lineage, and only the remaining capacity constituents are sealed into an immutable purge plan.
+The state durably enters non-replaceable `purging` with the plan digest before the first deletion.
+Any remaining exact capacity constituent is released first and then read back as durably released and provider-inactive or absent before the retained disk, RBAC, container, or identity is touched.
+Every retry repeats the complete fresh allocator/provider census before attempting a remaining release, and the census is repeated after release before artifact deletion, so a new same-fence reservation can never fall outside the sealed plan.
+
+Retries never rebuild or widen that plan.
+They accept only remaining subsets of its disk, role, container, identity, and capacity identities, use the stored ETags for conditional deletion, and persist progress after every boundary.
+A partial or ambiguous attempt remains `purging`; `replace` and `retain-failure` cannot reclaim it.
+Completion retains the local state as a `purged` tombstone with the immutable plan and digest, and repeating the exact command is a no-op.
 
 ## Cleanup order
 
