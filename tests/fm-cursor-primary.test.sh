@@ -115,10 +115,13 @@ SH
 # The park's child body: claim the home lock as this fake harness process, then
 # run the adapter as its child, so the real Cursor ancestry path decides lock
 # ownership on every platform. Keep the fake harness process alive: Linux
-# changes the process identity when an exec reaches the adapter's shebang.
+# changes the process identity when an exec reaches the adapter's shebang, and
+# Bash also tail-execs a final external command unless status handling follows.
 PARK_CHILD='
   printf "%s\n" "$$" > "$FM_HOME/state/.lock"
   "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+  rc=$?
+  exit "$rc"
 '
 
 # Run the park as a child of the fake cursor harness that holds the home lock.
@@ -140,6 +143,8 @@ run_session() {  # <dir> <event> <source> [session-id]
   printf '%s' "$payload" | FM_HOME="$dir" FM_SESSION_SOURCE="$source" "$FAKE_CURSOR" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     "$FM_HOME/bin/fm-sessionstart-cursor.sh" --source "$FM_SESSION_SOURCE"
+    rc=$?
+    exit "$rc"
   ' 2>/dev/null
 }
 
@@ -186,7 +191,9 @@ test_autoarm_stands_down_on_cursor_payload() {
   write_arm_fixture "$dir" actionable
   printf '%s' "$CURSOR_PAYLOAD" | FM_HOME="$dir" "$FAKE_CURSOR" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-      exec "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      rc=$?
+      exit "$rc"
     ' >/dev/null 2>&1
   status=$?
   expect_code 0 "$status" "the Claude auto-arm must stay inert under Cursor"
