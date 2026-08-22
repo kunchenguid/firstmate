@@ -125,6 +125,80 @@ test_live_stale_watch_lock_is_actionable() {
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
+# The arm window is the stretch between the singleton lock and the first beat,
+# and the arm TERMs a watcher that has not beaten inside its confirmation
+# timeout. This fixture parks a watcher inside that window's recovery-marker
+# section - where it already holds BOTH the singleton lock and the wake-queue
+# lock - by holding the marker lock from a live process. A watcher that dies
+# there leaving those locks behind bills the NEXT watcher a dead-holder steal
+# per lock, and a steal is seconds of forks under load, not microseconds: that
+# is how one missed confirmation compounded into a supervision outage that
+# could not clear itself.
+test_watcher_signal_releases_held_locks() {
+  local dir state fakebin out holder holder_started release pid queue_pid lock_pid marker i
+  dir=$(make_case signal-releases-locks)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  holder_started="$dir/holder-started"
+  release="$dir/holder-release"
+  marker="$state/.watcher-down"
+  mark_pr_check_migration_complete "$state"
+
+  # Live holder of the recovery-marker lock. It releases only when this test
+  # says so, because the watcher's own exit path must re-take that lock to
+  # publish downtime before it may release the singleton lock.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 300 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$marker.lock" "$holder_started" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$holder_started" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_started" ] || fail "recovery-marker lock holder did not start"
+
+  # FM_WATCH_HANDLING_SUCCESSOR=1 skips the earlier reopen-announced section, so
+  # the watcher parks in arm-check, which takes the wake-queue lock first.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    queue_pid=$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)
+    [ "$queue_pid" = "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$queue_pid" = "$pid" ] || fail "watcher did not park holding the wake-queue lock (holder '$queue_pid')"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "parked watcher does not hold the singleton lock"
+
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the parked watcher"
+  : > "$release"
+  wait_for_exit "$pid" 300
+  wait "$holder" 2>/dev/null || true
+
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" != "$pid" ] || fail "signalled watcher left its singleton lock held by a dead pid"
+  queue_pid=$(cat "$state/.wake-queue.lock/pid" 2>/dev/null || true)
+  [ "$queue_pid" != "$pid" ] || fail "signalled watcher left the wake-queue lock held by a dead pid"
+  # The singleton lock must still go back through the recovery marker, never as
+  # part of a blanket sweep, or supervision loses the record that it went down.
+  case "$(cat "$marker" 2>/dev/null || echo absent)" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) fail "singleton lock was released without publishing watcher downtime: $(cat "$marker" 2>/dev/null || echo absent)" ;;
+  esac
+  pass "a signalled watcher hands back every lock it holds"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -344,6 +418,158 @@ test_lock_does_not_steal_live_lock() {
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$lockpid" = "$live" ] || fail "live holder's lock pid was clobbered (got '$lockpid')"
   pass "live-held lock is not stolen"
+}
+
+# The ordering invariant the exit sweep depends on: a lock is recorded in memory
+# BEFORE it becomes visible on disk, and an owner directory before it can leak.
+# Every fork between a durable write and its bookkeeping is a signal-delivery
+# point, so the inverted order left a watcher holding state/.wake-queue.lock with
+# no record of it - which a real signal reproduces only about half the time.
+# Overriding the two steps that each follow a durable write asserts the ordering
+# directly, which a timing race cannot do reliably.
+test_lock_is_recorded_before_it_becomes_visible() {
+  local dir state lockdir probe out
+  dir=$(make_case lock-record-before-visible)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  probe="$dir/probe.sh"
+  cat > "$probe" <<'SH'
+set -u
+. "$1"
+# Stands in for the step that runs after mktemp -d has already put the owner
+# directory on disk, before the symlink that would make it reachable.
+fm_lock_prepare_owner() {
+  case "${FM_LOCK_PENDING_OWNERS:-}" in
+    *"$1"*) printf 'owner=recorded ' ;;
+    *) printf 'owner=missing ' ;;
+  esac
+  printf '%s\n' "${BASHPID:-$$}" > "$1/pid" 2>/dev/null || return 1
+}
+# Stands in for the last step before the lock carries our pid; ln -s has
+# already published it by now. Refusing the claim keeps the probe from
+# actually taking the lock, and exercises the cleanup path at the same time.
+fm_lock_claim() {
+  case "${FM_LOCK_HELD_PATHS:-}" in
+    *"$1"*) printf 'lock=recorded\n' ;;
+    *) printf 'lock=missing\n' ;;
+  esac
+  return 1
+}
+fm_lock_try_create "$2" || true
+# A refused acquisition must leave neither list populated, or a long-running
+# watcher accumulates entries every later sweep would retry.
+held=${FM_LOCK_HELD_PATHS:-}
+pending=${FM_LOCK_PENDING_OWNERS:-}
+printf 'residue=[%s][%s]\n' "${held//$'\n'/}" "${pending//$'\n'/}"
+SH
+  out=$(FM_STATE_OVERRIDE="$state" bash "$probe" "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    *"owner=recorded"*) ;;
+    *) fail "owner directory reached disk before it was recorded: $out" ;;
+  esac
+  case "$out" in
+    *"lock=recorded"*) ;;
+    *) fail "lock became visible on disk before it was recorded: $out" ;;
+  esac
+  case "$out" in
+    *"residue=[][]"*) ;;
+    *) fail "a refused acquisition left bookkeeping behind: $out" ;;
+  esac
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fail "probe left a lock behind"
+  fi
+  pass "a lock is recorded before it becomes visible on disk"
+}
+
+# fm_lock_acquire_wait spins until it wins, so a holder that can never release
+# has to be taken over rather than waited on. The holder here is a real process
+# killed outright, leaving the on-disk lock in exactly the shape a watcher
+# killed mid-critical-section leaves it in.
+test_lock_acquire_wait_takes_over_from_dead_holder() {
+  local dir state lockdir holder holder_started dead waiter result newpid i
+  dir=$(make_case acquire-wait-dead-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_started="$dir/holder-started"
+  result="$dir/acquired"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 300
+  ' _ "$LIB" "$lockdir" "$holder_started" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$holder_started" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_started" ] || fail "lock holder did not start"
+  dead=$(cat "$holder_started")
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$dead" ] || fail "killed holder did not leave its lock behind"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    cat "$2/pid" > "$3"
+  ' _ "$LIB" "$lockdir" "$result" &
+  waiter=$!
+  wait_for_exit "$waiter" 300 || fail "fm_lock_acquire_wait never returned against a dead holder"
+  newpid=$(cat "$result" 2>/dev/null || true)
+  [ -n "$newpid" ] || fail "waiter recorded no holder pid after acquiring"
+  [ "$newpid" != "$dead" ] || fail "acquired lock still names the dead holder $dead"
+  pass "fm_lock_acquire_wait takes over a lock whose holder is dead"
+}
+
+# The property the takeover above must not break: a lock whose holder is alive
+# is waited on, however long that takes, and the waiter gets it only when the
+# holder hands it back.
+test_lock_acquire_wait_never_takes_a_live_holders_lock() {
+  local dir state lockdir holder holder_started release waiter result lockpid i
+  dir=$(make_case acquire-wait-live-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_started="$dir/holder-started"
+  release="$dir/holder-release"
+  result="$dir/acquired"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 300 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$holder_started" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$holder_started" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_started" ] || fail "live lock holder did not start"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+  ' _ "$LIB" "$lockdir" "$result" &
+  waiter=$!
+  sleep 2
+  is_live_non_zombie "$waiter" || fail "waiter did not wait out a live holder"
+  [ ! -s "$result" ] || fail "waiter acquired a lock held by a live process"
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$(cat "$holder_started")" ] || fail "live holder's lock pid was replaced (got '$lockpid')"
+
+  : > "$release"
+  wait_for_exit "$holder" 100
+  wait_for_exit "$waiter" 300 || fail "waiter did not acquire after the live holder released"
+  [ -s "$result" ] || fail "waiter never recorded acquiring the released lock"
+  pass "fm_lock_acquire_wait waits out a live holder instead of taking its lock"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1128,12 +1354,16 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
+test_watcher_signal_releases_held_locks
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_is_recorded_before_it_becomes_visible
+test_lock_acquire_wait_takes_over_from_dead_holder
+test_lock_acquire_wait_never_takes_a_live_holders_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
