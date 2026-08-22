@@ -11,13 +11,17 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -38,6 +42,42 @@ SCHEMA = "fm.azure-validation/v1"
 RESULT_SCHEMA = "fm.azure-validation-result/v1"
 CREDENTIALS_SCHEMA = "fm.azure-validation-credentials/v1"
 RUNTIME_SCHEMA = "fm.azure-validation-runtime/v1"
+RUNTIME_MANIFEST_FIELDS = frozenset({
+    "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+    "provider_path", "gh_path", "node_path", "gh_axi_path",
+    "gh_axi_entrypoint", "gh_axi_closure", "files",
+})
+RUNTIME_FILE_FIELDS = frozenset({"path", "digest"})
+NO_MISTAKES_VERSION = re.compile(
+    r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+)
+GH_AXI_WRAPPER = (
+    b"#!/usr/bin/env bash\n"
+    b"# Runtime-bundle wrapper: bind gh-axi to the bundled Node interpreter.\n"
+    b"set -euo pipefail\n"
+    b'runtime_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)\n'
+    b'exec "$runtime_root/bin/node" "$runtime_root/gh-axi/dist/bin/gh-axi.js" "$@"\n'
+)
+GH_AXI_ENTRYPOINT = "gh-axi/dist/bin/gh-axi.js"
+JS_MODULE_SPECIFIER = re.compile(
+    r"""
+    (?:\b(?:import|export)\s+(?:[^;]*?\s+from\s+)?[\"']([^\"']+)[\"'])
+    |(?:\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\))
+    |(?:\brequire\s*\(\s*[\"']([^\"']+)[\"']\s*\))
+    """,
+    re.VERBOSE,
+)
+NODE_BUILTINS = {
+    "assert", "assert/strict", "async_hooks", "buffer", "child_process",
+    "cluster", "console", "constants", "crypto", "dgram", "diagnostics_channel",
+    "dns", "dns/promises", "domain", "events", "fs", "fs/promises", "http",
+    "http2", "https", "module", "net", "os", "path", "path/posix",
+    "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline",
+    "readline/promises", "repl", "stream", "stream/consumers", "stream/promises",
+    "stream/web", "string_decoder", "sys", "timers", "timers/promises", "tls",
+    "trace_events", "tty", "url", "util", "util/types", "v8", "vm", "wasi",
+    "worker_threads", "zlib",
+}
 # Byte-identical to CELL_HOST_CAPABILITY_DECLARATION in
 # bin/fm-azure-validation-shard-bridge.py. This side is the refusal: a behavior
 # shard command that does not carry exactly this declaration is not the sealed
@@ -144,10 +184,37 @@ RESOURCE_CLASSES = {
     },
 }
 
-FORBIDDEN_RUNTIME_NAMES = {
-    ".claude", ".config/gh", ".credentials.json", "auth.json", "hosts.yml",
-    "credentials", "token", "secret", "keychain", "cookies",
-}
+FORBIDDEN_RUNTIME_COMPONENTS = frozenset({
+    ".azure", ".claude", ".codex", ".credentials", ".credentials.json",
+    ".docker", ".env", ".git-credentials", ".netrc", ".npmrc", ".pypirc",
+    ".ssh", "auth.json", "cookies", "credentials", "credentials.json",
+    "hosts.yml", "keychain",
+})
+FORBIDDEN_RUNTIME_PATHS = ((".config", "gh"),)
+FORBIDDEN_RUNTIME_STEMS = frozenset({
+    "access_key", "access_token", "access_tokens", "accesskey", "accesstoken",
+    "accesstokens", "api_key", "apikey", "auth", "authentication",
+    "authorization", "client_secret", "client_secrets", "clientsecret",
+    "clientsecrets", "cookie", "cookies", "credential", "credentials",
+    "private_key", "private_keys", "privatekey", "privatekeys", "id_dsa",
+    "id_ecdsa", "id_ed25519", "id_rsa", "oauth_token", "passphrase",
+    "passphrases", "passwd", "password", "passwords", "refresh_token",
+    "refresh_tokens", "refreshtoken", "refreshtokens", "secret", "secret_key",
+    "secret_keys", "secretkey", "secretkeys", "secrets", "token", "tokens",
+})
+FORBIDDEN_RUNTIME_COMPACT_SUFFIXES = frozenset(
+    value.replace("_", "") for value in FORBIDDEN_RUNTIME_STEMS
+)
+FORBIDDEN_RUNTIME_DATA_SUFFIXES = (
+    ".conf", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml",
+)
+FORBIDDEN_RUNTIME_KEY_SUFFIXES = (
+    ".jks", ".key", ".keystore", ".p12", ".pem", ".pfx",
+)
+SAFE_RUNTIME_CODE_SUFFIXES = (
+    ".c", ".cc", ".cjs", ".cpp", ".d.ts", ".go", ".h", ".hpp", ".js",
+    ".map", ".md", ".mjs", ".py", ".rs", ".ts",
+)
 RESOURCE_API = {
     "vm": "2024-03-01",
     "nic": "2023-09-01",
@@ -184,6 +251,882 @@ def sha256_file(path):
             if not block:
                 return "sha256:" + digest.hexdigest()
             digest.update(block)
+
+
+class DuplicateJSONKey(ValueError):
+    pass
+
+
+def reject_duplicate_json_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateJSONKey("duplicate JSON key: {}".format(key))
+        value[key] = item
+    return value
+
+
+def strict_json_loads(value, label):
+    try:
+        return json.loads(value, object_pairs_hook=reject_duplicate_json_pairs)
+    except (json.JSONDecodeError, DuplicateJSONKey) as exc:
+        raise ValidationError(
+            "{} is not valid duplicate-free JSON: {}".format(label, exc)
+        )
+
+
+def runtime_path_is_unsafe(name):
+    raw = str(name)
+    components = normalized_runtime_components(raw)
+    return bool(
+        not raw
+        or "\x00" in raw
+        or raw.startswith(("/", "\\"))
+        or ".." in components
+    )
+
+
+def normalized_runtime_components(name):
+    return tuple(
+        component.casefold()
+        for component in raw_runtime_components(name)
+    )
+
+
+def raw_runtime_components(name):
+    return tuple(
+        component
+        for component in str(name).replace("\\", "/").split("/")
+        if component not in ("", ".")
+    )
+
+
+def normalized_runtime_credential_stem(component):
+    candidate = component
+    for suffix in FORBIDDEN_RUNTIME_DATA_SUFFIXES:
+        if candidate.casefold().endswith(suffix):
+            candidate = candidate[:-len(suffix)]
+            break
+    candidate = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", candidate)
+    candidate = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", candidate)
+    return re.sub(
+        r"[^a-z0-9]+", "_", candidate.casefold().strip(".")
+    ).strip("_")
+
+
+def compact_runtime_credential_stem(component):
+    candidate = component
+    for suffix in FORBIDDEN_RUNTIME_DATA_SUFFIXES:
+        if candidate.casefold().endswith(suffix):
+            candidate = candidate[:-len(suffix)]
+            break
+    return re.sub(r"[^a-z0-9]+", "", candidate.casefold().strip("."))
+
+
+def runtime_path_is_credential_like(name):
+    raw_components = raw_runtime_components(name)
+    components = tuple(component.casefold() for component in raw_components)
+    forbidden_path = any(
+        tuple(components[index:index + len(path)]) == path
+        for path in FORBIDDEN_RUNTIME_PATHS
+        for index in range(len(components) - len(path) + 1)
+    )
+    for raw_component, component in zip(raw_components, components):
+        if component in FORBIDDEN_RUNTIME_COMPONENTS:
+            return True
+        if component.startswith(".env."):
+            return True
+        if component.endswith(FORBIDDEN_RUNTIME_KEY_SUFFIXES):
+            return True
+        stem = normalized_runtime_credential_stem(raw_component)
+        compact_stem = compact_runtime_credential_stem(raw_component)
+        if (
+            not component.endswith(SAFE_RUNTIME_CODE_SUFFIXES)
+            and (
+                any(
+                    stem == value or "_{}_".format(value) in "_{}_".format(stem)
+                    for value in FORBIDDEN_RUNTIME_STEMS
+                )
+                or any(
+                    compact_stem.endswith(value)
+                    for value in FORBIDDEN_RUNTIME_COMPACT_SUFFIXES
+                )
+            )
+        ):
+            return True
+    return forbidden_path
+
+
+def require_runtime_input_path(name):
+    if runtime_path_is_unsafe(name):
+        raise ValidationError("runtime bundle input path is unsafe: {}".format(name))
+    if runtime_path_is_credential_like(name):
+        raise ValidationError(
+            "runtime bundle input has a credential-like path: {}".format(name)
+        )
+
+
+def require_runtime_source_path(source, label):
+    normalized = os.path.abspath(str(Path(source).expanduser()))
+    canonical = os.path.realpath(normalized)
+    if (
+        runtime_path_is_credential_like(normalized)
+        or runtime_path_is_credential_like(canonical)
+    ):
+        raise ValidationError(
+            "{} source has a credential-like path: {}".format(label, source)
+        )
+
+
+@contextlib.contextmanager
+def open_runtime_path_no_follow(source, label, directory=False):
+    absolute = Path(os.path.abspath(str(Path(source).expanduser())))
+    parts = absolute.parts
+    if not parts or parts[0] != os.path.sep or len(parts) < 2:
+        raise ValidationError("{} path is not an absolute file path".format(label))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(os.path.sep, directory_flags)
+        for component in parts[1:-1]:
+            child = os.open(
+                component,
+                directory_flags | nofollow,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+        final_flags = flags | nofollow
+        if directory:
+            final_flags |= getattr(os, "O_DIRECTORY", 0)
+        child = os.open(parts[-1], final_flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = child
+        yield descriptor
+    except OSError as exc:
+        raise ValidationError(
+            "{} path must exist without symlink components: {}".format(label, exc)
+        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def runtime_source_identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def linux_x86_64_elf_header_is_valid(header):
+    return bool(
+        len(header) >= 20
+        and header[:4] == b"\x7fELF"
+        and header[4] == 2
+        and header[5] == 1
+        and header[7] in (0, 3)
+        and int.from_bytes(header[16:18], "little") in (2, 3)
+        and int.from_bytes(header[18:20], "little") == 62
+    )
+
+
+@contextlib.contextmanager
+def open_runtime_source(source, expected, label="runtime bundle input"):
+    require_runtime_source_path(source, label)
+    with open_runtime_path_no_follow(source, label) as descriptor:
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or runtime_source_identity(observed) != expected
+        ):
+            raise ValidationError(
+                "runtime bundle input changed while it was being packaged: {}".format(
+                    source
+                )
+            )
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            yield handle
+            if runtime_source_identity(os.fstat(handle.fileno())) != expected:
+                raise ValidationError(
+                    "runtime bundle input changed while it was being packaged: {}".format(
+                        source
+                    )
+                )
+def require_linux_x86_64_elf(source, expected, label):
+    with open_runtime_source(source, expected, label) as handle:
+        header = handle.read(20)
+    if not linux_x86_64_elf_header_is_valid(header):
+        raise ValidationError(
+            "{} must be a Linux x86-64 ELF executable".format(label)
+        )
+
+
+def runtime_file_record(source, name, label, executable=False, elf=False):
+    require_runtime_input_path(name)
+    require_runtime_source_path(source, label)
+    source, observed = regular_runtime_source(source, label)
+    if observed.st_size > 512 * 1024**2:
+        raise ValidationError("{} exceeds 512 MiB".format(label))
+    if executable and observed.st_mode & 0o111 == 0:
+        raise ValidationError("{} must be executable".format(label))
+    expected = runtime_source_identity(observed)
+    if elf:
+        require_linux_x86_64_elf(source, expected, label)
+    digest = hashlib.sha256()
+    with open_runtime_source(source, expected, label) as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "name": name,
+        "source": source,
+        "identity": expected,
+        "size": observed.st_size,
+        "mode": 0o755 if observed.st_mode & 0o111 else 0o644,
+        "digest": "sha256:" + digest.hexdigest(),
+    }
+
+
+def runtime_bytes_record(name, value, mode):
+    require_runtime_input_path(name)
+    return {
+        "name": name,
+        "data": value,
+        "size": len(value),
+        "mode": mode,
+        "digest": sha256_bytes(value),
+    }
+
+
+def read_runtime_record(record, label, maximum_bytes):
+    if record["size"] > maximum_bytes:
+        raise ValidationError("{} exceeds {} bytes".format(label, maximum_bytes))
+    if "data" in record:
+        value = record["data"][:maximum_bytes + 1]
+    elif "archive" in record:
+        handle = record["archive"].extractfile(record["member"])
+        if handle is None:
+            raise ValidationError("{} is not a regular archive member".format(label))
+        value = handle.read(maximum_bytes + 1)
+    else:
+        with open_runtime_source(record["source"], record["identity"]) as handle:
+            value = handle.read(maximum_bytes + 1)
+    if len(value) > maximum_bytes:
+        raise ValidationError("{} exceeds {} bytes".format(label, maximum_bytes))
+    return value
+
+
+def read_runtime_json_record(record, label):
+    try:
+        source = read_runtime_record(record, label, 1024 * 1024).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError("{} is not valid UTF-8 JSON: {}".format(label, exc))
+    value = strict_json_loads(source, label)
+    if not isinstance(value, dict):
+        raise ValidationError("{} must contain a JSON object".format(label))
+    return value
+
+
+def normalize_runtime_module_path(directory, relative, label):
+    if not relative or relative.startswith("/"):
+        raise ValidationError("{} is unsafe: {}".format(label, relative))
+    normalized = posixpath.normpath(posixpath.join(directory, relative))
+    if normalized == ".." or normalized.startswith("../"):
+        raise ValidationError("{} escapes the gh-axi package: {}".format(label, relative))
+    return normalized
+
+
+def runtime_module_target(records_by_name, candidate, label):
+    candidates = [candidate]
+    if not posixpath.splitext(candidate)[1]:
+        candidates.extend(
+            candidate + suffix for suffix in (".js", ".mjs", ".cjs", ".json")
+        )
+        candidates.extend(
+            posixpath.join(candidate, name)
+            for name in ("index.js", "index.mjs", "index.cjs", "index.json")
+        )
+    for name in candidates:
+        if name in records_by_name:
+            return name
+    raise ValidationError("{} is absent: {}".format(label, candidate))
+
+
+def package_name_and_subpath(specifier):
+    parts = specifier.split("/")
+    if specifier.startswith("@"):
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            raise ValidationError("gh-axi import has a malformed package name: {}".format(specifier))
+        return "/".join(parts[:2]), "/".join(parts[2:])
+    return parts[0], "/".join(parts[1:])
+
+
+def package_export_target(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        for candidate in value:
+            resolved = package_export_target(candidate)
+            if resolved is not None:
+                return resolved
+        return None
+    if isinstance(value, dict):
+        for key in ("import", "node", "default", "require"):
+            if key in value:
+                resolved = package_export_target(value[key])
+                if resolved is not None:
+                    return resolved
+    return None
+
+
+def package_entry_relative(manifest, subpath, label):
+    exports = manifest.get("exports")
+    if exports is not None:
+        selected = exports
+        if isinstance(exports, dict) and any(str(key).startswith(".") for key in exports):
+            key = "." if not subpath else "./" + subpath
+            if key not in exports:
+                raise ValidationError("{} does not export {}".format(label, key))
+            selected = exports[key]
+        elif subpath:
+            raise ValidationError("{} does not export ./{}".format(label, subpath))
+        target = package_export_target(selected)
+        if target is None:
+            raise ValidationError("{} has no Node import target".format(label))
+    elif subpath:
+        target = "./" + subpath
+    else:
+        target = manifest.get("module") or manifest.get("main") or "./index.js"
+    if not isinstance(target, str) or not target.startswith("./"):
+        raise ValidationError("{} has an unsafe package entry".format(label))
+    return target
+
+
+def javascript_without_comments(source):
+    """Mask JavaScript comments while preserving strings and byte positions."""
+    masked = list(source)
+    index = 0
+    quote = None
+    escaped = False
+    while index < len(masked):
+        character = masked[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in ("'", '"', "`"):
+            quote = character
+            index += 1
+            continue
+        if character != "/" or index + 1 >= len(masked):
+            index += 1
+            continue
+        following = masked[index + 1]
+        if following == "/":
+            masked[index] = masked[index + 1] = " "
+            index += 2
+            while index < len(masked) and masked[index] not in ("\r", "\n"):
+                masked[index] = " "
+                index += 1
+            continue
+        if following == "*":
+            masked[index] = masked[index + 1] = " "
+            index += 2
+            while index < len(masked):
+                if (
+                    masked[index] == "*"
+                    and index + 1 < len(masked)
+                    and masked[index + 1] == "/"
+                ):
+                    masked[index] = masked[index + 1] = " "
+                    index += 2
+                    break
+                if masked[index] not in ("\r", "\n"):
+                    masked[index] = " "
+                index += 1
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def validate_gh_axi_runtime(records):
+    records_by_name = {record["name"]: record for record in records}
+    root_manifest_name = "gh-axi/package.json"
+    if root_manifest_name not in records_by_name:
+        raise ValidationError("gh-axi package is missing package.json")
+    root_manifest = read_runtime_json_record(
+        records_by_name[root_manifest_name], "gh-axi package.json"
+    )
+    if root_manifest.get("name") != "gh-axi":
+        raise ValidationError("gh-axi package.json has the wrong package name")
+    package_bin = root_manifest.get("bin")
+    if (
+        not isinstance(package_bin, dict)
+        or package_bin.get("gh-axi") != "./dist/bin/gh-axi.js"
+    ):
+        raise ValidationError("gh-axi package.json does not bind the runtime entrypoint")
+    if GH_AXI_ENTRYPOINT not in records_by_name:
+        raise ValidationError(
+            "gh-axi package is missing the runtime entrypoint dist/bin/gh-axi.js"
+        )
+
+    package_manifests = {"gh-axi": root_manifest}
+    package_queue = [("gh-axi", "gh-axi", root_manifest)]
+    module_queue = [GH_AXI_ENTRYPOINT]
+    visited_modules = set()
+    visited_packages = set()
+
+    def resolve_package(specifier, importer):
+        package_name, subpath = package_name_and_subpath(specifier)
+        importer_directory = posixpath.dirname(importer)
+        parts = importer_directory.split("/")
+        package_root = None
+        package_manifest_name = None
+        for length in range(len(parts), 0, -1):
+            candidate_root = "/".join(parts[:length] + ["node_modules", package_name])
+            candidate_manifest = candidate_root + "/package.json"
+            if candidate_manifest in records_by_name:
+                package_root = candidate_root
+                package_manifest_name = candidate_manifest
+                break
+        if package_root is None or package_manifest_name is None:
+            raise ValidationError(
+                "gh-axi package dependency is absent for import {} from {}".format(
+                    specifier, importer
+                )
+            )
+        if package_root not in package_manifests:
+            manifest = read_runtime_json_record(
+                records_by_name[package_manifest_name],
+                "gh-axi dependency {} package.json".format(package_name),
+            )
+            if manifest.get("name") != package_name:
+                raise ValidationError(
+                    "gh-axi dependency {} has the wrong package name".format(package_name)
+                )
+            package_manifests[package_root] = manifest
+            package_queue.append((package_root, package_root, manifest))
+        manifest = package_manifests[package_root]
+        target = package_entry_relative(
+            manifest,
+            subpath,
+            "gh-axi dependency {}".format(package_name),
+        )
+        candidate = normalize_runtime_module_path(
+            package_root,
+            target,
+            "gh-axi dependency {} entry".format(package_name),
+        )
+        package_prefix = package_root.rstrip("/") + "/"
+        if (
+            candidate != package_root
+            and not candidate.startswith(package_prefix)
+        ):
+            raise ValidationError(
+                "gh-axi dependency {} entry escapes its package root: {}".format(
+                    package_name, target
+                )
+            )
+        return runtime_module_target(
+            records_by_name,
+            candidate,
+            "gh-axi package entry",
+        )
+
+    while package_queue or module_queue:
+        while package_queue:
+            identity, importer_root, manifest = package_queue.pop()
+            if identity in visited_packages:
+                continue
+            visited_packages.add(identity)
+            dependencies = manifest.get("dependencies", {})
+            if not isinstance(dependencies, dict):
+                raise ValidationError("gh-axi package dependencies must be an object")
+            peers = manifest.get("peerDependencies", {})
+            if not isinstance(peers, dict):
+                raise ValidationError("gh-axi package peerDependencies must be an object")
+            peer_meta = manifest.get("peerDependenciesMeta", {})
+            if not isinstance(peer_meta, dict):
+                raise ValidationError("gh-axi package peerDependenciesMeta must be an object")
+            required = set(dependencies)
+            required.update(
+                name
+                for name in peers
+                if not isinstance(peer_meta.get(name), dict)
+                or not peer_meta[name].get("optional")
+            )
+            importer = importer_root + "/package.json"
+            for dependency in sorted(required):
+                module_queue.append(resolve_package(dependency, importer))
+
+        if not module_queue:
+            continue
+        module_name = module_queue.pop()
+        if module_name in visited_modules:
+            continue
+        visited_modules.add(module_name)
+        if posixpath.splitext(module_name)[1] not in (".js", ".mjs", ".cjs"):
+            continue
+        try:
+            source = read_runtime_record(
+                records_by_name[module_name],
+                "gh-axi JavaScript module {}".format(module_name),
+                16 * 1024 * 1024,
+            ).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError(
+                "gh-axi JavaScript module {} is not UTF-8: {}".format(module_name, exc)
+            )
+        for match in JS_MODULE_SPECIFIER.finditer(
+            javascript_without_comments(source)
+        ):
+            specifier = next(value for value in match.groups() if value is not None)
+            if specifier.startswith("node:") or specifier in NODE_BUILTINS:
+                continue
+            if specifier.startswith(("./", "../")):
+                candidate = normalize_runtime_module_path(
+                    posixpath.dirname(module_name),
+                    specifier,
+                    "gh-axi import target",
+                )
+                module_queue.append(
+                    runtime_module_target(
+                        records_by_name,
+                        candidate,
+                        "gh-axi import target",
+                    )
+                )
+            elif specifier.startswith(("/", "#")):
+                raise ValidationError(
+                    "gh-axi import target is unsupported: {}".format(specifier)
+                )
+            else:
+                module_queue.append(resolve_package(specifier, module_name))
+    return sorted(
+        visited_modules
+        | {package_root + "/package.json" for package_root in visited_packages}
+    )
+
+
+def collect_gh_axi_runtime(package):
+    package = Path(package).expanduser()
+    require_runtime_source_path(package, "gh-axi package")
+    try:
+        package_stat = os.lstat(str(package))
+    except OSError as exc:
+        raise ValidationError("gh-axi package is unreadable: {}".format(exc))
+    if not stat.S_ISDIR(package_stat.st_mode):
+        raise ValidationError("gh-axi package must be a symlink-free directory")
+    with open_runtime_path_no_follow(
+        package, "gh-axi package", directory=True
+    ) as descriptor:
+        if runtime_source_identity(os.fstat(descriptor)) != runtime_source_identity(
+            package_stat
+        ):
+            raise ValidationError("gh-axi package changed during validation")
+    records = []
+
+    def visit(directory, relative):
+        try:
+            entries = sorted(os.scandir(str(directory)), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise ValidationError("gh-axi package is unreadable: {}".format(exc))
+        for entry in entries:
+            child_relative = relative / entry.name
+            name = "gh-axi/" + child_relative.as_posix()
+            require_runtime_input_path(name)
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValidationError(
+                    "gh-axi package entry is unreadable: {}: {}".format(name, exc)
+                )
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise ValidationError(
+                    "gh-axi package contains a symlink: {}".format(name)
+                )
+            if stat.S_ISDIR(entry_stat.st_mode):
+                visit(Path(entry.path), child_relative)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                records.append(
+                    runtime_file_record(
+                        Path(entry.path), name, "gh-axi package file {}".format(name)
+                    )
+                )
+            else:
+                raise ValidationError(
+                    "gh-axi package entry is not a regular file or directory: {}".format(
+                        name
+                    )
+                )
+
+    visit(package, Path())
+    closure = validate_gh_axi_runtime(records)
+    return records, closure
+
+
+def runtime_tar_info(name, size, mode):
+    info = tarfile.TarInfo(name=name)
+    info.type = tarfile.REGTYPE
+    info.size = size
+    info.mode = mode
+    info.uid = info.gid = 0
+    info.uname = info.gname = "root"
+    info.mtime = 0
+    return info
+
+
+def output_path_exists(path):
+    return path.exists() or path.is_symlink()
+
+
+def regular_runtime_source(path, label, maximum_bytes=None):
+    source = Path(path).expanduser()
+    require_runtime_source_path(source, label)
+    try:
+        observed = os.lstat(str(source))
+    except OSError as exc:
+        raise ValidationError("{} is unreadable: {}".format(label, exc))
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise ValidationError("{} must be a regular file with one link".format(label))
+    if maximum_bytes is not None and observed.st_size > maximum_bytes:
+        raise ValidationError("{} exceeds the one-GiB bound".format(label))
+    with open_runtime_path_no_follow(source, label) as descriptor:
+        if runtime_source_identity(os.fstat(descriptor)) != runtime_source_identity(
+            observed
+        ):
+            raise ValidationError("{} changed during validation".format(label))
+    return source, observed
+
+
+def copy_identity_pinned_runtime(source, destination, label, expected_digest=None):
+    source, observed = regular_runtime_source(source, label, 1024**3)
+    expected = runtime_source_identity(observed)
+    destination = Path(destination)
+    descriptor = None
+    completed = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(str(destination), flags, 0o600)
+        with open_runtime_source(source, expected) as input_handle:
+            with os.fdopen(descriptor, "wb") as output_handle:
+                descriptor = None
+                shutil.copyfileobj(input_handle, output_handle, 1024 * 1024)
+                output_handle.flush()
+                os.fsync(output_handle.fileno())
+        copied = os.lstat(str(destination))
+        if (
+            not stat.S_ISREG(copied.st_mode)
+            or copied.st_nlink != 1
+            or copied.st_size != observed.st_size
+        ):
+            raise ValidationError("{} private copy changed during staging".format(label))
+        digest = hashlib.sha256()
+        with open_runtime_source(destination, runtime_source_identity(copied)) as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        copied_digest = "sha256:" + digest.hexdigest()
+        if expected_digest is not None and copied_digest != expected_digest:
+            raise ValidationError("{} private copy digest mismatch".format(label))
+        completed = True
+        return copied_digest
+    except OSError as exc:
+        raise ValidationError("{} private copy failed: {}".format(label, exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if not completed:
+            # A partial or mismatching copy is never available to payload assembly.
+            with contextlib.suppress(OSError):
+                destination.unlink()
+
+
+@contextlib.contextmanager
+def staged_runtime_bundle(env, source):
+    ensure_dirs(env)
+    staging_root = env["state_dir"] / ".runtime-staging"
+    staging_root.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(staging_root, 0o700)
+    directory = Path(tempfile.mkdtemp(prefix="runtime.", dir=str(staging_root)))
+    os.chmod(directory, 0o700)
+    staged = directory / "runtime.tar.gz"
+    try:
+        copy_identity_pinned_runtime(source, staged, "runtime bundle")
+        yield staged
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def build_runtime_bundle(args):
+    if not NO_MISTAKES_VERSION.fullmatch(args.no_mistakes_version):
+        raise ValidationError(
+            "--no-mistakes-version must be the exact artifact version"
+        )
+    output = Path(args.output).expanduser()
+    if not output.name:
+        raise ValidationError("runtime bundle output must name a file")
+    output = Path(os.path.abspath(str(output)))
+    if not output.parent.is_dir():
+        raise ValidationError("runtime bundle output directory does not exist")
+    if output_path_exists(output):
+        raise ValidationError("runtime bundle output already exists")
+    records = [
+        runtime_file_record(
+            args.no_mistakes,
+            "bin/no-mistakes",
+            "no-mistakes artifact",
+            executable=True,
+            elf=True,
+        ),
+        runtime_file_record(
+            args.provider_binary,
+            "bin/" + args.provider,
+            "{} provider artifact".format(args.provider),
+            executable=True,
+            elf=True,
+        ),
+        runtime_file_record(
+            args.gh,
+            "bin/gh",
+            "GitHub CLI artifact",
+            executable=True,
+            elf=True,
+        ),
+        runtime_file_record(
+            args.node,
+            "bin/node",
+            "Node interpreter artifact",
+            executable=True,
+            elf=True,
+        ),
+        runtime_bytes_record("bin/gh-axi", GH_AXI_WRAPPER, 0o755),
+    ]
+    for value in args.provider_extra:
+        basename = Path(value).name
+        if not basename:
+            raise ValidationError("provider extra must name a file")
+        records.append(
+            runtime_file_record(
+                value,
+                "bin/" + basename,
+                "provider extra {}".format(basename),
+                executable=True,
+                elf=True,
+            )
+        )
+    if args.provider == "codex" and "bin/codex-code-mode-host" not in {
+        record["name"] for record in records
+    }:
+        raise ValidationError("Codex runtime requires bin/codex-code-mode-host")
+    gh_axi_records, gh_axi_closure = collect_gh_axi_runtime(args.gh_axi_package)
+    records.extend(gh_axi_records)
+    names = [record["name"] for record in records]
+    if len(names) != len(set(names)):
+        raise ValidationError("runtime bundle inputs produce duplicate member names")
+    records.sort(key=lambda record: record["name"])
+    manifest = {
+        "schema": RUNTIME_SCHEMA,
+        "provider": args.provider,
+        "no_mistakes_version": args.no_mistakes_version,
+        "no_mistakes_path": "bin/no-mistakes",
+        "provider_path": "bin/" + args.provider,
+        "gh_path": "bin/gh",
+        "node_path": "bin/node",
+        "gh_axi_path": "bin/gh-axi",
+        "gh_axi_entrypoint": GH_AXI_ENTRYPOINT,
+        "gh_axi_closure": gh_axi_closure,
+        "files": [
+            {"path": record["name"], "digest": record["digest"]}
+            for record in records
+        ],
+    }
+    manifest_bytes = (
+        json.dumps(manifest, sort_keys=True, indent=1, ensure_ascii=False).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
+    manifest_record = runtime_bytes_record("runtime.json", manifest_bytes, 0o644)
+    if len(records) + 1 > 10000:
+        raise ValidationError("runtime bundle exceeds the bounded member inventory")
+    if manifest_record["size"] > 512 * 1024**2 or sum(
+        record["size"] for record in records
+    ) + manifest_record["size"] > 2 * 1024**3:
+        raise ValidationError("runtime bundle exceeds the decompressed size bounds")
+
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".{}.tmp.".format(output.name), dir=str(output.parent)
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as raw:
+            descriptor = None
+            with gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0
+            ) as compressed:
+                with tarfile.open(
+                    fileobj=compressed, mode="w:", format=tarfile.PAX_FORMAT
+                ) as archive:
+                    archive.addfile(
+                        runtime_tar_info(
+                            manifest_record["name"],
+                            manifest_record["size"],
+                            manifest_record["mode"],
+                        ),
+                        io.BytesIO(manifest_record["data"]),
+                    )
+                    for record in records:
+                        info = runtime_tar_info(
+                            record["name"], record["size"], record["mode"]
+                        )
+                        if "data" in record:
+                            archive.addfile(info, io.BytesIO(record["data"]))
+                        else:
+                            with open_runtime_source(
+                                record["source"], record["identity"]
+                            ) as handle:
+                                archive.addfile(info, handle)
+            raw.flush()
+            os.fsync(raw.fileno())
+        if temporary.stat().st_size > 1024**3:
+            raise ValidationError("runtime bundle exceeds the one-GiB bound")
+        validated_manifest, digest = validate_runtime_bundle(temporary, args.provider)
+        if validated_manifest != manifest:
+            raise ValidationError(
+                "runtime bundle self-validation returned a different manifest"
+            )
+        try:
+            os.link(str(temporary), str(output), follow_symlinks=False)
+        except FileExistsError:
+            raise ValidationError("runtime bundle output appeared during the build")
+        print(
+            "AZURE VALIDATION RUNTIME BUILT output={} digest={}".format(
+                output, digest
+            )
+        )
+    except OSError as exc:
+        raise ValidationError("runtime bundle build failed: {}".format(exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
 
 
 def now_utc():
@@ -549,85 +1492,183 @@ def pack_auth_home(auth_home, destination):
 
 
 def validate_runtime_bundle(path, provider):
-    source = Path(path).resolve()
-    if not source.is_file() or source.is_symlink():
-        raise ValidationError("runtime bundle must be a regular file")
-    if source.stat().st_size > 1024**3:
-        raise ValidationError("runtime bundle exceeds the one-GiB bound")
+    source, observed = regular_runtime_source(path, "runtime bundle", 1024**3)
+    expected = runtime_source_identity(observed)
     try:
-        with tarfile.open(source, "r:gz") as archive:
-            members = archive.getmembers()
-            names = [member.name for member in members]
-            if len(members) > 10000 or sum(member.size for member in members) > 2 * 1024**3:
-                raise ValidationError("runtime bundle exceeds the bounded member/decompressed inventory")
-            if names.count("runtime.json") != 1 or len(names) != len(set(names)):
-                raise ValidationError("runtime bundle has no unique runtime.json/member inventory")
-            for member in members:
-                lowered = member.name.lower().strip("./")
-                parts = set(lowered.split("/"))
-                if member.issym() or member.islnk() or member.isdev() or member.name.startswith("/") or ".." in member.name.split("/"):
-                    raise ValidationError("runtime bundle contains an unsafe member")
-                if parts.intersection(FORBIDDEN_RUNTIME_NAMES) or lowered.startswith(".config/gh/"):
-                    raise ValidationError("runtime bundle contains a credential-like path: {}".format(member.name))
-                if member.size > 512 * 1024**2:
-                    raise ValidationError("runtime bundle member exceeds 512 MiB")
-            manifest_handle = archive.extractfile("runtime.json")
-            if manifest_handle is None:
-                raise ValidationError("runtime manifest is not a regular file")
-            manifest = json.loads(manifest_handle.read().decode("utf-8"))
-    except (tarfile.TarError, OSError, json.JSONDecodeError) as exc:
-        raise ValidationError("runtime bundle is unreadable: {}".format(exc))
-    if manifest.get("schema") != RUNTIME_SCHEMA or manifest.get("provider") != provider:
-        raise ValidationError("runtime manifest schema/provider does not match the credential lease")
-    if not re.match(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$", str(manifest.get("no_mistakes_version", ""))):
-        raise ValidationError("runtime manifest has no exact no-mistakes version")
-    declared = manifest.get("files")
-    if not isinstance(declared, list) or not declared:
-        raise ValidationError("runtime manifest file inventory is empty")
-    declared_paths = set()
-    records_by_path = {}
-    for record in declared:
-        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
-            raise ValidationError("runtime manifest file record is malformed")
-        relative = record["path"]
-        if (
-            not relative or relative.startswith("/") or ".." in relative.split("/")
-            or relative in declared_paths
-        ):
-            raise ValidationError("runtime manifest file path is unsafe or duplicated")
-        require_sha256("runtime file digest", record.get("digest"))
-        declared_paths.add(relative)
-        records_by_path[relative] = record
-    archive_files = {member.name: member for member in members if member.isfile() and member.name != "runtime.json"}
-    if set(archive_files) != declared_paths:
-        raise ValidationError("runtime manifest does not exactly inventory the bundle")
-    with tarfile.open(source, "r:gz") as archive:
-        for relative, record in records_by_path.items():
-            handle = archive.extractfile(relative)
-            if handle is None:
-                raise ValidationError("runtime manifest member is not a regular file")
+        with open_runtime_source(source, expected) as source_handle:
             digest = hashlib.sha256()
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
+            for block in iter(lambda: source_handle.read(1024 * 1024), b""):
                 digest.update(block)
-            if "sha256:" + digest.hexdigest() != record["digest"]:
-                raise ValidationError("runtime bundle file digest mismatch: {}".format(relative))
-    required_executables = {
-        "no_mistakes_path": "no-mistakes",
-        "provider_path": provider,
-        "gh_path": "gh",
-        "gh_axi_path": "gh-axi",
-    }
-    for field, basename in required_executables.items():
-        relative = manifest.get(field)
-        member = archive_files.get(relative)
-        if (
-            not isinstance(relative, str)
-            or Path(relative).name != basename
-            or member is None
-            or member.mode & 0o111 == 0
-        ):
-            raise ValidationError("runtime {} exact executable is absent or not executable".format(field))
-    return manifest, sha256_file(source)
+            runtime_digest = "sha256:" + digest.hexdigest()
+            source_handle.seek(0)
+            with tarfile.open(fileobj=source_handle, mode="r:gz") as archive:
+                members = archive.getmembers()
+                names = [member.name for member in members]
+                if (
+                    len(members) > 10000
+                    or sum(member.size for member in members) > 2 * 1024**3
+                ):
+                    raise ValidationError(
+                        "runtime bundle exceeds the bounded member/decompressed inventory"
+                    )
+                if names.count("runtime.json") != 1 or len(names) != len(set(names)):
+                    raise ValidationError(
+                        "runtime bundle has no unique runtime.json/member inventory"
+                    )
+                for member in members:
+                    if (
+                        member.issym()
+                        or member.islnk()
+                        or member.isdev()
+                        or runtime_path_is_unsafe(member.name)
+                    ):
+                        raise ValidationError("runtime bundle contains an unsafe member")
+                    if runtime_path_is_credential_like(member.name):
+                        raise ValidationError(
+                            "runtime bundle contains a credential-like path: {}".format(
+                                member.name
+                            )
+                        )
+                    if member.size > 512 * 1024**2:
+                        raise ValidationError("runtime bundle member exceeds 512 MiB")
+                manifest_handle = archive.extractfile("runtime.json")
+                if manifest_handle is None:
+                    raise ValidationError("runtime manifest is not a regular file")
+                manifest = strict_json_loads(
+                    manifest_handle.read().decode("utf-8"), "runtime manifest"
+                )
+                if not isinstance(manifest, dict):
+                    raise ValidationError("runtime manifest must contain a JSON object")
+                if set(manifest) != RUNTIME_MANIFEST_FIELDS:
+                    raise ValidationError("runtime manifest fields are not the exact schema")
+                if (
+                    manifest.get("schema") != RUNTIME_SCHEMA
+                    or manifest.get("provider") != provider
+                ):
+                    raise ValidationError(
+                        "runtime manifest schema/provider does not match the credential lease"
+                    )
+                if not NO_MISTAKES_VERSION.fullmatch(
+                    str(manifest.get("no_mistakes_version", ""))
+                ):
+                    raise ValidationError(
+                        "runtime manifest has no exact no-mistakes version"
+                    )
+                declared = manifest.get("files")
+                if not isinstance(declared, list) or not declared:
+                    raise ValidationError("runtime manifest file inventory is empty")
+                declared_paths = set()
+                records_by_path = {}
+                for record in declared:
+                    if not isinstance(record, dict):
+                        raise ValidationError("runtime manifest file record is malformed")
+                    if set(record) != RUNTIME_FILE_FIELDS:
+                        raise ValidationError(
+                            "runtime manifest file record fields are not the exact schema"
+                        )
+                    if not isinstance(record.get("path"), str):
+                        raise ValidationError("runtime manifest file record is malformed")
+                    relative = record["path"]
+                    if (
+                        runtime_path_is_unsafe(relative)
+                        or relative in declared_paths
+                    ):
+                        raise ValidationError(
+                            "runtime manifest file path is unsafe or duplicated"
+                        )
+                    require_sha256("runtime file digest", record.get("digest"))
+                    if runtime_path_is_credential_like(relative):
+                        raise ValidationError(
+                            "runtime manifest contains a credential-like path: {}".format(
+                                relative
+                            )
+                        )
+                    declared_paths.add(relative)
+                    records_by_path[relative] = record
+                archive_files = {
+                    member.name: member
+                    for member in members
+                    if member.isfile() and member.name != "runtime.json"
+                }
+                if set(archive_files) != declared_paths:
+                    raise ValidationError(
+                        "runtime manifest does not exactly inventory the bundle"
+                    )
+                gh_axi_records = [
+                    {
+                        "name": name,
+                        "size": member.size,
+                        "archive": archive,
+                        "member": member,
+                    }
+                    for name, member in archive_files.items()
+                    if name.startswith("gh-axi/")
+                ]
+                gh_axi_closure = validate_gh_axi_runtime(gh_axi_records)
+                if (
+                    manifest["gh_axi_entrypoint"] != GH_AXI_ENTRYPOINT
+                    or manifest["gh_axi_closure"] != gh_axi_closure
+                ):
+                    raise ValidationError(
+                        "runtime manifest does not bind the exact gh-axi package closure"
+                    )
+                for relative, record in records_by_path.items():
+                    member_handle = archive.extractfile(relative)
+                    if member_handle is None:
+                        raise ValidationError(
+                            "runtime manifest member is not a regular file"
+                        )
+                    member_digest = hashlib.sha256()
+                    for block in iter(
+                        lambda: member_handle.read(1024 * 1024), b""
+                    ):
+                        member_digest.update(block)
+                    if (
+                        "sha256:" + member_digest.hexdigest()
+                        != record["digest"]
+                    ):
+                        raise ValidationError(
+                            "runtime bundle file digest mismatch: {}".format(relative)
+                        )
+                required_executables = {
+                    "no_mistakes_path": "bin/no-mistakes",
+                    "provider_path": "bin/" + provider,
+                    "gh_path": "bin/gh",
+                    "node_path": "bin/node",
+                    "gh_axi_path": "bin/gh-axi",
+                }
+                for field, expected_path in required_executables.items():
+                    relative = manifest.get(field)
+                    member = archive_files.get(relative)
+                    if (
+                        relative != expected_path
+                        or member is None
+                        or member.mode & 0o111 == 0
+                    ):
+                        raise ValidationError(
+                            "runtime {} exact executable is absent or not executable".format(
+                                field
+                            )
+                        )
+                node_handle = archive.extractfile(manifest["node_path"])
+                if (
+                    node_handle is None
+                    or not linux_x86_64_elf_header_is_valid(node_handle.read(20))
+                ):
+                    raise ValidationError(
+                        "runtime node_path must bind a Linux x86-64 ELF interpreter"
+                    )
+                wrapper_handle = archive.extractfile(manifest["gh_axi_path"])
+                if (
+                    wrapper_handle is None
+                    or wrapper_handle.read(len(GH_AXI_WRAPPER) + 1) != GH_AXI_WRAPPER
+                ):
+                    raise ValidationError(
+                        "runtime gh_axi_path must bind the exact bundled-Node wrapper"
+                    )
+    except (tarfile.TarError, OSError, UnicodeDecodeError) as exc:
+        raise ValidationError("runtime bundle is unreadable: {}".format(exc))
+    return manifest, runtime_digest
 
 
 def repository_identity(repo):
@@ -681,7 +1722,7 @@ def project_resource_class(env, repo_slug, requested):
     return selected
 
 
-def prepare_payload(env, state, runtime_source, auth_home):
+def prepare_payload(env, state, runtime_source, runtime_digest, auth_home):
     payload = env["state_dir"] / "payloads" / state["cell"]
     if payload.exists():
         raise ValidationError("cell payload already exists")
@@ -695,7 +1736,16 @@ def prepare_payload(env, state, runtime_source, auth_home):
     state["request"]["repository"]["snapshot_digest"] = sha256_file(bundle)
     state["request"]["repository"]["snapshot_bytes"] = bundle.stat().st_size
     runtime_copy = payload / "runtime.tar.gz"
-    shutil.copyfile(str(runtime_source), str(runtime_copy))
+    copy_identity_pinned_runtime(
+        runtime_source,
+        runtime_copy,
+        "staged runtime bundle",
+        expected_digest=runtime_digest,
+    )
+    runtime_copy_source, runtime_copy_stat = regular_runtime_source(
+        runtime_copy, "payload runtime bundle", 1024**3
+    )
+    runtime_copy_identity = runtime_source_identity(runtime_copy_stat)
     credentials_copy = payload / "credentials.tar.gz"
     pack_auth_home(auth_home, credentials_copy)
     state["request"]["credentials"]["bundle_digest"] = sha256_file(credentials_copy)
@@ -717,12 +1767,32 @@ def prepare_payload(env, state, runtime_source, auth_home):
     )
     with tarfile.open(input_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
         for source, name in sources:
-            info = archive.gettarinfo(str(source), arcname=name)
+            if source == runtime_copy:
+                info = tarfile.TarInfo(name=name)
+                info.type = tarfile.REGTYPE
+                info.size = runtime_copy_stat.st_size
+                info.mode = 0o600
+            else:
+                info = archive.gettarinfo(str(source), arcname=name)
             info.uid = info.gid = 0
             info.uname = info.gname = "root"
             info.mtime = 0
-            with open(source, "rb") as handle:
+            runtime_context = (
+                open_runtime_source(runtime_copy_source, runtime_copy_identity)
+                if source == runtime_copy
+                else open(source, "rb")
+            )
+            with runtime_context as handle:
                 archive.addfile(info, handle)
+    with tarfile.open(input_path, "r:gz") as archive:
+        packed_runtime = archive.extractfile("runtime.tar.gz")
+        if packed_runtime is None:
+            raise ValidationError("payload omitted its staged runtime bundle")
+        packed_digest = hashlib.sha256()
+        for block in iter(lambda: packed_runtime.read(1024 * 1024), b""):
+            packed_digest.update(block)
+        if "sha256:" + packed_digest.hexdigest() != runtime_digest:
+            raise ValidationError("payload runtime bundle digest mismatch after packing")
     state["input_path"] = str(input_path)
     state["input_digest"] = sha256_file(input_path)
     state["input_bytes"] = input_path.stat().st_size
@@ -730,6 +1800,11 @@ def prepare_payload(env, state, runtime_source, auth_home):
 
 
 def submit(env, args):
+    with staged_runtime_bundle(env, args.runtime_bundle) as runtime_source:
+        submit_staged(env, args, runtime_source)
+
+
+def submit_staged(env, args, runtime_source):
     with lock(env):
         if count_queued(env) >= env["queue_limit"]:
             raise ValidationError("validation queue depth limit reached; no compute was created")
@@ -748,7 +1823,9 @@ def submit(env, args):
         if not intent.strip() or len(intent.encode("utf-8")) > 64 * 1024:
             raise ValidationError("intent must contain 1-65536 bytes")
         credentials = load_credentials(args.credential_lease)
-        runtime, runtime_digest = validate_runtime_bundle(args.runtime_bundle, credentials["provider"])
+        runtime, runtime_digest = validate_runtime_bundle(
+            runtime_source, credentials["provider"]
+        )
         cell = new_cell()
         token = cell.split("-", 1)[1]
         resources = resource_names(env, token)
@@ -822,7 +1899,7 @@ def submit(env, args):
         save_state(env, state, create=True)
         try:
             prepare_payload(
-                env, state, Path(args.runtime_bundle).resolve(),
+                env, state, runtime_source, runtime_digest,
                 credentials["auth_home"],
             )
             transition(env, state, "queued", "exact pushed head queued without local validation execution")
@@ -3263,6 +4340,19 @@ def pure_check(args):
 def parser():
     root = argparse.ArgumentParser(prog="fm-azure-validation.sh")
     commands = root.add_subparsers(dest="command", required=True)
+    build_parser = commands.add_parser(
+        "build-runtime-bundle",
+        help="build a deterministic credential-free Linux runtime bundle",
+    )
+    build_parser.add_argument("--provider", required=True, choices=PROVIDERS)
+    build_parser.add_argument("--no-mistakes", required=True)
+    build_parser.add_argument("--provider-binary", required=True)
+    build_parser.add_argument("--provider-extra", action="append", default=[])
+    build_parser.add_argument("--gh", required=True)
+    build_parser.add_argument("--node", required=True)
+    build_parser.add_argument("--gh-axi-package", required=True)
+    build_parser.add_argument("--no-mistakes-version", required=True)
+    build_parser.add_argument("--output", required=True)
     submit_parser = commands.add_parser("submit")
     submit_parser.add_argument("--repo")
     submit_parser.add_argument("--task", required=True)
@@ -3314,6 +4404,9 @@ def main():
     try:
         if args.command == "pure-check":
             pure_check(args)
+            return 0
+        if args.command == "build-runtime-bundle":
+            build_runtime_bundle(args)
             return 0
         cloud = args.command in ("dispatch", "drive", "observe", "collect", "respond", "replace", "close", "retain-failure")
         # Planning a seed is a purely local credential read; only the upload

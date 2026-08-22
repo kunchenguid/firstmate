@@ -387,7 +387,18 @@ import pathlib
 import sys
 
 request_path = pathlib.Path(sys.argv[1])
-request = json.loads(request_path.read_text(encoding="utf-8"))
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise SystemExit("validation guest: request has a duplicate JSON key")
+        value[key] = item
+    return value
+
+
+request = json.loads(
+    request_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object
+)
 unsigned = dict(request)
 supplied = unsigned.pop("request_digest", None)
 canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
@@ -444,24 +455,213 @@ for path in root.rglob("*"):
     if path.is_dir():
         path.chmod(0o755)
 MODES
-  python3 - "$RUNTIME" <<'PY'
+  python3 - "$RUNTIME" "$REQUEST" <<'PY'
 import hashlib
 import json
+import os
 import pathlib
+import re
+import stat
 import sys
 
+def strict_json(path, label):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise SystemExit(
+                    "validation guest: {} has a duplicate JSON key".format(label)
+                )
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            pathlib.Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise SystemExit(
+            "validation guest: {} is not valid duplicate-free JSON".format(label)
+        )
+
+
 root = pathlib.Path(sys.argv[1]).resolve()
-manifest = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+manifest = strict_json(root / "runtime.json", "runtime manifest")
+request = strict_json(sys.argv[2], "sealed request")
+if manifest != request.get("runtime"):
+    raise SystemExit("validation guest: runtime manifest differs from the sealed request")
+manifest_fields = {
+    "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+    "provider_path", "gh_path", "node_path", "gh_axi_path",
+    "gh_axi_entrypoint", "gh_axi_closure", "files",
+}
+file_fields = {"path", "digest"}
+fixed_entrypoint = "gh-axi/dist/bin/gh-axi.js"
+fixed_wrapper = (
+    b"#!/usr/bin/env bash\n"
+    b"# Runtime-bundle wrapper: bind gh-axi to the bundled Node interpreter.\n"
+    b"set -euo pipefail\n"
+    b'runtime_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)\n'
+    b'exec "$runtime_root/bin/node" "$runtime_root/gh-axi/dist/bin/gh-axi.js" "$@"\n'
+)
+forbidden_components = {
+    ".azure", ".claude", ".codex", ".credentials", ".credentials.json",
+    ".docker", ".env", ".git-credentials", ".netrc", ".npmrc", ".pypirc",
+    ".ssh", "auth.json", "cookies", "credentials", "credentials.json",
+    "hosts.yml", "keychain",
+}
+forbidden_stems = {
+    "access_key", "access_token", "access_tokens", "accesskey", "accesstoken",
+    "accesstokens", "api_key", "apikey", "auth", "authentication",
+    "authorization", "client_secret", "client_secrets", "clientsecret",
+    "clientsecrets", "cookie", "cookies", "credential", "credentials",
+    "private_key", "private_keys", "privatekey", "privatekeys", "id_dsa",
+    "id_ecdsa", "id_ed25519", "id_rsa", "oauth_token", "passphrase",
+    "passphrases", "passwd", "password", "passwords", "refresh_token",
+    "refresh_tokens", "refreshtoken", "refreshtokens", "secret", "secret_key",
+    "secret_keys", "secretkey", "secretkeys", "secrets", "token", "tokens",
+}
+compact_suffixes = {value.replace("_", "") for value in forbidden_stems}
+data_suffixes = (".conf", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml")
+key_suffixes = (".jks", ".key", ".keystore", ".p12", ".pem", ".pfx")
+safe_code_suffixes = (
+    ".c", ".cc", ".cjs", ".cpp", ".d.ts", ".go", ".h", ".hpp", ".js",
+    ".map", ".md", ".mjs", ".py", ".rs", ".ts",
+)
+
+
+def normalized_components(value):
+    return tuple(
+        part.casefold() for part in raw_components(value)
+    )
+
+
+def raw_components(value):
+    return tuple(
+        part for part in str(value).replace("\\", "/").split("/")
+        if part not in ("", ".")
+    )
+
+
+def credential_like(value):
+    original_components = raw_components(value)
+    components = tuple(part.casefold() for part in original_components)
+    if any(
+        tuple(components[index:index + 2]) == (".config", "gh")
+        for index in range(len(components) - 1)
+    ):
+        return True
+    for original_component, component in zip(original_components, components):
+        if component in forbidden_components or component.startswith(".env."):
+            return True
+        if component.endswith(key_suffixes):
+            return True
+        candidate = original_component
+        for suffix in data_suffixes:
+            if candidate.casefold().endswith(suffix):
+                candidate = candidate[:-len(suffix)]
+                break
+        compact_stem = re.sub(
+            r"[^a-z0-9]+", "", candidate.casefold().strip(".")
+        )
+        candidate = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", candidate)
+        candidate = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", candidate)
+        stem = re.sub(
+            r"[^a-z0-9]+", "_", candidate.casefold().strip(".")
+        ).strip("_")
+        if (
+            not component.endswith(safe_code_suffixes)
+            and (
+                any(
+                    stem == value or f"_{value}_" in f"_{stem}_"
+                    for value in forbidden_stems
+                )
+                or any(compact_stem.endswith(value) for value in compact_suffixes)
+            )
+        ):
+            return True
+    return False
+
+
+if not isinstance(manifest, dict) or set(manifest) != manifest_fields:
+    raise SystemExit("validation guest: runtime manifest fields are not the exact schema")
+provider = manifest.get("provider")
+fixed_paths = {
+    "no_mistakes_path": "bin/no-mistakes",
+    "provider_path": "bin/" + provider if provider in ("codex", "claude") else None,
+    "gh_path": "bin/gh",
+    "node_path": "bin/node",
+    "gh_axi_path": "bin/gh-axi",
+    "gh_axi_entrypoint": fixed_entrypoint,
+}
+if any(manifest.get(field) != value for field, value in fixed_paths.items()):
+    raise SystemExit("validation guest: runtime fixed executable or entrypoint path drifted")
+closure = manifest["gh_axi_closure"]
+if (
+    not isinstance(closure, list)
+    or not closure
+    or not all(isinstance(item, str) for item in closure)
+    or closure != sorted(set(closure))
+    or fixed_entrypoint not in closure
+):
+    raise SystemExit("validation guest: runtime gh-axi closure is malformed")
+if not isinstance(manifest["files"], list) or not manifest["files"]:
+    raise SystemExit("validation guest: runtime file inventory is malformed")
 seen = set()
 for record in manifest["files"]:
-    path = (root / record["path"]).resolve()
-    if root not in path.parents or not path.is_file() or path.is_symlink():
+    if not isinstance(record, dict) or set(record) != file_fields:
+        raise SystemExit("validation guest: runtime file record fields are not exact")
+    if not isinstance(record["path"], str):
+        raise SystemExit("validation guest: runtime file path is malformed")
+    components = normalized_components(record["path"])
+    if (
+        not components
+        or record["path"].startswith(("/", "\\"))
+        or ".." in components
+        or credential_like(record["path"])
+    ):
+        raise SystemExit("validation guest: runtime file path is unsafe or credential-like")
+    path = root / record["path"]
+    try:
+        observed = os.lstat(path)
+    except OSError:
+        raise SystemExit("validation guest: runtime file is escaping, absent, or linked")
+    resolved = path.resolve()
+    if (
+        root not in resolved.parents
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_nlink != 1
+    ):
         raise SystemExit("validation guest: runtime file is escaping, absent, or linked")
     digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     if digest != record["digest"]:
         raise SystemExit("validation guest: runtime file digest mismatch")
     seen.add(path.relative_to(root).as_posix())
-actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path.name != "runtime.json"}
+if len(seen) != len(manifest["files"]):
+    raise SystemExit("validation guest: runtime file inventory has duplicates")
+if not set(closure).issubset(seen):
+    raise SystemExit("validation guest: runtime gh-axi closure is incomplete")
+package = strict_json(root / "gh-axi/package.json", "gh-axi package manifest")
+if (
+    package.get("name") != "gh-axi"
+    or not isinstance(package.get("bin"), dict)
+    or package["bin"].get("gh-axi") != "./dist/bin/gh-axi.js"
+    or (root / "bin/gh-axi").read_bytes() != fixed_wrapper
+):
+    raise SystemExit("validation guest: runtime gh-axi wrapper or entrypoint drifted")
+actual = set()
+for path in root.rglob("*"):
+    observed = os.lstat(path)
+    if stat.S_ISDIR(observed.st_mode):
+        continue
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise SystemExit("validation guest: runtime inventory contains a link or special file")
+    relative = path.relative_to(root).as_posix()
+    if relative != "runtime.json":
+        if credential_like(relative):
+            raise SystemExit("validation guest: runtime inventory has a credential-like path")
+        actual.add(relative)
 if actual != seen:
     raise SystemExit("validation guest: runtime inventory mismatch")
 PY
@@ -546,8 +746,9 @@ RUNTIME=/opt/fm-azure-validation/runtime
 NM_BIN=$RUNTIME/$(jq -r '.runtime.no_mistakes_path' "$REQUEST")
 PROVIDER_BIN=$RUNTIME/$(jq -r '.runtime.provider_path' "$REQUEST")
 GH_BIN=$RUNTIME/$(jq -r '.runtime.gh_path' "$REQUEST")
+NODE_BIN=$RUNTIME/$(jq -r '.runtime.node_path' "$REQUEST")
 GH_AXI_BIN=$RUNTIME/$(jq -r '.runtime.gh_axi_path' "$REQUEST")
-for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$GH_AXI_BIN"; do
+for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$NODE_BIN" "$GH_AXI_BIN"; do
   [ -x "$executable" ] || { echo "validation guest: exact runtime executable is absent" >&2; exit 125; }
 done
 PROVIDER=$(jq -r '.credentials.provider' "$REQUEST")

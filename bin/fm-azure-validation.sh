@@ -26,6 +26,13 @@
 #   FM_AZURE_VM_IMAGE_ID (prefer a baked gallery image over stock Ubuntu)
 #
 # Usage:
+#   fm-azure-validation.sh build-runtime-bundle --provider <codex|claude> \
+#     --no-mistakes <linux-x86-64-path> --provider-binary <linux-x86-64-path> \
+#     [--provider-extra <linux-x86-64-path>]... --gh <linux-x86-64-path> \
+#     --node <linux-x86-64-path> --gh-axi-package <directory> \
+#     --no-mistakes-version <exact-version> \
+#     --output <runtime.tar.gz>
+#   The Codex provider requires a provider-extra named codex-code-mode-host.
 #   fm-azure-validation.sh submit --task <id> --task-generation <id> \
 #     --validation-generation <id> --intent-file <path> \
 #     --credential-lease <credentials.json> --runtime-bundle <runtime.tar.gz> \
@@ -56,14 +63,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 usage() {
-  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
   help|-h|--help|"")
     usage
     ;;
-  submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue|auth-seed)
+  build-runtime-bundle|submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue|auth-seed)
     exec python3 "$SCRIPT_DIR/fm-azure-validation.py" "$@"
     ;;
   *)

@@ -33,19 +33,43 @@ make_repo() {
 
 make_runtime() {
   local root=$1 provider=${2:-codex}
-  mkdir -p "$root/runtime/bin"
-  for executable in no-mistakes "$provider" gh gh-axi; do
+  mkdir -p "$root/runtime/bin" "$root/runtime/gh-axi/dist/bin" \
+    "$root/runtime/gh-axi/dist/src"
+  for executable in no-mistakes "$provider" gh node gh-axi; do
     printf '#!/bin/sh\nexit 0\n' >"$root/runtime/bin/$executable"
     chmod +x "$root/runtime/bin/$executable"
   done
+  printf '%s\n' \
+    '{"name":"gh-axi","version":"1.0.0","type":"module","bin":{"gh-axi":"./dist/bin/gh-axi.js"}}' \
+    >"$root/runtime/gh-axi/package.json"
+  printf '%s\n' '#!/usr/bin/env node' \
+    'import { main } from "../src/cli.js";' 'main();' \
+    >"$root/runtime/gh-axi/dist/bin/gh-axi.js"
+  printf '%s\n' 'export function main() { return true; }' \
+    >"$root/runtime/gh-axi/dist/src/cli.js"
   python3 - "$root/runtime" "$provider" <<'PY'
 import hashlib
 import json
 from pathlib import Path
+import struct
 import sys
 root = Path(sys.argv[1])
+header = bytearray(64)
+header[:16] = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
+struct.pack_into("<HHIQQQIHHHHHH", header, 16, 2, 62, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
+(root/"bin/node").write_bytes(header + b"fixture-linux-node\n")
+(root/"bin/gh-axi").write_bytes(
+    b"#!/usr/bin/env bash\n"
+    b"# Runtime-bundle wrapper: bind gh-axi to the bundled Node interpreter.\n"
+    b"set -euo pipefail\n"
+    b'runtime_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)\n'
+    b'exec "$runtime_root/bin/node" "$runtime_root/gh-axi/dist/bin/gh-axi.js" "$@"\n'
+)
 files=[]
-for relative in ("bin/no-mistakes", "bin/"+sys.argv[2], "bin/gh", "bin/gh-axi"):
+for relative in (
+    "bin/no-mistakes", "bin/"+sys.argv[2], "bin/gh", "bin/node", "bin/gh-axi",
+    "gh-axi/package.json", "gh-axi/dist/bin/gh-axi.js", "gh-axi/dist/src/cli.js",
+):
     path=root/relative
     files.append({"path":relative,"digest":"sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()})
 manifest={
@@ -55,12 +79,19 @@ manifest={
     "no_mistakes_path":"bin/no-mistakes",
     "provider_path":"bin/"+sys.argv[2],
     "gh_path":"bin/gh",
+    "node_path":"bin/node",
     "gh_axi_path":"bin/gh-axi",
+    "gh_axi_entrypoint":"gh-axi/dist/bin/gh-axi.js",
+    "gh_axi_closure":[
+        "gh-axi/dist/bin/gh-axi.js",
+        "gh-axi/dist/src/cli.js",
+        "gh-axi/package.json",
+    ],
     "files":files,
 }
 (root/"runtime.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
 PY
-  COPYFILE_DISABLE=1 tar -czf "$root/runtime.tar.gz" -C "$root/runtime" runtime.json bin
+  COPYFILE_DISABLE=1 tar -czf "$root/runtime.tar.gz" -C "$root/runtime" runtime.json bin gh-axi
 }
 
 make_credentials() {
@@ -387,7 +418,7 @@ PY2
   COPYFILE_DISABLE=1 tar -xzf "$tmp/runtime.tar.gz" -C "$tmp/runtime-tampered"
   printf '#!/bin/sh\nexit 7\n' >"$tmp/runtime-tampered/bin/codex"
   chmod +x "$tmp/runtime-tampered/bin/codex"
-  COPYFILE_DISABLE=1 tar -czf "$tmp/tampered-runtime.tar.gz" -C "$tmp/runtime-tampered" runtime.json bin
+  COPYFILE_DISABLE=1 tar -czf "$tmp/tampered-runtime.tar.gz" -C "$tmp/runtime-tampered" runtime.json bin gh-axi
   make_credentials "$tmp"
   rc=0
   out=$(validation "$home" submit --task task-one --task-generation generation-one \
@@ -398,7 +429,7 @@ PY2
   assert_contains "$out" "runtime bundle file digest mismatch" "runtime digest refusal was not explicit"
   COPYFILE_DISABLE=1 tar -xzf "$tmp/runtime.tar.gz" -C "$tmp"
   printf 'secret\n' >"$tmp/runtime/auth.json"
-  COPYFILE_DISABLE=1 tar -czf "$tmp/bad-runtime.tar.gz" -C "$tmp/runtime" runtime.json auth.json bin
+  COPYFILE_DISABLE=1 tar -czf "$tmp/bad-runtime.tar.gz" -C "$tmp/runtime" runtime.json auth.json bin gh-axi
   rc=0
   out=$(validation "$home" submit --task task-one --task-generation generation-one \
     --validation-generation validation-one --intent-file "$tmp/intent.txt" \
