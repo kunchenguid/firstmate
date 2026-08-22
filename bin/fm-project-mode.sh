@@ -4,6 +4,8 @@
 # no-mistakes|direct-PR|local-only and yolo is on|off.
 # --path accepts one registered project identifier and prints its resolved path.
 # --list-paths prints every registered identifier and resolved path as TSV.
+# --entry prints the validated registry entry for one identifier.
+# --child-entry prints that entry with a child-home-local projects/<id> path.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -30,6 +32,7 @@
 # without registry delimiters, empty components, or traversal components.
 # --path never accepts a path and never searches the filesystem for an identifier.
 # --list-paths is the only bulk operation and exposes the resolved pairs to callers.
+# --entry and --child-entry keep registry serialization inside this format owner.
 # Every registry entry is validated before any result is returned, including
 # duplicate identifiers and two identifiers resolving to the same path.
 #
@@ -56,6 +59,8 @@
 # Usage: fm-project-mode.sh [--raw] <project-id>
 #        fm-project-mode.sh --path <project-id>
 #        fm-project-mode.sh --list-paths
+#        fm-project-mode.sh --entry <project-id>
+#        fm-project-mode.sh --child-entry <project-id>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,6 +76,8 @@ usage() {
   echo "usage: fm-project-mode.sh [--raw] <project-id>" >&2
   echo "       fm-project-mode.sh --path <project-id>" >&2
   echo "       fm-project-mode.sh --list-paths" >&2
+  echo "       fm-project-mode.sh --entry <project-id>" >&2
+  echo "       fm-project-mode.sh --child-entry <project-id>" >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -87,6 +94,14 @@ while [ "$#" -gt 0 ]; do
       [ "$OP" = mode ] && [ -z "$NAME" ] || { usage; exit 2; }
       OP=list
       ;;
+    --entry)
+      [ "$OP" = mode ] && [ -z "$NAME" ] || { usage; exit 2; }
+      OP=entry
+      ;;
+    --child-entry)
+      [ "$OP" = mode ] && [ -z "$NAME" ] || { usage; exit 2; }
+      OP='child-entry'
+      ;;
     --)
       shift
       [ "$#" -eq 1 ] || { usage; exit 2; }
@@ -99,7 +114,7 @@ while [ "$#" -gt 0 ]; do
       exit 2
       ;;
     *)
-      if { [ "$OP" = mode ] || [ "$OP" = path ]; } && [ -z "$NAME" ]; then
+      if { [ "$OP" = mode ] || [ "$OP" = path ] || [ "$OP" = entry ] || [ "$OP" = child-entry ]; } && [ -z "$NAME" ]; then
         NAME=$1
       else
         usage
@@ -112,7 +127,7 @@ done
 
 if [ "$OP" = list ]; then
   [ -z "$NAME" ] && [ "$RAW" -eq 0 ] || { usage; exit 2; }
-elif [ "$OP" = path ]; then
+elif [ "$OP" = path ] || [ "$OP" = entry ] || [ "$OP" = child-entry ]; then
   [ "$RAW" -eq 0 ] && [ -n "$NAME" ] && [ "$#" -eq 0 ] || { usage; exit 2; }
 else
   [ -n "$NAME" ] || { usage; exit 2; }
@@ -279,6 +294,22 @@ path_key() {
   printf '%s\n' "$out"
 }
 
+registry_entry() {
+  local project=$1 child=${2:-0}
+  awk -v n="$project" -v child="$child" '
+    $1 == "-" && $2 == n {
+      line=$0
+      if (child == 1) {
+        sub(/[[:space:]]\[path=[^]]+\][[:space:]]*$/, "", line)
+        printf "%s [path=projects/%s]\n", line, n
+      } else {
+        print line
+      }
+      exit
+    }
+  ' "$REG"
+}
+
 declare -a PROJECT_IDS=()
 declare -a PROJECT_MODES=()
 declare -a PROJECT_YOLOS=()
@@ -329,7 +360,7 @@ fi
 if [[ ${PROJECT_INDEX[$NAME]+present} ]]; then
   index=${PROJECT_INDEX[$NAME]}
 else
-  if [ "$OP" = path ]; then
+  if [ "$OP" = path ] || [ "$OP" = entry ] || [ "$OP" = child-entry ]; then
     echo "error: project '$NAME' is not registered; no path can be inferred" >&2
     exit 1
   fi
@@ -340,6 +371,16 @@ fi
 
 if [ "$OP" = path ]; then
   printf '%s\n' "${PROJECT_PATHS[$index]}"
+  exit 0
+fi
+
+if [ "$OP" = entry ]; then
+  registry_entry "$NAME"
+  exit 0
+fi
+
+if [ "$OP" = child-entry ]; then
+  registry_entry "$NAME" 1
   exit 0
 fi
 

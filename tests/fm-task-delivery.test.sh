@@ -323,6 +323,14 @@ EOF
   assert_contains "$out" $'legacy\t'"$home/projects/legacy" "list operation did not expose the legacy identifier and path pair"
   assert_contains "$out" $'declared\t' "list operation did not expose the declared identifier and path pair"
 
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --entry declared)
+  [ "$out" = '- declared [direct-PR] - fixture (added 2026-01-01) [path=diaria/api-v2]' ] \
+    || fail "entry operation did not preserve the validated registry entry (got '$out')"
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path/home-dir" "$PROJECT_MODE" --child-entry declared)
+  [ "$out" = '- declared [direct-PR] - fixture (added 2026-01-01) [path=projects/declared]' ] \
+    || fail "child entry operation did not serialize the child-local path (got '$out')"
+
   cat > "$home/data/projects.md" <<'EOF'
 - invalid-path [direct-PR] - fixture (added 2026-01-01) [path=bad path]
 EOF

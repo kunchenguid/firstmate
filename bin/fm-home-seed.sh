@@ -457,15 +457,15 @@ EOF
 }
 
 project_path_in_home() {
-  local home=$1 project=$2
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+  local home=$1 data=$2 projects=$3 project=$4
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    FM_PROJECTS_OVERRIDE="$projects" \
     "$FM_ROOT/bin/fm-project-mode.sh" --path "$project"
 }
 
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src=$(project_path_in_home "$FM_HOME" "$project") || return 1
+  src=$(project_path_in_home "$FM_HOME" "$DATA" "$PROJECTS" "$project") || return 1
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -493,7 +493,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url
-  src=$(project_path_in_home "$FM_HOME" "$project") || return 1
+  src=$(project_path_in_home "$FM_HOME" "$DATA" "$PROJECTS" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
@@ -669,14 +669,6 @@ seed_rollback() {
   fi
 }
 
-registry_line_for_project() {
-  local project=$1 line
-  [ -f "$DATA/projects.md" ] || return 1
-  line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
-  [ -n "$line" ] || return 1
-  printf '%s\n' "$line"
-}
-
 project_mode_in_home() {
   local home=$1 project=$2 mode
   read -r mode _ <<EOF
@@ -686,32 +678,38 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
+  local home=$1 sub_reg tmp project existing_id existing_pairs selected
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
-  names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
   if [ -f "$sub_reg" ]; then
-    awk -v names="$names" '
-      BEGIN {
-        split(names, a, "\034")
-        for (i in a) selected[a[i]]=1
-      }
-      !($1=="-" && ($2 in selected)) { print }
-    ' "$sub_reg" > "$tmp"
+    existing_pairs=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" \
+      "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || return 1
+    : > "$tmp"
+    while IFS=$'\t' read -r existing_id _; do
+      [ -n "$existing_id" ] || continue
+      selected=0
+      for project in "$@"; do
+        if [ "$existing_id" = "$project" ]; then
+          selected=1
+          break
+        fi
+      done
+      if [ "$selected" -eq 0 ]; then
+        FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+          FM_PROJECTS_OVERRIDE="$home/projects" \
+          "$FM_ROOT/bin/fm-project-mode.sh" --entry "$existing_id" >> "$tmp" || return 1
+      fi
+    done <<EOF
+$existing_pairs
+EOF
   else
     : > "$tmp"
   fi
-  today=$(date +%F)
   for project in "$@"; do
-    line=$(registry_line_for_project "$project" || true)
-    if [ -z "$line" ]; then
-      line="- $project - cloned project (added $today)"
-    fi
-    # The child clone is deliberately local to the child home. Never copy a
-    # parent path into its registry, or the child would point back at the source.
-    line=$(printf '%s\n' "$line" | sed -E 's/[[:space:]]\[path=[^]]+\][[:space:]]*$//')
-    printf '%s [path=projects/%s]\n' "$line" "$project" >> "$tmp"
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+      "$FM_ROOT/bin/fm-project-mode.sh" --child-entry "$project" >> "$tmp" || return 1
   done
   mv "$tmp" "$sub_reg"
 }
@@ -775,11 +773,13 @@ refuse_populated_projectless_home() {
     clones+=("$(basename "$project_path")")
   done
   if [ -f "$home/data/projects.md" ]; then
-    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+    registry_entries=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" \
+      "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || {
       echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
       return 1
     }
-    while IFS= read -r project; do
+    while IFS=$'\t' read -r project _; do
       [ -n "$project" ] && registry_projects+=("$project")
     done <<< "$registry_entries"
   fi

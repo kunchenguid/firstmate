@@ -194,7 +194,12 @@ else
 fi
 
 PROJECT_REG="$TMP/projects.md"
+MANIFEST_PROJECT_DATA="$TMP/manifest-project-data"
+MANIFEST_PROJECT_REG="$MANIFEST_PROJECT_DATA/projects.md"
+CHILD_PROJECTS="$FM_HOME/projects"
+mkdir "$MANIFEST_PROJECT_DATA"
 : > "$PROJECT_REG"
+: > "$MANIFEST_PROJECT_REG"
 while IFS= read -r record; do
   [ -n "$record" ] || continue
   encoded=${record#project=}
@@ -220,8 +225,19 @@ EOF
   [ -n "$ORIGIN" ] || die "project $NAME has no origin"
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
-  case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
-  DEST="$FM_HOME/projects/$NAME"
+  printf '%s\n' "$REGISTRY_LINE" >> "$MANIFEST_PROJECT_REG"
+  CHILD_REGISTRY_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$MANIFEST_PROJECT_DATA" \
+    FM_PROJECTS_OVERRIDE="$CHILD_PROJECTS" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --child-entry "$NAME") \
+    || die "project $NAME registry line is malformed"
+  printf '%s\n' "$CHILD_REGISTRY_LINE" >> "$PROJECT_REG"
+  RESOLVED_PROJECT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$TMP" \
+    FM_PROJECTS_OVERRIDE="$CHILD_PROJECTS" \
+    "$SCRIPT_DIR/fm-project-mode.sh" --path "$NAME") \
+    || die "project $NAME child registry line is malformed"
+  DEST="$CHILD_PROJECTS/$NAME"
+  [ "$RESOLVED_PROJECT" = "$DEST" ] \
+    || die "project $NAME registry path does not resolve inside this home"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
       || die "project destination exists but is not a safe clone: $DEST"
@@ -236,8 +252,6 @@ EOF
         || die "no-mistakes initialization failed for project $NAME"
     fi
   fi
-  REGISTRY_LINE=$(printf '%s\n' "$REGISTRY_LINE" | sed -E 's/[[:space:]]\[path=[^]]+\][[:space:]]*$//')
-  printf '%s [path=projects/%s]\n' "$REGISTRY_LINE" "$NAME" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
 
 cp "$TMP/charter" "$FM_HOME/data/charter.md.tmp.$$"

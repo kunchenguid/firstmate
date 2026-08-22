@@ -469,8 +469,8 @@ fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
 rm -rf "$TMP_ROOT/beta-src"
-cat > "$TMP_ROOT/seed-parent/data/projects.md" <<'EOF'
-- beta [direct-PR] - beta project (added 2026-08-06)
+cat > "$TMP_ROOT/seed-parent/data/projects.md" <<EOF
+- beta [direct-PR] - beta project (added 2026-08-06) [path=$TMP_ROOT/parent-specific/beta-source]
 - delta [local-only] - delta project (added 2026-08-06)
 EOF
 BETA_ORIGIN="file://$TMP_ROOT/beta.git"
@@ -528,6 +528,10 @@ assert_present "$TMP_ROOT/seed-noclone-home/projects/beta/README.md" \
   || fail "the remote clone did not come from the supplied origin"
 assert_grep '- beta [direct-PR]' "$TMP_ROOT/seed-noclone-home/data/projects.md" \
   "the remote home did not publish the project's registered posture"
+assert_grep '[path=projects/beta]' "$TMP_ROOT/seed-noclone-home/data/projects.md" \
+  "the remote home did not serialize the clone as child-local"
+assert_no_grep "$TMP_ROOT/parent-specific" "$TMP_ROOT/seed-noclone-home/data/projects.md" \
+  "the remote home retained the parent-only project path"
 assert_absent "$TMP_ROOT/seed-parent/projects/beta" \
   "seeding cloned the project into the primary project tree"
 [ "$(projects_snapshot "$TMP_ROOT/seed-parent/projects")" = "$PROJECTS_BEFORE" ] \

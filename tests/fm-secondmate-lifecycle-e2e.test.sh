@@ -39,6 +39,41 @@ PANE="$TMP_ROOT/pane.txt"
 ALPHA_ORIGIN=
 BETA_ORIGIN=
 
+test_seed_preserves_effective_registry_overrides() {
+  local parent data_override projects_override source sub resolved out
+  parent="$TMP_ROOT/override-parent"
+  data_override="$TMP_ROOT/override-data"
+  projects_override="$TMP_ROOT/override-projects"
+  source="$TMP_ROOT/irregular-source/atlas-repository"
+  sub="$TMP_ROOT/override-child"
+  mkdir -p "$parent/state" "$parent/config" "$data_override" "$projects_override"
+  mark_firstmate_home "$sub"
+  fm_git_init_commit "$source"
+  fm_git_add_origin "$source" "$TMP_ROOT/remotes/override-atlas.git"
+  printf '%s\n' "- atlas [direct-PR] - override fixture (added 2026-08-22) [path=$source]" \
+    > "$data_override/projects.md"
+
+  out=$(FM_HOME="$parent" FM_DATA_OVERRIDE="$data_override" \
+    FM_PROJECTS_OVERRIDE="$projects_override" FM_STATE_OVERRIDE="$parent/state" \
+    FM_SECONDMATE_CHARTER='Own the override fixture.' \
+    FM_SECONDMATE_SCOPE='override fixture delivery' \
+    "$ROOT/bin/fm-home-seed.sh" override "$sub" atlas) \
+    || fail "seed did not preserve the effective registry overrides"
+
+  assert_contains "$out" "home=$sub" "override seed did not report the child home"
+  assert_present "$sub/projects/atlas/README.md" "override seed did not clone the declared source path"
+  resolved=$(FM_HOME="$sub" "$ROOT/bin/fm-project-mode.sh" --path atlas)
+  [ "$resolved" = "$sub/projects/atlas" ] \
+    || fail "child registry did not resolve atlas inside the child home (got '$resolved')"
+  assert_grep '[path=projects/atlas]' "$sub/data/projects.md" \
+    "child registry did not serialize its local clone path"
+  assert_present "$data_override/secondmates.md" \
+    "seed did not retain the effective data directory for parent registration"
+  assert_absent "$parent/data/projects.md" \
+    "seed unexpectedly read or created the default parent data registry"
+  pass "seed: effective data and project overrides cross the path resolver boundary"
+}
+
 # --- shared world + seed ----------------------------------------------------
 setup_world() {
   mkdir -p "$HOME_DIR/projects" "$HOME_DIR/data" "$HOME_DIR/state"
@@ -250,6 +285,7 @@ phase_teardown() {
   pass "teardown: removes the home, then clears meta and the registry route"
 }
 
+test_seed_preserves_effective_registry_overrides
 setup_world
 phase_seed
 phase_spawn
