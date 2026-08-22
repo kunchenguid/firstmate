@@ -2234,8 +2234,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # Wait budget: a cold worktree on a large repository legitimately outlasts any
+  # fixed guess (a 2.3 GB checkout has been seen to exceed 60s), while a genuinely
+  # stuck spawn must still surface within minutes so it stays distinguishable from
+  # a slow one. Follow the FM_KIMI_READY_POLLS/FM_KIMI_POLL_INTERVAL pattern:
+  # FM_TREEHOUSE_READY_POLLS polls (default 300) at FM_TREEHOUSE_POLL_INTERVAL
+  # seconds each (default 1), for a default budget of five minutes - roughly 5x
+  # headroom over the observed slow case, still bounded.
+  wt_polls=${FM_TREEHOUSE_READY_POLLS:-300}
+  wt_interval=${FM_TREEHOUSE_POLL_INTERVAL:-1}
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$wt_polls"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2246,15 +2255,27 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         fi
         candidate="$p_real"
       else
+        # The pane is still at the project, so treehouse get may have already
+        # failed outright. Pool exhaustion prints its reason verbatim to this
+        # window; no timeout value can fix that, so fail fast naming the reason
+        # instead of burning the whole budget. The task window is brand new, so
+        # the phrase can only come from this spawn's own treehouse get.
+        wt_pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+        case "$wt_pane" in
+          *"worktrees are in use or dirty"*)
+            echo "error: treehouse get failed: the worktree pool is exhausted (all worktrees are in use or dirty); free a worktree or raise max_trees in treehouse.toml, then retry; inspect window $T" >&2
+            exit 1
+            ;;
+        esac
         candidate=""
       fi
     else
       candidate=""
     fi
-    sleep 1
+    sleep "$wt_interval"
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within its wait budget ($wt_polls polls at ${wt_interval}s each); either the worktree pool is exhausted or worktree creation is still running on a large cold repository - read window $T's output to tell which" >&2
     exit 1
   fi
 
