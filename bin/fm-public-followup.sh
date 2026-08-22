@@ -352,8 +352,9 @@ cmd_brief() {
     || die "public-followup obligation '$id' has no expected final type" 1
   keys=$(printf '%s' "$payload" \
     | jq -er '.public_followup.expected_final.required_deliverables
-        | select(type == "array" and length > 0)
-        | .[] | select(type == "string" and length > 0)' 2>/dev/null) \
+        | select(type == "array" and length > 0
+            and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
+        | .[]' 2>/dev/null) \
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
   deliverable_flags=
   while IFS= read -r key; do

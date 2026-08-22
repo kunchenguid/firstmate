@@ -2052,22 +2052,41 @@ test_expiry_escalation_uses_now_override() {
 }
 
 test_brief_fails_without_typed_deliverable_keys() {
-  local home real_tasks
+  local home real_tasks invalid
   home=$(make_home brief-keys)
   seed_commitment "$home" pf-brief req-brief discord main work-brief
   real_tasks=$(command -v tasks-axi)
   cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-exit 69
+if [ "${FAKE_INVALID_KEYS:-}" = unreadable ]; then
+  exit 69
+fi
+"$REAL_TASKS_AXI" "$@" | jq --argjson invalid "$FAKE_INVALID_KEYS" '
+  if .public_followups then
+    .public_followups |= map(
+      if .id == "pf-brief" then
+        .public_followup.expected_final.required_deliverables = $invalid
+      else . end)
+  else . end'
 SH
   chmod +x "$home/fakebin/tasks-axi"
-  REAL_TASKS_AXI="$real_tasks" expect_failure \
+  REAL_TASKS_AXI="$real_tasks" FAKE_INVALID_KEYS=unreadable expect_failure \
     "brief must fail when typed deliverable keys cannot be read" \
     run_pf "$home" brief pf-brief
   assert_contains "$EXPECT_OUT" "could not read public-followup obligation" \
     "brief must explain why it cannot produce executable instructions"
   assert_not_contains "$EXPECT_OUT" "<key>=<value>" \
     "brief must never substitute a generic deliverable placeholder"
+
+  for invalid in '["pr_url",7]' '["pr_url",""]' '["PR_URL"]' '["pr-url"]'; do
+    REAL_TASKS_AXI="$real_tasks" FAKE_INVALID_KEYS="$invalid" expect_failure \
+      "brief must reject an invalid required deliverable array" \
+      run_pf "$home" brief pf-brief
+    assert_contains "$EXPECT_OUT" "no readable required deliverable keys" \
+      "brief must reject the complete contract when any key is invalid"
+    assert_not_contains "$EXPECT_OUT" "--deliverable pr_url=<value>" \
+      "brief must not emit a partial contract from an invalid key array"
+  done
   pass "brief fails explicitly when typed deliverable keys are unavailable"
 }
 
@@ -2121,7 +2140,7 @@ test_x_request_teardown_warns_when_final_unposted() {
 }
 
 test_secondmate_promotion_uses_teardown_parent_resolution() {
-  local parent stale child out
+  local parent stale child remote_child out
   parent=$(make_home promote-parent)
   stale=$(make_home promote-stale-parent)
   child=$(make_home promote-child relay-off)
@@ -2163,6 +2182,22 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
     "a recovered legacy parent must identify the consent-holding home"
   assert_contains "$out" "--from pf-valid --work-home secondmate:mate --work-id promote-legacy" \
     "legacy parent recovery must print the rechain hint"
+
+  remote_child=$(make_home promote-remote-child relay-off)
+  printf '%s\n' remote-mate > "$remote_child/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote.example\n' \
+    > "$remote_child/.fm-secondmate-parent"
+  printf 'FMX_PAIRING_TOKEN=child-local-token\n' > "$remote_child/.env"
+  fm_write_meta "$remote_child/state/promote-remote.meta" \
+    "window=firstmate:fm-promote-remote" "kind=scout"
+  out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
+    FM_STATE_OVERRIDE="$remote_child/state" \
+    "$PROMOTE" promote-remote --mode local-only --yolo off 2>&1) \
+    || fail "a remote parent route must not block promotion: $out"
+  assert_contains "$out" "promoted promote-remote to ship" \
+    "an unresolved remote parent must never refuse the kind flip"
+  assert_contains "$out" "could not resolve the consent-holding parent home" \
+    "a remote route with a local Relay token must warn as teardown does"
   pass "secondmate promotion matches teardown parent resolution"
 }
 

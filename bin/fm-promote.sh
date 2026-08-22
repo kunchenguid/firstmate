@@ -209,7 +209,13 @@ if [ -f "$FM_HOME/.fm-secondmate-home" ]; then
       promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
     fi
   elif [ "$PROMOTE_PARENT_ROUTE" = remote ]; then
-    :
+    PROMOTE_HOME_ENV_TOKEN=
+    if [ -f "$FM_HOME/.env" ]; then
+      PROMOTE_HOME_ENV_TOKEN=$(fmx_env_get FMX_PAIRING_TOKEN "$FM_HOME/.env")
+    fi
+    if [ -n "$PROMOTE_HOME_ENV_TOKEN" ]; then
+      promote_warn_parent_unresolved "$PROMOTE_MATE_ID"
+    fi
   elif [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
     if fm_pf_relay_active "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME"; then
       if PROMOTE_PARENT=$(promote_resolve_primary_home \
