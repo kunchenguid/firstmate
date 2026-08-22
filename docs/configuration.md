@@ -413,6 +413,54 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Waiting conditions (state/wartebedingungen.check.sh)
+
+A held or externally waiting backlog entry usually carries its truth outside firstmate: a pull request's state at the forge, an account or payment state, a rolled-out service, an answer somebody else has to send.
+Nothing re-reads that truth on its own, so the condition is only ever re-checked when somebody happens to present the entry - which is exactly when a long-resolved wait gets quoted as still open.
+[`bin/fm-wartebedingungen.sh`](../bin/fm-wartebedingungen.sh) moves that re-reading to the machine.
+It runs on the watcher's ordinary check cadence, probes each deposited condition read-only, and wakes firstmate when reality has already satisfied one.
+It never closes an entry; firstmate closes it, with the evidence the wake carried.
+
+A condition is one line in a backlog entry's note body, indented like every other body line:
+
+```
+wartet-auf: <art> [argumente...]
+```
+
+The probe kinds are `pr-merged`, `gh-runs-green`, `url-status`, `datum`, `cmd`, and `unpruefbar`.
+`bin/fm-wartebedingungen.sh --help` and that script's header own what each kind treats as met and what arguments it takes.
+An entry may carry several lines and is reported as soon as any one of them is met.
+`unpruefbar <grund>` records that no reading probe exists for this wait, which is how a wait is deliberately left unchecked instead of forgotten.
+
+Three findings can reach firstmate, and none of them is a silence:
+
+- `Bedingung laengst erfuellt: <eintrag> - <beleg>` means the wait is over and the entry can be reconciled.
+- `Bedingung unpruefbar hinterlegt: <eintrag>` marks an entry that waits on the outside but carries no condition at all.
+  A hold of kind `external` says so outright; an untyped hold is read from its own reason, because a hold that says in so many words that it is waiting for something is the same risk whether or not anyone typed the kind.
+  Holds of kind `future`, `captain`, `parked`, and `load` are firstmate's own dated, owned, or capacity waits and are left alone.
+  It is a risk marker, not an obligation to retrofit every older entry at once.
+- `Wartebedingung nicht pruefbar: <eintrag> - <grund>` means a probe could not answer.
+  A failed probe is never folded into "not yet met", because that is how a dead detector goes quiet.
+
+`bin/fm-wartebedingungen.sh report` prints every watched entry, its condition, and its verdict, including the entries that still carry none, so the retrofit worklist is read off the machine rather than off memory.
+
+Every built-in probe reads and nothing more; none of them writes, retries, repairs, or closes anything.
+The `cmd` kind is the one that runs text taken from the backlog, so it is gated on the same trust mechanic as every other custom watcher check: a `cmd` probe runs only while `state/wartebedingungen.check.sh` is bound to its current bytes by [`bin/fm-check-register.sh`](../bin/fm-check-register.sh).
+Unbound - including after the check has been edited - the `cmd` probe is refused and reported as refused rather than skipped quietly.
+
+Arm the check once per home with `bin/fm-wartebedingungen.sh arm`.
+That writes `state/wartebedingungen.check.sh` and binds its bytes, so the existing watcher polls it on its normal cadence and turns its findings into a `check:` wake; no separate schedule is involved.
+Arming alone does not make watcher supervision required, and it is refused in a home with no backlog to guard.
+`bin/fm-wartebedingungen.sh disarm` removes the shim, its trust binding, and the record.
+`state/.wartebedingungen` records the exact finding set the last report was made from, so one unhandled finding is reported once instead of on every poll, while a new, changed, or returning finding is news again.
+
+The backlog is read directly as the markdown file `.tasks.toml` pins, rather than through `tasks-axi`, because the note body is what carries the conditions and a listing truncates it, and because the check must keep working in a home whose backlog backend is set to `manual`.
+
+`FM_WARTE_INTERVAL` (default 900 seconds, `0` to sweep on every run) sets how often probes actually run, `FM_WARTE_PROBE_SECS` (default 5) bounds one probe, and `FM_WARTE_BUDGET_SECS` (default 20) bounds a whole sweep.
+The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a check the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
+So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the findings.
+A sweep that runs out of budget names the entry it did not reach rather than reporting the rest as still waiting.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -657,6 +705,11 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_WARTE_INTERVAL=900   # seconds between waiting-condition sweeps; 0 sweeps on every run, other values must be 60..86400
+FM_WARTE_PROBE_SECS=5   # 1..30 seconds allowed for one waiting-condition probe
+FM_WARTE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole waiting-condition sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_WARTE_NOW=           # test override for the waiting-condition cadence clock; the sweep budget still uses real time
+FM_WARTE_TODAY=         # test override for the date a "wartet-auf: datum" condition is compared against
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document

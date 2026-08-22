@@ -107,6 +107,7 @@ state/               runtime records and signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
+  wartebedingungen.check.sh  generated waiting-condition poll shim and its .check-trust binding; present only after bin/fm-wartebedingungen.sh arm; its report record .wartebedingungen is what keeps one unhandled finding from being reported on every poll
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
@@ -491,6 +492,8 @@ When a main-side thread such as a pending captain decision or relay reminder is 
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 Update the backlog on every dispatch, completion, and decision for a work item.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
+When an item's truth lies outside firstmate - a PR's state at the forge, an account or payment state, a rolled-out service, an answer someone else owes - deposit a `wartet-auf:` line in its note so the waiting-condition guard re-reads that truth on cadence and wakes with the evidence; where no reading probe exists, record that with `wartet-auf: unpruefbar <grund>` rather than leaving the wait to memory (`bin/fm-wartebedingungen.sh --help`, `docs/configuration.md`).
+A wake naming such an entry is evidence that the wait is over, not authority to close it: reconcile the item against that evidence.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
