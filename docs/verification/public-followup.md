@@ -60,8 +60,14 @@ ok - CONTROL: the identical teardown REFUSES the moment a commitment is register
 ok - rechain posts the shipped follow-on into the same thread
 ok - rechain resumes the same obligation after an interrupted bind
 ok - concurrent rechains cannot fork one delivered source
+ok - failed rechain retirement keeps the source claimed by one resumable destination
 ok - registration replay preserves delivered and retired loop states
 ok - redelivery does not report a retired loop as open
+ok - retire closes delivered loops after secondmate home removal
+ok - retire fails closed for an unbound existing secondmate
+ok - retire fails closed when a secondmate ID is reassigned
+ok - rechain refuses an unrelated existing destination
+ok - pending skips a registration retired during settlement
 ok - retire --reason closes the loop and drops the open-loop line
 ok - retention creates no false teardown refusal and pending no longer prunes
 ok - expiry escalation is pinned by FMX_NOW_OVERRIDE
@@ -109,4 +115,5 @@ The only supervision surfaces touched are the session-start digest, which `bin/f
 
 Runtime backends (tmux, herdr, zellij, orca, cmux): not applicable after inspection.
 No command here reads `state/<id>.meta`'s backend fields, resolves an endpoint, or captures a pane.
-The one lifecycle integration is `bin/fm-teardown.sh`'s owed-reply refusal plus the non-blocking open-loop and legacy `x_request=` warnings, which run before any backend command and key only on the task id and registration records, so they behave identically on every backend.
+The lifecycle integrations are backlog-handoff warnings, promotion rechain hints, and `bin/fm-teardown.sh`'s owed-reply refusal plus non-blocking open-loop and legacy `x_request=` warnings.
+They inspect home, task, parent-binding, and registration records rather than backend fields or endpoints, so they behave identically on every backend.

@@ -5,9 +5,10 @@
 # Firstmate promises a public final reply when a myfirstmate relay mention (X or
 # Discord) asks for work. `tasks-axi public-followup` is the sole owner of that
 # typed obligation and its state machine; state/x-context/ is the sole owner of
-# the private full request context. This library owns only the small Firstmate
-# side: the activation gate, the private per-home transport directories, and the
-# deterministic terminal-event identity.
+# the private full request context. This library owns Firstmate's activation
+# gate, private per-home transport paths, retained-loop state and locking
+# helpers, follow-up window classification, and deterministic terminal-event
+# identity.
 #
 # Sourced, never executed. No side effects on source (it creates nothing), which
 # is what keeps a relay-disabled home free of public-followup artifacts.
@@ -31,12 +32,13 @@
 # Private transport layout, all under <home>/state/public-followup (mode 0700,
 # initialized by `fm-public-followup.sh register` and extended only by these
 # public-followup commands):
-#   registry/<obligation-id>   registration record: the bounded public-safe
-#                              binding (obligation, relation, work ref,
-#                              generation, platform, request id) plus the loop
-#                              fields that survive delivery (state, delivered_at,
-#                              followup_expires_at, request_context_b64). Presence
-#                              means the public loop is still open. Delivery
+#   registry/<obligation-id>   registration record: the bounded private binding
+#                              (obligation, relation, work ref and canonical
+#                              secondmate path, generation, platform, request id)
+#                              plus the loop fields that survive delivery (state,
+#                              delivered_at, followup_expires_at,
+#                              request_context_b64). Presence means the public
+#                              loop is still open. Delivery
 #                              stamps state=delivered; only `retire` removes the
 #                              record. The obligation itself always remains
 #                              tasks-axi truth.

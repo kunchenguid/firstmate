@@ -262,6 +262,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
    - "the relay no longer accepts a follow-up" is a captain decision, not a retry.
 4. After a successful deliver (or when the digest lists an `open-loop` line), decide the disposition in that same turn:
    - Follow-on work authorized from the same public thread: `bin/fm-public-followup.sh rechain <new-id> --from <delivered-id> --work-home <main|secondmate:<id>> --work-id <task-id> --expected <pr-merged|report-ready|local-main>`, then put the printed `brief` into that follow-on's instructions (and into the routed item's own note when the work is routed).
+     If rechain reports an interrupted bind or source-retirement failure, resume the same destination with the same command; the retained source claim forbids choosing another destination.
    - The public loop is finished: `bin/fm-public-followup.sh retire <id> --reason "<why the loop is done>"`.
    Delivering a final is not closure.
    Silence after delivery is an open loop, not a kept promise for later work.
