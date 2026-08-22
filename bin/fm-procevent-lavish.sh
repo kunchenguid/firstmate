@@ -88,7 +88,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real state reg identity wait_ms i=0 max live
+  local artifact=${1-} id real reg_out identity wait_ms i=0 max live
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -96,7 +96,15 @@ cmd_arm() {
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  # register reports the identity of the exact generation it just published,
+  # captured on the other side while it still held the source lock. Reading it
+  # back from that line - rather than re-deriving it here with a separate,
+  # unlocked stat of the registry file - is what keeps this attempt's identity
+  # from ever being some concurrent arm call's later registration instead.
+  reg_out=$("$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real") || exit 1
+  printf '%s\n' "$reg_out"
+  identity=${reg_out##* }
+  [ -n "$identity" ] || die "cannot read the registered generation: $id"
   # Registration proves the source definition was accepted; it does not prove
   # this attempt's listener ever starts, because reconcile owns that launch.
   # Readiness is therefore proved before it is reported: kick one reconcile so
@@ -108,10 +116,12 @@ cmd_arm() {
     ''|*[!0-9]*) die "FM_PROCEVENT_LAVISH_ARM_WAIT_MS must be a nonnegative integer" ;;
   esac
   wait_ms=${FM_PROCEVENT_LAVISH_ARM_WAIT_MS:-5000}
-  state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-  reg="$(fm_procevent_registry_dir "$state")/$id.source"
-  identity=$(fm_pr_file_identity "$reg") || die "cannot read the registered generation: $id"
-  "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  # Kicked in the background, never awaited: reconcile can block on a source
+  # lock held by a live process elsewhere or on slow runner cleanup, and only
+  # the timed sampling loop below is allowed to bound how long arm waits.
+  # Running it synchronously here would let that internal blocking silently
+  # replace the documented bound with reconcile's own, possibly unbounded, one.
+  "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 &
   max=$((wait_ms / 50 + 1))
   live=1
   while [ "$i" -lt "$max" ]; do

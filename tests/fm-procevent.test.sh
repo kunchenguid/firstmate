@@ -670,6 +670,47 @@ assert_present "$HLB/state/procevent/$old_id.source" \
 FM_HOME="$HLB" "$ROOT/bin/fm-procevent.sh" retire "$old_id" >/dev/null 2>&1 || true
 pass "arm proves the exact registered listener live before ready and refuses otherwise"
 
+# --- reconcile's own lock contention on an UNRELATED source must never widen
+# arm's documented bound. Reconcile walks every machine-wide registered source,
+# not just the one this arm call just registered, so a lock held elsewhere for
+# some other source cannot be allowed to postpone the timed sampling loop that
+# is supposed to be the only thing bounding how long arm waits.
+HLC="$TMP_ROOT/hlc"; new_home "$HLC"
+CONTEND_LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/contend-lavish-stub")
+cat > "$CONTEND_LAVISH_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Never actually needs to run in this test: reconcile is kept from ever
+# reaching this source's own claim by contention staged on an unrelated one.
+printf 'session:\n  file: /review.html\n  status: feedback\nfeedback[1]{text}:\n  contend\n'
+SH
+chmod +x "$CONTEND_LAVISH_BIN/lavish-axi"
+# Sorts before any "lavish-<hash>" source id, so reconcile's own *.source walk
+# reaches this contended registration first.
+CONTEND_BLOCKER_ID="aaa-lock-contender-src"
+pe_register "$HLC" lavish "$CONTEND_BLOCKER_ID" -- /bin/true >/dev/null
+CONTEND_READY="$TMP_ROOT/contend-lock-ready"
+CONTEND_RELEASE="$TMP_ROOT/contend-lock-release"
+hold_source_lock "$CONTEND_BLOCKER_ID" "$CONTEND_READY" "$CONTEND_RELEASE"
+contend_holder_pid=$HOLDER_PID
+wait_for "$CONTEND_READY" || fail "could not hold the unrelated source's lock boundary"
+# Released on its own timer, independent of arm: a synchronous reconcile call
+# would otherwise deadlock this test against arm's own completion.
+( sleep 4; : > "$CONTEND_RELEASE" ) &
+contend_timer_pid=$!
+CONTEND_ART="$TMP_ROOT/contend-review.html"
+printf '<h1>contend review</h1>\n' > "$CONTEND_ART"
+contend_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$CONTEND_ART")
+PE_TRACKED+=("$HLC|$contend_id")
+contend_start=$(date +%s)
+PATH="$CONTEND_LAVISH_BIN:$PATH" FM_HOME="$HLC" FM_PROCEVENT_LAVISH_ARM_WAIT_MS=300 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$CONTEND_ART" >/dev/null 2>&1 || true
+contend_elapsed=$(( $(date +%s) - contend_start ))
+wait "$contend_holder_pid" 2>/dev/null || true
+wait "$contend_timer_pid" 2>/dev/null || true
+[ "$contend_elapsed" -le 2 ] \
+  || fail "arm's bounded wait (300ms) was extended by an unrelated source's lock contention: ${contend_elapsed}s (held for 4s)"
+pass "reconcile's contention on an unrelated source's lock never extends arm's own bound"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
