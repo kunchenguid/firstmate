@@ -80,6 +80,10 @@ test_two_homes_configure_distinct_pool_roots() {
   config_b=$(pool_config_view_for_home "$case_dir/homeB" "$case_dir/base" "$case_dir/homeB/project")
   assert_present "$config_a/treehouse.toml" "the first home has no generated Treehouse config"
   assert_present "$config_b/treehouse.toml" "the second home has no generated Treehouse config"
+  git -C "$config_a" check-ignore -q -- treehouse.toml \
+    || fail "the first generated Treehouse config is not actually ignored"
+  git -C "$config_a" check-ignore -q -- .gitignore \
+    || fail "the first generated ignore contract does not ignore itself"
   assert_absent "$case_dir/homeA/project/treehouse.toml" "pool setup mutated the first primary clone"
   assert_absent "$case_dir/homeB/project/treehouse.toml" "pool setup mutated the second primary clone"
   [ -z "$(git -C "$case_dir/homeA/project" status --porcelain)" ] \
@@ -174,8 +178,63 @@ SH
   assert_contains "$out" "could not write and verify" "the failed write postcondition was not reported"
   generated=$(find "$case_dir/homeA/state/treehouse-config" -name treehouse.toml -print -quit 2>/dev/null || true)
   [ -z "$generated" ] || fail "the no-op writer unexpectedly configured a pool root"
+  generated=$(find "$case_dir/homeA/state/treehouse-config" -name .git -print -quit 2>/dev/null || true)
+  [ -z "$generated" ] || fail "the failed generated write left a partial Git view"
   assert_absent "$clone/treehouse.toml" "the failed generated write mutated the primary clone"
   pass "pool configuration verifies the root that was actually written"
+}
+
+test_pool_root_rolls_back_an_existing_view_on_verification_failure() {
+  local case_dir clone config project_git_dir fakebin real_git out status toml_before ignore_before
+  local toml_mode ignore_mode exclude_before
+  case_dir=$(make_two_homes_one_project rollback-existing-view)
+  clone="$case_dir/homeA/project"
+  config=$(pool_config_view_for_home "$case_dir/homeA" "$case_dir/base" "$clone") \
+    || fail "could not create the rollback fixture view"
+  project_git_dir=$(git -C "$clone" rev-parse --absolute-git-dir)
+  rm -f -- "$config/.git/HEAD" "$config/.git/commondir" "$config/.git/index"
+  rmdir "$config/.git"
+  ln -s "$project_git_dir" "$config/.git"
+  printf 'root = "/preserved/original"\n' > "$config/treehouse.toml"
+  printf '.gitignore\ntreehouse.toml\npreserved-local-entry\n' > "$config/.gitignore"
+  chmod 0640 "$config/treehouse.toml"
+  chmod 0600 "$config/.gitignore"
+  toml_before=$(cksum < "$config/treehouse.toml")
+  ignore_before=$(cksum < "$config/.gitignore")
+  toml_mode=$(file_mode "$config/treehouse.toml")
+  ignore_mode=$(file_mode "$config/.gitignore")
+  exclude_before=$(cksum < "$clone/.git/info/exclude")
+  real_git=$(command -v git)
+  fakebin=$(fm_fakebin "$case_dir/verify-failure")
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *" check-ignore "*) exit 1 ;;
+esac
+exec "${FM_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(FM_HOME="$case_dir/homeA" FM_POOL_ROOT_BASE="$case_dir/base" \
+    FM_REAL_GIT="$real_git" PATH="$fakebin:$PATH" "$POOL_ROOT_BIN" "$clone" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a failed ignore verification must fail pool configuration"
+  assert_contains "$out" "could not write and verify" "the transactional verification failure was not reported"
+  [ "$(cksum < "$config/treehouse.toml")" = "$toml_before" ] \
+    || fail "failed verification did not restore the prior Treehouse config"
+  [ "$(cksum < "$config/.gitignore")" = "$ignore_before" ] \
+    || fail "failed verification did not restore the prior ignore contract"
+  [ "$(file_mode "$config/treehouse.toml")" = "$toml_mode" ] \
+    || fail "failed verification did not restore the Treehouse config mode"
+  [ "$(file_mode "$config/.gitignore")" = "$ignore_mode" ] \
+    || fail "failed verification did not restore the ignore-contract mode"
+  [ -L "$config/.git" ] && [ "$(readlink "$config/.git")" = "$project_git_dir" ] \
+    || fail "failed verification did not restore the prior Git control link"
+  [ "$(cksum < "$clone/.git/info/exclude")" = "$exclude_before" ] \
+    || fail "generated-view rollback mutated the primary clone's Git exclusion"
+  [ -z "$(git -C "$clone" status --porcelain)" ] \
+    || fail "generated-view rollback dirtied the primary clone"
+  pass "pool configuration restores the complete prior view after verification failure"
 }
 
 # The vendor fact the class rests on: treehouse hands two clones of one origin
@@ -266,11 +325,24 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  send-keys)
+    case "${4:-}" in
+      *"treehouse get --lease"*) bash -c "$4" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
 
   fm_git_init_commit "$case_dir/upstream"
   git clone --quiet --bare "$case_dir/upstream" "$case_dir/origin.git"
@@ -293,6 +365,7 @@ run_spawn_case() {  # <case-dir> <id> <args...>
     FM_PROJECTS_OVERRIDE="$case_dir/home/projects" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
     FM_POOL_ROOT_BASE="$case_dir/base" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$case_dir/pool" \
+    FM_TREEHOUSE_LOG="$case_dir/treehouse.log" \
     PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$id" "$case_dir/project" "$@" 2>&1
 }
@@ -315,8 +388,9 @@ test_spawn_refuses_a_copy_another_task_claims() {
   out=$(run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 1 "$status" "spawn should refuse a copy another task already claims: $out"
-  assert_contains "$out" "other-task already claims" "the refusal did not name the claiming task"
+  assert_contains "$out" "task other-task claims" "the refusal did not name the claiming task"
   assert_absent "$case_dir/home/state/$id.meta" "a refused spawn still published task metadata"
+  assert_absent "$case_dir/treehouse.log" "spawn asked Treehouse to recycle a copy already claimed by legacy metadata"
   [ "$(git -C "$case_dir/pool" rev-parse HEAD)" = "$pool_head" ] \
     || fail "the refused spawn reset the other task's copy before refusing"
   [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/other-task" ] \
@@ -344,6 +418,7 @@ test_spawn_refuses_ambiguous_worktree_metadata() {
   expect_code 1 "$status" "spawn should fail closed on ambiguous worktree metadata"
   assert_contains "$out" "ambiguous worktree metadata" "the refusal did not identify the ambiguous ownership record"
   assert_absent "$case_dir/home/state/$id.meta" "ambiguous metadata still allowed a second owner record"
+  assert_absent "$case_dir/treehouse.log" "ambiguous metadata was checked only after requesting a lease"
   [ "$(git -C "$case_dir/pool" rev-parse HEAD)" = "$pool_head" ] \
     || fail "ambiguous metadata allowed spawn to reset the claimed copy"
   [ "$(git -C "$case_dir/pool" rev-parse --abbrev-ref HEAD)" = "fm/ambiguous-owner" ] \
@@ -398,6 +473,10 @@ test_spawn_claims_this_homes_pool_root_before_leasing() {
   status=$?
   expect_code 0 "$status" "an unclaimed pooled copy should still spawn"
   assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_grep "get --lease --lease-holder $id" "$case_dir/treehouse.log" \
+    "spawn did not acquire its worktree as a durable task-labelled Treehouse lease"
+  assert_grep "treehouse_lease_holder=$id" "$case_dir/home/state/$id.meta" \
+    "spawn did not persist the durable lease identity with task custody metadata"
   config_home=$(pool_config_view_for_home "$case_dir/home" "$case_dir/base" "$case_dir/project")
   assert_present "$config_home/treehouse.toml" "spawn did not generate this home's Treehouse config"
   assert_absent "$case_dir/project/treehouse.toml" "spawn wrote Treehouse config into the primary clone"
@@ -1035,6 +1114,7 @@ test_pool_root_is_idempotent_without_mutating_the_clone
 test_pool_root_preserves_a_tracked_primary_config
 test_pool_root_preserves_a_nonregular_primary_config
 test_pool_root_verifies_the_written_config
+test_pool_root_rolls_back_an_existing_view_on_verification_failure
 test_real_treehouse_stops_sharing_a_pool_between_homes
 test_real_treehouse_accepts_encoded_pool_paths
 test_spawn_refuses_a_copy_another_task_claims

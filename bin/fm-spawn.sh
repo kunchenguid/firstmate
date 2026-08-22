@@ -685,6 +685,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TREEHOUSE_LEASE_HOLDER=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1774,20 +1775,48 @@ release_delivered_pool_copies() {  # <project>
   return 0
 }
 
-# A pooled copy has exactly one owner, and the pool cannot tell you who it is.
-# Treehouse re-leases a slot as soon as the shell that held it is gone, but this
-# home's durable records outlive that shell: a task whose agent died still names
-# that copy in state/<id>.meta, and that task's cleanup still hard-resets it.
-# Launching a second task into the same copy gives it two owners, and whichever
-# task is torn down first destroys the other's work. Run this after the slot is
-# acquired and BEFORE anything uses it - the base refresh below already resets
-# the copy - so the refusal lands while both tasks' work is still intact.
+# A pooled copy has exactly one owner. New acquisitions use Treehouse's durable
+# lease, while this home's records remain the custody authority consumed by
+# spawn and teardown.
 #
 # The refusal deliberately does NOT return the slot. `treehouse return`
 # terminates the processes inside a copy and hard-resets it, which is exactly
 # the damage this guard exists to prevent, and the conflicting task may still be
 # working in there. Firstmate reconciles the claim instead; the copy, its
 # processes, and this spawn's endpoint are all left exactly as they are.
+validate_worktree_metadata_before_lease() {  # <pool-root>
+  local pool_root=$1 meta claimed claimed_real holder other_id
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    if [ "$other_id" = "$ID" ]; then
+      echo "error: task $ID acquired a durable record while its fresh spawn was preparing to lease; refusing to replace that task's ownership. No worktree lease was requested. Use --relaunch to reuse the existing task." >&2
+      exit 1
+    fi
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
+      echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing before requesting a worktree lease" >&2
+      exit 1
+    fi
+    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      echo "error: cannot confirm worktree ownership because task $other_id has missing, empty, or ambiguous worktree metadata in '$meta'; refusing before requesting a worktree lease" >&2
+      exit 1
+    }
+    claimed_real=$(real_path_or_raw "$claimed")
+    case "$claimed_real" in
+      "$pool_root"/.treehouse/*)
+        holder=$(fm_backend_meta_exact_value "$meta" treehouse_lease_holder) || {
+          echo "error: task $other_id claims '$claimed' in this home's pool without confirmable durable-lease metadata; refusing before Treehouse can recycle that copy" >&2
+          exit 1
+        }
+        if [ "$holder" != "$other_id" ]; then
+          echo "error: task $other_id claims '$claimed' with mismatched durable-lease holder '$holder'; refusing before Treehouse can recycle that copy" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+}
+
 assert_worktree_unclaimed() {  # <worktree>
   local worktree=$1 meta claimed claimed_real other_id wt_real
   wt_real=$(real_path_or_raw "$worktree")
@@ -2319,7 +2348,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   }
   release_delivered_pool_copies "$PROJ_ABS"
-  spawn_send_text_line "$WT_TARGET" "(cd $(shell_quote "$TREEHOUSE_CONFIG_VIEW_REAL") && exec treehouse get)"
+  validate_worktree_metadata_before_lease "$TREEHOUSE_POOL_ROOT"
+  TREEHOUSE_LEASE_HOLDER=$ID
+  spawn_send_text_line "$WT_TARGET" "FM_TREEHOUSE_LEASED_WORKTREE=\$(cd $(shell_quote "$TREEHOUSE_CONFIG_VIEW_REAL") && treehouse get --lease --lease-holder $(shell_quote "$TREEHOUSE_LEASE_HOLDER")) && cd \"\$FM_TREEHOUSE_LEASED_WORKTREE\" && unset FM_TREEHOUSE_LEASED_WORKTREE"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2758,6 +2789,7 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  [ -z "${TREEHOUSE_LEASE_HOLDER:-}" ] || echo "treehouse_lease_holder=$TREEHOUSE_LEASE_HOLDER"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"

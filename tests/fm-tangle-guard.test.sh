@@ -303,12 +303,12 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid (cd '" "$rec" \
+  assert_grep "send-keys -t @spawnwid FM_TREEHOUSE_LEASED_WORKTREE=" "$rec" \
     "treehouse get must start from the home-private config view on the stable window id"
   assert_grep "/state/treehouse-config/" "$rec" \
     "treehouse get did not use the home-namespaced config view"
-  assert_grep "exec treehouse get) Enter" "$rec" \
-    "the config view must invoke treehouse directly"
+  assert_grep "treehouse get --lease --lease-holder 'rec-win-gg7'" "$rec" \
+    "the config view must acquire a durable task-labelled lease"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 
