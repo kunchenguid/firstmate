@@ -1030,6 +1030,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  control_parent_is_fm_control() {
+    local pid=$1 command
+    command=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null) || return 1
+    case " $command " in
+      *" $SCRIPT_DIR/fm-control.sh "*) ;;
+      *) return 1 ;;
+    esac
+    case " $command " in
+      *" relaunch "*) return 0 ;;
+    esac
+    return 1
+  }
+  control_relaunch_tx_matches() {
+    local recorded_tx
+    recorded_tx=$(awk -F= '$1 == "relaunch_tx" { value = $2 } END { if (value != "") print value }' \
+      "$STATE/$ID.control-relaunch" 2>/dev/null) || return 1
+    [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] && [ "$recorded_tx" = "$FM_CONTROL_RELAUNCH_TX" ]
+  }
   # --recover-missing rebuilds an endpoint, so it must trace to the control
   # plane: either this process IS bin/fm-control.sh's own relaunch child -
   # proven by that task's control lock naming our direct parent plus the
@@ -1038,7 +1056,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # authorizes finishing a failed attempt. Any other caller is refused rather
   # than allowed an endpoint rebuild outside the control plane's transaction.
   RECOVER_MISSING_AUTHORIZED=0
-  if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+     && control_parent_is_fm_control "$PPID" \
+     && control_relaunch_tx_matches; then
     RECOVER_MISSING_AUTHORIZED=1
   elif [ -f "$STATE/$ID.control-relaunch.recovery-attempt" ]; then
     RECOVER_MISSING_AUTHORIZED=1

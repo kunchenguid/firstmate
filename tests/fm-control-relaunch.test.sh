@@ -1593,6 +1593,26 @@ test_recover_missing_recovers_a_missing_herdr_endpoint() {
   pass "fm-control relaunch: a missing Herdr endpoint recovers through a rebuilt recorded pane"
 }
 
+test_recovery_marker_cleanup_failure_is_incomplete() {
+  local dir out rc marker real_rm
+  dir=$(new_case recov-marker-rm rl51)
+  add_herdr_ship_task "$dir" rl51 claude
+  make_herdr_stub "$dir" "hp-rl51-old" "hws-rl51"
+  : > "$dir/fake/ws-ok"
+  marker="$dir/home/state/rl51.control-relaunch.recovery-attempt"
+  real_rm=$(command -v rm)
+  make_rm_failure_stub "$dir"
+  out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_FAIL_PATH="$marker" \
+    run_control "$dir" rl51 relaunch --note "marker cleanup failure"); rc=$?
+  expect_code 1 "$rc" "a recovery marker cleanup failure should fail the transaction"$'\n'"$out"
+  assert_contains "$out" "recovery-attempt marker could not be cleared" \
+    "the failure should identify the uncleared recovery marker"
+  [ -e "$marker" ] || fail "a failed marker cleanup must leave the marker for reconciliation"
+  [ "$(journal_field "$dir" rl51 rollback)" = none-new-agent-confirmed ] \
+    || fail "a live replacement with an uncleared marker must be recorded as incomplete"
+  pass "fm-control relaunch: marker cleanup failure stays incomplete"
+}
+
 test_recover_missing_refuses_an_ambiguous_herdr_workspace() {
   local dir out rc
   dir=$(new_case recov-ambig rl43)
@@ -1765,6 +1785,38 @@ test_recover_missing_refuses_an_unauthorized_caller() {
   pass "fm-spawn --recover-missing: refuses an unauthorized direct caller"
 }
 
+test_recover_missing_refuses_a_non_control_parent_with_a_transaction() {
+  local dir out rc lock parent
+  dir=$(new_case recov-parent rl52)
+  add_herdr_ship_task "$dir" rl52 claude
+  make_herdr_stub "$dir" "hp-rl52-old" "hws-rl52"
+  : > "$dir/fake/ws-ok"
+  lock="$dir/home/state/.control-rl52.lock"
+  parent="$dir/non-control-parent.sh"
+  cat > "$parent" <<SH
+#!/usr/bin/env bash
+set -u
+mkdir -p "$lock"
+printf '%s\\n' "\$\$" > "$lock/pid"
+PATH="$dir/fakebin:\$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \\
+  FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \\
+  FM_CONTROL_RELAUNCH_TX=forged \\
+  "$SPAWN" rl52 --relaunch --recover-missing --harness claude
+rc=\$?
+exit "\$rc"
+SH
+  chmod +x "$parent"
+  out=$(
+    "$parent" 2>&1
+  ); rc=$?
+  expect_code 1 "$rc" "a non-control lock holder must not authorize recovery"$'\n'"$out"
+  assert_contains "$out" "reserved for bin/fm-control.sh" \
+    "the refusal should identify the missing control-plane proof"
+  [ ! -e "$dir/fake/create-label" ] \
+    || fail "an unauthorized recovery must not create a replacement pane"
+  pass "fm-spawn --recover-missing: rejects a non-control parent despite a transaction token"
+}
+
 test_recover_missing_refuses_alive_endpoint() {
   local dir out rc
   dir=$(new_case recov-alive rl44)
@@ -1784,6 +1836,7 @@ test_recover_missing_refuses_alive_endpoint() {
 test_recover_missing_refuses_without_relaunch
 test_recover_missing_refuses_secondmate_kind
 test_recover_missing_recovers_a_missing_herdr_endpoint
+test_recovery_marker_cleanup_failure_is_incomplete
 test_recover_missing_refuses_an_ambiguous_herdr_workspace
 test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
 test_recovery_pane_survives_an_empty_first_cwd_read
@@ -1791,5 +1844,6 @@ test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path
 test_unsupported_kind_with_a_stranded_marker_stays_ordinary
 test_recover_missing_refuses_an_unauthorized_caller
+test_recover_missing_refuses_a_non_control_parent_with_a_transaction
 test_recover_missing_refuses_alive_endpoint
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree

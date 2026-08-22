@@ -892,7 +892,8 @@ do_relaunch() {
   # The recovery landed: its attempt marker must not outlive it, or a later
   # ordinary agent-free relaunch would be misread as a failed recovery retry.
   if [ "$recover_missing" = 1 ]; then
-    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null || true
+    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null \
+      || die "the replacement agent for $ID is alive, but its recovery-attempt marker could not be cleared"
   fi
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
