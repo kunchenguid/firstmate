@@ -933,6 +933,42 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
+# True when the handling drain would actually present something for this
+# recovery episode: an unacknowledged queue row, a still-open decision, or an
+# unread informational status line. docs/watcher-continuity.md owns that
+# presentation contract, and this reads the same three sources through their
+# owners, cheapest first. Both scans are strictly read-only: the whole-file
+# decision fold is used rather than its incremental sibling because that sibling
+# writes a cursor the unread-status scan falls back to, which would let this
+# check blind the drain it is protecting. Any scan failure answers true: an
+# extra wake is cheap, and silence about real supervision work is not.
+recovery_has_presentable_work() {
+  local found
+  [ ! -s "$FM_WAKE_QUEUE" ] || return 0
+  found=$(scan_unread_surface_lines "$STATE") || return 0
+  [ -z "$found" ] || return 0
+  found=$(scan_open_decisions "$STATE") || return 0
+  [ -z "$found" ] || return 0
+  return 1
+}
+
+# Retire an episode this watcher proved has nothing to present, so later arms
+# stop re-surfacing it. The emptiness re-check and the generation-bound
+# acknowledgement share the queue lock fm_wake_append also holds, so a wake
+# racing this decision keeps its episode. A status line appended after this
+# point is not stranded either: this watcher is live, so the ordinary signal
+# scan surfaces it.
+retire_empty_recovery_episode() {  # <generation>
+  local generation=$1 retired=1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ ! -s "$FM_WAKE_QUEUE" ] \
+    && fm_recovery_marker_ack "$WATCHER_DOWNTIME_MARKER" "$generation"; then
+    retired=0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$retired"
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -946,6 +982,17 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  fi
+  if ! recovery_has_presentable_work; then
+    fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*)
+        if retire_empty_recovery_episode "${FM_RECOVERY_MARKER_TOKEN##*:}"; then
+          WATCHER_RECOVERY_PENDING=0
+          return 0
+        fi
+        ;;
+    esac
   fi
   wake "check: rearm-resurface"
 }

@@ -35,6 +35,11 @@ Claude's Stop hook starts the successor arm at the next Stop after the handling 
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no auto-arm claim is still deciding, so a leftover claim whose own decision already finished cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce; it enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
+That recovery presentation includes all unacknowledged queue rows, the cursor-folded OPEN DECISIONS set, and still-unread informational status lines, so a still-open decision or a buried `note:` answer reappears even when recovery has no queue row of its own.
+Those three sources are also the whole test for whether the wake is worth sending: a successor emits it only when at least one of them actually holds something, and otherwise retires the episode silently.
+A watcher close publishes downtime unconditionally, so without that test a torn-down fleet re-arms straight into another empty episode and every following arm delivers a recovery wake whose handling turn finds nothing.
+The watcher reads those sources read-only and never advances the presentation cursor, and any failure to read one of them is treated as work present, because a redundant wake costs a turn while a suppressed one costs the work.
 The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
@@ -47,7 +52,9 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 
 ## Recovery episode acknowledgement
 
-A recovery episode is one generation of `state/.watcher-down`, and it is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
+A recovery episode is one generation of `state/.watcher-down`.
+It is retired by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`, or by a watcher that proved the episode has nothing to present and acknowledged that same generation under the queue lock `fm_wake_append` also holds, so a wake racing that decision keeps its episode.
+Delivering `check: rearm-resurface` never retires the episode by itself: the wake is delivered but not yet handled, and preserving it is what lets an interrupted handling turn re-drain the same work.
 An unacknowledged downtime generation is announced at most once: the first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
 A non-successor watcher start after an announced-but-unacked episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
 Every watcher close and every durable queue append publishes downtime, so a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
@@ -82,6 +89,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
+It also pins both halves of the worth-sending test: each of the three presentation sources alone still resurfaces after a real down stretch, and a fully torn-down fleet re-arms silently across consecutive cycles instead of delivering recovery wakes whose drains present nothing.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.

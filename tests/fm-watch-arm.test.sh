@@ -377,6 +377,8 @@ test_marker_publish_failure_retains_recovery_evidence() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
+  seed_open_decision "$state" marker-failure
+
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
   first_arm=$ARM_PID
   is_live_non_zombie "$first_arm" || fail "marker-failure fixture watcher did not stay live"
@@ -539,6 +541,7 @@ test_malformed_marker_is_quarantined_once() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data" "$state/.watcher-down"
   printf 'foreign state\n' > "$state/.watcher-down/payload"
+  seed_open_decision "$state" malformed-marker
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "malformed marker did not produce a bounded recovery wake"
@@ -601,6 +604,7 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   printf '%s\n' "$WATCH" > "$owner/watcher-path"
   printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
   ln -s "$owner" "$state/.watch.lock"
+  seed_open_decision "$state" reused-pid-lock
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
   wait_for_exit "$ARM_PID" 80 || fail "restart did not surface recovery after clearing a reused-pid lock"
@@ -804,6 +808,134 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+# Take the live watcher down the way an ordinary close does, so the recovery
+# episode this home would really see is the one under test.
+close_live_watcher() {  # <state>
+  local state=$1 watcher_pid
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "no live watcher to close"
+  kill -TERM "$watcher_pid" 2>/dev/null || fail "could not close the live watcher"
+  wait "$ARM_PID" 2>/dev/null || true
+}
+
+# Recovery is decided at the top of the watcher's first poll, so a bounded
+# settle is enough to prove an arm stayed silent rather than merely slow.
+expect_silent_arm() {  # <label> <arm-out>
+  local label=$1 out=$2 i=0
+  while [ "$i" -lt 30 ]; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$ARM_PID" && return 0
+  wait "$ARM_PID" 2>/dev/null || true
+  fail "$label woke with nothing to report: $(cat "$out")"
+}
+
+# A recovery presentation has three independent sources: unacknowledged queue
+# rows, still-open decisions, and unread informational status lines
+# (docs/watcher-continuity.md). A watcher that goes down while ANY one of them
+# holds real work must still resurface it on return, so each source is covered
+# on its own - a suppression bug in any one of them makes firstmate blind.
+test_recovery_still_surfaces_every_presentable_source() {
+  local dir home state fakebin
+
+  dir=$(make_case recovery-source-queue-row)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "queue-row fixture watcher did not stay live"
+  close_live_watcher "$state"
+  append_wake "$state" check startup-network 'check: startup-network queued while down'
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "a wake queued during downtime was not resurfaced"
+  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "downtime with a queued wake did not resurface it: $(cat "$dir/recovery-arm.out")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+    || fail "queue-row recovery drain failed"
+  grep "$(printf '\tcheck\tstartup-network\t')" "$dir/drain.out" >/dev/null \
+    || fail "resurfaced recovery did not present the queued wake"
+
+  dir=$(make_case recovery-source-open-decision)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  seed_open_decision "$state" downtime-signoff
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "open-decision fixture watcher did not stay live"
+  close_live_watcher "$state"
+  [ ! -s "$state/.wake-queue" ] || fail "open-decision fixture queued a wake, so it proves nothing"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "an open decision was not resurfaced after downtime"
+  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "downtime with an open decision and no queue row stayed silent: $(cat "$dir/recovery-arm.out")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+    || fail "open-decision recovery drain failed"
+  grep -F 'held [key=downtime-signoff] needs-decision:' "$dir/drain.out" >/dev/null \
+    || fail "resurfaced recovery did not present the still-open decision"
+
+  dir=$(make_case recovery-source-unread-note)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "unread-note fixture watcher did not stay live"
+  close_live_watcher "$state"
+  printf 'note: the answer the captain was waiting for landed here\n' > "$state/quiet.status"
+  [ ! -s "$state/.wake-queue" ] || fail "unread-note fixture queued a wake, so it proves nothing"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
+  wait_for_exit "$ARM_PID" 80 || fail "an unread note line was not resurfaced after downtime"
+  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "downtime with an unread note and no queue row stayed silent: $(cat "$dir/recovery-arm.out")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+    || fail "unread-note recovery drain failed"
+  grep -F 'quiet note: the answer the captain was waiting for landed here' "$dir/drain.out" >/dev/null \
+    || fail "resurfaced recovery did not present the unread note line"
+
+  pass "watch-arm: downtime still resurfaces a queued wake, an open decision, and an unread note"
+}
+
+# The reported symptom: with the fleet fully torn down, every re-arm delivered
+# "check: rearm-resurface" and every handling turn found nothing. Each re-arm
+# closes the previous watcher, which republishes downtime, so a watcher that
+# resurfaces an empty episode re-arms straight into the next identical one.
+test_empty_fleet_recovery_stays_silent_across_rearms() {
+  local dir home state fakebin cycle out
+  dir=$(make_case empty-fleet-rearm-silence)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+
+  # Reach the reported condition the way the home did: finish real work, handle
+  # and acknowledge it, then tear the fleet down.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  is_live_non_zombie "$ARM_PID" || fail "teardown fixture watcher did not stay live"
+  printf 'done: the last task finished\n' > "$state/lastjob.status"
+  wait_for_exit "$ARM_PID" 120 || fail "fixture watcher did not deliver its status wake"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 \
+    || fail "handling drain before teardown failed"
+  ack_wakes "$state" || fail "handling acknowledgement before teardown failed"
+  rm -f "$state/lastjob.status"
+
+  [ -z "$(find "$state" -maxdepth 1 -name '*.meta')" ] \
+    || fail "the empty-fleet fixture still has work under way, so it proves nothing"
+  [ -z "$(find "$state" -maxdepth 1 -name '*.check.sh')" ] \
+    || fail "the empty-fleet fixture still has an armed check, so it proves nothing"
+  [ ! -s "$state/.wake-queue" ] || fail "the empty-fleet fixture still has queued wakes"
+
+  for cycle in 1 2 3; do
+    out="$dir/rearm-$cycle.out"
+    start_rearm_arm "$home" "$state" "$fakebin" "$out"
+    expect_silent_arm "re-arm $cycle over an empty fleet" "$out"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-$cycle.out" 2>/dev/null \
+      || fail "empty-fleet drain $cycle failed"
+    [ ! -s "$dir/drain-$cycle.out" ] \
+      || fail "empty-fleet drain $cycle presented work that does not exist: $(cat "$dir/drain-$cycle.out")"
+    close_live_watcher "$state"
+  done
+
+  pass "watch-arm: an empty fleet re-arms silently instead of resurfacing nothing"
+}
+
+test_recovery_still_surfaces_every_presentable_source
+test_empty_fleet_recovery_stays_silent_across_rearms
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
