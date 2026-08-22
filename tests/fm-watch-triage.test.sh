@@ -1578,12 +1578,15 @@ test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record() {
 }
 
 # --- a declared pause's ONE immediate surface is never absorbed ----------------
-# The other half of standing aside for the crew's own declaration. A `paused:` crew
-# whose agent is still live is at an active external-decision gate, and the contract
-# is that it surfaces ONCE straight away rather than waiting out any cadence, because
-# a live gate hidden behind an absorb is a crew waiting on an answer nobody knows is
-# needed. That surface reaches the shared emit point, so without the stand-aside gate
-# an admissible green declaration on the same task would swallow it.
+# A `paused:` crew whose agent is still live is at an active external-decision gate,
+# and the contract is that it surfaces ONCE straight away rather than waiting out any
+# cadence, because a live gate hidden behind an absorb is a crew waiting on an answer
+# nobody knows is needed. That surface does reach the shared emit point, so this pins
+# that a merge-wait record on the same task cannot swallow it.
+# What actually refuses here is the suppressor's CLASS check, not its paused/captain-held
+# gate: this fixture keeps the agent alive, so pause_state_class returns `none` at its
+# live-agent gate and hands that verdict on as the fresh class, which is not
+# `merge-wait`. The paused gate is defense-in-depth and is decisive on no current path.
 test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed() {
   local dir state fakebin out capture_file window key pane_hash sig pid pr text
   dir=$(make_case nonterminal-pause-first-surface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1628,6 +1631,9 @@ test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed() {
 # still be rechecked as the captain's to clear: a recheck that points the captain at
 # an outside maintainer, when the captain is the one who can clear it, is worse than
 # no recheck at all.
+# What keeps the wording right here is handle_paused_stale owning the window, not the
+# suppressor: this fixture's dead agent makes pause_state_class return `paused`, which
+# routes to the pause cadence and never reaches the shared emit point at all.
 test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait() {
   local dir state fakebin out capture_file window key pane_hash sig pid pr text
   dir=$(make_case nonterminal-hold-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1663,6 +1669,246 @@ test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait() {
   unset FM_FAKE_CREW_STATE
   pass "a verified captain-held transfer keeps its own awaiting-the-captain recheck even when the task carries an admissible merge-wait record"
 }
+# Seed a task whose run recorded the terminal checks-green outcome while its pane is
+# semantically BUSY with no completed turn ever recorded, which is the busy-turn bound
+# fixture: bin/fm-crew-state.sh emits the run-step verdict before it ever reads the
+# pane, so such a task still reports checks green and its declaration is admissible.
+seed_busy_green_merge_task() {  # <state> <task> <window> <pane-text> <pr>
+  local state=$1 task=$2 window=$3 text=$4 pr=$5 key
+  printf 'window=%s\nkind=ship\nharness=pi\npr=%s\n' "$window" "$pr" > "$state/$task.meta"
+  printf 'done: PR %s checks green\n' "$pr" > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  record_pi_busy "$state" "$task"
+  arm_merge_poll "$state" "$task"
+}
+
+# --- a declaration never absorbs the busy-pane completed-turn bound -------------
+# A declaration speaks to exactly one alarm class, idle-pane wedge aging on a task
+# waiting for a merge. The busy-turn bound is a different class: FM_BUSY_TURN_MAX_SECS
+# exists because a hung foreground call can hide behind a busy signature, and a pending
+# merge explains nothing about a hung call. Reachable because the run-step verdict wins
+# over the pane read, so a busy pane whose run recorded checks green still reports that
+# outcome and would otherwise be admissible. Its reminder wording would then be the only
+# report of a hung agent, naming the wrong problem entirely.
+test_busy_turn_bound_is_not_absorbed_by_a_merge_wait() {
+  local dir state fakebin out drain_out capture_file window key pid pr text
+  dir=$(make_case busy-turn-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busyhang"; pr='https://example.test/pr/21'
+  text='Working... (3600.1s)'
+  printf '%s' "$text" > "$capture_file"
+  seed_busy_green_merge_task "$state" busyhang "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" busyhang || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No completed turn ever recorded, so the spawn record itself ages past the bound.
+  touch -t 200001010000 "$state/busyhang.meta"
+  # The wedge timer for the crossed bound is already past its threshold, so this poll is
+  # the one that escalates.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a declared merge wait absorbed the busy-pane completed-turn bound"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the busy-turn bound did not escalate as a possible wedge: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null \
+    && fail "the busy-turn bound was reported with merge-wait wording, naming the wrong problem"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "the busy-turn escalation counter was reset by the declaration"
+  [ -s "$state/busyhang.merge-wait" ] || fail "the busy-turn alarm removed the captain's declaration record"
+  [ -s "$state/busyhang.check.sh" ] || fail "the merge poll did not survive the busy-turn alarm"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the busy-turn alarm failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the busy-turn escalation was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared merge wait never absorbs the busy-pane completed-turn bound, which reports a possible hung call rather than a pending merge"
+}
+
+# Ask the suppressor directly whether it would absorb one alarm, by loading
+# bin/fm-watch.sh's functions in a subshell (its source guard returns before the lock
+# and the poll loop, the same way tests/fm-supervision-events.test.sh loads them).
+# Needed because the away-mode gate is not decisive on any end-to-end path today: away
+# mode reaches emit_stale_wake only through the busy-turn class, which the class gate
+# already refuses, so an end-to-end away-mode test cannot tell the two gates apart.
+# Prints `absorbed` or `proceeded`.
+merge_wait_suppressor_verdict() {  # <state> <fakebin> <window> <task> <alarm-class>
+  local state=$1 fakebin=$2 window=$3 task=$4 alarm=$5
+  env FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=240 \
+    bash -c '
+      # shellcheck source=/dev/null
+      . "$1/bin/fm-watch.sh" >/dev/null 2>&1
+      if merge_wait_absorbs_alarm "$2" "$3" "$4"; then printf absorbed; else printf proceeded; fi
+    ' _ "$ROOT" "$window" "$task" "$alarm"
+}
+
+# --- the away-mode gate refuses before any read, on its own ---------------------
+# While state/.afk exists the daemon owns triage, so the watcher enqueues and exits on
+# every wake and never runs the costly provably-working read.
+# bin/fm-supervise-daemon.sh's classify_stale never calls crew_absorb_class, so a wake
+# this watcher absorbed in away mode is one nobody ever classifies. The gate is kept and
+# tested independently of the class rule precisely because the class rule closing this
+# path today is a coincidence a later refactor could remove.
+test_merge_wait_away_mode_gate_refuses_before_any_read() {
+  local dir state fakebin window pr text reads before
+  dir=$(make_case merge-wait-away-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  reads="$dir/reads.log"
+  window="test:fm-awaygate"; pr='https://example.test/pr/25'
+  text='idle and declared'
+  seed_green_merge_task "$state" awaygate "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" awaygate || fail "could not declare the fixture merge wait"
+  log_crew_state_reads "$fakebin"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+  export FM_FAKE_CREW_STATE_LOG="$reads"
+
+  # Without away mode the same idle-stale alarm IS absorbed, so the fixture is proven
+  # admissible and the away-mode leg below cannot pass vacuously.
+  [ "$(merge_wait_suppressor_verdict "$state" "$fakebin" "$window" awaygate idle-stale)" = absorbed ] \
+    || fail "the fixture was not admissible, so the away-mode leg would prove nothing"
+  before=$(crew_state_reads "$reads")
+  [ "$before" -ge 1 ] || fail "the admissible leg never consulted authoritative crew state"
+
+  : > "$state/.afk"
+  [ "$(merge_wait_suppressor_verdict "$state" "$fakebin" "$window" awaygate idle-stale)" = proceeded ] \
+    || fail "away mode absorbed an alarm the daemon owns"
+  [ "$(crew_state_reads "$reads")" -eq "$before" ] \
+    || fail "away mode ran a costly crew-state read before refusing"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_LOG
+  pass "the away-mode gate refuses an otherwise admissible alarm before any status, record or crew-state read"
+}
+
+# --- away mode hands the busy-turn wake off end to end --------------------------
+# The end-to-end companion to the gate test above: with .afk present the watcher queues
+# the wake for the daemon and exits rather than absorbing it. Today the class gate is
+# what refuses here, since the busy-turn bound is the only emit_stale_wake caller away
+# mode can reach, so this pins the observable hand-off rather than the away-mode gate.
+test_merge_wait_absorbs_nothing_in_away_mode() {
+  local dir state fakebin out drain_out capture_file window key pid pr text reads
+  dir=$(make_case merge-wait-away-mode); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  reads="$dir/reads.log"
+  window="test:fm-away"; pr='https://example.test/pr/22'
+  text='Working... (3600.1s)'
+  printf '%s' "$text" > "$capture_file"
+  seed_busy_green_merge_task "$state" away "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" away || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/away.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  log_crew_state_reads "$fakebin"
+  : > "$state/.afk"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_FAKE_CREW_STATE_LOG="$reads" FM_BUSY_TURN_MAX_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "away mode absorbed a wake the daemon owns"; }
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "away mode did not hand the wake off: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null && fail "away mode reported a merge-wait absorb"
+  [ "$(crew_state_reads "$reads")" -eq 0 ] \
+    || fail "away mode ran $(crew_state_reads "$reads") costly crew-state reads"
+  [ -s "$state/away.check.sh" ] || fail "the merge poll did not survive the away-mode hand-off"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the away-mode hand-off failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the away-mode wake was not queued for the daemon"
+  unset FM_FAKE_CREW_STATE
+  pass "away mode absorbs no wake and runs no crew-state read even with a live admissible declaration"
+}
+
+# --- the class parameter did not disable the feature ----------------------------
+# The regression guard the other way round: the idle-pane wedge window is exactly the
+# class a declaration DOES speak to, so it must still be absorbed on the long cadence
+# after the busy class was carved out.
+test_idle_wedge_window_is_still_absorbed_by_a_merge_wait() {
+  local dir state fakebin out capture_file window key pid pr text sig
+  dir=$(make_case idle-wedge-still-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-idlewedge"; pr='https://example.test/pr/23'
+  text='idle, committed, waiting on the maintainer'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" idlewedge "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  printf 'working: rebased onto the latest base\n' >> "$state/idlewedge.status"
+  sig=$(seen_sig "$state/idlewedge.status"); printf '%s' "$sig" > "$state/.seen-idlewedge_status"
+  declare_merge_wait "$state" idlewedge || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$text")" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the idle wedge window is no longer absorbed by a declaration: $(cat "$out")"
+  fi
+  if grep -F "possible wedge" "$out" >/dev/null; then
+    reap "$pid"; fail "the idle wedge window wedge-escalated despite a live declaration: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the absorbed idle wedge window printed a wake reason: $(cat "$out")"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 0 ] \
+    || { reap "$pid"; fail "the absorbed idle wedge window kept an escalation count"; }
+  [ -s "$state/idlewedge.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the absorb"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "the idle-pane wedge window is still absorbed by a live declaration, so carving out the busy class did not narrow the feature"
+}
+
+# --- the reminder also passes through from the wedge window ---------------------
+# docs/architecture.md claims the bounded reminder wherever an alarm attempt recurs,
+# which includes the non-terminal wedge window and not only a first sighting. Driving it
+# from wedge_timer_check also exercises the documented exception that wake() exits before
+# the caller's since-file bookkeeping runs.
+test_merge_wait_reminder_passes_through_from_the_wedge_window() {
+  local dir state fakebin out capture_file window key pid pr text sig
+  dir=$(make_case merge-wait-wedge-reminder); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedgeremind"; pr='https://example.test/pr/24'
+  text='idle, declared, and long overdue'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" wedgeremind "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  printf 'working: rebased onto the latest base\n' >> "$state/wedgeremind.status"
+  sig=$(seen_sig "$state/wedgeremind.status"); printf '%s' "$sig" > "$state/.seen-wedgeremind_status"
+  declare_merge_wait "$state" wedgeremind || fail "could not declare the fixture merge wait"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$text")" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # The declaration is older than the reminder window, so this absorbed wedge alarm is
+  # the one that passes its reminder through.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/wedgeremind.merge-wait"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  merge_wait_watch "$state" "$fakebin" "$capture_file" "$window" "$out" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "the wedge window never passed the declaration's reminder through"; }
+  grep -F "merge wait" "$out" >/dev/null \
+    || fail "the wedge-window reminder was not labelled a merge wait: $(cat "$out")"
+  grep -F "someone else's to make" "$out" >/dev/null \
+    || fail "the wedge-window reminder did not name the merge as someone else's to make: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the wedge-window reminder was reported as a possible wedge"
+  [ -e "$state/.merge-wait-resurfaced-$key" ] || fail "the wedge-window reminder recorded no throttle"
+  [ -s "$state/wedgeremind.check.sh" ] || fail "the merge poll did not survive the wedge-window reminder"
+  unset FM_FAKE_CREW_STATE
+  pass "the bounded reminder also passes through from the non-terminal wedge window, not only from a first sighting"
+}
+
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
@@ -3477,6 +3723,11 @@ test_merge_wait_withdrawn_record_returns_to_aging
 test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record
 test_nonterminal_stale_declared_pause_first_surface_is_not_absorbed
 test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait
+test_busy_turn_bound_is_not_absorbed_by_a_merge_wait
+test_merge_wait_away_mode_gate_refuses_before_any_read
+test_merge_wait_absorbs_nothing_in_away_mode
+test_idle_wedge_window_is_still_absorbed_by_a_merge_wait
+test_merge_wait_reminder_passes_through_from_the_wedge_window
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

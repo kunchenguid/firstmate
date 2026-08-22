@@ -157,7 +157,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # this fleet can make (bin/fm-merge-wait.sh) is NOT a classification at all: it
 # absorbs the alarm at the single emit point (merge_wait_absorbs_alarm via
 # emit_stale_wake), after whichever owner classified the window, and passes one
-# reminder through per PAUSE_RESURFACE_SECS.
+# reminder through per PAUSE_RESURFACE_SECS. It absorbs the idle-pane stale class
+# ONLY, never the busy-pane completed-turn bound below, which reports a possible hung
+# foreground call rather than a pending merge.
 # An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
@@ -352,11 +354,34 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # there is no durable refusal to age, expire, or permanently void a declaration:
 # every later alarm asks again.
 #
-# Four gates, cheapest first:
+# A declaration speaks to exactly ONE alarm class: idle-pane wedge aging on a task
+# waiting for a merge. <alarm-class> is therefore declared by the emit site rather
+# than inferred, because which class an alarm belongs to is caller knowledge and
+# matching the triage label or reason text would be fragile string coupling. Only
+# `idle-stale` may be absorbed. The busy-pane completed-turn bound
+# (BUSY_TURN_MAX_SECS, via busy_turn_bound_check) passes `busy-turn` and is
+# deliberately NOT absorbed: it exists because a hung foreground call can hide behind
+# a busy signature, a declaration says nothing about a hung call, and this reminder's
+# "checks green and awaiting a merge" wording would name the wrong problem for one.
+# That is why the busy-turn exception clauses in docs/configuration.md and
+# docs/architecture.md name only the crew's own declarations and the worktree-write
+# deferral, and why a merge wait must not be added to them.
+#
+# Gates, cheapest first:
+#   - away mode. While state/.afk exists the daemon owns triage, so the watcher
+#     enqueues and exits on every wake rather than absorbing any of them, and does
+#     not run the costly provably-working read at all. This is checked FIRST, before
+#     any status read, record read, or crew-state read. It is not merely implied by
+#     the class gate below: bin/fm-supervise-daemon.sh's classify_stale never calls
+#     crew_absorb_class, so an absorbed wake in away mode is one nobody classifies;
+#   - the alarm class must be `idle-stale`, per the paragraph above;
 #   - a crew that declared its OWN wait (`paused:` or a verified `captain-held`
 #     transfer) owns this window's reminder and its wording. A merge wait and a hold
 #     block on different humans, and a recheck naming the wrong human is worse than
-#     no recheck, so the declaration stands aside here;
+#     no recheck, so the declaration stands aside here. Defense-in-depth rather than
+#     load-bearing: pause_state_class already maps a merge-wait verdict to paused for
+#     a status-declared window, and every emit site that reaches here excludes such a
+#     last line by other means, so no current path depends on this gate alone;
 #   - the record must be live: present, naming the pull request the task still
 #     records, and with the merge poll still armed. A withdrawn, superseded, or
 #     poll-less declaration fails on file tests alone, with no crew-state read;
@@ -395,8 +420,10 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # merge (bin/fm-merge-wait.sh declare refuses outright without one), and firstmate's
 # fleet-wide heartbeat review reads every task in flight from the structured fleet
 # view whether or not its pane ever changes.
-merge_wait_absorbs_alarm() {  # <window> <task> [fresh-class]
-  local win=$1 task=$2 class=${3-} key mtime age
+merge_wait_absorbs_alarm() {  # <window> <task> <alarm-class> [fresh-crew-class]
+  local win=$1 task=$2 alarm=$3 class=${4-} key mtime age
+  afk_present && return 1
+  [ "$alarm" = idle-stale ] || return 1
   [ -n "$task" ] || return 1
   status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && return 1
   merge_wait_declared "$task" "$STATE" || return 1
@@ -413,11 +440,17 @@ merge_wait_absorbs_alarm() {  # <window> <task> [fresh-class]
   return 0
 }
 
-# The one emit point for every stale wake a declaration may absorb. 0 when the wake
-# was queued and the caller must carry on to wake(); 1 when it was absorbed, in which
-# case the caller does its own bookkeeping and simply does not wake. <fresh-class> is
-# the caller's own just-read crew_absorb_class verdict where it has one, so the
-# suppressor never has to re-read what the caller already knows.
+# The one emit point for every stale wake. 0 when the wake was queued and the caller
+# must carry on to wake(); 1 when a declaration absorbed it, in which case the caller
+# does its own bookkeeping and simply does not wake.
+#
+# <alarm-class> is REQUIRED, and every emit site states it rather than letting the
+# suppressor guess: `idle-stale` for the idle-pane wedge-aging class a merge wait may
+# absorb, `busy-turn` for the busy-pane completed-turn bound it may not. A new emit
+# site therefore has to decide which class it belongs to instead of silently
+# inheriting suppression. <fresh-crew-class> is the caller's own just-read
+# crew_absorb_class verdict where it has one, so the suppressor never re-reads what
+# the caller already knows.
 #
 # ONE exception to "the caller carries on either way": when the absorb is also due to
 # pass its bounded reminder through, merge_wait_absorbs_alarm reaches resurface_absorbed
@@ -425,9 +458,9 @@ merge_wait_absorbs_alarm() {  # <window> <task> [fresh-class]
 # NOT run on that cycle. That is benign and self-correcting rather than a lost update:
 # the hash was not recorded, so the next poll re-enters the same sighting, finds the
 # reminder throttle now fresh, absorbs quietly, and completes the bookkeeping then.
-emit_stale_wake() {  # <window> <task> <reason> [fresh-class]
-  local win=$1 task=$2 reason=$3 class=${4-}
-  merge_wait_absorbs_alarm "$win" "$task" "$class" && return 1
+emit_stale_wake() {  # <window> <task> <reason> <alarm-class> [fresh-crew-class]
+  local win=$1 task=$2 reason=$3 alarm=$4 class=${5-}
+  merge_wait_absorbs_alarm "$win" "$task" "$alarm" "$class" && return 1
   fm_wake_append stale "$win" "$reason" || exit 1
   return 0
 }
@@ -486,8 +519,8 @@ clear_write_tracking() {  # <window-key>
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason emitted
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <alarm-class>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 alarm=$6 since age n reason emitted
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -509,7 +542,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         emitted=0
-        emit_stale_wake "$win" "$task" "$reason" && emitted=1
+        emit_stale_wake "$win" "$task" "$reason" "$alarm" && emitted=1
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         [ "$emitted" = 1 ] || return 0
@@ -584,13 +617,17 @@ handle_paused_stale() {  # <window> <task> <hash>
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
 # classification.
+#
+# The crossed bound is emitted as the `busy-turn` alarm class, so a declared merge
+# wait can never absorb it: the two speak to different problems, and a hung
+# foreground call is not something a pending merge explains.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
   if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" busy-turn
   return 1
 }
 
@@ -680,7 +717,7 @@ surface_nonterminal_stale() {  # <window> <hash> [fresh-class]
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   emitted=0
-  emit_stale_wake "$win" "$task" "stale: $win" "$class" && emitted=1
+  emit_stale_wake "$win" "$task" "stale: $win" idle-stale "$class" && emitted=1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
@@ -1364,7 +1401,7 @@ EOF
                 # firstmate acknowledging this green line, and leaving it unmarked
                 # would just move the same alarm to the heartbeat backstop.
                 stale_emitted=0
-                emit_stale_wake "$w" "$task" "stale: $w" "$stale_class" && stale_emitted=1
+                emit_stale_wake "$w" "$task" "stale: $w" idle-stale "$stale_class" && stale_emitted=1
                 printf '%s' "$h" > "$sf"
                 rm -f "$ssf"
                 clear_write_tracking "$key"
@@ -1377,7 +1414,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task" idle-stale
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1427,12 +1464,12 @@ EOF
                 working) clear_pause_state "$key"
                          clear_merge_wait_markers "$key"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" idle-stale
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" idle-stale
             fi
           fi
         fi
