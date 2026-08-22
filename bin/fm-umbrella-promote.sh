@@ -541,6 +541,13 @@ for sf in "$STORIES_DIR"/*.md; do
   story_ids+=("$sid")
   story_repos+=("$srepo")
   story_kinds+=("$skind")
+  # The `[<epic-slug>]` title tag is the DURABLE EPIC-MEMBERSHIP pointer recorded
+  # on the task itself (report dcen-04): bin/fm-epic-status.sh unions the epic view
+  # by this tag (or an equivalent `parent:<slug>` edge on an off-plan task), so a
+  # task's epic membership is read from the task, not inferred from a story file
+  # existing. Keep it inline in the title so the tag never changes the backlog line
+  # format that fm-fleet-snapshot / fm-session-start render (unlike a dep edge). The
+  # same membership model is mirrored by the distro backlog-lint (dcen-05b).
   story_titles+=("[$EPIC_SLUG] $shead")
   story_files+=("$base")
 done

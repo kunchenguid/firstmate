@@ -16,6 +16,9 @@
 #   - epic branches     epic/<slug> present / MISSING per involved repo (N/M cut)
 #   - stories           each story's state: DONE | dispatchable | blocked (by ...)
 #                       | unseeded, with repo, base, and declared deps
+#   - off-plan tasks    backlog tasks that belong to the epic by membership (an
+#                       [<slug>] tag or a parent:<slug> edge) but have no story
+#                       file - mid-epic follow-ups, decision-holds, splits
 #   - dispatch owner    this home, or a candidate secondmate to confirm by scope
 #
 # Usage:
@@ -128,6 +131,28 @@ for i in "${!ST_ID[@]}"; do
 done
 [ "${#ST_ID[@]}" -gt 0 ] || echo "  (no stories under $EPIC_DIR/stories/)"
 echo "  $dispatchable dispatchable now"
+
+# --- off-plan tasks (epic membership recorded on the task, no story file) ----
+# Gap mode B (report dcen-04): a backlog task that belongs to this epic by
+# membership - an `[<slug>]` tag or a `parent:<slug>` edge - but has no story file
+# is invisible to the story-id join above. Union those in here so mid-epic
+# follow-ups, decision-holds, and splits roll back up under the epic. The story
+# ids are passed as the "known" set so an on-plan story is never double-listed.
+offplan=0
+while IFS=$'\t' read -r xid xdone xrepo xkind; do
+  [ -n "$xid" ] || continue
+  if [ "$offplan" -eq 0 ]; then
+    echo ""
+    echo "off-plan tasks (epic membership on the task, no story file):"
+  fi
+  offplan=$((offplan + 1))
+  xmeta="repo: ${xrepo:-?}, kind: ${xkind:-?}"
+  if [ "$xdone" = "done" ]; then
+    echo "  [x] $xid  DONE  ($xmeta)"
+  else
+    echo "  [ ] $xid  open  ($xmeta)"
+  fi
+done < <(epic_extra_members "$BACKLOG" "$EPIC_SLUG" ${ST_ID[@]+"${ST_ID[@]}"})
 
 # --- dispatch owner ---------------------------------------------------------
 echo ""

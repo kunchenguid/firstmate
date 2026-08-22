@@ -94,6 +94,57 @@ epic_backlog_state() {
   ' "$backlog"
 }
 
+# epic_extra_members <backlog-file> <slug> [<known-id>...]: print the OFF-PLAN
+# backlog tasks that belong to epic <slug> by MEMBERSHIP recorded on the task -
+# an `[<slug>]` title tag OR a `parent:<slug>` dependency edge - but are NOT among
+# the <known-id> story ids, one per line, TAB-separated:  <id>\t<done|open>\t<repo>\t<kind>
+#
+# This is the union half that closes gap mode B (report dcen-04): a mid-epic
+# follow-up, decision-hold, or split has no story file, so the story-id join above
+# never sees it and the task falls out of the epic view. Membership is recorded on
+# the task instead of inferred from a story file - bin/fm-umbrella-promote.sh
+# stamps the `[<slug>]` tag on every seeded story, and a `parent:<slug>` edge is
+# the equivalent structured signal firstmate can put on an off-plan task (both
+# round-trip through tasks-axi; a `parent:` edge to the non-task epic slug is
+# preserved, non-blocking metadata). The same membership model is mirrored by the
+# distro backlog-lint (dcen-05b). Read-only: this only reads data/backlog.md
+# (backend-agnostic - both backends render it) and never mutates.
+epic_extra_members() {
+  local backlog=$1 slug=$2; shift 2
+  local known=" $* "
+  [ -f "$backlog" ] || return 0
+  awk -v slug="$slug" -v known="$known" '
+    {
+      pfx = substr($0, 1, 6)
+      if (pfx !~ /^- \[.\] /) next
+      after = substr($0, 7)
+      sp = index(after, " ")
+      id = (sp > 0 ? substr(after, 1, sp - 1) : after)
+      if (id == "") next
+      if (index(known, " " id " ") > 0) next        # a story: shown by the story-id join
+
+      member = 0
+      if (index($0, "[" slug "]") > 0) member = 1    # [<slug>] title tag
+      if (!member) {                                 # parent:<slug> edge (target must equal slug)
+        rest = $0
+        while ((p = index(rest, "parent:")) > 0) {
+          t = substr(rest, p + 7)
+          sub(/^[[:space:]]+/, "", t)
+          tok = t; sub(/[[:space:](].*/, "", tok)
+          if (tok == slug) { member = 1; break }
+          rest = substr(rest, p + 7)
+        }
+      }
+      if (!member) next
+
+      done = (substr($0, 4, 1) == "x") ? "done" : "open"
+      repo = ""; if (match($0, /\(repo: [^)]*\)/)) repo = substr($0, RSTART + 7, RLENGTH - 8)
+      kind = ""; if (match($0, /\(kind: [^)]*\)/)) kind = substr($0, RSTART + 7, RLENGTH - 8)
+      printf "%s\t%s\t%s\t%s\n", id, done, repo, kind
+    }
+  ' "$backlog"
+}
+
 # epic_status_load <epic-dir> <backlog-file>: populate the shared model globals
 # from the epic dir + backlog. Every array is parallel and 0-indexed by story.
 #   EPIC_SLUG EPIC_STATUS EPIC_SIGNED_OFF EPIC_TITLE   scalars from epic.md

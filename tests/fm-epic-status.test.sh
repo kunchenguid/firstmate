@@ -43,9 +43,14 @@ cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 - [ ] demo-04 - [demo] fourth (repo: beta) (kind: ship) (since 260101)
 - [ ] demo-05 - [demo] fifth (repo: alpha) (kind: ship) (since 260101)
 - [ ] demo-07 - [demo] scout (repo: alpha) (kind: scout) (since 260101)
+- [ ] demo-fu-open - [demo] mid-epic follow-up (repo: alpha) (kind: ship) (since 260110)
+- [ ] demo-hold-1 - decision hold parent: demo (repo: alpha) (kind: captain) (since 260110)
+- [ ] unrelated-1 - [other] not this epic (repo: alpha) (kind: ship) (since 260110)
+- [ ] demo-edge-decoy - decoy parent: demo-01 (repo: alpha) (kind: ship) (since 260110)
 
 ## Done
 - [x] demo-01 - [demo] first https://example.invalid/pr/1 (repo: alpha) (kind: ship) (merged 260102)
+- [x] demo-fu-done - [demo] earlier follow-up https://example.invalid/pr/9 (repo: alpha) (kind: ship) (merged 260111)
 EOF
 
 cat > "$HOME_DIR/data/plans/epic-demo/epic.md" <<'EOF'
@@ -126,6 +131,22 @@ assert_contains "$OUT" "demo-01  DONE" "a merged story shows DONE"
 assert_contains "$OUT" "demo-02  DISPATCHABLE" "a story whose only dep is merged is dispatchable"
 assert_contains "$OUT" "demo-03  blocked-by: demo-02" "a story with an unmerged dep is blocked-by it"
 assert_contains "$OUT" "demo-06  UNSEEDED" "a story with no backlog entry is unseeded"
+
+# --- gap mode B (report dcen-04): off-plan tasks surface by MEMBERSHIP ---------
+# A backlog task that belongs to the epic by an [demo] tag or a parent:demo edge
+# but has no story file used to be invisible; it now rolls up under the epic.
+assert_contains "$OUT" "off-plan tasks (epic membership on the task, no story file):" \
+  "off-plan section header not printed"
+assert_contains "$OUT" "demo-fu-open  open" "an epic-TAGGED backlog task with no story file must surface"
+assert_contains "$OUT" "demo-hold-1  open" "a task carrying a parent:<slug> EDGE (no tag) must surface"
+assert_contains "$OUT" "demo-fu-done  DONE" "a merged off-plan epic task must surface as DONE"
+# Boundary: a non-member task and a parent edge to a DIFFERENT id must NOT surface.
+assert_not_contains "$OUT" "unrelated-1" "a task tagged for another epic must not surface"
+assert_not_contains "$OUT" "demo-edge-decoy" "a parent: edge to a different id (demo-01) must not match slug demo"
+# An on-plan story is shown once (in stories), never double-listed as off-plan.
+assert_not_contains "$OUT" "demo-02  open" "an on-plan story must not be double-listed as off-plan"
+pass "gap mode B: epic-tagged/parent-edged off-plan tasks surface; non-members and on-plan stories do not"
+
 assert_contains "$OUT" "epic/demo in alpha" "the epic branch check keys off the story pr_base"
 assert_contains "$OUT" "epic/other in alpha  - MISSING" "a missing story-base branch is flagged"
 assert_contains "$OUT" 'DRIFT: story base branch(es) differ from the epic slug "demo": other' \
