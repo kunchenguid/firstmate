@@ -435,6 +435,24 @@ test_no_origin_prunes_merged_task_branch() {
   pass "the backstop sweep runs with no origin remote at all (pure local-only clone, not just local-only mode)"
 }
 
+test_detached_project_prunes_merged_task_branch() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" chi)
+  ff_merge_task_branch "$clone" fm/task-detached feature.txt hello
+  git -C "$clone" checkout -q --detach
+  mkdir -p "$home/data"
+  printf -- '- chi [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "chi: pruned fm/task-detached" \
+    "a detached project still deletes a branch proved merged into main"
+  branch_exists "$clone" fm/task-detached \
+    && fail "detached-prune: fm/task-detached should have been deleted"
+  pass "the shared sweep deletes against its explicit default-branch proof even from detached HEAD"
+}
+
 test_unmerged_task_branch_is_left_alone() {
   local home clone out
   home=$(new_home)
@@ -767,6 +785,7 @@ test_no_origin_skipped
 test_local_only_skipped
 test_local_only_prunes_merged_task_branch
 test_no_origin_prunes_merged_task_branch
+test_detached_project_prunes_merged_task_branch
 test_unmerged_task_branch_is_left_alone
 test_gone_unmerged_task_branch_is_left_alone
 test_checked_out_task_branch_is_left_alone
