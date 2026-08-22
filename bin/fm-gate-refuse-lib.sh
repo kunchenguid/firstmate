@@ -13,7 +13,7 @@
 # instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
 # THIS is the firstmate capability-removal half: an enforceable script refusal,
 # not a prose rule the neutralized agent would never read. It is sourced at the
-# top of the three fleet-lifecycle entrypoints and called before any fleet
+# top of every guarded fleet-mutation entrypoint and called before any fleet
 # mutation, so a gate agent that still reaches for the fleet is stopped cold.
 #
 # Two independent signals, either of which refuses (fail closed):
