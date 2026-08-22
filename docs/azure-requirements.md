@@ -73,39 +73,19 @@ Status: DONE, met live on 2026-08-22.
 Acceptance: a secondmate running on an Azure worker requests a crewmate worker, the controller
 creates it, the crewmate completes a task, and both release cleanly.
 
-The evidence is the live acceptance run recorded at
-`/Users/dongkeun/Downloads/firstmate-azure-full-completion-evidence/live-acceptance-20260822T061300Z`
-(`run-manifest.json`, revision 12). Every evidence file named in R1, R2/R3, R5 and R9 is relative
-to that directory.
+The compact tracked record is [`docs/evidence/azure-live-acceptance-2026-08-22/evidence.json`](evidence/azure-live-acceptance-2026-08-22/evidence.json), derived from frozen manifest revision 12 at the SHA-256 recorded in `frozen_manifest.sha256`.
+Its [README](evidence/azure-live-acceptance-2026-08-22/README.md) maps claims to field paths and gives reproducible frozen-digest and authenticated live-ref checks.
 
-- Parent compartment: task `azaccept`, task generation `spawn:a632e0aaaa34a6ff`, assignment
-  `asg-00000018` on slot 1 (`vm-fm7c799d-wkr-01`), repository generation
-  `0bb0c22f157829653bffe3075548d34faec538e1`.
-- It emitted child request
-  `7970c2936d499c8525bbb1a91adddba7a3452afd3182be257c225995fea25c29` (sequence 2, `child_kind`
-  `ship`, `60-frozen-child-request.json`) into the controller's durable outbox, and the controller
-  created the child worker.
-- Child: task `azaccept-cf242c626`, task generation `spawn:a73823d99b3cab33`, assignment
-  `asg-00000019` on slot 2 (`vm-fm7c799d-wkr-02`), repository generation
-  `3f0b1ecdbe9c76a7a61d738bf524d14151a9a36c` in `relvino-knowledge-core`.
-- The child completed its documentation brief: exit 0, `timed_out false`, result digest
-  `1f238e423056b6193f80e826638a1aa19158dac4997c10af457defc9842ddff3`, outcome bundle
-  `7e812cd519426a7e5990244c28eda033bf98be510f18e013b51a12270f39edb3` carrying one commit
-  (`60-frozen-child-worker-result.json`).
-- That commit is live on origin: `refs/heads/fm-child/azaccept-cf242c626-20260822` at
-  `818e018d8dbb7b8d5bccae2b1d93192364533d1b`, read back in `30-child-origin-heads.txt`.
-- The compartment then ended terminal: monitor status `closed`, `legs_completed: 1`, verified
-  chain tip at sequence 7 (`60-frozen-parent-monitor-status.txt`,
-  `60-frozen-parent-monitor-state.json`).
-- Both released cleanly. `40-parent-release-proof.json` and `40-child-release-proof.json` are
-  `fm.worker-release/v2` proofs, each recording all five authorities, `account`, `endpoint`,
-  `landing`, `report` and `worktree`, with verdict `proved` against exactly the task generation
-  and assignment generation above.
-- Aftercare is zero-worker and zero-resource: `50-post-reset-provider-inventory.json` reports an
-  empty `workers` list and `regional_used_vcpus` 0, `50-post-reset-vms.json` is `[]`,
-  `51-post-reset-controller.json` holds no assigned assignment and no held lease, and
-  `60-final-verifier.log` reads `PASS post-reset 60 exact resources absent; queue complete; no
-  workers or VMs`.
+- Parent compartment: task `azaccept`, task generation `spawn:a632e0aaaa34a6ff`, assignment `asg-00000018` on slot 1 with its exact account-binding digest (`simultaneous_assignments[0]`).
+- It emitted child request `7970c2936d499c8525bbb1a91adddba7a3452afd3182be257c225995fea25c29` (sequence 2, `child_kind` `ship`, `child_request`) into the controller's durable outbox, and the controller created the child worker.
+- Child: task `azaccept-cf242c626`, task generation `spawn:a73823d99b3cab33`, assignment `asg-00000019` on slot 2 with its exact account-binding digest (`simultaneous_assignments[1]`).
+- The child completed its documentation brief: exit 0, `timed_out false`, result digest `1f238e423056b6193f80e826638a1aa19158dac4997c10af457defc9842ddff3`, outcome bundle `7e812cd519426a7e5990244c28eda033bf98be510f18e013b51a12270f39edb3` carrying one commit (`executions[0]`).
+- That commit is live on origin: `refs/heads/fm-child/azaccept-cf242c626-20260822` at `818e018d8dbb7b8d5bccae2b1d93192364533d1b`, with the frozen heads digest and authenticated exact-ref-line digest in `origin`.
+- The compartment then ended terminal: monitor status `closed`, `legs_completed: 1`, verified chain tip at sequence 7 (`parent_monitor`).
+- Both released cleanly (`release_proofs[0]` and `release_proofs[1]`).
+  Each `fm.worker-release/v2` record contains the complete `account`, `endpoint`, `landing`, `report`, and `worktree` authority map, with every verdict `proved` and every evidence and receipt digest retained.
+- Aftercare proves the 60 enumerated acceptance resources absent, zero provider workers, zero active specialized reservations, zero regional worker vCPUs, zero VMs, and no assigned controller queue entry (`post_reset`).
+  The final verifier string is retained exactly at `post_reset.final_verifier`.
 
 History, kept because the defect and its correction are what this section was written for.
 `docs/azure-workers.md` stated that a worker never runs Firstmate, a secondmate, another
@@ -379,8 +359,7 @@ to do it silently. Raising the ceiling means adding profiles on distinct account
 Acceptance: concurrent crewmates run on distinct pi profiles with no account collision.
 
 Met on real compute, which is what an earlier revision of this section still owed.
-`20-phase2-simultaneous-controller.json` is ONE controller snapshot holding four assignments
-simultaneously in `assigned` state, on four slots and four distinct upstream account bindings:
+The tracked evidence `simultaneous_assignments` array is derived from one controller snapshot holding four assignments simultaneously in `assigned` state, on four slots and four distinct upstream account bindings:
 
 | task | task generation | assignment | slot | account binding |
 |---|---|---|---|---|
@@ -389,16 +368,13 @@ simultaneously in `assigned` state, on four slots and four distinct upstream acc
 | `r5-accept-readme-v3-20260822` | `spawn:a6e066062139056b` | `asg-00000020` | 3 | `82b2c485...` |
 | `r5-accept-package-v3-20260822` | `spawn:abcda52fbf779687` | `asg-00000021` | 4 | `dadc7a39...` |
 
-The two ordinary crewmates executed successfully: each returned exit 0, `timed_out false` and
-`outcome_commits 0` for its read-only inspection brief, with result digests `77c43f95...` and
-`55151c48...` (`60-frozen-ordinary-0-completion.md`, `60-frozen-ordinary-1-completion.md`). Each
-of the four release proofs records the `account` authority `proved` against exactly the binding
-above, so what the worker held is proved on release rather than only at staging.
+The two ordinary crewmates executed successfully: each returned exit 0, `timed_out false` and `outcome_commits 0` for its read-only inspection brief, with result digests `77c43f95...` and `55151c48...` (`executions[1]` and `executions[2]`).
+Each record in `release_proofs` records the `account` authority `proved` against exactly the binding above, so what the worker held is proved on release rather than only at staging.
 No account collision appears anywhere in that snapshot: four live workers, four bindings.
 
-What this does NOT prove, stated so nobody reads more into it: four concurrent accounts were
-exercised, not the pool of eight, and the two ordinary briefs were read-only inspections. The
-committing leg is the compartment child, recorded in R2/R3.
+What this does NOT prove, stated so nobody reads more into it: four concurrent accounts were exercised, not the pool of eight, and the two ordinary briefs were read-only inspections.
+The committing leg is the compartment child, recorded in R2/R3.
+These limits are machine-readable in `limitations`.
 
 ## R6. Crosscheck reviews outside the author's model family
 
@@ -976,18 +952,16 @@ they will cross is 2026-08-29. The mechanism is proven; the calendar is not.
 
 Status: PARTIAL.
 
-Proven by the 2026-08-22 live acceptance run, whose paths are listed in R2/R3 and R5:
+Proven by the subset of the 2026-08-22 live acceptance recorded in the tracked evidence linked from R2/R3:
 
-- The worker landing path. The compartment child's outcome landed as commit
-  `818e018d8dbb7b8d5bccae2b1d93192364533d1b` on
-  `refs/heads/fm-child/azaccept-cf242c626-20260822` at origin.
-- Execution on the leased Pi provider accounts. All four release proofs record the `account`
-  authority `proved` against the account binding the controller leased for that task.
+- The worker landing path.
+  The compartment child's outcome landed as commit `818e018d8dbb7b8d5bccae2b1d93192364533d1b` on `refs/heads/fm-child/azaccept-cf242c626-20260822` at origin (`origin`).
+- Execution on the leased Pi provider accounts.
+  All four records in `release_proofs` record the `account` authority `proved` against the account binding the controller leased for that task.
 - Secondmate-in-Azure, formerly blocked on R2/R3, which is now DONE:
-  `40-parent-release-proof.json` records all five authorities `proved` for the compartment.
-- Resource cleanup. `60-final-verifier.log` reads `PASS post-reset 60 exact resources absent;
-  queue complete; no workers or VMs`, with the inventory, VM list and controller snapshots behind
-  it.
+  `release_proofs[0]` records all five authorities `proved` for the compartment.
+- Resource cleanup.
+  `post_reset.final_verifier` reads `PASS post-reset 60 exact resources absent; queue complete; no workers or VMs`, with the digest-bound inventory, VM-list, resource-list, and controller source artifacts named in `source_artifacts`.
 
 An accepted Pi-harness review on the current model image is proven by Azure review
 `azure-r4-respond-285`.
