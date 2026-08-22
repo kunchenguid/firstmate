@@ -32,6 +32,10 @@ SH
 : "${FM_LAVISH_TEST_LOG:?}"
 printf '<call>\n' >> "$FM_LAVISH_TEST_LOG"
 for arg in "$@"; do printf '<%s>\n' "$arg" >> "$FM_LAVISH_TEST_LOG"; done
+case ":${WSLENV:-}:" in
+  *:FM_LAVISH_WINDOWS_ARGV_JSON:*) ;;
+  *) unset FM_LAVISH_WINDOWS_ARGV_JSON ;;
+esac
 if [ -n "${FM_LAVISH_WINDOWS_ARGV_JSON:-}" ]; then
   printf '<structured-argv>\n' >> "$FM_LAVISH_TEST_LOG"
   perl -MJSON::PP -e '
