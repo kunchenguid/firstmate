@@ -341,12 +341,12 @@ test_omp_launch_argv_is_contained() {
   # rather than one of omp's subcommands (auth, token, usage, setup, update,
   # plugin, marketplace, acp), which is what keeps those surfaces unreachable.
   assert_contains "$launch" \
-    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep,bash --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
     "omp launch argv is not the contained shape"
 
   # The allowlist is exact, so a later widening has to be deliberate.
   tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')
-  [ "$tools" = "read,write,edit,glob,grep,bash" ] \
+  [ "$tools" = "read,write,edit,glob,grep" ] \
     || fail "omp tool allowlist drifted, got '$tools'"
   case ",$tools," in
     *,task,*) fail "omp allowlist must exclude the task subagent tool" ;;
@@ -354,6 +354,7 @@ test_omp_launch_argv_is_contained() {
     *,computer,*) fail "omp allowlist must exclude the computer tool" ;;
     *,web_search,*) fail "omp allowlist must exclude web search" ;;
     *,mcp,*) fail "omp allowlist must exclude MCP tooling" ;;
+    *,bash,*) fail "omp allowlist must exclude command execution" ;;
   esac
 
   # Exactly one extension is loaded, and it is the firstmate-owned state file.

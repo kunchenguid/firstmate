@@ -1465,10 +1465,23 @@ launch_template() {
     # every auto-discovered user/project extension, and --no-skills drops the
     # ambient skill surface, so the only loaded extension is the firstmate-owned
     # -e __OMPEXT__ busy-state file written below.
-    # --tools is an ALLOWLIST that limits the initially active toolset. It names
-    # only core coding tools and therefore excludes omp's `task` subagent
-    # delegation plus its extended/network surface (browser, computer,
-    # web_search, mcp).
+    # --tools is an ALLOWLIST that limits the initially active toolset. Each name
+    # is here for one reason, and nothing is present that another name already
+    # covers:
+    #   read  - open a named file.
+    #   write - create a file.
+    #   edit  - modify an existing file.
+    #   glob  - find files by path pattern. This is the enumerated name covering
+    #           both directory listing and file search.
+    #   grep  - find files by content.
+    # Everything omp otherwise offers is deliberately absent. No `task`, so the
+    # worker cannot delegate to subagents firstmate does not supervise. No
+    # browser, computer, web_search, or mcp, so the pilot has no network or
+    # desktop surface. No `bash`, so the worker cannot execute commands at all:
+    # this pilot is scoped to reading and editing files, and command execution
+    # is a widening that has to be requested and approved on its own terms
+    # rather than inherited. Narrowing this list is always safe; widening it is
+    # a captain decision.
     # omp rejects an unknown --tools name with a usage error and refuses the
     # whole launch rather than narrowing silently, so an invalid name here kills
     # every omp spawn before the agent starts. Every name is therefore verified
@@ -1476,10 +1489,9 @@ launch_template() {
     # pinned v17.2.9 asset was asked directly, by appending a deliberately
     # invalid sentinel to the list and reading which names it reports back as
     # unknown. An earlier claim of "static inspection" here was wrong and named
-    # `ls`, which this build does not accept.
-    # `glob` is the enumerated name covering both directory listing and file
-    # search. The build also accepts `find`, but does not list it among its own
-    # valid tools, so this adapter does not depend on that unenumerated alias.
+    # `ls`, which this build does not accept. The build does accept `find`, but
+    # does not list it among its own valid tools, so this adapter does not
+    # depend on that unenumerated alias.
     # tests/fm-omp-harness.test.sh re-asks the installed binary on every run.
     # __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
     # above refuses the spawn unless this exact launch was given a fully qualified
@@ -1495,7 +1507,7 @@ launch_template() {
     # pair is here: cursor-agent does not clear its own markers, so an omp
     # worker launched from a cursor primary would otherwise inherit them and
     # self-report cursor.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
