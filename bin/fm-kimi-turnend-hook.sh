@@ -33,7 +33,18 @@ if [ -z "${HOME:-}" ]; then
   printf 'fm-kimi-turnend-hook: refused: HOME is unset.\n' >&2
   exit 1
 fi
-if ! command -v python3 >/dev/null 2>&1; then
+# tomllib is stdlib only on Python 3.11+, so the platform `python3` is not always
+# usable: macOS still ships 3.9 as /usr/bin/python3. Pick the first interpreter
+# that can actually import tomllib rather than assuming `python3` can.
+PYTHON_BIN=
+for _fm_kimi_py in python3 python3.14 python3.13 python3.12 python3.11; do
+  if command -v "$_fm_kimi_py" >/dev/null 2>&1 && "$_fm_kimi_py" -c 'import tomllib' >/dev/null 2>&1; then
+    PYTHON_BIN=$_fm_kimi_py
+    break
+  fi
+done
+unset _fm_kimi_py
+if [ -z "$PYTHON_BIN" ]; then
   printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
   exit 1
 fi
@@ -42,7 +53,7 @@ if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
+"$PYTHON_BIN" - "$ACTION" "$HOME/.kimi-code" <<'PY'
 import os
 import re
 import shutil

@@ -14,6 +14,12 @@ set -u
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
+# The check resolves its active home from FM_HOME (falling back to its own root).
+# The matrix builds absolute x-mode.env paths from $ROOT, so pin the active home
+# to $ROOT; otherwise an ambient FM_HOME (e.g. a crewmate's fleet home) makes the
+# absolute-path setup nodes (A13) unrecognizable and the run non-hermetic.
+export FM_HOME="$ROOT"
+
 # --- full cross-harness acceptance matrix ----------------------------------
 
 MATRIX_IDS=()

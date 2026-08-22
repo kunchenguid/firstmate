@@ -16,7 +16,18 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
-PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+# The hook needs a Python with tomllib (stdlib only on 3.11+); the platform
+# python3 is 3.9 on macOS. Select the same tomllib-capable interpreter the hook
+# does so the suite's own TOML parsing and the fakebin match real behavior.
+PYTHON_BIN=
+for _kimi_test_py in python3 python3.14 python3.13 python3.12 python3.11; do
+  if command -v "$_kimi_test_py" >/dev/null 2>&1 && "$_kimi_test_py" -c 'import tomllib' >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v "$_kimi_test_py")
+    break
+  fi
+done
+unset _kimi_test_py
+[ -n "$PYTHON_BIN" ] || fail "test needs python3 with tomllib"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
@@ -348,7 +359,7 @@ test_kimi_hook_install_refuses_without_jq() {
   printf '# Captain config\nmodel = "test"\n' > "$config"
   cp "$config" "$before"
   ln -s "$(command -v bash)" "$fakebin/bash"
-  ln -s "$(command -v python3)" "$fakebin/python3"
+  ln -s "$PYTHON_BIN" "$fakebin/python3"
 
   rc=0
   out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?

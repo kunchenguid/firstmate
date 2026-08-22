@@ -241,6 +241,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -255,10 +259,6 @@
     {
       "path": "docs/configuration.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/captain-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/cross-repo-workspaces.md",
@@ -407,6 +407,58 @@
     {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "evidence/epflow-05/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "evidence/epflow-05/transcript.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "evidence/epflow-07/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "evidence/epflow-07/transcript.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "evidence/epwf-02/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "evidence/epwf-02/transcript.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "skills/README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-handoff/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-new/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-plan/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-review/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-scaffold/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/epic-ship/SKILL.md",
+      "audience": "public-product"
     },
     {
       "path": "skills/stow/SKILL.md",
