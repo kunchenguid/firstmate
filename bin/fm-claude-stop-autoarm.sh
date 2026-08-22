@@ -162,7 +162,39 @@ claim_publish() {
 }
 # A claim that cannot be published is not fatal: this hook still arms, and the
 # guard falls back to the same evidence it used before.
-claim_publish || true
+#
+# The claim is published before the identity gate below, so a session that does
+# not own this home must never publish one: bin/fm-turnend-guard.sh's
+# autoarm_claim_in_progress() cannot distinguish a competing session's live claim
+# from an owning arm's, and would read it as recovery under way while nothing
+# arms this home. fm_session_lock_owned_by_self is the authoritative answer but
+# costs the 16-hop, 3-forks-per-hop walk this claim exists to cover; the bare
+# parent chain below costs one fork per hop under a hard bound, and the owning
+# session is the hook's near ancestor in an ordinary Stop firing. Beyond the
+# bound the answer is unknown, and unknown declines: declining costs a false
+# alarm the guard already tolerates, while publishing on inconclusive costs the
+# silent drop this whole branch exists to remove.
+CLAIM_OWNER_MAX_HOPS=8
+claim_owner_is_near_ancestor() {
+  local lock_pid pid hops=0
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pid=$CLAIM_PID
+  while [ "$hops" -lt "$CLAIM_OWNER_MAX_HOPS" ]; do
+    [ "$pid" = "$lock_pid" ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$pid" in
+      ''|0|1|*[!0-9]*) return 1 ;;
+    esac
+    hops=$((hops + 1))
+  done
+  return 1
+}
+if claim_owner_is_near_ancestor; then
+  claim_publish || true
+fi
 trap claim_release EXIT
 
 # --- identity: only the lock-owning session's hooks may arm ------------------

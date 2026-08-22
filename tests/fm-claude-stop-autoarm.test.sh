@@ -786,6 +786,97 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# A `ps` shim that delays every call, so the bounded parent-chain pre-check and
+# the identity gate's ancestry walk both take long enough in wall clock for the
+# tests below to poll for the claim's presence or absence while they run,
+# rather than only after the exit trap has removed it.
+install_slow_ps() {
+  local dir=$1 real_ps
+  real_ps=$(command -v ps) || fail "ps not found for the slow-ps fixture"
+  mkdir -p "$dir/slowbin"
+  cat > "$dir/slowbin/ps" <<SH
+#!/usr/bin/env bash
+sleep 0.05
+exec $real_ps "\$@"
+SH
+  chmod +x "$dir/slowbin/ps"
+}
+
+# The owning session: state/.lock's pid is the hook's own near ancestor, so the
+# bounded pre-check finds it and the claim must appear while the (slowed)
+# identity gate is still walking, not merely by the time the hook exits.
+test_claim_observable_during_identity_walk_when_owner() {
+  local dir hook_pid status claim_seen n
+  dir=$(make_primary_dir "$TMP_ROOT/claim-owner-visible")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  install_slow_ps "$dir"
+  printf '%s\n' '{"session_id":"sess-owner","stop_hook_active":false}' \
+    | PATH="$dir/slowbin:$PATH" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' > "$dir/hook.out" 2>&1 &
+  hook_pid=$!
+  claim_seen=0
+  n=0
+  while kill -0 "$hook_pid" 2>/dev/null; do
+    if [ -e "$dir/state/.claude-autoarm-claim" ]; then
+      claim_seen=1
+      break
+    fi
+    sleep 0.02
+    n=$((n + 1))
+    [ "$n" -lt 500 ] || break
+  done
+  wait "$hook_pid" 2>/dev/null; status=$?
+  [ "$claim_seen" -eq 1 ] || fail "the owning session's claim never appeared during its identity walk: $(cat "$dir/hook.out" 2>/dev/null)"
+  expect_code 2 "$status" "the ordinary owning firing must still rewake once the pre-check passes"
+  [ -e "$dir/state/arm-ran" ] || fail "the owning session's firing did not arm"
+  pass "auto-arm: the owning session's claim is observable while its own identity walk runs"
+}
+
+# The competing session: state/.lock names a live harness pid that is NOT an
+# ancestor of the hook. The bounded pre-check must find no ancestry match and
+# decline to publish, so the claim must never appear at any point in the run -
+# not even transiently during the (slowed) identity gate - and the hook must
+# still stay inert.
+test_competing_session_never_publishes_a_claim() {
+  local dir other hook_pid status claim_seen n
+  dir=$(make_primary_dir "$TMP_ROOT/competing-session")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  install_slow_ps "$dir"
+  # The trailing no-op keeps the fake harness process alive instead of allowing
+  # bash to exec the final sleep into a non-harness process.
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  printf '%s\n' '{"session_id":"sess-competing","stop_hook_active":false}' \
+    | PATH="$dir/slowbin:$PATH" FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' \
+    > "$dir/hook.out" 2>&1 &
+  hook_pid=$!
+  claim_seen=0
+  n=0
+  while kill -0 "$hook_pid" 2>/dev/null; do
+    if [ -e "$dir/state/.claude-autoarm-claim" ]; then
+      claim_seen=1
+      break
+    fi
+    sleep 0.02
+    n=$((n + 1))
+    [ "$n" -lt 500 ] || break
+  done
+  wait "$hook_pid" 2>/dev/null; status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  [ "$claim_seen" -eq 0 ] || fail "a competing session's claim appeared before its identity gate could reject it"
+  [ ! -e "$dir/state/.claude-autoarm-claim" ] || fail "a competing session left a claim behind: $(cat "$dir/hook.out" 2>/dev/null)"
+  expect_code 0 "$status" "a competing session's firing must stay inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a competing session armed the watcher"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "a competing session wrote an epoch"
+  pass "auto-arm: a competing session that does not own state/.lock never publishes a claim"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -815,3 +906,5 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_fm_lock_status_still_works_with_shared_lib
+test_claim_observable_during_identity_walk_when_owner
+test_competing_session_never_publishes_a_claim

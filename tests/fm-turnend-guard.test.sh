@@ -1832,16 +1832,16 @@ test_hook_claude_mode_claim_requires_live_matched_publisher() {
 
 # `arming` is the one epoch outcome that unambiguously means "arming right now",
 # and the incident's sixth occurrence blocked while it stood on disk.
-test_hook_claude_mode_allows_on_fresh_arming_epoch() {
+test_hook_claude_mode_dead_arming_epoch_blocks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-arming-epoch")
   : > "$dir/state/task1.meta"
   printf 'epoch=3 owner_pid=%s outcome=arming updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
     > "$dir/state/.claude-autoarm-epoch"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  expect_code 0 "$status" "--claude must not force a turn against a fresh arming epoch"
-  [ -z "$out" ] || fail "--claude arming-epoch allow produced output: $out"
-  pass "fm-turnend-guard --claude: a fresh arming epoch is recovery under way, not a missing claim"
+  expect_code 2 "$status" "--claude must force a turn against a fresh arming epoch with no live arm, watcher, or claim"
+  assert_contains "$out" 'TURN WOULD END BLIND' "dead arming epoch must still block loudly"
+  pass "fm-turnend-guard --claude: a fresh arming epoch with no live arm, watcher or claim still blocks"
 }
 
 # The masking condition was host load: each wait pass forks, so a budget spent as
@@ -1958,5 +1958,5 @@ test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_claude_mode_early_claim_is_the_whole_difference
 test_hook_claude_mode_claim_requires_live_matched_publisher
-test_hook_claude_mode_allows_on_fresh_arming_epoch
+test_hook_claude_mode_dead_arming_epoch_blocks
 test_hook_claude_mode_wait_is_bounded_by_elapsed_time
