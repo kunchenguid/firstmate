@@ -174,6 +174,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# epic_status_find_dir + epic_report_symlink: the report-into-epic bridge below
+# reuses this READ-ONLY lib rather than re-deriving epic dirs (report dcen-10).
+# shellcheck source=bin/fm-epic-status-lib.sh
+. "$SCRIPT_DIR/fm-epic-status-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1129,6 +1133,26 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Bridge a completed task's report into its epic's reports/ dir so the dashboard
+# artifact tab shows it with zero hand-patching (report dcen-10). The canonical
+# report stays at data/<id>/report.md; this only adds an idempotent RELATIVE
+# symlink to it. Standalone (no-epic) tasks are skipped silently. Best-effort:
+# every step degrades to a silent skip, so a resolution miss never blocks
+# teardown. The epic slug comes from the ONE derivation owner (fm-captain-hold.sh
+# epic-slug), the dir from the ONE slug->dir owner (epic_status_find_dir).
+bridge_report_into_epic() {
+  local slug epic_dir
+  [ -f "$DATA/$ID/report.md" ] || return 0
+  slug=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" epic-slug "$ID" 2>/dev/null) \
+    || return 0
+  slug=$(printf '%s' "$slug" | tr -d '[:space:]')
+  [ -n "$slug" ] || return 0
+  epic_dir=$(epic_status_find_dir "$DATA/plans" "$slug") || return 0
+  [ -n "$epic_dir" ] || return 0
+  epic_report_symlink "$DATA" "$ID" "$epic_dir"
 }
 
 backlog_refresh_reminder() {
@@ -2841,4 +2865,5 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+bridge_report_into_epic
 backlog_refresh_reminder

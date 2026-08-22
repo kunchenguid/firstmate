@@ -29,6 +29,14 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh diverged
+#   fm-captain-hold.sh epic-slug <task-id>
+#
+# `epic-slug` prints the epic slug the given task belongs to (its `[<slug>]`
+# title tag / `parent:<slug>` edge / plan-dir story file), or nothing when it
+# has no determinable epic. Read-only and best-effort - it never requires
+# tasks-axi and degrades to empty - so scout/ship teardown can reuse the ONE
+# owner of this derivation to bridge the report into the epic dir (report
+# dcen-10) rather than re-parsing membership.
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -433,6 +441,17 @@ origin_epic_slug() {  # <origin-id>
   return 0
 }
 
+# Print the epic slug a task belongs to (empty when none). Read-only reuse of the
+# ONE membership-derivation owner above so teardown does not re-parse (report
+# dcen-10). Best-effort: origin_epic_slug never hard-requires tasks-axi.
+command_epic_slug() {
+  local id=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$id"
+  origin_epic_slug "$id"
+  printf '\n'
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
   local epic_slug=''
@@ -473,6 +492,14 @@ command_hold() {
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
+    # The dashboard task-detail route rejects an id longer than 64 chars
+    # (ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/), which silently 400s the page
+    # (report dcen-10). Refuse to MINT such an id rather than create a row the
+    # dashboard cannot open; existing rows are never re-checked here, so this
+    # never breaks holding/answering a pre-existing long id. Shorten the origin
+    # or key so the composed id fits.
+    [ "${#id}" -le 64 ] \
+      || fail "task id exceeds 64 characters and the dashboard would reject it: $id"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}
@@ -1091,6 +1118,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   diverged) shift; command_diverged "$@" ;;
+  epic-slug) shift; command_epic_slug "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
