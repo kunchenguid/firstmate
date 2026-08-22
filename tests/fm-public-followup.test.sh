@@ -1616,18 +1616,44 @@ EOF
 }
 
 test_registration_replay_preserves_delivery_and_retirement() {
-  local home log
+  local home log registry snapshot
   home=$(make_home register-replay)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-register-replay req-register-replay discord main work-register-replay
+  jq -n '{relation_id:"rel-alternate", work_ref:{home_id:"main", task_id:"work-alternate"},
+      role:"fulfills", required:false, generation:1}' > "$home/alternate-relation.json"
+  tasks_in "$home" public-followup bind-work pf-register-replay \
+    --relation-file "$home/alternate-relation.json" >/dev/null \
+    || fail "could not add the alternate valid work binding"
   emit_terminal "$home" "$home" pf-register-replay main work-register-replay >/dev/null || fail "emit failed"
-  run_pf "$home" consume >/dev/null || fail "consume failed"
+  run_pf "$home" consume >/dev/null || fail "initial consume failed"
+  run_pf "$home" register pf-register-replay --relation rel-alternate --work-home main \
+    --work-id work-alternate --generation 1 >/dev/null \
+    || fail "could not register the alternate valid work binding"
+  "$EMIT" --home "$home" --obligation pf-register-replay --relation rel-alternate \
+    --source-home main --work-id work-alternate --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/8 \
+    --outcome-text 'The alternate bound work also reached its terminal outcome.' >/dev/null \
+    || fail "alternate emit failed"
+  run_pf "$home" consume >/dev/null || fail "alternate consume failed"
+  run_pf "$home" register pf-register-replay --relation rel-code --work-home main \
+    --work-id work-register-replay --generation 1 >/dev/null \
+    || fail "could not restore the original open registration"
   FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-register-replay >/dev/null || fail "deliver failed"
 
   run_pf "$home" register pf-register-replay --relation rel-code --work-home main \
     --work-id work-register-replay --generation 1 >/dev/null || fail "registration replay failed"
-  grep -q '^state=delivered$' "$home/state/public-followup/registry/pf-register-replay" \
+  registry="$home/state/public-followup/registry/pf-register-replay"
+  grep -q '^state=delivered$' "$registry" \
     || fail "registration replay must not downgrade a delivered loop"
+
+  snapshot="$home/registry-before-replay"
+  cp "$registry" "$snapshot"
+  run_pf "$home" register pf-register-replay --relation rel-alternate --work-home main \
+    --work-id work-alternate --generation 1 --platform x --request req-alternate >/dev/null \
+    || fail "delivered registration replay against another valid binding failed"
+  cmp -s "$snapshot" "$registry" \
+    || fail "delivered registration replay must preserve the complete retained baton"
 
   run_pf "$home" retire pf-register-replay --reason "finished after replay" >/dev/null \
     || fail "retire after replay failed"

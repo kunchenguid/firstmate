@@ -288,7 +288,7 @@ cmd_register() {
     request_context_b64=$(printf '%s' "$request_json" | fm_pf_b64_encode)
   fi
 
-  local mkdir_target registry_state delivered_at retired_file rechain_to
+  local mkdir_target registry_state retired_file
   for mkdir_target in "$(fm_pf_registry_dir "$STATE")" "$(fm_pf_events_dir "$STATE")" \
                       "$(fm_pf_consumed_dir "$STATE")" "$(fm_pf_rejected_dir "$STATE")"; do
     fmx_private_artifact_dir_prepare "$mkdir_target" >/dev/null \
@@ -302,18 +302,15 @@ cmd_register() {
     die "public loop '$id' has already been retired and cannot be registered again" 1
   fi
   registry_state=$(fm_pf_registry_loop_state "$STATE" "$id")
-  delivered_at=$(fm_pf_registry_get "$STATE" "$id" delivered_at)
-  rechain_to=$(fm_pf_registry_get "$STATE" "$id" rechain_to)
   if [ "$registry_state" = delivered ]; then
-    printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=delivered\ndelivered_at=%s\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-      "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
-      "$delivered_at" "$followup_expires_at" "$request_context_b64"
-    [ -z "$rechain_to" ] || printf 'rechain_to=%s\n' "$rechain_to"
-  else
-    printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-      "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
-      "$followup_expires_at" "$request_context_b64"
-  fi | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
+    pf_registry_lock_release "$id"
+    printf 'already registered %s state=delivered\n' "$id"
+    return 0
+  fi
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+    "$id" "$relation" "$work_home" "$work_id" "$generation" "$platform" "$request" \
+    "$followup_expires_at" "$request_context_b64" \
+    | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
   pf_registry_lock_release "$id"
 
