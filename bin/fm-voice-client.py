@@ -14,11 +14,18 @@ WHAT IS VERIFIED AND WHAT IS NOT. Read this before trusting a number from it.
   replace the microphone and the speaker with files and leave everything else
   alone.
 
-  NOT verified, and cannot be from here: the microphone capture path and the
-  speaker playback path. The desktop this was written on has neither a
-  microphone nor a speaker, and no worker can reach the captain's laptop. The
-  sounddevice calls below are written from its documented interface and have
-  never been run against a real device. Treat the first live run as the test.
+  NOT verified, and cannot be from here: the audio DEVICES. The desktop this was
+  written on has neither a microphone nor a speaker, and no worker can reach the
+  captain's laptop. The sounddevice calls below are written from its documented
+  interface and have never been run against a real device. Treat the first live
+  run as the test.
+
+  Verified, and worth telling apart from the devices: the speaker's own byte
+  ACCOUNTING, which is the arithmetic deciding which turn a chunk of reply audio
+  is credited to and which turn's first-audio clock it stamps. That is plain
+  logic rather than device work, so it is exercised against a stub stream with
+  the callback driven by hand. Nothing in that says how a real output device
+  behaves.
 
 TWO KINDS OF LISTENING, one of them built. --listen push-to-talk is the default
 and the only mode that runs: the captain says when they are talking, the model is
@@ -199,27 +206,31 @@ class FilePlayback:
 
     def __init__(self, path):
         self._handle = open(path, "wb")
+        self._lock = threading.Lock()
         self.first_played = None
         self.device_latency = None
-        # Everything written, and what the turn being measured is owed. The
-        # difference is the audio of turns already recorded.
-        self.bytes = 0
         self.turn_bytes = 0
         self._turn = None
 
     def write(self, pcm, turn):
-        mine = turn == self._turn
-        if mine and self.first_played is None:
-            self.first_played = time.monotonic()
-        self._handle.write(pcm)
-        self.bytes += len(pcm)
-        if mine:
-            self.turn_bytes += len(pcm)
+        # Held across the whole body, as the speaker's is, because the turn
+        # comparison, the stamp and the count are one decision and the file write
+        # sitting between them releases the interpreter. A turn advancing in that
+        # gap took the credit for a chunk that was not its own and a first-audio
+        # stamp from before it began, which is a negative headline figure.
+        with self._lock:
+            mine = turn == self._turn
+            if mine and self.first_played is None:
+                self.first_played = time.monotonic()
+            self._handle.write(pcm)
+            if mine:
+                self.turn_bytes += len(pcm)
 
     def turn_reset(self, turn):
-        self._turn = turn
-        self.first_played = None
-        self.turn_bytes = 0
+        with self._lock:
+            self._turn = turn
+            self.first_played = None
+            self.turn_bytes = 0
 
     def drain(self, timeout=5):
         del timeout
@@ -254,7 +265,6 @@ class SpeakerPlayback:
         self._buffer = bytearray()
         self._lock = threading.Lock()
         self.first_played = None
-        self.bytes = 0
         self.turn_bytes = 0
         self._turn = None
         self._earlier = 0
@@ -287,7 +297,6 @@ class SpeakerPlayback:
             else:
                 self._earlier += len(pcm)
             self._buffer += pcm
-        self.bytes += len(pcm)
 
     def turn_reset(self, turn):
         with self._lock:
@@ -651,6 +660,24 @@ class Client:
             except (BrokenPipeError, OSError):
                 return
 
+    def _unfinished(self, subject):
+        """Name a fault that landed on an open turn, in the words that turn earned.
+
+        A relay dies mid-turn in two shapes and they are not the same fault. With
+        no reply audio yet, the turn went unanswered. With some already played,
+        the captain heard the start of an answer and the rest was cut off, so the
+        turn WAS answered and first_audio_s is a real measurement of when: saying
+        nothing arrived would contradict the answered field two lines below it in
+        the same record, and a reader who believes the wrong one goes looking in
+        the wrong place.
+
+        Read off the same count answered is read off, so the two cannot disagree
+        about one turn whatever the timing.
+        """
+        if self.playback.turn_bytes > 0:
+            return "{} before the reply finished".format(subject)
+        return "{} before this turn was answered".format(subject)
+
     def _downlink(self):
         # Why the loop stopped, for a turn that was still waiting for its reply
         # when it did. Neither of the quiet exits below raises, and they are
@@ -685,7 +712,10 @@ class Client:
                 break
             if got is None:
                 say("client: the connection ended")
-                why = "the connection ended before this turn was answered"
+                # The subject only. Whether it ended before the turn was answered
+                # or partway through the answer is decided by _unfinished at the
+                # tail, where the audio count is read.
+                why = "the connection ended"
                 cause = "the connection ended"
                 break
             kind, payload = got
@@ -757,8 +787,9 @@ class Client:
                             if arrived_in == self.turn_id:
                                 if not self.reply_done.is_set():
                                     self.turn.setdefault(
-                                        "failed", "the relay ended the session "
-                                                  "before this turn was answered")
+                                        "failed",
+                                        self._unfinished(
+                                            "the relay ended the session"))
                                 self.reply_done.set()
                     else:
                         log(self.verbose, "notice {}".format(obj))
@@ -785,7 +816,7 @@ class Client:
                         cause = "the relay signed off after being asked to stop"
                     else:
                         say("client: the relay stopped without being asked to")
-                        why = "the relay stopped before this turn was answered"
+                        why = "the relay stopped"
                         cause = "the relay stopped without being asked to"
                     break
             except Exception as exc:               # noqa: BLE001
@@ -834,7 +865,7 @@ class Client:
         # can infer it.
         with self.lock:
             if why is not None and not self.reply_done.is_set():
-                self.turn.setdefault("failed", why)
+                self.turn.setdefault("failed", self._unfinished(why))
             if cause is not None:
                 self.closed_because = cause
             self.closed.set()
@@ -1081,7 +1112,14 @@ class Client:
                 break
             print(json.dumps(record))
             sys.stdout.flush()
-            if not record["answered"]:
+            # A named reason counts as well as an unanswered turn, and not only
+            # when a later run remains. A relay killed while speaking leaves a
+            # turn that was answered and a record that says why the answer stopped
+            # partway, and at the default of one run that turn cleared all three of
+            # the other paths to a non-zero code and reported the session a
+            # success. A results file whose own record names an infrastructure
+            # failure must not sit behind an exit code that says nothing happened.
+            if not record["answered"] or record["relay_error"]:
                 rc = 1
             if index < self.options.runs:
                 # Checked after the record and before the wait, because that wait

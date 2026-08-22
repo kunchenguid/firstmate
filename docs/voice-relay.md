@@ -151,6 +151,13 @@ the timings for each turn as JSON on stdout and everything human on stderr, so
 `--runs 5 > runs.jsonl` gives you your own spread to compare against the table
 above.
 
+Every record carries `relay_error`, which is null when nothing broke and otherwise names what did.
+It tells the two mid-turn failures apart, because they are not the same fault: a turn that got no reply audio at all says the connection ended, or the relay stopped, or the session ended, before that turn was answered, while a turn whose answer had already started playing says the same thing happened before the reply finished.
+The second still reads `answered: true`, because sound did reach you and `first_audio_s` is a real measurement of when.
+
+The exit code is non-zero if any turn went unanswered, if any record carries a `relay_error`, or if the session stopped before it had taken the runs you asked for.
+A truncated answer therefore fails the run rather than passing it, so a spread computed from `runs.jsonl` cannot quietly average an infrastructure failure into a latency figure.
+
 If the audio devices are not the ones you want, `--input-device` and `--output-device` take a name or an index.
 Neither the client nor this guide can yet tell you which device it resolved, so an unexpected device is diagnosed by trying the other name or index rather than by reading a log line.
 If it fails before any audio, add `--verbose` and look for the handshake: a chatty login shell on the desktop printing to stdout is the one failure that looks like a protocol error and is not.

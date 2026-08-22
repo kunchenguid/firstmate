@@ -1289,7 +1289,7 @@ mkdir -p "$TMP_ROOT/client-files"
 printf '\0\0\0\0' > "$TMP_ROOT/client-files/clip.pcm"
 
 python3 - "$ROOT/bin" "$TMP_ROOT/client-files" <<'PY' || fail "laptop client"
-import io, os, sys
+import io, os, sys, types
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -1890,6 +1890,95 @@ check(named_run["relay_error"] == RELAY_REASON,
       "the relay's own reason must reach the record unchanged rather than being "
       "overwritten by the goodbye behind it: %r" % named_run["relay_error"])
 
+# THE MIDDLE OF THE SCENARIO, which the cases above and below both miss. A relay
+# killed mid-turn ends its stdout on a frame boundary, and it spends nearly the
+# whole turn streaming a reply, so dying AFTER some of that reply has played is
+# the likelier half of the very fault this work exists to name. The cases above
+# cover dying before any of it, and the answered-turn case below covers a reply
+# that finished, so nothing pinned the middle.
+#
+# In the middle both halves of the record are true at once and must say so: sound
+# reached the captain, so the turn was answered and first_audio_s measures when,
+# AND the answer stopped partway, so the reason has to say the reply did not
+# finish rather than that the turn was never answered. A record asserting both
+# "answered" and "before this turn was answered" sends whoever reads it to the
+# wrong end. At the default of one run this also used to clear every path to a
+# non-zero exit code and report the session a success.
+SOME_REPLY = frame.encode(frame.AUDIO, b"\x00\x00" * 1200)
+SESSION_ENDED = frame.encode_json(frame.NOTICE, {"event": "session-ended"})
+
+
+def turn_cut(label, payload, out_name):
+    """Take one turn, at the default run count, against a scripted downlink."""
+    gate = thread_lib.Event()
+    cut = client.Client(client.parse_args(
+        ["--host", "desk", "--in-file", os.path.join(TMP, "clip.pcm"),
+         "--out-file", os.path.join(TMP, out_name),
+         "--timeout", "2", "--audio-idle", "0.05"]))
+    cut.reader = frame.Reader(ScriptedStream(gate, payload, label))
+    cut.uplink = StartGate(gate)
+    cut.playback = client.FilePlayback(os.path.join(TMP, out_name))
+    cut.capture = client.FileCapture(os.path.join(TMP, "clip.pcm"))
+    cut.capture.start(cut.up_q, cut.talking)
+    thread_lib.Thread(target=cut._sender, daemon=True).start()
+    thread_lib.Thread(target=cut._downlink, daemon=True).start()
+    out, said = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(said):
+        code = cut.run()
+    cut.up_q.put(None)
+    cut.playback.close()
+    records = [json_lib.loads(line) for line in out.getvalue().splitlines()
+               if line.strip()]
+    check(len(records) == 1,
+          "%s: one turn was taken, so one record belongs in the file: %r"
+          % (label, records))
+    check(cut.options.runs == 1,
+          "%s: fixture is wrong, this case is about the default run count: %r"
+          % (label, cut.options.runs))
+    return records[0], said.getvalue(), code
+
+
+for label, payload, subject in (
+        ("end of stream", b"", "the connection ended"),
+        ("relay stopped", frame.encode(frame.BYE), "the relay stopped"),
+        ("session ended", SESSION_ENDED, "the relay ended the session")):
+    slug = label.replace(" ", "-")
+    # No audio at all. This half keeps the wording it already had, so the two can
+    # never be collapsed back into one sentence that fits neither.
+    silent, _, silent_code = turn_cut(
+        "%s, nothing played" % label, payload, "reply-silent-%s.pcm" % slug)
+    check(not silent["answered"] and silent["reply_audio_seconds"] == 0,
+          "%s: fixture is wrong, this half is the one where nothing played: %r"
+          % (label, silent))
+    check(silent["relay_error"] == "%s before this turn was answered" % subject,
+          "%s: a turn that got no audio went unanswered and the reason should say "
+          "so: %r" % (label, silent["relay_error"]))
+    check(silent_code != 0,
+          "%s: an unanswered turn must not exit 0, got %r" % (label, silent_code))
+
+    # Some of the reply played, then the same ending. Same fault, different turn,
+    # and the record has to describe the turn it actually got.
+    partial, _, partial_code = turn_cut(
+        "%s, part of a reply played" % label, SOME_REPLY + payload,
+        "reply-partial-%s.pcm" % slug)
+    check(partial["answered"] and partial["reply_audio_seconds"] > 0,
+          "%s: audio reached the captain, so the turn was answered: %r"
+          % (label, partial))
+    check(partial["first_audio_s"] is not None,
+          "%s: and when it reached them is a real measurement, not a null: %r"
+          % (label, partial))
+    check(partial["relay_error"] == "%s before the reply finished" % subject,
+          "%s: a reply cut short must say the reply did not finish: %r"
+          % (label, partial["relay_error"]))
+    check("before this turn was answered" not in partial["relay_error"],
+          "%s: and must not claim nothing arrived, which its own answered field "
+          "contradicts: %r" % (label, partial["relay_error"]))
+    # The record and the exit code have to agree with each other as well.
+    check(partial_code != 0,
+          "%s: a record naming a fault must not exit 0, even at the default of "
+          "one run and even though the turn was answered, got %r"
+          % (label, partial_code))
+
 # With runs still to take, the loop also has to say why they were not taken, and
 # that line has to restate the cause that was recorded rather than asserting a
 # default. Told "the relay stopped" and then "the connection closed", the captain
@@ -2155,9 +2244,6 @@ check(late_code != 0,
 check(os.path.getsize(late_out_file) == 2400,
       "the late chunk must still reach the output, not be discarded to make the "
       "figures tidy: %d bytes" % os.path.getsize(late_out_file))
-check(late.playback.bytes == 2400,
-      "and the playback should still count it among everything it wrote: %r"
-      % late.playback.bytes)
 
 # The wait between turns is the last thing a lost session should do. It exists
 # only to avoid talking over the model's own speech, and a relay that is already
@@ -2203,6 +2289,150 @@ check("the connection ended before run 2 of 3" in prompt_said.getvalue(),
       "and it should name the cause and the first run it lost: %r"
       % prompt_said.getvalue())
 
+# The speaker's byte ACCOUNTING, which is not the speaker. No audio device is
+# reached here and none can be on this host: the stream is a stub and the device
+# callback is called by hand, so nothing below says anything about how a real
+# output device behaves. What it does cover is the arithmetic deciding which turn
+# a chunk is credited to and whose first-audio clock it stamps, which until now
+# was the one piece of that logic with no coverage at all while the file path it
+# mirrors had plenty. Its correctness rests on the earlier turns' bytes being a
+# prefix of the buffer, and a sign or bound slip in the prefix count would
+# silently mismeasure the headline latency on the path the captain will use.
+class StubStream:
+    """Stands in for the output device: accepts the settings, plays nothing."""
+
+    def __init__(self, **settings):
+        self.settings = settings
+        self.latency = 0.011
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+stub_audio = types.ModuleType("sounddevice")
+stub_audio.RawOutputStream = StubStream
+sys.modules["sounddevice"] = stub_audio
+
+
+def fresh_speaker():
+    return client.SpeakerPlayback()
+
+
+def pull(speaker, frames):
+    """Ask the stub device for one block, and return exactly what it was handed."""
+    block = bytearray(frames * 2)
+    speaker._callback(block, frames, None, None)
+    return bytes(block)
+
+
+opened = fresh_speaker()
+check(opened.device_latency == 0.011,
+      "the reported device latency should come from the stream: %r"
+      % opened.device_latency)
+
+# No earlier bytes at all: the first chunk of this turn's own reply is this turn's
+# first audio.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x01\x01" * 300, 1)
+check(speaker.turn_bytes == 600,
+      "this turn's own audio is credited to it: %r" % speaker.turn_bytes)
+check(pull(speaker, 300) == b"\x01\x01" * 300, "and is played unchanged")
+check(speaker.first_played is not None,
+      "and stamps this turn's first audio when it reaches the device")
+
+# An empty buffer. Silence handed to the device is not the reply arriving, so the
+# count taken and the count skipped are equal at zero and nothing is stamped.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+check(pull(speaker, 100) == b"\x00" * 200,
+      "an empty buffer is padded with silence")
+check(speaker.first_played is None,
+      "and stamps nothing: no reply audio has reached the device yet")
+
+# Earlier bytes exactly equal to the block taken. The whole block belongs to a turn
+# already recorded, so it plays and stamps nothing.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x02\x02" * 300, 1)
+check(speaker.turn_bytes == 0,
+      "a chunk from an earlier turn is credited to nobody: %r" % speaker.turn_bytes)
+check(pull(speaker, 300) == b"\x02\x02" * 300,
+      "but is still played, because it is the tail of an answer being listened to")
+check(speaker.first_played is None,
+      "and must not stamp the later turn's first audio")
+
+# Earlier bytes larger than the block taken, drained across two blocks. The count
+# has to come down by what was taken and no more, or the turn's real first audio
+# is stamped by somebody else's tail.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x03\x03" * 300, 1)
+speaker.write(b"\x04\x04" * 300, 1)
+check(pull(speaker, 150) == b"\x03\x03" * 150, "the earlier tail plays in order")
+check(speaker.first_played is None, "and stamps nothing on the first block")
+check(pull(speaker, 150) == b"\x03\x03" * 150, "nor on the second")
+check(speaker.first_played is None, "still nothing stamped")
+check(pull(speaker, 300) == b"\x04\x04" * 300, "nor while the rest of it drains")
+check(speaker.first_played is None,
+      "1200 earlier bytes must take 1200 bytes to drain, not one block")
+speaker.write(b"\x05\x05" * 300, 2)
+check(pull(speaker, 300) == b"\x05\x05" * 300, "then this turn's own reply plays")
+check(speaker.first_played is not None, "and that is what stamps the clock")
+
+# Earlier bytes smaller than the block taken, so one block spans the boundary. The
+# first byte past the earlier tail is this turn's first audio, and it is inside a
+# block that started with somebody else's.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x06\x06" * 150, 1)
+speaker.write(b"\x07\x07" * 150, 2)
+check(pull(speaker, 300) == b"\x06\x06" * 150 + b"\x07\x07" * 150,
+      "a block spanning the boundary is played whole")
+check(speaker.first_played is not None,
+      "and the first byte past the earlier tail stamps this turn's first audio")
+check(speaker.turn_bytes == 300,
+      "with only this turn's half credited to it: %r" % speaker.turn_bytes)
+
+# A turn advancing while the previous answer is still queued, which is the case
+# turn_reset itself has to handle: everything already buffered belongs to the turn
+# that is being closed, however it got there.
+speaker = fresh_speaker()
+speaker.turn_reset(1)
+speaker.write(b"\x08\x08" * 300, 1)
+check(speaker.turn_bytes == 600, "turn one is credited its own reply")
+speaker.turn_reset(2)
+check(speaker.turn_bytes == 0 and speaker.first_played is None,
+      "turn two starts owed nothing and unstamped: %r %r"
+      % (speaker.turn_bytes, speaker.first_played))
+check(pull(speaker, 300) == b"\x08\x08" * 300,
+      "turn one's undrained tail still reaches the device")
+check(speaker.first_played is None,
+      "but it must not stamp turn two, which is what it would have done before "
+      "turn_reset counted what was already queued")
+speaker.write(b"\x09\x09" * 300, 2)
+check(pull(speaker, 300) == b"\x09\x09" * 300 and speaker.first_played is not None,
+      "and turn two's own reply is what stamps turn two")
+check(speaker.turn_bytes == 600, "credited to turn two: %r" % speaker.turn_bytes)
+
+# A short buffer of earlier bytes: padded with silence, and the padding is not
+# mistaken for this turn's reply either.
+speaker = fresh_speaker()
+speaker.turn_reset(2)
+speaker.write(b"\x0a\x0a" * 100, 1)
+check(pull(speaker, 300) == b"\x0a\x0a" * 100 + b"\x00" * 400,
+      "a short earlier tail is padded rather than repeated")
+check(speaker.first_played is None, "and the padding stamps nothing")
+
+del sys.modules["sounddevice"]
+
 
 
 # A startup that refuses part way through releases what it already started, and
@@ -2212,7 +2442,6 @@ check("the connection ended before run 2 of 3" in prompt_said.getvalue(),
 class Recorder:
     def __init__(self, closed):
         self._closed = closed
-        self.bytes = 0
         self.first_played = None
         self.device_latency = None
 
@@ -3558,6 +3787,13 @@ for alarming in ("stopped without being asked", "could not handle the relay's",
     check(alarming not in transcript,
           "a session where every turn was answered said %r: %r"
           % (alarming, transcript))
+# And no record named a reason, which is what now decides the exit code as well.
+# A fault that fires on a session where everything worked would fail every clean
+# run from here on, so the absence is worth pinning next to the exit code itself.
+for run in runs:
+    check(run["relay_error"] is None,
+          "turn %s recorded a reason on a session that worked: %r"
+          % (run["run"], run["relay_error"]))
 check("the relay signed off" in transcript,
       "but the end of the session should still be said, in wording that cannot be "
       "read as a fault: %r" % transcript)
