@@ -1686,6 +1686,23 @@ test_recovery_pane_survives_an_empty_first_cwd_read() {
   pass "fm-control relaunch: a recovery pane's empty first cwd read does not fail the wait"
 }
 
+test_recover_missing_refuses_an_unauthorized_caller() {
+  local dir out rc
+  dir=$(new_case recov-unauth rl49)
+  add_ship_task "$dir" rl49 claude
+  # The endpoint is agent-free, but this direct fm-spawn invocation has
+  # neither a live fm-control relaunch parent nor the durable
+  # recovery-attempt marker a prior committed recovery leaves behind, so the
+  # control-plane reservation must refuse the endpoint rebuild outright
+  # instead of trusting the caller.
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl49 --relaunch --recover-missing --harness claude); rc=$?
+  expect_code 1 "$rc" "--recover-missing without control-plane provenance should refuse"
+  assert_contains "$out" "reserved for bin/fm-control.sh" \
+    "the refusal should name the control plane that owns the recovery"
+  pass "fm-spawn --recover-missing: refuses an unauthorized direct caller"
+}
+
 test_recover_missing_refuses_alive_endpoint() {
   local dir out rc
   dir=$(new_case recov-alive rl44)
@@ -1710,5 +1727,6 @@ test_recover_missing_rebuilds_a_dead_endpoint_only_with_the_marker
 test_recovery_pane_survives_an_empty_first_cwd_read
 test_dead_endpoint_without_a_marker_stays_on_the_ordinary_path
 test_ordinary_relaunch_failure_retry_stays_on_the_same_path
+test_recover_missing_refuses_an_unauthorized_caller
 test_recover_missing_refuses_alive_endpoint
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
