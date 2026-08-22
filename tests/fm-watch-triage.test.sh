@@ -986,7 +986,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
-# Fixture for the four merge-wait behavioral cases below: a ship task whose checks
+# Fixture for the merge-wait behavioral cases below: a ship task whose checks
 # are green, whose merge poll is armed, and whose pane has already been seen once at
 # <hash>, so the next poll of an unchanged pane is a stale sighting on the terminal
 # branch. Declaring the wait is left to each caller, because whether the record
@@ -1245,6 +1245,209 @@ test_terminal_stale_merge_wait_cleared_record_returns_to_aging() {
     || fail "the released pane's stale was not queued"
   unset FM_FAKE_CREW_STATE
   pass "withdrawing a declaration releases the absorbed pane, so it re-classifies and surfaces on the next poll"
+}
+
+# --- declared AFTER the pane was already classified: entered on the next poll ----
+# The population this whole feature exists for is a pane that does NOT change: the
+# work is committed, the checks are green, nothing is running, so the pane sits
+# byte-identical for hours. But the classification that records the cadence marker
+# runs only on a new hash, so an entry gated on that marker alone left a declaration
+# written against an already-classified pane with no way in until the pane happened to
+# change. This is the branch where that repeated indefinitely: a merge-waiting task
+# whose log has since picked up a later non-captain-relevant note is surfaced once by
+# surface_nonterminal_stale, which records the hash and drops the pause flag and the
+# cadence markers together, so every later poll of that unchanged hash fell through to
+# the wedge timer and re-ran the escalation chain against a live, admissible
+# declaration - the exact alarm the declaration exists to end.
+test_nonterminal_stale_declaration_after_classification_enters_the_cadence() {
+  local dir state fakebin out capture_file window key pane_hash pid pr text queued_before
+  dir=$(make_case nonterminal-stale-late-declaration); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-latedecl"; pr='https://example.test/pr/14'
+  text='committed and pushed, nothing left to run'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" latedecl "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  # A later note leaves the log's LAST line non-captain-relevant, which is what routes
+  # this green task through the non-terminal branch.
+  printf 'working: rebased onto the latest base\n' >> "$state/latedecl.status"
+  printf '%s' "$(seen_sig "$state/latedecl.status")" > "$state/.seen-latedecl_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  # Phase A: no declaration yet, so the real surface path runs and leaves exactly the
+  # state the gap needs - the current hash recorded, no cadence marker, no wedge timer,
+  # no pause flag.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the undeclared non-terminal stale did not surface"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "the surfaced pane did not record its current hash"
+  [ ! -e "$state/.merge-wait-$key" ] || fail "the surfaced pane kept a merge-wait cadence marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the surfaced pane kept a wedge timer"
+  [ ! -e "$state/.paused-$key" ] || fail "the surfaced pane kept a pause flag"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+  queued_before=$(wc -c < "$state/.wake-queue" 2>/dev/null || echo 0)
+
+  # Phase B: declare the wait against that unchanged pane. A one-second escalation
+  # threshold means the wedge chain fires within a poll or two if the declaration
+  # cannot be entered, so staying quiet is the whole assertion.
+  declare_merge_wait "$state" latedecl 'the upstream maintainer owns this merge' \
+    || fail "could not declare the fixture merge wait"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declaration on an unchanged hash still woke firstmate: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declaration on an unchanged hash woke firstmate on a later poll: $(cat "$out")"
+  fi
+  if grep -F "possible wedge" "$out" >/dev/null; then
+    reap "$pid"; fail "a live declaration on an unchanged hash still wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the entered declaration printed a wake reason: $(cat "$out")"; }
+  [ -e "$state/.merge-wait-$key" ] || { reap "$pid"; fail "the late declaration never entered the merge-wait cadence"; }
+  [ -e "$state/.merge-wait-rechecked-$key" ] || { reap "$pid"; fail "the late declaration recorded no recheck timer"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the absorbed declaration left the wedge timer running"; }
+  [ "$(wc -c < "$state/.wake-queue" 2>/dev/null || echo 0)" -eq "$queued_before" ] \
+    || { reap "$pid"; fail "the absorbed declaration enqueued a wake"; }
+  [ -s "$state/latedecl.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the late declaration"; }
+  [ -s "$state/latedecl.check-trust" ] \
+    || { reap "$pid"; fail "the merge poll's registration did not survive the late declaration"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge wait declared after its pane was already classified enters the cadence on the next poll instead of waiting for the pane to change"
+}
+
+# --- declared while a wedge timer is already running: no final escalation -------
+# The terminal branch's bounded form of the same gap. A green ship task absorbed
+# earlier as provably-working carries a running .stale-since timer, so a declaration
+# recorded before that timer elapsed would fire one last escalation through the
+# wedge-timer entry before the window went quiet. The cadence entry is evaluated ahead
+# of that timer, so the declaration is admitted on the very next poll and the timer is
+# dropped rather than harvested.
+test_terminal_stale_merge_wait_declared_during_wedge_timer_never_escalates() {
+  local dir state fakebin out capture_file window key pane_hash pid pr text
+  dir=$(make_case terminal-stale-merge-wait-mid-timer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-midtimer"; pr='https://example.test/pr/15'
+  text='green and idle, the merge is not ours to make'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" midtimer "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  # Already classified on this hash, with a wedge timer running for it and backdated
+  # past the threshold, so the poll under test is the one that would have escalated.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  declare_merge_wait "$state" midtimer || fail "could not declare the fixture merge wait"
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declaration recorded mid-timer still fired a wedge escalation: $(cat "$out")"
+  fi
+  if grep -F "possible wedge" "$out" >/dev/null; then
+    reap "$pid"; fail "a declaration recorded mid-timer fired one more possible-wedge alarm: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the mid-timer declaration printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the mid-timer declaration enqueued a wake"; }
+  [ -e "$state/.merge-wait-$key" ] || { reap "$pid"; fail "the mid-timer declaration never entered the cadence"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "the absorbed declaration left the wedge timer running"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "the absorbed declaration kept an escalation count"; }
+  [ -s "$state/midtimer.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the absorb"; }
+  [ -s "$state/midtimer.check-trust" ] \
+    || { reap "$pid"; fail "the merge poll's registration did not survive the absorb"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a merge wait declared while a wedge timer is already running is absorbed on the next poll without firing one more escalation"
+}
+
+# --- a first entry rechecks before it can silence anything ---------------------
+# Entering the cadence off the declaration record would be a silent pass if the record
+# were trusted on its own: the record is durable and the pull request is not. On a
+# first entry the recheck timer is absent, which makes the bounded greenness recheck
+# due at once, so a declaration whose run is no longer green is handed straight to the
+# wedge timer, and one whose recorded pull request has been superseded never enters at
+# all. Both keep the alarm the 2026-08-21 sweep depended on, when three merge watches
+# pointed at heads that no longer existed and one merge had already landed unnoticed -
+# with the declaration record still sitting on disk in each case.
+test_merge_wait_first_entry_rechecks_before_it_can_silence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid pr text
+  dir=$(make_case merge-wait-first-entry-recheck); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-firstentry"; pr='https://example.test/pr/16'
+  text='idle pane, declaration on disk'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" firstentry "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  declare_merge_wait "$state" firstentry || fail "could not declare the fixture merge wait"
+  [ ! -e "$state/.merge-wait-rechecked-$key" ] \
+    || fail "the fixture already carried a recheck timer, so this would not be a first entry"
+
+  # Phase A: the run is no longer green. The recheck is due on this very first entry,
+  # so the declaration cannot hold and the pane escalates.
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a no-longer-green declaration silenced its pane on first entry"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the no-longer-green declaration did not hand its pane back to the wedge timer: $(cat "$out")"
+  [ -f "$state/firstentry.merge-wait" ] || fail "the recheck removed the captain's declaration record"
+  [ ! -e "$state/.merge-wait-$key" ] || fail "a refused declaration kept a cadence flag"
+  [ ! -e "$state/.merge-wait-rechecked-$key" ] || fail "a refused declaration kept a recheck timer"
+  [ -s "$state/firstentry.check.sh" ] || fail "the merge poll did not survive the handback"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the handback failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the handback's escalation was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: the run is green again, but the task's recorded pull request has been
+  # superseded, so the declaration names a pull request this task no longer watches.
+  # It must not enter at all, even though greenness alone would now admit it.
+  printf 'window=%s\nkind=ship\npr=%s\n' "$window" 'https://example.test/pr/17' > "$state/firstentry.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a declaration naming a superseded pull request silenced its pane"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the superseded declaration did not age its pane as an ordinary wedge: $(cat "$out")"
+  [ -f "$state/firstentry.merge-wait" ] || fail "the superseded declaration's record was removed"
+  [ ! -e "$state/.merge-wait-$key" ] || fail "the superseded declaration entered the cadence"
+  [ -s "$state/firstentry.check.sh" ] || fail "the merge poll did not survive the superseded declaration"
+  unset FM_FAKE_CREW_STATE
+  pass "a first cadence entry rechecks greenness and pull-request identity at once, so neither a red nor a superseded declaration can silence its pane"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -3052,6 +3255,9 @@ test_terminal_stale_merge_wait_absorbed_then_resurfaced
 test_terminal_stale_green_without_declaration_still_surfaces
 test_terminal_stale_merge_wait_recheck_withdraws_and_escalates
 test_terminal_stale_merge_wait_cleared_record_returns_to_aging
+test_nonterminal_stale_declaration_after_classification_enters_the_cadence
+test_terminal_stale_merge_wait_declared_during_wedge_timer_never_escalates
+test_merge_wait_first_entry_rechecks_before_it_can_silence
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

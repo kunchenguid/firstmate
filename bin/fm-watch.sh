@@ -1335,12 +1335,18 @@ EOF
                 wake "stale: $w"
                 ;;
             esac
-          elif [ -e "$mwf" ]; then
-            # This exact hash is already on the merge-wait cadence. The declaration
-            # is still in force (the reconciliation at the top of this loop drops the
-            # marker otherwise), but that is not enough on its own, so the bounded
-            # recheck decides whether the wait keeps holding or the window returns to
-            # the ordinary wedge timer.
+          elif [ -e "$mwf" ] || merge_wait_declared "$task" "$STATE"; then
+            # This exact hash is either already on the merge-wait cadence, or carries a
+            # declaration recorded after the hash was last classified. The cadence is
+            # entered from BOTH, because the classification that creates the marker
+            # only runs on a new hash: gating solely on the marker would leave a
+            # declaration written against a static pane waiting for that pane to
+            # change before it took effect, aging through the wedge timer below in the
+            # meantime. Neither entry is enough on its own, so the bounded recheck
+            # decides whether the wait keeps holding or the window returns to the
+            # ordinary wedge timer; on a first entry its timer is absent, so that
+            # recheck is due immediately and a red, superseded, or poll-less
+            # declaration is handed straight back rather than silencing the pane.
             merge_wait_repeat_poll "$w" "$task" "$h" "$ssf" "$ewf" "stale (merge wait withdrawn)"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1395,7 +1401,12 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$mwf" ]; then
+            if [ -e "$mwf" ] || merge_wait_declared "$task" "$STATE"; then
+              # Both entries, for the reason the terminal branch above spells out. This
+              # is the branch where the gap actually repeated: surface_nonterminal_stale
+              # records the hash and drops both the pause flag and the cadence, so a
+              # declaration written afterwards had nothing left to re-enter through and
+              # the pane wedge-escalated on the timer below indefinitely.
               merge_wait_repeat_poll "$w" "$task" "$h" "$ssf" "$ewf" "non-terminal stale (merge wait withdrawn)"
             elif [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
