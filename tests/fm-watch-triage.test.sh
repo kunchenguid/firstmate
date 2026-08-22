@@ -1450,6 +1450,265 @@ test_merge_wait_first_entry_rechecks_before_it_can_silence() {
   pass "a first cadence entry rechecks greenness and pull-request identity at once, so neither a red nor a superseded declaration can silence its pane"
 }
 
+# Swap in a crew-state fake that records one line per invocation, so a test can assert
+# the bounded "one read per wedge window" contract by counting real calls through
+# FM_CREW_STATE_BIN. bin/fm-inactive-reconcile.sh reads its own
+# FM_INACTIVE_CREW_STATE_BIN and never this one, so the log holds only the stale
+# loop's own reads.
+log_crew_state_reads() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+id=${1:-}
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_LOG"
+key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+var="FM_FAKE_CREW_STATE_$key"
+val=${!var:-${FM_FAKE_CREW_STATE:-}}
+printf '%s\n' "${val:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+}
+
+crew_state_reads() {  # <log>
+  local log=$1
+  [ -e "$log" ] || { printf '0'; return; }
+  printf '%s' "$(grep -c . "$log" 2>/dev/null || echo 0)"
+}
+
+# --- a refused declaration stays refused, instead of re-alarming every window ----
+# A declaration is durable and its pull request is not, so a live record can outlive
+# the green outcome that made it admissible. The refusal must then be STICKY per
+# declaration record. Recomputing it every poll re-armed the wedge timer behind every
+# escalation, so the pane alarmed `possible wedge, escalation N` every
+# STALE_ESCALATE_SECS forever on an UNCHANGED hash and accumulated
+# demand-deep-inspection, while the very same pane with no declaration at all is
+# completely quiet on repeat polls. That made declaring strictly noisier than not
+# declaring, which is the exact alarm class this feature exists to remove. It also
+# cost one full bin/fm-crew-state.sh read per poll, breaking the one-read-per-wedge-
+# window bound merge_wait_repeat_poll's own header states.
+test_merge_wait_refusal_is_sticky_and_stops_realarming() {
+  local dir state fakebin out capture_file window key pane_hash pid pr text reads first_reads escalations
+  dir=$(make_case merge-wait-sticky-refusal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; reads="$dir/reads.log"
+  window="test:fm-sticky"; pr='https://example.test/pr/18'
+  text='pane has not changed in hours'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" sticky "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  declare_merge_wait "$state" sticky || fail "could not declare the fixture merge wait"
+  log_crew_state_reads "$fakebin"
+  # The declaration is live on disk, but the run is no longer at the green outcome, so
+  # it is inadmissible.
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+
+  # Phase A: the first entry refuses the declaration and hands the pane to the wedge
+  # timer, which has only just started, so there is no wake yet. Several more polls of
+  # the same unchanged hash must add NO further crew-state reads.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE_LOG="$reads" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration woke firstmate before its wedge timer elapsed: $(cat "$out")"
+  fi
+  [ -s "$state/.merge-wait-refused-$key" ] \
+    || { reap "$pid"; fail "the refusal was not recorded against the declaration record"; }
+  [ ! -e "$state/.merge-wait-$key" ] || { reap "$pid"; fail "a refused declaration kept its cadence flag"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "the refused declaration did not start the ordinary wedge timer"; }
+  first_reads=$(crew_state_reads "$reads")
+  [ "$first_reads" -ge 1 ] || { reap "$pid"; fail "the first entry never read authoritative crew state"; }
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration woke firstmate on a later poll: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration woke firstmate on a later poll: $(cat "$out")"
+  fi
+  [ "$(crew_state_reads "$reads")" -eq "$first_reads" ] \
+    || { reap "$pid"; fail "a refused declaration re-read crew state on every poll, breaking the one-read-per-window bound"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "the refused declaration printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: past the threshold the ordinary wedge timer escalates ONCE, exactly as it
+  # would for an undeclared pane whose run went red.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE_LOG="$reads" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the refused declaration never aged into its single wedge escalation"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "the refused declaration's escalation was not a possible wedge: $(cat "$out")"
+  escalations=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+  [ "$escalations" -eq 1 ] || fail "the refused declaration escalated $escalations times instead of once"
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    && fail "a single handback escalation demanded deep inspection"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-B watcher stop"
+
+  # Phase C: and then it goes quiet on the unchanged hash, instead of re-arming the
+  # timer and escalating again every window. This is the repeating chain itself.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE_LOG="$reads" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  first_reads=$(crew_state_reads "$reads")
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration re-armed its wedge chain after the handback escalation: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration re-armed its wedge chain after the handback escalation: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the refused declaration re-armed its wedge chain after the handback escalation: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "the refused declaration alarmed again on an unchanged hash: $(cat "$out")"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "the refused declaration restarted the wedge timer on an unchanged hash"; }
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || { reap "$pid"; fail "the refused declaration accumulated further escalations on an unchanged hash"; }
+  [ "$(crew_state_reads "$reads")" -eq "$first_reads" ] \
+    || { reap "$pid"; fail "the refused declaration resumed reading crew state every poll"; }
+  [ -s "$state/sticky.merge-wait" ] || { reap "$pid"; fail "the sticky refusal removed the captain's declaration record"; }
+  [ -s "$state/sticky.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the refusal"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a refused merge-wait declaration stays refused, so an inadmissible record escalates once and then goes as quiet as an undeclared pane"
+}
+
+# --- the crew's OWN declared pause outranks a leftover merge-wait record --------
+# A merge wait and a `paused:` pause block on DIFFERENT humans, and the pause is the
+# crew's own live declaration. When the merge-wait entry was tried first it took a
+# window the pause cadence owns, and because a paused verdict is not a merge-wait
+# verdict the window was handed to the wedge timer and escalated `possible wedge` -
+# where a declared pause is exempt from wedge aging entirely. pause_state_class is
+# also the stronger test: it recovers paused for a confidently dead crew and for a
+# secondmate, neither of which crew_absorb_class alone can name.
+test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record() {
+  local dir state fakebin out capture_file window key pane_hash sig pid pr text
+  dir=$(make_case nonterminal-pause-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-pauseover"; pr='https://example.test/pr/19'
+  text='idle, the crew declared its own wait'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" pauseover "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" pauseover || fail "could not declare the fixture merge wait"
+  # The crew then declares its own external wait, which is not captain-relevant, so
+  # this window is classified on the non-terminal path.
+  printf 'paused: awaiting the upstream maintainer\n' > "$state/pauseover.status"
+  sig=$(seen_sig "$state/pauseover.status"); printf '%s' "$sig" > "$state/.seen-pauseover_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  # Already classified and already on the pause cadence, which is the repeat-poll
+  # state the merge-wait entry used to steal.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream maintainer'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declared pause holding a merge-wait record was woken: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declared pause holding a merge-wait record was woken on a later poll: $(cat "$out")"
+  fi
+  if grep -F "possible wedge" "$out" >/dev/null; then
+    reap "$pid"; fail "a declared pause holding a merge-wait record aged into a possible wedge: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a declared pause holding a merge-wait record printed a wake reason: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "the pause cadence lost its flag to the merge-wait record"; }
+  [ ! -e "$state/.merge-wait-$key" ] || { reap "$pid"; fail "the merge-wait cadence took a window the pause owns"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a declared pause was handed to the wedge timer"; }
+  [ -s "$state/pauseover.check.sh" ] || { reap "$pid"; fail "the merge poll did not survive the pause absorb"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorb stop"
+
+  # Past the cadence it re-surfaces as a PAUSE recheck naming the external wait, not
+  # as a merge-wait recheck.
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/pauseover.status"
+  sig=$(seen_sig "$state/pauseover.status"); printf '%s' "$sig" > "$state/.seen-pauseover_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the declared pause never re-surfaced on its own cadence"; }
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the re-surface did not name the pause's external wait: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null \
+    && fail "a declared pause was re-surfaced with the merge-wait wording"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the declared pause re-surface was labelled a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a crew's own declared pause outranks a live merge-wait record, keeping its exemption from wedge aging and its own external-wait wording"
+}
+
+# --- a captain-held transfer keeps "awaiting the captain" ----------------------
+# The two declared waits get the same bounded cadence but block on different humans,
+# and handle_paused_stale exists to name the right one. A verified hold whose task
+# also carries an admissible green merge-wait record must still be rechecked as the
+# captain's to clear: a recheck that points the captain at an outside maintainer,
+# when the captain is the one holding the decision, is worse than no recheck at all.
+test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait() {
+  local dir state fakebin out capture_file window key pane_hash sig pid pr text
+  dir=$(make_case nonterminal-hold-over-merge-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-holdover"; pr='https://example.test/pr/20'
+  text='idle, a held decision is outstanding'
+  printf '%s' "$text" > "$capture_file"
+  seed_green_merge_task "$state" holdover "$window" "$text" "$pr" \
+    || fail "could not arm the fixture merge poll"
+  declare_merge_wait "$state" holdover || fail "could not declare the fixture merge wait"
+  printf 'captain-held: which base should this land on\n' > "$state/holdover.status"
+  sig=$(seen_sig "$state/holdover.status"); printf '%s' "$sig" > "$state/.seen-holdover_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$text")
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  # The run IS still at the green outcome, so crew_absorb_class would say merge-wait.
+  # The hold must win anyway, because the hold is what the captain has to clear.
+  export FM_FAKE_CREW_STATE="state: done · source: run-step · $FM_CLASSIFY_CHECKS_GREEN_DETAIL"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/holdover.status"
+  sig=$(seen_sig "$state/holdover.status"); printf '%s' "$sig" > "$state/.seen-holdover_status"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the captain-held transfer never re-surfaced on its own cadence"; }
+  grep -F "awaiting the captain" "$out" >/dev/null \
+    || fail "the held decision was not rechecked as the captain's to clear: $(cat "$out")"
+  grep -F "merge wait" "$out" >/dev/null \
+    && fail "a captain-held transfer was rechecked with the merge-wait wording, naming the wrong human"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a captain-held transfer aged into a possible wedge"
+  [ ! -e "$state/.merge-wait-$key" ] || fail "the merge-wait cadence took a window the captain hold owns"
+  [ -s "$state/holdover.check.sh" ] || fail "the merge poll did not survive the captain-held recheck"
+  unset FM_FAKE_CREW_STATE
+  pass "a verified captain-held transfer keeps its own awaiting-the-captain recheck even when the task carries an admissible merge-wait record"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -3258,6 +3517,9 @@ test_terminal_stale_merge_wait_cleared_record_returns_to_aging
 test_nonterminal_stale_declaration_after_classification_enters_the_cadence
 test_terminal_stale_merge_wait_declared_during_wedge_timer_never_escalates
 test_merge_wait_first_entry_rechecks_before_it_can_silence
+test_merge_wait_refusal_is_sticky_and_stops_realarming
+test_nonterminal_stale_declared_pause_outranks_a_merge_wait_record
+test_nonterminal_stale_captain_held_keeps_its_own_wording_over_a_merge_wait
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
