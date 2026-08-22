@@ -4445,6 +4445,39 @@ SH
   pass "fm_backend_herdr_cli: a hung control-socket RPC dies at FM_BACKEND_HERDR_CLI_TIMEOUT (${elapsed}s), 0 disables the bound"
 }
 
+test_cli_bound_preserves_failure_status() {
+  local dir fb rc
+  dir="$TMP_ROOT/cli-bound-status"; fb="$dir/fakebin"; mkdir -p "$fb"
+  # A herdr client killed by a signal (an OOM kill, a SIGSEGV, an operator or
+  # supervisor kill) must surface as a FAILED RPC, never as exit 0 with empty
+  # stdout: fm_backend_herdr_capture guards with `out=$(...) || return 1`, so a
+  # masked signal death would hand the watcher an empty pane as a real capture
+  # and hash it into a false "stale:" wake. Asserted on the host's own
+  # mechanism and again on the dependency-free fallback, because the bound is
+  # only trustworthy if every mechanism agrees on what failure looks like.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+kill -9 $$
+SH
+  chmod +x "$fb/herdr"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 137 ] || fail "a SIGKILLed herdr RPC must report 128+signal, got $rc"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli sess status --json' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 137 ] || fail "the dependency-free bound must also report 128+signal for a SIGKILLed RPC, got $rc"
+  rc=0
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLI_TIMEOUT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_bounded fm-no-such-command-xyz' "$ROOT" >/dev/null 2>&1 \
+    || rc=$?
+  [ "$rc" = 127 ] || fail "a bounded command with no executable must report 127, got $rc"
+  pass "fm_backend_herdr_bounded: signal deaths stay non-zero (137) on every mechanism and a missing executable reports 127"
+}
+
 test_events_capable_large_schema_is_pipe_noise_free() {
   local dir fb err rc
   dir="$TMP_ROOT/cap-schema"; fb="$dir/fakebin"; mkdir -p "$fb"
@@ -4687,5 +4720,6 @@ test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
 test_cli_bound_kills_hung_rpc
+test_cli_bound_preserves_failure_status
 test_events_capable_large_schema_is_pipe_noise_free
 test_wait_transition_hung_reader_bounded

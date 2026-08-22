@@ -86,6 +86,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# Bounded command execution (fm_run_timed). bin/fm-timeout-lib.sh is this
+# repo's single owner of that mechanism, so this adapter never re-derives the
+# coreutils/BSD/perl/bash selection, the process-group containment, or what
+# "the bound was hit" means. That library declares `set -u` for its own
+# hygiene, which a sourced sibling must not impose on THIS adapter's consumers
+# - several of them deliberately run without it - so the caller's setting is
+# restored around the source, exactly as bin/fm-classify-lib.sh does.
+case $- in *u*) _fm_backend_herdr_nounset=on ;; *) _fm_backend_herdr_nounset=off ;; esac
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
+[ "$_fm_backend_herdr_nounset" = on ] || set +u
+unset _fm_backend_herdr_nounset
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -373,40 +386,25 @@ fm_backend_herdr_workspace_label() {
 # launch) bypass it, via fm_backend_herdr_cli_unbounded.
 FM_BACKEND_HERDR_CLI_TIMEOUT=${FM_BACKEND_HERDR_CLI_TIMEOUT:-20}
 
-# fm_backend_herdr_bounded: run <command...> under FM_BACKEND_HERDR_CLI_TIMEOUT.
-# Prefers timeout(1)/gtimeout(1); falls back to a perl alarm wrapper (perl
-# ships on macOS, which lacks coreutils timeout by default). Exit 124 on a
-# killed run, mirroring timeout(1).
+# fm_backend_herdr_bounded: run <command...> under FM_BACKEND_HERDR_CLI_TIMEOUT,
+# through fm_run_timed. This function owns only the herdr-specific POLICY - the
+# knob, its default, and what disables it - while bin/fm-timeout-lib.sh owns
+# every mechanic the bound depends on: mechanism selection, TERM-then-KILL
+# escalation past a client that ignores TERM, whole-process-group containment
+# so a descendant holding this call's stdout cannot outlive the bound, a
+# dependency-free bash fallback on a host with no timeout/gtimeout/perl, and
+# the exit-status contract (124 for the bound, 128+signal for a signal death,
+# 127 for an un-exec'able command). That contract is what keeps the adapter's
+# `out=$(fm_backend_herdr_cli ...) || return 1` guards honest: a signal-killed
+# `pane read` must not read back as a successful capture of an empty pane.
 #
-# All three mechanisms escalate TERM to KILL: a herdr client wedged on the
-# control socket may never service a TERM handler, and `timeout` without
-# --kill-after then waits for that child forever - an unbounded hang inside
-# the very wrapper that exists to bound it.
-#
-# Exit status is the command's own, except that a signal death is reported as
-# 128+signal rather than collapsing to the low byte. The perl branch must do
-# that explicitly: `$? >> 8` is 0 for every signalled child, which would turn
-# a KILLed `herdr pane read` into a successful capture of an empty pane and
-# invert `... || return 1` guards across the adapter.
-#
-# A host with none of the three bounding mechanisms runs the command
-# unbounded, as it did before the bound existed: routing every RPC through a
-# wrapper that cannot run would disable the backend outright, which is a worse
-# failure than the hang this bound removes.
+# A non-positive or non-numeric bound is not a bound (`timeout 0` and the perl
+# fallback's `alarm 0` both disable the deadline), so 0 is rejected here and
+# runs the command directly rather than being handed to the owner.
 fm_backend_herdr_bounded() {  # <command...>
   local t=$FM_BACKEND_HERDR_CLI_TIMEOUT
   case "$t" in ''|*[!0-9]*|0) "$@"; return $? ;; esac
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 2 "$t" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 2 "$t" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV or exit 127 } my $stop = sub { kill "TERM", $pid; select undef, undef, undef, 0.2; kill "KILL", $pid; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; alarm $t; waitpid $pid, 0; my $st = $?; exit($st & 127 ? 128 + ($st & 127) : $st >> 8)' "$t" "$@"
-  else
-    "$@"
-    return $?
-  fi
+  fm_run_timed "$t" "$@"
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting

@@ -13,7 +13,11 @@
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
-#       reproduced by the perl and bash fallbacks).
+#       reproduced by the perl and bash fallbacks). A command killed by a
+#       signal reports 128+signal, never 0: a caller guarding with
+#       `out=$(...) || return 1` must not read a signal death (an OOM kill, a
+#       SIGSEGV, an operator kill) as a successful run that happened to
+#       produce empty output. A command that cannot be exec'd reports 127.
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
@@ -132,7 +136,7 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $st = $?; exit($st & 127 ? 128 + ($st & 127) : $st >> 8)' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;

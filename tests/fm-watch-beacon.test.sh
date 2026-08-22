@@ -12,6 +12,12 @@
 #     cycle beating and alive;
 #   - a backend whose every call HANGS is cut off by the herdr RPC bound
 #     (FM_BACKEND_HERDR_CLI_TIMEOUT) so the beacon still advances promptly.
+# The two supervision loops whose wall time scales with the fleet live in
+# shared libraries with non-watcher callers, so they reach the beacon through
+# FM_LIVENESS_BEAT_HOOK rather than calling watcher_beat directly. The final
+# cases pin that seam from both sides: the hook fires once per pending-reply
+# record and once per triaged signal task, and an unset hook stays a no-op for
+# every consumer that owns no beacon.
 # Both watchers run with SIGPIPE ignored, the disposition a Node-based arm
 # chain hands down and the environment the incident's broken-pipe noise came
 # from. The herdr-side units for the RPC bound, the pipe-noise-free capability
@@ -79,6 +85,20 @@ seed_herdr_window() {  # <state>
   fm_write_meta "$state/tsk.meta" "window=sess:wG:pQ" "backend=herdr" "kind=ship"
 }
 
+# One open pending-reply record for <task> under <state>, so the watcher's
+# per-cycle fm_pending_reply_tick has a record to iterate. That loop lives in a
+# shared library and reaches the beacon only through FM_LIVENESS_BEAT_HOOK, so
+# a record here is what proves the watcher actually wires the hook up.
+seed_pending_reply() {  # <state> <task>
+  local state=$1 task=$2
+  (
+    set +u
+    # shellcheck source=bin/fm-pending-reply-lib.sh
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    fm_pending_reply_create "$(dirname "$state")" "$state" "$task" "please report back"
+  ) >/dev/null
+}
+
 test_beacon_advances_when_every_backend_call_fails() {
   local dir state fakebin out pid
   dir=$(make_case beacon-backend-fails); state="$dir/state"; fakebin="$dir/fakebin"
@@ -107,6 +127,9 @@ test_beacon_advances_when_backend_hangs() {
   local dir state fakebin out pid start elapsed
   dir=$(make_case beacon-backend-hangs); state="$dir/state"; fakebin="$dir/fakebin"
   seed_herdr_window "$state"
+  # An open pending-reply record puts the shared-library tick in the cycle too,
+  # so this case covers the hook path as well as the watcher's own beats.
+  seed_pending_reply "$state" tsk
   # Every herdr invocation hangs far past the guard grace - the wedged
   # post-machine-sleep server. The RPC bound must cut each call so the cycle
   # keeps beating; without it this case burns 60s per call and the advance
@@ -132,7 +155,86 @@ SH
   pass "beacon keeps advancing within ${elapsed}s while every backend call hangs (RPC bound cuts each call)"
 }
 
+# The probe every hook case installs: one line per beat, so a case can count
+# how many times the loop under test refreshed the beacon.
+beat_probe_lines() {  # <beats-file>
+  local n
+  n=$(wc -l < "$1" 2>/dev/null | tr -d ' ')
+  printf '%s' "${n:-0}"
+}
+
+test_liveness_hook_beats_per_pending_reply_record() {
+  local dir state beats n
+  dir=$(make_case liveness-hook-pending-reply); state="$dir/state"; beats="$dir/beats"
+  : > "$beats"
+  (
+    set +u
+    # shellcheck source=bin/fm-pending-reply-lib.sh
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    beat_probe() { printf 'x\n' >> "$beats"; }
+    fm_pending_reply_create "$dir" "$state" alpha "first request" >/dev/null || exit 1
+    fm_pending_reply_create "$dir" "$state" bravo "second request" >/dev/null || exit 1
+    fm_pending_reply_create "$dir" "$state" charlie "third request" >/dev/null || exit 1
+    FM_LIVENESS_BEAT_HOOK=beat_probe fm_pending_reply_tick "$state" || exit 1
+  ) || fail "seeding and ticking three pending-reply records must succeed"
+  n=$(beat_probe_lines "$beats")
+  [ "$n" -ge 3 ] \
+    || fail "fm_pending_reply_tick must beat once per record; three records produced $n beats"
+  pass "fm_pending_reply_tick beats the liveness hook once per record ($n beats for 3 records)"
+}
+
+test_liveness_hook_beats_per_signal_triage_task() {
+  local dir state fakebin beats n
+  dir=$(make_case liveness-hook-signal-triage); state="$dir/state"; fakebin="$dir/fakebin"
+  beats="$dir/beats"
+  : > "$beats"
+  : > "$state/one.status"; : > "$state/two.status"; : > "$state/three.status"
+  (
+    set +u
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$ROOT/bin/fm-classify-lib.sh"
+    beat_probe() { printf 'x\n' >> "$beats"; }
+    # Every task provably working, so the batch runs to completion instead of
+    # short-circuiting on the first one.
+    export FM_FAKE_CREW_STATE='state: working · source: pane · fake'
+    FM_LIVENESS_BEAT_HOOK=beat_probe signal_crew_provably_working \
+      "$state/one.status" "$state/two.status" "$state/three.status" || exit 1
+  ) || fail "a three-task batch with every crew provably working must classify as absorbable"
+  n=$(beat_probe_lines "$beats")
+  [ "$n" -ge 3 ] \
+    || fail "signal_crew_provably_working must beat once per task; three tasks produced $n beats"
+  pass "signal_crew_provably_working beats the liveness hook once per task ($n beats for 3 tasks)"
+}
+
+test_liveness_hook_unset_is_a_noop() {
+  local dir state fakebin beats n
+  dir=$(make_case liveness-hook-unset); state="$dir/state"; fakebin="$dir/fakebin"
+  beats="$dir/beats"
+  : > "$beats"
+  : > "$state/one.status"
+  (
+    set +u
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+    # shellcheck source=bin/fm-pending-reply-lib.sh
+    . "$ROOT/bin/fm-pending-reply-lib.sh"
+    beat_probe() { printf 'x\n' >> "$beats"; }
+    fm_liveness_beat || exit 1
+    fm_pending_reply_create "$dir" "$state" alpha "first request" >/dev/null || exit 1
+    fm_pending_reply_tick "$state" || exit 1
+    export FM_FAKE_CREW_STATE='state: working · source: pane · fake'
+    signal_crew_provably_working "$state/one.status" || exit 1
+  ) || fail "with no hook set, both loops must behave exactly as they did before the hook existed"
+  n=$(beat_probe_lines "$beats")
+  [ "$n" -eq 0 ] \
+    || fail "an unset FM_LIVENESS_BEAT_HOOK must beat nothing, got $n beats"
+  pass "an unset liveness hook is a no-op for consumers that own no beacon"
+}
+
 test_beacon_advances_when_every_backend_call_fails
 test_beacon_advances_when_backend_hangs
+test_liveness_hook_beats_per_pending_reply_record
+test_liveness_hook_beats_per_signal_triage_task
+test_liveness_hook_unset_is_a_noop
 
 echo "fm-watch-beacon tests passed"
