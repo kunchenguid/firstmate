@@ -33,7 +33,9 @@
 #   scaffolds `jj bookmark create` instead of `git checkout -b` because the
 #   project's AGENTS.md forbids raw git write commands. The token implies
 #   captain-side jjhouse provisioning and is ignored by this parser, so the
-#   emitted mode/yolo are unaffected.
+#   emitted mode/yolo are unaffected. fm-brief.sh honours the token only when
+#   the jj/jjhouse tooling is on PATH, else it warns and falls back to the git
+#   branch step.
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.

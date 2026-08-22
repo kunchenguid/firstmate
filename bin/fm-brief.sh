@@ -30,8 +30,11 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context plus the optional `jj` opt-in token that
-# selects jj bookmarks for jj-managed projects; the delivery mode itself is never
-# read from it here - the explicit --mode is authoritative:
+# selects jj bookmarks for jj-managed projects when the jj/jjhouse tooling is
+# installed (without it the scaffold warns and falls back to the git branch step,
+# so the token never emits a mandatory command the worker cannot run); the
+# delivery mode itself is never read from it here - the explicit --mode is
+# authoritative:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -417,23 +420,39 @@ DOD=${DOD%$'\n'}
 # write commands and jj is their version control. The token is part of the
 # registry line format documented in bin/fm-project-mode.sh, so firstmate
 # records it once per project instead of hand-patching every brief.
+#
+# The token takes effect only when the tooling that makes the step executable
+# is present on this host (the same host the crew worktrees live on): `jj`
+# runs the bookmark command and `jjhouse` provisions the jj workspace pool.
+# A project marked jj-managed before that tooling is installed falls back to
+# the git branch step with a loud warning - never a mandatory command the
+# worker cannot run, and never a silent misconfiguration.
 JJ_MANAGED=0
 if [ -f "$DATA/projects.md" ]; then
+  # The token is read only from the documented registry line format: the mode
+  # bracket must open at field 3 right after the project name. Legacy rows
+  # without a bracket are never scanned, so bracket-like description text
+  # cannot be mistaken for an opt-in.
   JJ_TOKEN=$(awk -v n="$REPO" '
     $1=="-" && $2==n {
-      for (i=3; i<=NF; i++)
-        if ($i ~ /\]$/) {
-          if ($(i+1)=="jj") print "jj"
-          exit
-        }
+      if ($3 ~ /^\[/) {
+        for (i=3; i<=NF; i++)
+          if ($i ~ /\]$/) {
+            if ($(i+1)=="jj") print "jj"
+            break
+          }
+      }
       exit
     }
   ' "$DATA/projects.md")
   [ "$JJ_TOKEN" = jj ] && JJ_MANAGED=1
 fi
-if [ "$JJ_MANAGED" = 1 ]; then
+if [ "$JJ_MANAGED" = 1 ] && command -v jj >/dev/null 2>&1 && command -v jjhouse >/dev/null 2>&1; then
   BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
 else
+  if [ "$JJ_MANAGED" = 1 ]; then
+    echo "warn: $REPO is registered jj-managed but jj/jjhouse is not on PATH; falling back to the git branch step (provision jjhouse to activate the jj path)" >&2
+  fi
   BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
 fi
 
