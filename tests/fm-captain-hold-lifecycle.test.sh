@@ -1812,6 +1812,17 @@ SH
   assert_contains "$err" "$home/data/done-archive.md" \
     "the refusal must name the archive whose read failed"
 
+  # Two different things reach this refusal and the archive's mode is fine in this
+  # one, so it must not assert a cause it cannot know. Naming a mode or a symlink
+  # to repair sends the operator at a file that is not broken, which is the same
+  # confidently-wrong direction the old "absent" wording sent them in.
+  assert_contains "$err" "or the read of it did not complete" \
+    "the refusal must allow for a read that broke, not assert an unreadable path"
+  assert_not_contains "$err" "symlink" \
+    "a read that failed must not tell the operator to repair a symlink"
+  assert_not_contains "$err" "unreadable mode" \
+    "a read that failed must not tell the operator to repair a file mode"
+
   # Non-vacuity: the same gate passes the moment the read works again, so the
   # refusal above is the failed read and not the fixture.
   out=$(run_captain "$home" complete "$id" "$call" 2>&1) \
@@ -1819,6 +1830,95 @@ SH
   assert_contains "$out" "captain-call inventory reviewed" \
     "the later review pass over an archived origin was not recorded"
   pass "an archive read that fails refuses in its own words instead of disowning the origin"
+}
+
+# The legacy fallback runs only when the first probe genuinely MISSED, never when
+# it could not be settled, and this pair pins that because the reasoning beside it
+# does not survive a refactor. The two probes name different records, so ruling on
+# the legacy one while the keyed one is unreadable can pass a captain call that was
+# never answered. The fixture is one where the legacy record is real, live, and
+# answered, so falling through would look right and be wrong; only the archive's
+# readability differs between the halves, which is what makes the refusal
+# attributable to the archive read and to nothing else.
+test_an_unsettled_archive_read_outranks_the_legacy_identity() {
+  local home id key legacy out err
+  home=$(make_home retention-archive-legacy-fallback)
+  id=sample-fallback-origin
+  key=laterpick
+  legacy="$id-decision-$key"
+
+  # An unrelated closed row, trimmed by real retention, so this home HAS an
+  # archive file whose readability can be flipped without touching the record
+  # under test.
+  tasks_in "$home" add sample-fallback-filler "Trim this row" --repo sample >/dev/null \
+    || fail "could not create the filler row"
+  tasks_in "$home" "done" sample-fallback-filler >/dev/null \
+    || fail "could not close the filler row"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_grep "sample-fallback-filler" "$home/data/done-archive.md" \
+    "setup error: retention should have built the archive out of the filler row"
+
+  # The record the gate would rule on if it fell through: the LEGACY derived
+  # identity, alive in the backlog and carrying a real recorded captain answer.
+  tasks_in "$home" add "$legacy" "Choose the fallback option" --repo sample >/dev/null \
+    || fail "could not create the legacy call"
+  run_captain "$home" hold "$legacy" --reason "captain fallback choice pending" >/dev/null \
+    || fail "could not hold the legacy call"
+  printf 'Take the fallback option.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$legacy" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the captain's answer"
+  assert_grep "$legacy" "$home/data/backlog.md" \
+    "setup error: the answered legacy record must stay in the live backlog"
+  assert_no_grep "$legacy" "$home/data/done-archive.md" \
+    "setup error: the legacy record must not be archived, or the fallback is not what reaches it"
+
+  # Pre-collapse metadata names the bare key, and nothing anywhere is that key, so
+  # the fallback is the only thing that can resolve the entry.
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$key" >> "$home/state/$id.meta"
+  if tasks_in "$home" show "$key" --full >/dev/null 2>&1; then
+    fail "setup error: the bare key must name no task, or the fallback is never reached"
+  fi
+
+  # Half one, the quiet no-entry boundary: no archive file at all, so the read
+  # settles as a miss, the fallback runs, and the answered legacy record passes.
+  # This half is what proves the record really is reachable and answered, which is
+  # what makes the refusal in half two mean something.
+  mv "$home/data/done-archive.md" "$home/archive-parked.md" \
+    || fail "could not park the archive fixture"
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "the gate refused an answered legacy record while no archive existed: $out"
+  assert_contains "$out" "verified: $id captain-call inventory" \
+    "the fallback did not rule on the answered legacy record it reached"
+
+  # Half two, the same fixture with only the archive's readability changed: the
+  # first probe cannot be settled, so the gate must refuse rather than rule on a
+  # record other than the one it was asked about.
+  ln -s "$home/archive-parked.md" "$home/data/done-archive.md" \
+    || fail "could not make the archive unreadable"
+  if run_captain "$home" verify "$id" > "$home/fallback.out" 2> "$home/fallback.err"; then
+    fail "the gate ruled on the legacy identity while the keyed record's archive read was unsettled"
+  fi
+  err=$(cat "$home/fallback.err")
+  assert_contains "$err" "the archive could not be searched" \
+    "the refusal must name the archive read rather than a missing decision"
+  assert_contains "$err" "$home/data/done-archive.md" \
+    "the refusal must name the archive it could not search"
+  assert_not_contains "$err" "has no record" \
+    "an unsettled archive read must never read as a decision that is simply absent"
+
+  # And the flip back: readable again, and the same fixture passes again, so the
+  # refusal was the archive read and not something the symlink step disturbed.
+  rm -f "$home/data/done-archive.md"
+  mv "$home/archive-parked.md" "$home/data/done-archive.md" \
+    || fail "could not restore the archive fixture"
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "the gate stayed refused once the archive was readable again: $out"
+  assert_contains "$out" "verified: $id captain-call inventory" \
+    "the restored archive must leave the fallback ruling exactly as it did before"
+  pass "an archive read that cannot be settled outranks an answered legacy identity"
 }
 
 # A legacy key resolves through the composed `<origin>-decision-<key>` identity,
@@ -2071,6 +2171,7 @@ test_a_row_archived_mid_batch_is_still_read_out_of_the_archive
 test_archived_origin_still_owns_a_later_review_pass
 test_unopenable_archive_refuses_instead_of_reading_as_absent
 test_an_archive_read_error_never_disowns_the_origin
+test_an_unsettled_archive_read_outranks_the_legacy_identity
 test_an_archive_skip_names_the_probed_legacy_identity
 test_no_staged_archive_view_survives_a_reader
 test_markdown_config_forms_all_locate_the_archive

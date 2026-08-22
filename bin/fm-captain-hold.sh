@@ -315,11 +315,15 @@ unstageable_archive() {  # <task-id>
   fail "captain call $1 is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read, so this cannot confirm what the captain answered"
 }
 
-# The archive file itself could not be opened, so whether it holds this record is
-# unknown. It cannot claim the record is archived and it must never claim the
-# record is absent, and it names the id so the reader knows what was being asked.
+# The archive read never completed, so whether the archive holds this record is
+# unknown. TWO different things land here and the message must not pick one of
+# them: the path is there but is not a readable regular file, or the read itself
+# broke after the path opened. Naming only the first would send an operator to
+# check a mode and a symlink on a file whose mode is fine, so it states both and
+# prescribes no single repair. It cannot claim the record is archived and it must
+# never claim the record is absent, and it names the id being asked about.
 unsearchable_archive() {  # <task-id>
-  fail "$ARCHIVE_FILE exists but is not a readable regular file, so the archive could not be searched for $1; a record may well be in there, and a symlink or an unreadable mode has to be fixed before this can tell"
+  fail "the archive could not be searched for captain call $1: $ARCHIVE_FILE is not a readable regular file, or the read of it did not complete; a record may well be in there, so this cannot tell until that read works"
 }
 
 # Every archive-read failure, each said in its own words. None may degrade into
@@ -501,8 +505,24 @@ resolve_and_load() {  # <origin-or-empty> <entry>
   RESOLVED_ID=$entry
   load_durable_record "$entry" || rc=$?
   [ "$rc" -ne 0 ] || return 0
-  # Only a genuine miss falls through to the legacy identity. An archive read
-  # that failed either way is a hard stop, so a second lookup cannot bury it.
+  # ONLY A GENUINE MISS falls through to the legacy identity. An archive read
+  # that could not be settled is a hard stop, and this is not a safe
+  # simplification to remove later.
+  #
+  # The two probes name DIFFERENT records, so a legacy probe that succeeds does
+  # not answer the question the first probe left open: it hands
+  # verify_loaded_durable a record the caller never asked about. Concretely, the
+  # keyed identity is closed with no recorded captain answer inside the archive
+  # this read cannot open, the legacy identity is answered in the live backlog, and
+  # falling through would find that genuine answer and PASS while the captain call
+  # it was asked to settle was never answered. That is a false pass on an
+  # unanswered captain call, which is the one failure this read must not add.
+  #
+  # An unreadable archive means the gate does not know, and "do not know" must not
+  # be reported as settled in either direction. The cost is real and accepted: a
+  # scout whose calls were all properly answered can be blocked from cleanup until
+  # the archive path is repaired, which is the direction that cannot lose a
+  # captain's unanswered question.
   [ "$rc" -eq 1 ] || return "$rc"
   [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] || return 1
   legacy=$(legacy_hold_id "$origin" "$entry")
@@ -907,29 +927,24 @@ command_answers() {
     # trimmed out of the backlog resolves here like any other.
     resolve_rc=0
     resolve_and_load "$origin" "$key" || resolve_rc=$?
-    # These three name RESOLVED_ID, not the delivered key: for a legacy key the
-    # id that actually reached the archive is the composed identity, and naming
-    # the bare key would send a reader hunting a row nothing ever archived.
-    if [ "$resolve_rc" -eq 2 ]; then
-      printf 'skipped: %s (archived in %s but that record could not be read)\n' \
-        "$RESOLVED_ID" "$ARCHIVE_FILE"
+    # Every archive-read failure is one skip with a different reason, and all of
+    # them name RESOLVED_ID rather than the delivered key: for a legacy key the id
+    # that actually reached the archive is the composed identity, and naming the
+    # bare key would send a reader hunting a row nothing ever archived.
+    reason=''
+    case "$resolve_rc" in
+      2) reason="archived in $ARCHIVE_FILE but that record could not be read" ;;
+      3) reason="archived in $ARCHIVE_FILE but no readable copy of that archive could be staged" ;;
+      4) reason="the archive could not be searched: $ARCHIVE_FILE is not a readable regular file, or the read of it did not complete" ;;
+    esac
+    if [ -n "$reason" ]; then
+      printf 'skipped: %s (%s)\n' "$RESOLVED_ID" "$reason"
       skipped=$((skipped + 1))
       continue
     fi
-    if [ "$resolve_rc" -eq 3 ]; then
-      printf 'skipped: %s (archived in %s but no readable copy of that archive could be staged)\n' \
-        "$RESOLVED_ID" "$ARCHIVE_FILE"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    if [ "$resolve_rc" -eq 4 ]; then
-      printf 'skipped: %s (%s exists but is not a readable regular file, so the archive could not be searched)\n' \
-        "$RESOLVED_ID" "$ARCHIVE_FILE"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    # The genuine miss keeps the key: no identity resolved, so there is none to
-    # name, and the key is what the channel has to correct.
+    # The genuine miss is the one skip with a different SUBJECT: no identity
+    # resolved, so there is none to name, and the key is what the channel has to
+    # correct.
     if [ "$resolve_rc" -ne 0 ]; then
       printf 'skipped: %s (no captain-held task with that id in %s or %s)\n' \
         "$key" "$BACKLOG_FILE" "$ARCHIVE_FILE"

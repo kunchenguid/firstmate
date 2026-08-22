@@ -97,7 +97,7 @@ require_record() {  # <label> <task-id>
   [ "$rc" -ne 3 ] \
     || fail "$label $id is archived in $ARCHIVE_FILE but no readable copy of that archive could be staged; nothing was read"
   [ "$rc" -ne 4 ] \
-    || fail "$ARCHIVE_FILE exists but is not a readable regular file, so the archive could not be searched for $label $id"
+    || fail "the archive could not be searched for $label $id: $ARCHIVE_FILE is not a readable regular file, or the read of it did not complete"
   [ "$rc" -eq 0 ] \
     || fail "$label $id has no record: no task $id in $BACKLOG_FILE and none in $ARCHIVE_FILE"
 }
