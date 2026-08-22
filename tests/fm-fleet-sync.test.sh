@@ -12,6 +12,14 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
+# It also pins the fm/<task-id> backstop sweep (prune_merged_fm_branches,
+# backed by bin/fm-branch-merge-lib.sh's shared proof): a branch already
+# fast-forward-merged into local main is pruned even for a local-only-mode
+# project or a clone with no origin remote at all (prune_gone_branches never
+# reaches either, since both skip the whole remote-backed sync); an unmerged
+# branch, one still checked out in a worktree, and the project's own default
+# branch are all left untouched.
+#
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
@@ -370,6 +378,127 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+# --- prune_merged_fm_branches fixtures --------------------------------------
+#
+# fm-merge-local.sh's own effect, reproduced with plain git rather than by
+# invoking that script: an fm/<id> branch with one real commit, fast-forward
+# merged into local main. This is exactly the state fm-fleet-sync.sh's
+# fm/<task-id> sweep (prune_merged_fm_branches, backed by
+# bin/fm-branch-merge-lib.sh) must recognize as safely deletable.
+ff_merge_task_branch() {
+  local clone=$1 branch=$2 file=$3 content=$4
+  git -C "$clone" branch -q "$branch"
+  git -C "$clone" checkout -q "$branch"
+  printf '%s\n' "$content" > "$clone/$file"
+  git -C "$clone" add -- "$file"
+  git -C "$clone" -c user.email=t@t -c user.name=t commit -q -m "task work"
+  git -C "$clone" checkout -q main
+  git -C "$clone" merge -q --ff-only "$branch"
+}
+
+branch_exists() {
+  git -C "$1" show-ref --verify --quiet "refs/heads/$2"
+}
+
+test_local_only_prunes_merged_task_branch() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" sigma)
+  ff_merge_task_branch "$clone" fm/task-a feature.txt hello
+  mkdir -p "$home/data"
+  printf -- '- sigma [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "sigma: pruned fm/task-a" \
+    "local-only project still gets its merged fm/* branch swept"
+  branch_exists "$clone" fm/task-a \
+    && fail "local-only-prune: fm/task-a should have been deleted"
+  pass "the local-only backstop sweep prunes an fm/* branch already fast-forward-merged into local main"
+}
+
+test_no_origin_prunes_merged_task_branch() {
+  local home clone out
+  home=$(new_home)
+  clone="$home/projects/xi"
+  git init -q "$clone"
+  git -C "$clone" symbolic-ref HEAD refs/heads/main
+  commit_file "$clone" file.txt v0 C0
+  ff_merge_task_branch "$clone" fm/task-b feature.txt hello
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "xi: pruned fm/task-b" \
+    "a remote-less project still gets its merged fm/* branch swept"
+  branch_exists "$clone" fm/task-b \
+    && fail "no-origin-prune: fm/task-b should have been deleted"
+  pass "the backstop sweep runs with no origin remote at all (pure local-only clone, not just local-only mode)"
+}
+
+test_unmerged_task_branch_is_left_alone() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" omicron)
+  git -C "$clone" branch -q fm/task-c
+  git -C "$clone" checkout -q fm/task-c
+  commit_file "$clone" feature.txt hello "unmerged work"
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- omicron [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task-c" "an unmerged fm/* branch must never be reported as pruned"
+  branch_exists "$clone" fm/task-c \
+    || fail "unmerged-prune: fm/task-c was deleted despite never being merged"
+  pass "the backstop sweep leaves an unmerged/diverged fm/* branch untouched"
+}
+
+test_checked_out_task_branch_is_left_alone() {
+  local home clone out wt
+  home=$(new_home)
+  clone=$(build_pair "$home" pi_project)
+  ff_merge_task_branch "$clone" fm/task-d feature.txt hello
+  # Add a worktree on the branch, exactly like a live/not-yet-torn-down task:
+  # still checked out even though its content already landed on main.
+  wt="$home/wt-task-d"
+  git -C "$clone" worktree add -q "$wt" fm/task-d
+  mkdir -p "$home/data"
+  printf -- '- pi_project [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task-d" "a branch still checked out in a worktree must never be reported as pruned"
+  branch_exists "$clone" fm/task-d \
+    || fail "checked-out-prune: fm/task-d was deleted while still checked out in $wt"
+  pass "the backstop sweep leaves an fm/* branch with an active worktree untouched"
+}
+
+test_prune_never_targets_the_default_branch() {
+  local home clone
+  home=$(new_home)
+  clone=$(build_pair "$home" rho)
+  mkdir -p "$home/data"
+  printf -- '- rho [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  run_sync "$home" "$clone" >/dev/null
+
+  branch_exists "$clone" main || fail "default-branch-guard: main was removed by the sweep"
+  [ "$(git -C "$clone" symbolic-ref --quiet --short HEAD 2>/dev/null)" = main ] \
+    || fail "default-branch-guard: the clone is no longer on main after the sweep"
+
+  # Direct exercise of fm-branch-merge-lib.sh's own defensive guard (its public
+  # function interface, not its source text): a caller that ever named the
+  # default branch itself as the delete candidate must still be refused, since
+  # every branch is trivially its own ancestor.
+  # shellcheck source=bin/fm-branch-merge-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-branch-merge-lib.sh"
+  if fm_branch_is_safely_merged "$clone" main refs/heads/main; then
+    fail "default-branch-guard: fm_branch_is_safely_merged approved deleting the branch named as its own merge target"
+  fi
+  pass "the sweep and its shared proof both refuse to ever target the default/protected branch"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -613,6 +742,11 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_local_only_prunes_merged_task_branch
+test_no_origin_prunes_merged_task_branch
+test_unmerged_task_branch_is_left_alone
+test_checked_out_task_branch_is_left_alone
+test_prune_never_targets_the_default_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

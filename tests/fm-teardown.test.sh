@@ -210,6 +210,13 @@ write_meta() {
     "mode=$mode"
 }
 
+# True when refs/heads/fm/task-x1 still exists in the shared project repo
+# ($case_dir/wt is a linked worktree of $case_dir/project, so either path
+# resolves the same ref). Args: case_dir
+task_branch_exists() {
+  git -C "$1/project" show-ref --verify --quiet refs/heads/fm/task-x1
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -650,7 +657,13 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
-  pass "local-only worktree with work merged into local main is torn down (no regression)"
+  # This is the exact concrete-trigger shape: a local-only task whose branch
+  # was fast-forward merged into main (bin/fm-merge-local.sh's own effect).
+  # Its fm/task-x1 branch must not be left behind for firstmate to clean up by
+  # hand once teardown itself has confirmed the merge and torn the task down.
+  task_branch_exists "$case_dir" \
+    && fail "merged-main: fm/task-x1 was left behind after a landed local-only teardown"
+  pass "local-only worktree with work merged into local main is torn down (no regression), and its task branch is dropped inline"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -764,7 +777,13 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
-  pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+  # A PR merged outside firstmate's own fm-pr-check.sh/fm-pr-merge.sh flow (no
+  # pr= ever recorded) is fully reconciled by this same discovery path: once
+  # teardown proceeds, the task's own fm/task-x1 branch becomes eligible for
+  # - and gets - the same inline cleanup as any other landed task.
+  task_branch_exists "$case_dir" \
+    && fail "no-pr-branch-discovery: fm/task-x1 was left behind after teardown reconciled the externally-merged PR"
+  pass "teardown discovers a merged PR by branch name, tears down when no pr= was ever recorded, and drops its task branch"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
