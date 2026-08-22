@@ -25,6 +25,19 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Home language (config/language)
+
+The home language chooses visible Firstmate product strings such as Calm's `/calm` help text and built-in collision warning.
+Store the choice in gitignored `config/language` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The first non-empty, non-`#` line is a lowercase language tag such as `en`, `de`, `es`, or `fr-ca`.
+An absent, unreadable, or unrecognized value defaults to `en`.
+English is the source catalog and the fallback; no other language is preferred by the resolver.
+Additional languages are optional JSON catalogs, either a tracked pack at `languages/<tag>.json` in the code root or a home-local overlay at `config/languages/<tag>.json`.
+A local overlay wins over a tracked pack for the same tag, and a more specific tag (`es-mx`) falls back through its primary tag (`es`) to English.
+Background diagnostics and internal logs stay English.
+This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+`.pi/extensions/lib/fm-language.ts` owns lookup and formatting.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
