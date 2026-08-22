@@ -16,6 +16,7 @@ POST_SNAPSHOT_CONFIG_FILTER=
 POST_FINAL_DIRECTORY=0
 POST_BRIEF_LINK_DIRECTORY=0
 POST_FINAL_LINK_DIRECTORY=0
+POST_PENDING_DIRECTORY=0
 
 chmod() {
   local target=${!#}
@@ -67,6 +68,18 @@ jq() {
 
 perl() {
   local target=${!#} external
+  if [ "$POST_FINAL_DIRECTORY" -eq 1 ] \
+    && [[ "$target" == */pending.consumed.json ]]; then
+    mkdir "$TASK_DIR/routing-decision.json" || return 1
+    POST_FINAL_DIRECTORY=0
+  fi
+  if [ "$POST_PENDING_DIRECTORY" -eq 1 ] \
+    && [[ "$target" == */pending.consumed.json ]]; then
+    mv "$TASK_DIR/routing-decision.pending.json" "$TASK_DIR/routing-decision.original.json" || return 1
+    mkdir "$TASK_DIR/routing-decision.pending.json" || return 1
+    printf 'replacement directory sentinel\n' > "$TASK_DIR/routing-decision.pending.json/sentinel" || return 1
+    POST_PENDING_DIRECTORY=0
+  fi
   case "$target" in
     */routing-brief.*.md)
       if [ "$POST_BRIEF_LINK_DIRECTORY" -eq 1 ]; then
@@ -212,6 +225,38 @@ setup_relaunch_task() {
     echo 'harness=codex'
     echo 'kind=ship'
     echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-t1'
+    echo 'model=default'
+    echo 'effort=default'
+    echo "routing_decision=$TASK_DIR/prior-routing-decision.json"
+  } > "$HOME_DIR/state/t1.meta"
+  cp "$HOME_DIR/state/t1.meta" "$LAB/relaunch-meta.before"
+}
+
+setup_secondmate_relaunch_task() {
+  local secondmate_home="$LAB/secondmate-home"
+  RELAUNCH_WT=$secondmate_home
+  RELAUNCH_PANE_LOG="$LAB/relaunch-pane.log"
+  RELAUNCH_ENDPOINT_LOG="$LAB/relaunch-endpoint.log"
+  RELAUNCH_LEASE_LOG="$LAB/relaunch-lease.log"
+  mkdir -p "$secondmate_home/bin"
+  printf 't1\n' > "$secondmate_home/.fm-secondmate-home"
+  printf '# Secondmate fixture\n' > "$secondmate_home/AGENTS.md"
+  : > "$RELAUNCH_PANE_LOG"
+  : > "$RELAUNCH_ENDPOINT_LOG"
+  : > "$RELAUNCH_LEASE_LOG"
+  printf 'zsh' > "$LAB/relaunch-command"
+  printf '{}\n' > "$TASK_DIR/prior-routing-decision.json"
+  {
+    echo 'window=fmses:fm-t1'
+    echo 'endpoint_task_id=t1'
+    echo "worktree=$secondmate_home"
+    echo "project=$secondmate_home"
+    echo "home=$secondmate_home"
+    echo 'harness=codex'
+    echo 'kind=secondmate'
+    echo 'mode=secondmate'
     echo 'yolo=off'
     echo 'tasktmp=/tmp/fm-t1'
     echo 'model=default'
@@ -369,6 +414,7 @@ write_fixture() {
   POST_FINAL_DIRECTORY=0
   POST_BRIEF_LINK_DIRECTORY=0
   POST_FINAL_LINK_DIRECTORY=0
+  POST_PENDING_DIRECTORY=0
   RUN_CWD=
 }
 
@@ -622,6 +668,14 @@ setup_pending_symlink() {
 }
 setup_pending_replaced_after_snapshot() {
   POST_SNAPSHOT_SOURCE_FILTER='.rationale = "replacement after validation began"'
+}
+setup_pending_directory_after_snapshot() { POST_PENDING_DIRECTORY=1; }
+
+assert_pending_directory_preserved() {
+  [ -d "$TASK_DIR/routing-decision.pending.json" ] \
+    || fail "pending receipt directory replacement was not restored"
+  printf 'replacement directory sentinel\n' | cmp -s - "$TASK_DIR/routing-decision.pending.json/sentinel" \
+    || fail "pending receipt directory replacement contents were changed or deleted"
 }
 setup_selection_order_tamper() { update_receipt '.selection_order |= reverse'; }
 setup_quota_byte_mutation() { write_multi_fixture; printf '\n' >> "$TASK_DIR/quota-snapshot.json"; }
@@ -943,6 +997,10 @@ codex config model equals|codex --model opus -c=model=sonnet -c model_reasoning_
 codex profile separate|codex --model opus -c model_reasoning_effort=high --profile fast|raw launch uses an unattested Codex model or provider configuration
 codex profile equals|codex --model opus -c model_reasoning_effort=high --profile=fast|raw launch uses an unattested Codex model or provider configuration
 codex oss provider|codex --model opus -c model_reasoning_effort=high --oss --local-provider ollama|raw launch uses an unattested Codex model or provider configuration
+muse provider separate|muse --model opus --reasoning-effort high --provider echo|raw launch uses an unattested provider, account, router, or backend selector
+muse account equals|muse --model opus --reasoning-effort high --account=alternate|raw launch uses an unattested provider, account, router, or backend selector
+muse router separate|muse --model opus --reasoning-effort high --router direct|raw launch uses an unattested provider, account, router, or backend selector
+muse backend equals|muse --model opus --reasoning-effort high --backend=echo|raw launch uses an unattested provider, account, router, or backend selector
 command wrapper env|env ROUTE_MODEL=sonnet claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper arch|arch claude --model opus --effort high|raw launch command head is not a supported harness executable
 command wrapper taskset|taskset -c 0 claude --model opus --effort high|raw launch command head is not a supported harness executable
@@ -1011,13 +1069,28 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
 exercise_negative "61 pending receipt replaced after snapshot" PERSISTENCE_REFUSED setup_pending_replaced_after_snapshot \
-  "pending receipt changed after its validation snapshot"
-exercise_negative "62 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
+  "pending receipt changed or disappeared after its validation snapshot"
+exercise_negative "62 pending receipt directory after snapshot" PERSISTENCE_REFUSED setup_pending_directory_after_snapshot \
+  "pending receipt changed or disappeared after its validation snapshot" assert_pending_directory_preserved
+exercise_negative "63 final directory raced after target check" PERSISTENCE_REFUSED setup_final_directory_after_check \
   "validated receipt could not be persisted atomically"
-exercise_negative "63 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
+exercise_negative "64 brief target raced to directory symlink" PERSISTENCE_REFUSED setup_brief_link_directory_race \
   "validated brief snapshot could not be published at its hash-addressed path" assert_brief_link_directory_race
-exercise_negative "64 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
+exercise_negative "65 receipt target raced to directory symlink" PERSISTENCE_REFUSED setup_final_link_directory_race \
   "validated receipt could not be persisted atomically" assert_final_link_directory_race
+
+write_fixture
+setup_final_directory
+setup_secondmate_relaunch_task
+secondmate_out=$(run_relaunch_spawn "$SPAWN")
+secondmate_status=$?
+expect_code 1 "$secondmate_status" "route-changing secondmate relaunch should refuse a hostile final receipt"
+assert_contains "$secondmate_out" "ROUTING_DECISION PERSISTENCE_REFUSED" \
+  "route-changing secondmate relaunch named the wrong refusal predicate"
+assert_absent "$RELAUNCH_WT/state" \
+  "route-changing secondmate relaunch mutated its home before receipt commitment"
+assert_relaunch_refused_before_effects
+pass "route-changing secondmate relaunch commits before home mutation"
 
 write_fixture
 expected_config_hash=$(jq -r '.dispatch_config.sha256' "$TASK_DIR/routing-decision.pending.json")
@@ -1029,7 +1102,7 @@ run_validator_then_effects >/dev/null 2>&1 || fail "canonical config replacement
   || fail "canonical config replacement counterexample did not fire"
 pass "canonical config replacement cannot change snapshotted candidate resolution"
 
-expected_count=$((120 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((125 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

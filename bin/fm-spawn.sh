@@ -1724,46 +1724,6 @@ if [ "$KIND" = secondmate ]; then
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
   WT="$PROJ_ABS"
-  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
-  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
-  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
-    case "$sm_ff_out" in
-      *': skipped:'*)
-        sm_ff_line=$(first_line "$sm_ff_out")
-        sm_ff_prefix="secondmate $ID: skipped: "
-        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
-        ;;
-    esac
-  else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
-  fi
-  mkdir -p "$PROJ_ABS/state" || {
-    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
-    exit 1
-  }
-  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
-    CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
-      echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
-      exit 1
-    }
-    if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
-      echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
-      exit 1
-    fi
-    CONFIG_INHERIT_LOCK_HELD=1
-    # Inheritance propagation: push the primary-authoritative live-safe local inheritance
-    # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
-      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
-      || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
-  fi
   if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
     BRIEF=$FM_ROUTING_BRIEF_FINAL
   elif [ -f "$PROJ_ABS/data/charter.md" ]; then
@@ -1992,6 +1952,49 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
     echo "error: validated routing transaction could not be sealed" >&2
     exit 1
   }
+fi
+
+if [ "$KIND" = secondmate ]; then
+  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
+  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
+  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
+  # spawn section). Purely local - no fetch: the home is a worktree of this same
+  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
+  # wrong-branch home is left untouched and launches as-is. The agent re-reads
+  # AGENTS.md fresh on launch, so no nudge is needed here.
+  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    case "$sm_ff_out" in
+      *': skipped:'*)
+        sm_ff_line=$(first_line "$sm_ff_out")
+        sm_ff_prefix="secondmate $ID: skipped: "
+        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+        ;;
+    esac
+  else
+    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+  fi
+  mkdir -p "$PROJ_ABS/state" || {
+    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
+    exit 1
+  }
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
+    CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
+      echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
+      exit 1
+    }
+    if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
+      echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
+      exit 1
+    fi
+    CONFIG_INHERIT_LOCK_HELD=1
+    # Inheritance propagation: push the primary-authoritative live-safe local inheritance
+    # surface into this secondmate home (fm-config-inherit-lib.sh).
+    FM_CONFIG_INHERIT_LIVE=1 \
+      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
+      || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  fi
 fi
 
 W="fm-$ID"

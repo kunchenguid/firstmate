@@ -29,6 +29,7 @@ FM_ROUTING_PREPARED_DATA=
 FM_ROUTING_PREPARED_ID=
 FM_ROUTING_PREPARED_SOURCE_PENDING=
 FM_ROUTING_PREPARED_COMMITTED=0
+FM_ROUTING_PREPARED_UNSAFE=0
 FM_ROUTING_DECISION_MAX_AGE_SECONDS=300
 FM_ROUTING_DECISION_MAX_FUTURE_SECONDS=30
 
@@ -83,6 +84,40 @@ fm_routing_private_input() {
 
 fm_routing_link_exact() {
   perl -e 'use strict; my ($source, $target) = @ARGV; link($source, $target) or exit 1' -- "$1" "$2"
+}
+
+fm_routing_link_regular_exact() {
+  perl -e '
+    use strict;
+    my ($source, $target) = @ARGV;
+    my @source = lstat($source) or exit 1;
+    exit 1 unless -f _ && !-l _;
+    link($source, $target) or exit 1;
+    my @target = lstat($target) or exit 1;
+    unless (-f _ && !-l _ && $source[0] == $target[0] && $source[1] == $target[1]) {
+      unlink($target);
+      exit 1;
+    }
+  ' -- "$1" "$2"
+}
+
+fm_routing_consume_regular_exact() {
+  perl -e '
+    use strict;
+    use Errno qw(ENOENT);
+    use Fcntl qw(S_ISREG);
+    my ($source, $validated, $consumed) = @ARGV;
+    rename($source, $consumed) or exit 1;
+    my @consumed = lstat($consumed);
+    my @validated = stat($validated);
+    if (!@consumed || !@validated || !S_ISREG($consumed[2])
+        || $consumed[0] != $validated[0] || $consumed[1] != $validated[1]) {
+      if (!lstat($source) && $! == ENOENT && rename($consumed, $source)) {
+        exit 1;
+      }
+      exit 2;
+    }
+  ' -- "$1" "$2" "$3"
 }
 
 fm_routing_restore_consumed_pending() {
@@ -367,6 +402,10 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested Codex model or provider configuration"
           return 1
         fi
+        ;;
+      --*provider*|--*account*|--*router*|--*backend*)
+        fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch uses an unattested provider, account, router, or backend selector"
+        return 1
         ;;
       --effort|--reasoning-effort|--thinking)
         [ "$FM_ROUTING_COMMAND_EFFORT_SEEN" -eq 0 ] \
@@ -838,13 +877,14 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
 fm_routing_decision_persist_prepared() {
   local snapshot_dir=$FM_ROUTING_PREPARED_DIR data=$FM_ROUTING_PREPARED_DATA
   local id=$FM_ROUTING_PREPARED_ID source_pending=$FM_ROUTING_PREPARED_SOURCE_PENDING
-  local task_dir pending brief final brief_final brief_anchor brief_hash consumed_pending generated_at
+  local task_dir pending validated_pending brief final brief_final brief_anchor brief_hash consumed_pending generated_at status
   [ -n "$snapshot_dir" ] && [ -d "$snapshot_dir" ] && [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 0 ] || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "no validated routing transaction is prepared"
     return 1
   }
   task_dir="$data/$id"
   pending="$task_dir/routing-decision.pending.json"
+  validated_pending="$snapshot_dir/pending.validated.json"
   brief="$task_dir/brief.md"
   final="${source_pending%.pending.json}.json"
   brief_hash=$FM_ROUTING_BRIEF_HASH
@@ -876,26 +916,29 @@ fm_routing_decision_persist_prepared() {
     }
     brief_anchor=$brief
   fi
-  chmod 0600 "$pending" || {
+  chmod 0600 "$validated_pending" || {
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt permissions could not be restricted"
     return 1
   }
   consumed_pending="$snapshot_dir/pending.consumed.json"
-  mv -- "$source_pending" "$consumed_pending" 2>/dev/null || {
+  fm_routing_consume_regular_exact "$source_pending" "$validated_pending" "$consumed_pending" 2>/dev/null
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    [ "$status" -ne 2 ] || FM_ROUTING_PREPARED_UNSAFE=1
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed or disappeared after its validation snapshot"
     return 1
-  }
+  fi
   if ! cmp -s "$pending" "$consumed_pending"; then
     fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "pending receipt changed after its validation snapshot"
     return 1
   fi
-  fm_routing_link_exact "$pending" "$final" 2>/dev/null || {
+  fm_routing_link_exact "$validated_pending" "$final" 2>/dev/null || {
     fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt could not be persisted atomically"
     return 1
   }
-  if [ ! -f "$final" ] || [ -L "$final" ] || [[ ! "$final" -ef "$pending" ]] \
+  if [ ! -f "$final" ] || [ -L "$final" ] || [[ ! "$final" -ef "$validated_pending" ]] \
     || ! cmp -s "$final" "$consumed_pending"; then
     fm_routing_restore_consumed_pending "$consumed_pending" "$source_pending"
     fm_routing_refuse "PERSISTENCE_REFUSED" "validated receipt was not published as the exact regular-file target"
@@ -903,7 +946,7 @@ fm_routing_decision_persist_prepared() {
   fi
   if [ ! -f "$brief_final" ] || [ -L "$brief_final" ] || [[ ! "$brief_final" -ef "$brief_anchor" ]] \
     || ! cmp -s "$brief_final" "$brief"; then
-    fm_routing_rollback_exact "$final" "$pending" "$consumed_pending" "$source_pending" || {
+    fm_routing_rollback_exact "$final" "$validated_pending" "$consumed_pending" "$source_pending" || {
       fm_routing_refuse "PERSISTENCE_REFUSED" "validated routing transaction could not be rolled back safely"
       return 1
     }
@@ -916,13 +959,14 @@ fm_routing_decision_persist_prepared() {
 }
 
 fm_routing_decision_discard_prepared() {
-  local pending consumed final
+  local validated consumed final
   [ -n "$FM_ROUTING_PREPARED_DIR" ] || return 0
-  pending="$FM_ROUTING_PREPARED_DATA/$FM_ROUTING_PREPARED_ID/routing-decision.pending.json"
+  [ "$FM_ROUTING_PREPARED_UNSAFE" -eq 0 ] || return 1
+  validated="$FM_ROUTING_PREPARED_DIR/pending.validated.json"
   consumed="$FM_ROUTING_PREPARED_DIR/pending.consumed.json"
   final="${FM_ROUTING_PREPARED_SOURCE_PENDING%.pending.json}.json"
   if [ "$FM_ROUTING_PREPARED_COMMITTED" -eq 1 ]; then
-    fm_routing_rollback_exact "$final" "$pending" "$consumed" "$FM_ROUTING_PREPARED_SOURCE_PENDING" || return 1
+    fm_routing_rollback_exact "$final" "$validated" "$consumed" "$FM_ROUTING_PREPARED_SOURCE_PENDING" || return 1
   fi
   rm -rf -- "$FM_ROUTING_PREPARED_DIR"
   FM_ROUTING_PREPARED_DIR=
@@ -930,6 +974,7 @@ fm_routing_decision_discard_prepared() {
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
   FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_UNSAFE=0
   FM_ROUTING_DECISION_FINAL=
   FM_ROUTING_BRIEF_FINAL=
   FM_ROUTING_BRIEF_HASH=
@@ -944,6 +989,7 @@ fm_routing_decision_seal_prepared() {
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
   FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_UNSAFE=0
 }
 
 fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
@@ -958,6 +1004,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   FM_ROUTING_PREPARED_ID=
   FM_ROUTING_PREPARED_SOURCE_PENDING=
   FM_ROUTING_PREPARED_COMMITTED=0
+  FM_ROUTING_PREPARED_UNSAFE=0
   task_dir="$data/$id"
   source_pending="$task_dir/routing-decision.pending.json"
   source_intent="$task_dir/routing-intent.json"
@@ -989,7 +1036,8 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot layout could not be created"
     return 1
   }
-  if ! cp "$source_pending" "$snapshot_data/$id/routing-decision.pending.json" \
+  if ! fm_routing_link_regular_exact "$source_pending" "$snapshot_dir/pending.validated.json" \
+    || ! cp "$snapshot_dir/pending.validated.json" "$snapshot_data/$id/routing-decision.pending.json" \
     || ! cp "$source_intent" "$snapshot_data/$id/routing-intent.json" \
     || ! cp "$source_brief" "$snapshot_data/$id/brief.md"; then
     rm -rf -- "$snapshot_dir"
