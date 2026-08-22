@@ -118,17 +118,25 @@ is_canonical_claude_pointer() {
 }
 
 # A CLAUDE.md that is not the canonical pointer but carries real document
-# structure (two or more headings) or enough content to be more than a
-# trivial stub (more than AUTHORED_MIN_LINES lines) is judged authored rather
-# than a placeholder. Promoting an authored file would silently restructure
-# deliberate content, so it is refused instead of moved, the same way a
-# distinct real AGENTS.md/CLAUDE.md pair is refused elsewhere in this script.
+# structure (two or more headings), enough total content to be more than a
+# trivial stub (more than AUTHORED_MIN_LINES lines), or more than one
+# substantive (non-heading, non-blank) content line is judged authored rather
+# than a placeholder. A generated stub is a single heading followed by a
+# single one-line instruction; anything with a second content line is already
+# more than a placeholder can hold, even when it still fits in a handful of
+# lines under one heading (issue: a short one-heading router-style file was
+# still being classified as a placeholder and silently promoted). Promoting
+# an authored file would silently restructure deliberate content, so it is
+# refused instead of moved, the same way a distinct real AGENTS.md/CLAUDE.md
+# pair is refused elsewhere in this script.
 AUTHORED_MIN_LINES=12
 is_authored_claude_md() {
-  local headings lines
+  local headings lines content_lines
   headings=$(grep -c '^#' "$CLAUDE" 2>/dev/null) || headings=0
   lines=$(awk 'END { print NR }' "$CLAUDE" 2>/dev/null) || lines=0
-  [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ]
+  content_lines=$(awk '!/^#/ && NF { c++ } END { print c+0 }' "$CLAUDE" 2>/dev/null) || content_lines=0
+  [ "${headings:-0}" -ge 2 ] || [ "${lines:-0}" -gt "$AUTHORED_MIN_LINES" ] ||
+    [ "${content_lines:-0}" -gt 1 ]
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
