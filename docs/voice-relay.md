@@ -36,10 +36,8 @@ out-of-band capture already uses, rather than a second queue.
 
 ## What it costs in time
 
-Measured on 2026-08-22 against the reviewed relay code, `amazon.nova-2-sonic-v1:0`
-in `eu-north-1`, on a spoken question that makes the agent read the records before
-it can answer, which is the slowest ordinary case. Six runs each, all six answered
-each way.
+Measured on 2026-08-21 against the reviewed relay code, `amazon.nova-2-sonic-v1:0` in `eu-north-1`, on a spoken question that makes the agent read the records before it can answer, which is the slowest ordinary case.
+Six runs each, all six answered each way.
 
 | Path | First audio out, seconds | Median |
 | --- | --- | --- |
@@ -72,13 +70,16 @@ reuses that answer, so a reconnect costs a reconnect.
 
 What the relay figure does NOT include, and could not be measured from here:
 
-- **Your laptop's round trip to this desktop.** The measurement ran over
-  `ssh localhost`, so the network hop is zero. Add roughly your own round trip
-  time: the audio goes up and the reply comes back, so it lands about once.
-- **Microphone capture and speaker output latency.** This desktop has no
-  microphone and no speaker, so every measurement used audio files. The client
-  reports both device figures in its own output, so your first live run measures
-  them rather than guessing.
+- **The SSH hop itself.**
+These runs drove the relay as a local child process, which is the identical relay command with only the `ssh -T <host>` prefix omitted, so the client, the framing, the uplink ordering, the relay, the records read and the handover are all real and only the SSH subprocess is absent.
+Two facts bound what its absence can be hiding.
+A constant transport cost cannot produce the turn-by-turn step that the credential defect produced, and the first pass, which did run over `ssh localhost`, put its own first turn 0.009 seconds above its own direct control.
+Neither of those is a measurement of the SSH path on this code, and neither is offered as one.
+- **Your laptop's round trip to this desktop.**
+Add roughly your own round trip time: the audio goes up and the reply comes back, so it lands about once.
+- **Microphone capture and speaker output latency.**
+This desktop has no microphone and no speaker, so every measurement used audio files.
+The client reports both device figures in its own output, so your first live run measures them rather than guessing.
 
 So your number is about 1.15 to 1.3 seconds plus your round trip time plus your
 audio devices. It is worth saying plainly that this came in under the bottom of
@@ -271,8 +272,9 @@ these are the shapes.
 
 ## Cost
 
-`$0.00293` per exchange on the numbers above, which is roughly a dollar for three
-hundred and forty questions. Push to talk is `$0.0101` per minute of session
+`$0.00293` per exchange, derived from the first pass's token counts and session seconds, which is roughly a dollar for three hundred and forty questions.
+The re-measured exchange is about a quarter of a second shorter, worth about `$0.00004` at the session rate below, so the figure is unchanged at the precision it is quoted to.
+Push to talk is `$0.0101` per minute of session
 against `$0.0151` with an open microphone.
 
 Text in and out is materially dearer on this model version than the one it
