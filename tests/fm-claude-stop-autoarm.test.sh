@@ -34,7 +34,16 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-wake-context.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
+  printf 'context fixture failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
+  exit 1
+fi
+printf 'CLAUDE_CONTEXT_PACKET\n'
+SH
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  chmod +x "$dir/bin/fm-wake-context.sh"
 }
 
 make_primary_dir() {
@@ -339,12 +348,26 @@ test_actionable_close_rewakes_with_reason() {
   expect_code 2 "$status" "an actionable arm close must exit 2 so Claude rewakes"
   assert_contains "$out" "firstmate watcher wake" "rewake must carry the wake banner"
   assert_contains "$out" "stale: fixture-win actionable" "rewake must carry the arm's reason line"
-  assert_contains "$out" "bin/fm-wake-drain.sh" "rewake must direct the drain-first protocol"
+  assert_contains "$out" "CLAUDE_CONTEXT_PACKET" "rewake must attach the wake-context presentation"
+  assert_not_contains "$out" "bin/fm-wake-drain.sh" "attached packet must avoid a redundant drain"
   assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "rewake must forbid a duplicate model re-arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
+}
+
+test_actionable_close_surfaces_context_fallback() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-context-fallback")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(FM_WAKE_CONTEXT_FIXTURE_FAIL=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "context failure must preserve Claude's actionable rewake"
+  assert_contains "$out" "context fixture failed on stderr" "Claude dropped context stderr"
+  assert_contains "$out" "WAKE_CONTEXT_FALLBACK:" "Claude omitted the canonical context fallback"
+  [ "$(printf '%s\n' "$out" | grep -c 'WAKE_CONTEXT_FALLBACK:')" -eq 1 ] || fail "Claude duplicated the canonical fallback: $out"
+  pass "auto-arm: Claude delivers context stderr and canonical fallback"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -795,6 +818,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_actionable_close_surfaces_context_fallback
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

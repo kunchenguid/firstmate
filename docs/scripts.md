@@ -91,7 +91,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
-| `fm-wake-drain.sh`       | Present durable watcher wakes, unread informational status lines, OPEN DECISIONS, and captain-call RECORD DIVERGENCE, consume acknowledged rows through their sequence, retire only the matching recovery generation, then assert supervision health |
+| `fm-wake-drain.sh`       | Present durable watcher wakes, unread informational status lines, OPEN DECISIONS, and captain-call RECORD DIVERGENCE, supersede an older fallback receipt, consume acknowledged rows through their sequence, commit a matching staged wake-context packet or fallback cursor, retire only the matching recovery generation, then assert supervision health |
+| `fm-wake-context.sh`     | Present and replay one byte-bounded `fm-wake-context.v1` packet for Claude, Codex, or Pi, preserving the complete drain presentation and a minimal fallback acknowledgement receipt |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared wake-classification vocabulary, durable keyed-decision folds and scans, and unread informational status-line selection |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |

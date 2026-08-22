@@ -83,6 +83,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const wakeContextScript = `${fmRoot}/bin/fm-wake-context.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -185,6 +186,21 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   };
 }
 
+function wakeContextPresentation(): string {
+  const fallback = "WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.";
+  const result = spawnSync("bash", [wakeContextScript, "--present"], {
+    cwd: fmRoot,
+    env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+    encoding: "utf8",
+    maxBuffer: 128 * 1024,
+  });
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return fallback;
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  if (result.status === 0 && output) return output;
+  if (output.includes("WAKE_CONTEXT_FALLBACK:")) return output;
+  return output ? `${output}\n${fallback}` : fallback;
+}
+
 function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
@@ -245,7 +261,7 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return;
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}\n\n${wakeContextPresentation()}\n\nHandle this presentation without rebuilding fleet context. Watcher continuity is extension-owned.`,
     );
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }

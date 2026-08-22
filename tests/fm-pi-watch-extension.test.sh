@@ -71,6 +71,27 @@ export const Type = {
 JS
 }
 
+test_pi_enobufs_returns_complete_action() {
+  local repo="$TMP_ROOT/pi-enobufs-root" home="$TMP_ROOT/pi-enobufs-home" out
+  mkdir -p "$home/state" "$home/config"; install_pi_watch_extension_fixture "$repo"
+  printf '\nexport { wakeContextPresentation };\n' >> "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-wake-context.sh" <<'SH'
+#!/usr/bin/env bash
+head -c 180000 /dev/zero | tr '\0' x
+printf '\nTRUNCATED_TAIL_WITH_ACK\n'
+exit 1
+SH
+  chmod +x "$repo/bin/fm-wake-context.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+process.stdout.write(mod.wakeContextPresentation());
+EOF
+)
+  [ "$out" = 'WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.' ] || fail "Pi silently returned a truncated wake context"
+  pass "Pi converts ENOBUFS into one complete actionable fallback"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -340,6 +361,12 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-wake-context.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'PI_CONTEXT_FROM_STDERR\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
+exit 1
+SH
+  chmod +x "$repo/bin/fm-wake-context.sh"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -365,6 +392,7 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 let deliveryStarted = false;
 let rowsAtDelivery = 0;
+let deliveredPrompt = "";
 let releaseDelivery = () => {};
 const deliveryBlocked = new Promise((resolve) => {
   releaseDelivery = resolve;
@@ -375,7 +403,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
+  sendUserMessage: async (message) => {
+    deliveredPrompt = message;
     rowsAtDelivery = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
       : 0;
@@ -398,6 +427,9 @@ const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 const armRows = rows.filter((row) => row.startsWith("arm="));
 if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
 if (!deliveryStarted) throw new Error("wake delivery did not begin");
+if (!deliveredPrompt.includes("PI_CONTEXT_FROM_STDERR")) throw new Error(`Pi dropped wake-context stderr: ${deliveredPrompt}`);
+if (!deliveredPrompt.includes("WAKE_CONTEXT_FALLBACK:")) throw new Error(`Pi omitted wake-context fallback: ${deliveredPrompt}`);
+if ((deliveredPrompt.match(/WAKE_CONTEXT_FALLBACK:/g) || []).length !== 1) throw new Error(`Pi duplicated wake-context fallback: ${deliveredPrompt}`);
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
 if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
@@ -2251,6 +2283,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_enobufs_returns_complete_action
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
