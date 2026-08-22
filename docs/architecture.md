@@ -15,7 +15,7 @@ A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies de
 External issue trackers need a different trust boundary from captain conversation.
 Periodic Linear polling alone fits the existing authenticated custom-check cadence, but prompt discovery would either spend a network query every few minutes or accept hourly latency; it remains useful as drift detection, not as the primary signal.
 Forwarding a Linear webhook through `fm-inbox.sh note` would wake promptly, but it would place machine bytes in the captain-authored input channel and could make untrusted text appear to carry captain authority.
-A typed untrusted ingress composed with the existing process-event inbox and durable wake queue preserves prompt event-driven detection, capture-before-publication ordering, restart replay, and handled acknowledgements without adding another watcher or detached retry loop.
+A typed untrusted ingress composed with the existing process-event inbox and durable wake queue preserves prompt observation in an actively supervised home, capture-before-publication ordering, restart replay, and handled acknowledgements without adding another watcher or detached retry loop.
 
 `bin/fm-procevent-external-event.sh` is that ingress and adapter.
 An external authenticated webhook terminator or automation invokes it locally or over an operator-controlled SSH route; Firstmate intentionally contains no public HTTP server.
