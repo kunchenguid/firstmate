@@ -120,6 +120,23 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/date" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "$*" = "-u +%s" ] && [ -n "${FM_FAKE_DATE_FIRST_EPOCH:-}" ]; then
+  count=$(cat "$FM_FAKE_DATE_STATE" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_DATE_STATE"
+  if [ "$count" -le "${FM_FAKE_DATE_SWITCH_AFTER:-1}" ]; then
+    printf '%s\n' "$FM_FAKE_DATE_FIRST_EPOCH"
+  else
+    printf '%s\n' "$FM_FAKE_DATE_LATE_EPOCH"
+  fi
+  exit 0
+fi
+exec "${FM_REAL_DATE:-/bin/date}" "$@"
+SH
+  chmod +x "$fb/date"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -240,6 +257,19 @@ prepare_relaunch_receipt() { # <case-dir> <id> <harness> <model> <effort> [note]
     }' > "$task_dir/routing-decision.pending.json"
 }
 
+age_relaunch_receipt() { # <case-dir> <id> <seconds>
+  local dir=$1 id=$2 age=$3 now epoch timestamp file tmp
+  now=$(date -u +%s)
+  epoch=$((now - age))
+  timestamp=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)
+  file="$dir/home/data/$id/routing-decision.pending.json"
+  tmp="$file.tmp"
+  jq --arg timestamp "$timestamp" '.generated_at = $timestamp' "$file" > "$tmp"
+  mv "$tmp" "$file"
+  ROUTING_TEST_NOW=$now
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
@@ -251,6 +281,11 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_REAL_DATE="${FM_REAL_DATE:-$(command -v date)}" \
+    FM_FAKE_DATE_FIRST_EPOCH="${FM_FAKE_DATE_FIRST_EPOCH:-}" \
+    FM_FAKE_DATE_LATE_EPOCH="${FM_FAKE_DATE_LATE_EPOCH:-}" \
+    FM_FAKE_DATE_STATE="${FM_FAKE_DATE_STATE:-$dir/fake/date-count}" \
+    FM_FAKE_DATE_SWITCH_AFTER="${FM_FAKE_DATE_SWITCH_AFTER:-1}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -528,6 +563,97 @@ test_explicit_same_route_requires_a_receipt_before_control_effects() {
   [ ! -e "$dir/home/state/rl37.control-relaunch" ] \
     || fail "a routing preflight refusal must create no transaction journal"
   pass "fm-control relaunch: an explicit same-value route needs a receipt before control effects"
+}
+
+test_late_expiry_refuses_before_journal_writes() {
+  local dir out rc counter
+  dir=$(new_case late-journal rl38)
+  add_ship_task "$dir" rl38 claude
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl38 codex default default "late receipt"
+  age_relaunch_receipt "$dir" rl38 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$dir" rl38 relaunch --harness codex --note "late receipt"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 1 "$rc" "a receipt expiring during preflight should refuse"
+  assert_contains "$out" "ROUTING_DECISION STALE" "late preflight refusal should name freshness"
+  [ ! -e "$dir/home/state/rl38.control-relaunch" ] \
+    || fail "late preflight refusal must precede the first journal write"
+
+  counter=$(new_case late-journal-counter rl39)
+  add_ship_task "$counter" rl39 claude
+  printf 'codex' > "$counter/fake/becomes"
+  prepare_relaunch_receipt "$counter" rl39 codex default default "late receipt counterexample"
+  age_relaunch_receipt "$counter" rl39 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_STATE="$counter/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$counter" rl39 relaunch --harness codex --note "late receipt counterexample"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "freshness counterexample should reach journal publication"$'\n'"$out"
+  [ -e "$counter/home/state/rl39.control-relaunch" ] \
+    || fail "late-expiry journal assertion has no firing counterexample"
+  pass "fm-control relaunch: late expiry refuses before journal writes"
+}
+
+test_late_expiry_refuses_before_agent_exit() {
+  local dir out rc counter
+  dir=$(new_case late-exit rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl40 codex default default "late exit receipt"
+  age_relaunch_receipt "$dir" rl40 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$dir" rl40 relaunch --harness codex --note "late exit receipt"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 1 "$rc" "a receipt expiring during preflight should refuse before exit"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "late preflight refusal stopped the running agent"
+
+  counter=$(new_case late-exit-counter rl41)
+  add_ship_task "$counter" rl41 claude
+  printf 'codex' > "$counter/fake/becomes"
+  prepare_relaunch_receipt "$counter" rl41 codex default default "late exit counterexample"
+  age_relaunch_receipt "$counter" rl41 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_STATE="$counter/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=1
+  out=$(run_control "$counter" rl41 relaunch --harness codex --note "late exit counterexample"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "freshness counterexample should replace the running agent"$'\n'"$out"
+  [ "$(cat "$counter/fake/command")" = codex ] \
+    || fail "late-expiry exit assertion has no firing counterexample"
+  pass "fm-control relaunch: late expiry refuses before agent exit"
+}
+
+test_committed_handoff_does_not_revalidate_after_exit() {
+  local dir out rc
+  dir=$(new_case committed-handoff rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl42 codex default default "committed handoff"
+  age_relaunch_receipt "$dir" rl42 299
+  FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
+  FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
+  FM_FAKE_DATE_STATE="$dir/fake/date-count"
+  FM_FAKE_DATE_SWITCH_AFTER=2
+  out=$(run_control "$dir" rl42 relaunch --harness codex --note "committed handoff"); rc=$?
+  unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
+  expect_code 0 "$rc" "a committed routing handoff must not revalidate after exit"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "committed routing handoff did not launch the replacement"
+  [ -f "$dir/home/data/rl42/routing-decision.json" ] \
+    && [ ! -e "$dir/home/data/rl42/routing-decision.pending.json" ] \
+    || fail "control preflight did not consume the committed routing receipt"
+  pass "fm-control relaunch: committed routing handoff is not revalidated"
 }
 
 # --- 2. harness switch -------------------------------------------------------
@@ -1457,6 +1583,9 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_explicit_same_route_requires_a_receipt_before_control_effects
+test_late_expiry_refuses_before_journal_writes
+test_late_expiry_refuses_before_agent_exit
+test_committed_handoff_does_not_revalidate_after_exit
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

@@ -425,8 +425,10 @@ Missing, malformed, hash-mismatched, or older-than-five-minutes multi-candidate 
 
 The receipt and quota timestamps use RFC3339 UTC and are accepted for five minutes, with at most 30 seconds of future clock skew.
 The supervisor home and local host are represented by SHA-256 identities and are recomputed by the spawn process rather than trusted from caller prose.
-During spawn preflight, `fm-spawn.sh` validates the pending receipt and prepares immutable launch input without consuming the pending artifact, so a project, delivery, credential, backend, or adapter refusal leaves the same receipt retryable.
-After fallible preflight succeeds, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json` at the effect boundary, records the receipt and validated brief paths in task metadata, and continues into the established spawn path in the same invocation.
+During ordinary spawn preflight, `fm-spawn.sh` validates the pending receipt and prepares immutable launch input without consuming the pending artifact, so a project, delivery, credential, backend, or adapter refusal leaves the same receipt retryable.
+The control-plane preflight for a route-changing relaunch is the exception: it commits the receipt before any checkpoint journal or agent exit, then passes the exact committed paths and launch-input bytes through the owning lifecycle transaction so the launch half cannot perform a second routing validation after effects.
+That commit applies the same five-minute acceptance check without widening it; once accepted, the receipt is not re-aged during the bounded control handoff, and it remains consumed even if a later non-routing checkpoint, stop, or launch operation fails.
+For an ordinary spawn, after fallible preflight succeeds, `fm-spawn.sh` atomically consumes the pending receipt into `data/<task-id>/routing-decision.json` at the effect boundary, records the receipt and validated brief paths in task metadata, and continues into the established spawn path in the same invocation.
 Successful consumption is one-shot, so a later fresh dispatch attempt requires a fresh pending receipt.
 Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
 An existing final directory, regular or dangling symlink, or other non-regular target is rejected before the atomic rename.

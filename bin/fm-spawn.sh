@@ -300,6 +300,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 ROUTING_PREFLIGHT_ONLY=${FM_CONTROL_ROUTING_PREFLIGHT:-0}
+ROUTING_COMMITTED_HANDOFF=${FM_CONTROL_ROUTING_COMMITTED:-0}
 POS=()
 want_value=
 for a in "$@"; do
@@ -352,6 +353,10 @@ done
 case "$ROUTING_PREFLIGHT_ONLY" in
   0|1) ;;
   *) echo "error: FM_CONTROL_ROUTING_PREFLIGHT must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$ROUTING_COMMITTED_HANDOFF" in
+  0|1) ;;
+  *) echo "error: FM_CONTROL_ROUTING_COMMITTED must be 0 or 1" >&2; exit 1 ;;
 esac
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -957,6 +962,20 @@ if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
     exit 1
   }
 fi
+if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 1 ] && [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ] || {
+    echo "error: the committed control-plane routing handoff applies only to the launch half of --relaunch" >&2
+    exit 1
+  }
+  [ "$SPAWN_CONTROL_PARENT" -eq 1 ] || {
+    echo "error: the committed control-plane routing handoff requires the owning fm-control transaction" >&2
+    exit 1
+  }
+  [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] || {
+    echo "error: the committed control-plane routing handoff requires a routing-axis override" >&2
+    exit 1
+  }
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -1539,21 +1558,33 @@ fi
 # contract, while a secondmate relaunch with an explicit routing override is a
 # fresh decision under the same receipt gate as every other relaunch.
 if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
-  fm_routing_decision_validate_and_prepare \
-    "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
-    "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
-    || exit 1
-  fm_operational_verified_file_input \
-    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
-    echo "error: validated routing brief changed before launch input construction" >&2
-    exit 1
-  }
+  if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+    FM_ROUTING_DECISION_FINAL=${FM_CONTROL_ROUTING_DECISION_FINAL:-}
+    FM_ROUTING_BRIEF_FINAL=${FM_CONTROL_ROUTING_BRIEF_FINAL:-}
+    FM_ROUTING_LAUNCH_INPUT=${FM_CONTROL_ROUTING_LAUNCH_INPUT:-}
+  else
+    fm_routing_decision_validate_and_prepare \
+      "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+      "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+      || exit 1
+    fm_operational_verified_file_input \
+      launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
+      echo "error: validated routing brief changed before launch input construction" >&2
+      exit 1
+    }
+  fi
 fi
 if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
-  fm_routing_decision_discard_prepared || {
-    echo "error: validated relaunch routing preflight could not be discarded safely" >&2
+  fm_routing_decision_persist_prepared || exit 1
+  fm_routing_decision_seal_prepared || {
+    echo "error: validated relaunch routing preflight could not be sealed" >&2
     exit 1
   }
+  jq -cn \
+    --arg decision "$FM_ROUTING_DECISION_FINAL" \
+    --arg brief "$FM_ROUTING_BRIEF_FINAL" \
+    --arg launch_input "$FM_ROUTING_LAUNCH_INPUT" \
+    '{decision: $decision, brief: $brief, launch_input: $launch_input}'
   exit 0
 fi
 
@@ -1940,16 +1971,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
-if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
   fm_routing_decision_persist_prepared || exit 1
-  if [ -n "${KIMI_BIN:-}" ]; then
-    "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
-      echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
-      exit 1
-    }
-  fi
   fm_routing_decision_seal_prepared || {
     echo "error: validated routing transaction could not be sealed" >&2
+    exit 1
+  }
+fi
+if [ -n "${KIMI_BIN:-}" ]; then
+  "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+    echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
     exit 1
   }
 fi
