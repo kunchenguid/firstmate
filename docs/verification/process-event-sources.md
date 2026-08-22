@@ -13,7 +13,8 @@ Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner an
 
 Verified portably on 2026-08-22 through `tests/fm-lavish-route.test.sh`.
 The suite stubs Windows facilities at the executable boundary and proves that WSL open, poll, end, export, share, stop, setup, and doctor operations all select the tracked Windows bridge without invoking a Linux `lavish-axi` fallback.
-It also proves that canonical artifact identity and structured argv containing spaces, `#`, or dash-prefixed options survive path conversion, that export outputs and attachment fields become usable WSL paths, that arbitrary feedback is not rewritten, that open and poll select the same bridge, that each operation creates one runtime invocation, and that native routing remains argv-compatible.
+It also proves that canonical artifact identity and structured argv containing spaces, `#`, empty arguments, or dash-prefixed options survive path conversion, that export outputs and attachment fields become usable WSL paths, that arbitrary feedback is not rewritten, that open and poll select the same bridge, that each operation creates one runtime invocation, and that native routing remains argv-compatible.
+`tests/fm-lavish-windows-argv.test.sh` exercises the real Windows PowerShell 5.1 boundary and proves that empty and stop-style arguments reach the native Windows Lavish CLI unchanged.
 `tests/fm-bearings-board.test.sh` proves that the next arm replaces a persisted legacy Linux poll registration with the routed command, preserves the answer binding, and then remains idempotent.
 
 The real Windows PowerShell bridge was additionally verified on 2026-08-22 with a temporary artifact containing spaces and `#`:
