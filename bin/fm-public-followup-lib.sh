@@ -103,6 +103,13 @@ fm_pf_registry_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/registry"; }
 fm_pf_events_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/events"; }
 fm_pf_consumed_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/consumed"; }
 fm_pf_rejected_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejected"; }
+fm_pf_retired_dir()  { printf '%s\n' "$1/$FM_PF_DIRNAME/retired"; }
+
+fm_pf_retirement_receipt_exists() {
+  local file
+  file="$(fm_pf_retired_dir "$1")/$2"
+  [ -f "$file" ] && [ ! -L "$file" ]
+}
 
 # fm_pf_dir_has_entry <dir>: 0 when <dir> is a real directory holding at least
 # one non-dot entry. Stops at the first hit, so cost does not grow with the

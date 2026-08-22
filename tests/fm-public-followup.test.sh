@@ -1692,6 +1692,127 @@ test_redelivery_does_not_report_retired_loop_open() {
   pass "redelivery does not report a retired loop as open"
 }
 
+test_retire_after_secondmate_home_removal() {
+  local home child log out
+  home=$(make_home retire-removed-secondmate)
+  child="$home/removed-mate"
+  mkdir -p "$child/state"
+  printf 'mate\n' > "$child/.fm-secondmate-home"
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-removed-mate req-removed-mate secondmate:mate scout-removed
+  "$EMIT" --home "$home" --obligation pf-removed-mate --relation rel-code \
+    --source-home secondmate:mate --work-id scout-removed --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-removed/report.md \
+    --outcome-text 'The removed child completed its investigation.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-removed-mate >/dev/null || fail "deliver failed"
+
+  rm -rf "$child"
+  rm -f "$home/state/mate.meta"
+  out=$(run_pf "$home" retire pf-removed-mate --reason "child home was torn down") \
+    || fail "retire must accept an already-absent child legacy link: $out"
+  assert_contains "$out" "retired pf-removed-mate" \
+    "retire must close a delivered loop after its secondmate home is removed"
+  assert_absent "$home/state/public-followup/registry/pf-removed-mate" \
+    "retire must remove the registration after child teardown"
+  assert_present "$home/state/public-followup/retired/pf-removed-mate" \
+    "retire must still record its receipt"
+  pass "retire closes delivered loops after secondmate home removal"
+}
+
+test_rechain_refuses_unclaimed_existing_destination() {
+  local home log out
+  home=$(make_home rechain-existing-destination)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" public-final-existing-a req-existing main scout-existing
+  "$EMIT" --home "$home" --obligation public-final-existing-a --relation rel-code \
+    --source-home main --work-id scout-existing --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-existing/report.md \
+    --outcome-text 'Investigation complete.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver public-final-existing-a >/dev/null \
+    || fail "deliver failed"
+
+  jq -n '{type:"pr-merged", project:"firstmate", required_deliverables:["pr_url"],
+      completion_policy:"all-required"}' > "$home/collision-expected.json"
+  tasks_in "$home" public-followup add public-final-existing-b \
+    --request-context-file "$home/request.json" --purpose promised-final \
+    --expected-final-file "$home/collision-expected.json" \
+    --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
+
+  expect_failure "a first rechain must not adopt an unrelated existing obligation" \
+    run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
+      --work-home main --work-id ship-existing --expected pr-merged
+  assert_contains "$EXPECT_OUT" "was not created by this rechain" \
+    "the collision refusal must identify the unclaimed destination"
+  out=$(cat "$home/state/public-followup/registry/public-final-existing-a")
+  case "$out" in
+    *rechain_to=*) fail "a destination collision must not claim the source" ;;
+  esac
+  assert_absent "$home/state/public-followup/registry/public-final-existing-b" \
+    "an unrelated obligation must not become a registered destination"
+  pass "rechain refuses an unrelated existing destination"
+}
+
+test_pending_skips_concurrent_retirement() {
+  local home log real_tasks pending_pid locker_pid rc=0 i
+  home=$(make_home pending-retirement-race)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-race req-race discord main work-race
+  emit_terminal "$home" "$home" pf-race main work-race >/dev/null || fail "race emit failed"
+  run_pf "$home" consume >/dev/null || fail "race consume failed"
+  FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-race >/dev/null || fail "race deliver failed"
+  sed -e 's/^state=delivered$/state=open/' \
+      -e '/^delivered_at=/d' -e '/^delivered_obligation=/d' \
+      "$home/state/public-followup/registry/pf-race" > "$home/race-open"
+  mv "$home/race-open" "$home/state/public-followup/registry/pf-race"
+  chmod 600 "$home/state/public-followup/registry/pf-race"
+
+  seed_commitment "$home" pf-race-other req-race-other discord main work-race-other
+
+  FM_RACE_HOME="$home" FM_RACE_ROOT="$ROOT" bash -c '
+    . "$FM_RACE_ROOT/bin/fm-public-followup-lib.sh"
+    fm_pf_registry_lock_acquire "$FM_RACE_HOME/state" pf-race || exit 1
+    : > "$FM_RACE_HOME/lock-ready"
+    while [ ! -e "$FM_RACE_HOME/release-lock" ]; do sleep 0.02; done
+    sleep 0.1
+    mkdir -p "$FM_RACE_HOME/state/public-followup/retired"
+    printf "reason=concurrent close\nretired_at=2026-08-01T00:00:00Z\n" \
+      > "$FM_RACE_HOME/state/public-followup/retired/pf-race"
+    chmod 600 "$FM_RACE_HOME/state/public-followup/retired/pf-race"
+    rm -f "$FM_RACE_HOME/state/public-followup/registry/pf-race"
+    fm_pf_registry_lock_release "$FM_RACE_HOME/state" pf-race
+  ' &
+  locker_pid=$!
+  for i in $(seq 1 100); do [ -e "$home/lock-ready" ] && break; sleep 0.02; done
+  [ -e "$home/lock-ready" ] || fail "race locker did not start"
+
+  real_tasks=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+"$REAL_TASKS_AXI" "$@"
+rc=$?
+if [ "$1" = public-followup ] && [ "$2" = list ]; then
+  : > "$PENDING_LISTED"
+fi
+exit "$rc"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  REAL_TASKS_AXI="$real_tasks" PENDING_LISTED="$home/pending-listed" \
+    run_pf "$home" pending > "$home/pending-race.out" 2>&1 &
+  pending_pid=$!
+  for i in $(seq 1 100); do [ -e "$home/pending-listed" ] && break; sleep 0.02; done
+  [ -e "$home/pending-listed" ] || fail "pending did not snapshot the backlog"
+  : > "$home/release-lock"
+  wait "$locker_pid" || fail "race retirement failed"
+  wait "$pending_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "pending aborted on concurrent retirement: $(cat "$home/pending-race.out")"
+  assert_grep 'unresolved pf-race-other ' "$home/pending-race.out" \
+    "pending must continue surfacing unrelated loops after concurrent retirement: $(cat "$home/pending-race.out")"
+  pass "pending skips a registration retired during settlement"
+}
+
 test_retire_reason_closes_the_open_loop() {
   local home log out registry_file receipt_mode
   home=$(make_home retire-reason)
@@ -1980,6 +2101,9 @@ test_rechain_claims_delivered_source_once
 test_failed_rechain_retirement_keeps_source_claimed
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
+test_retire_after_secondmate_home_removal
+test_rechain_refuses_unclaimed_existing_destination
+test_pending_skips_concurrent_retirement
 test_retire_reason_closes_the_open_loop
 test_retention_creates_no_false_teardown_refusal
 test_expiry_escalation_uses_now_override

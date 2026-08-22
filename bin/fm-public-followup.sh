@@ -297,7 +297,7 @@ cmd_register() {
 
   pf_registry_lock_acquire "$id" \
     || die "could not lock registration '$id'" 1
-  retired_file="$STATE/$FM_PF_DIRNAME/retired/$id"
+  retired_file="$(fm_pf_retired_dir "$STATE")/$id"
   if [ -e "$retired_file" ] || [ -L "$retired_file" ]; then
     die "public loop '$id' has already been retired and cannot be registered again" 1
   fi
@@ -562,7 +562,7 @@ print_open_loop() {
 cmd_pending() {
   gate_or_exit
 
-  local listing id payload delivery task_state summary platform request expires printed=0 loop_state settled
+  local listing id payload delivery task_state summary platform request expires printed=0 loop_state settled stamp_rc
   # An unreadable backlog with registrations present is exactly the silence this
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
@@ -604,7 +604,12 @@ cmd_pending() {
     fi
     if [ "$settled" -eq 1 ]; then
       if [ "$loop_state" != delivered ]; then
-        fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" \
+        stamp_rc=0
+        fm_pf_registry_stamp_delivered "$STATE" "$id" "$(now_rfc3339)" || stamp_rc=$?
+        if [ "$stamp_rc" -eq 3 ] && fm_pf_retirement_receipt_exists "$STATE" "$id"; then
+          continue
+        fi
+        [ "$stamp_rc" -eq 0 ] \
           || die "could not stamp settled registration '$id' as delivered" 1
       fi
       # Keep the registration. Clearing a leftover legacy link is best-effort
@@ -658,24 +663,32 @@ public_followup_registration_valid() {
 }
 
 public_followup_secondmate_home() {
-  local id=$1 meta home marker
+  local id=$1 meta_home registry_home home marker
   fm_pf_home_id_valid "secondmate:$id" || return 1
-  meta="$STATE/$id.meta"
-  home=$(fmx_meta_get "$meta" home)
-  if [ -z "$home" ] && [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
-    home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
+  meta_home=$(fmx_meta_get "$STATE/$id.meta" home)
+  registry_home=
+  if [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
+    registry_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
   fi
-  [ -n "$home" ] || return 1
-  case "$home" in /*) ;; *) return 1 ;; esac
-  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 1
+  if [ -n "$meta_home" ] && [ -n "$registry_home" ] && [ "$meta_home" != "$registry_home" ]; then
+    return 2
+  fi
+  home=${meta_home:-$registry_home}
+  [ -n "$home" ] || return 3
+  case "$home" in /*) ;; *) return 2 ;; esac
+  if [ ! -e "$home" ]; then
+    [ ! -L "$home" ] || return 2
+    return 3
+  fi
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 2
+  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 2
   marker=$(sed -n '1p' "$home/.fm-secondmate-home" 2>/dev/null)
-  [ "$marker" = "$id" ] || return 1
+  [ "$marker" = "$id" ] || return 2
   printf '%s\n' "$home"
 }
 
 clear_public_followup_link() {
-  local id=$1 work_home work_id home state
+  local id=$1 work_home work_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
@@ -686,7 +699,10 @@ clear_public_followup_link() {
       state=$STATE
       ;;
     secondmate:*)
-      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || return 1
+      rc=0
+      home=$(public_followup_secondmate_home "${work_home#secondmate:}") || rc=$?
+      [ "$rc" -ne 3 ] || return 0
+      [ "$rc" -eq 0 ] || return 1
       state="$home/state"
       ;;
     *) return 1 ;;
@@ -1052,7 +1068,7 @@ cmd_rechain() {
 
   pf_registry_lock_acquire "$from" \
     || die "could not lock source registration '$from' for rechain" 1
-  local src_file loop_state expires window ctx rechain_to source_record
+  local src_file loop_state expires window ctx rechain_to source_record first_claim=0 existing
   src_file="$(fm_pf_registry_dir "$STATE")/$from"
   [ -f "$src_file" ] && [ ! -L "$src_file" ] \
     || die "no registration for '$from' in this home" 1
@@ -1090,11 +1106,21 @@ cmd_rechain() {
     die "source '$from' is already claimed by rechain destination '$rechain_to'; resume that destination" 1
   fi
   if [ -z "$rechain_to" ]; then
+    existing=$(obligation_json "$new_id") \
+      || die "could not check whether rechain destination '$new_id' is unused" 1
+    [ -z "$existing" ] \
+      || die "'$new_id' already exists and was not created by this rechain; choose another id" 1
+    [ ! -e "$(fm_pf_registry_dir "$STATE")/$new_id" ] \
+      && [ ! -L "$(fm_pf_registry_dir "$STATE")/$new_id" ] \
+      && [ ! -e "$(fm_pf_retired_dir "$STATE")/$new_id" ] \
+      && [ ! -L "$(fm_pf_retired_dir "$STATE")/$new_id" ] \
+      || die "'$new_id' already has local public-loop state; choose another id" 1
     source_record=$(grep -v -E '^rechain_to=' "$src_file" 2>/dev/null) \
       || die "could not read source registration '$from' while claiming it" 1
     printf '%s\nrechain_to=%s\n' "$source_record" "$new_id" \
       | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$from" 600 \
       || die "could not claim source registration '$from' for '$new_id'" 1
+    first_claim=1
   fi
 
   local ctx_file expected_file relation_file keys_json project src_payload
@@ -1129,9 +1155,13 @@ cmd_rechain() {
     '{relation_id:"rel-1", work_ref:{home_id:$h, task_id:$w},
       role:"fulfills", required:true, generation:1}' > "$relation_file"
 
-  local existing relation_count new_registry
-  existing=$(obligation_json "$new_id") \
-    || die "could not read the backlog through tasks-axi" 1
+  local relation_count new_registry
+  if [ "$first_claim" -eq 1 ]; then
+    existing=
+  else
+    existing=$(obligation_json "$new_id") \
+      || die "could not read the backlog through tasks-axi" 1
+  fi
   if [ -n "$existing" ]; then
     printf '%s' "$existing" | jq -e \
       --slurpfile request "$ctx_file" --slurpfile expected "$expected_file" \
@@ -1228,7 +1258,7 @@ cmd_retire() {
   if ! clear_public_followup_link "$id"; then
     die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
   fi
-  retired_dir="$STATE/$FM_PF_DIRNAME/retired"
+  retired_dir=$(fm_pf_retired_dir "$STATE")
   retired_at=$(now_rfc3339)
   registry_file="$(fm_pf_registry_dir "$STATE")/$id"
   printf 'reason=%s\nretired_at=%s\n' "$reason" "$retired_at" \
