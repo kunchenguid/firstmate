@@ -408,8 +408,15 @@ failure_episode_verified() {
 # fm_watcher_healthy and fm_pid_identity, so a budget spent as a pass COUNT runs
 # for an unbounded multiple of the milliseconds it names - a nominal 800ms spent
 # as eight passes ran for 29.8s at a real turn boundary during the reproduction.
-# Bounding elapsed time makes FM_CLAUDE_AUTOARM_SYNC_WAIT_MS mean what it says on
-# every host; the claim above is what makes a short wait sufficient.
+# The deadline bounds the RETRYING only. It does not bound this hook's total
+# runtime, which is dominated by fixed cost the hook pays whatever the budget is:
+# sourcing its libraries, the primary-scope checks, and on the blocking path the
+# budget accounting and banner. With the budget set to zero that fixed cost alone
+# measured about 5s on a loaded host, so FM_CLAUDE_AUTOARM_SYNC_WAIT_MS is a
+# ceiling on waiting, never a promise about how long the Stop hook takes.
+# One full evaluation is irreducible - the guard cannot know a proof is absent
+# without looking for all of them - and the claim above is what makes a short
+# wait sufficient once that evaluation is paid for.
 WAIT_DEADLINE_MS=$(( $(fm_timing_now_ms) + SYNC_WAIT_MS ))
 while :; do
   if autoarm_owns_recovery; then
@@ -418,15 +425,14 @@ while :; do
     fi
     exit 0
   fi
+  # Checked AFTER the evaluation above, so the loop always makes at least one
+  # complete attempt and the last thing it does before breaking is a full
+  # evaluation. That is why no re-evaluation follows this loop: one there would
+  # repeat the pass just completed, with no sleep in between, and pay a second
+  # round of the fork-heavy checks and their budget accounting for nothing.
   [ "$(fm_timing_now_ms)" -lt "$WAIT_DEADLINE_MS" ] || break
   sleep 0.1
 done
-if autoarm_owns_recovery; then
-  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
-  fi
-  exit 0
-fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.

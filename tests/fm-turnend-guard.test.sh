@@ -1848,23 +1848,43 @@ test_hook_claude_mode_allows_on_fresh_arming_epoch() {
 # a pass COUNT runs for an unbounded multiple of the milliseconds it names - 29.8s
 # for a nominal 800ms at the turn boundary in the reproduction.
 test_hook_claude_mode_wait_is_bounded_by_elapsed_time() {
-  local dir out status started elapsed real_sleep
+  local dir out status real_sleep started baseline_ms baseline_status waited_ms attributable_ms
+  local sleep_s=3
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-wait-deadline")
   : > "$dir/state/task1.meta"
   real_sleep=$(command -v sleep) || fail "sleep not found for the loaded-host fixture"
   mkdir -p "$dir/slowbin"
   cat > "$dir/slowbin/sleep" <<SH
 #!/usr/bin/env bash
-exec $real_sleep 1
+exec $real_sleep $sleep_s
 SH
   chmod +x "$dir/slowbin/sleep"
-  started=$(date +%s)
+  # Measure the WAIT, not the hook. Most of this hook's wall clock is fixed cost
+  # it pays whatever the budget is - sourcing its libraries, the primary-scope
+  # checks, and on the blocking path the budget accounting and banner - measured
+  # at seconds on a loaded host. Asserting total runtime would therefore assert
+  # that fixed cost and fail on load rather than on the defect. The zero budget
+  # run cannot retry at all, so the difference between the two is exactly what
+  # the cooperative wait spent.
+  started=$(date +%s%3N)
+  out=$(PATH="$dir/slowbin:$PATH" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 run_hook_claude "$dir" true); baseline_status=$?
+  baseline_ms=$(( $(date +%s%3N) - started ))
+  # Both runs must take the same path, or the difference measures the path and
+  # not the wait.
+  expect_code 2 "$baseline_status" "the zero-budget baseline must block on the same path as the real-budget run"
+  started=$(date +%s%3N)
   # The assignments stay inside this command substitution's own subshell.
   out=$(PATH="$dir/slowbin:$PATH" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800 run_hook_claude "$dir" true); status=$?
-  elapsed=$(( $(date +%s) - started ))
+  waited_ms=$(( $(date +%s%3N) - started ))
+  attributable_ms=$(( waited_ms - baseline_ms ))
   expect_code 2 "$status" "an unclaimed unhealthy stop must still block after the bounded wait"
   assert_contains "$out" "TURN WOULD END BLIND" "the bounded-wait block lost its blind-turn banner"
-  [ "$elapsed" -lt 5 ] || fail "an 800ms cooperative wait ran ${elapsed}s on a slow host: it is counting passes, not elapsed time"
+  # A deadline-bounded wait sleeps at most once past its budget, so it spends one
+  # shimmed interval; the ceiling is three to absorb host noise. The pass-count
+  # loop this replaced spent SYNC_WAIT_MS/100 intervals - eight here, 24s - so the
+  # two are never within a factor of two of this bound.
+  [ "$attributable_ms" -lt $(( sleep_s * 3 * 1000 )) ] \
+    || fail "the cooperative wait spent ${attributable_ms}ms of ${sleep_s}s sleeps for an 800ms budget (baseline ${baseline_ms}ms, total ${waited_ms}ms): it is counting passes, not elapsed time"
   pass "fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count"
 }
 
