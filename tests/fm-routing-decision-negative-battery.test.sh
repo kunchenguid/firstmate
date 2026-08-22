@@ -262,6 +262,9 @@ RAW_SHAPE_COMMAND=
 setup_raw_punctuation() { setup_raw_literal "claude --model a${RAW_PUNCTUATION}b --effort high"; }
 setup_raw_newline() { setup_raw_literal $'claude --model opus\n--effort high'; }
 setup_raw_carriage_return() { setup_raw_literal $'claude --model opus\r--effort high'; }
+setup_raw_double_history() { setup_raw_literal 'claude --model "!!" --effort high'; }
+setup_raw_double_backslash() { setup_raw_literal 'claude --model "a\b" --effort high'; }
+setup_raw_leading_equals() { setup_raw_literal 'claude --model =ls --effort high'; }
 setup_raw_flag_shape() { setup_raw_literal "$RAW_SHAPE_COMMAND"; }
 setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
 setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus --effort high'; }
@@ -412,6 +415,148 @@ setup_rule_binding_kind_drift() {
   POST_BINDING_RECEIPT_FILTER='.dispatch_config = {kind: "absent", sha256: null}'
 }
 
+SHELL_DIFF_DIR="$TMP_ROOT/shell-differential"
+SHELL_DIFF_PROBE="$SHELL_DIFF_DIR/argv-probe"
+SHELL_DIFF_ACTUAL="$SHELL_DIFF_DIR/actual.argv"
+SHELL_DIFF_EXPECTED="$SHELL_DIFF_DIR/expected.argv"
+SHELL_DIFF_COUNTEREXAMPLE="$SHELL_DIFF_DIR/counterexample.argv"
+shell_differential_character_count=0
+shell_differential_run_count=0
+shell_differential_counterexample_count=0
+
+write_shell_differential_probe() {
+  mkdir -p "$SHELL_DIFF_DIR"
+  cat > "$SHELL_DIFF_PROBE" <<'SH'
+#!/bin/sh
+set -u
+: "${FM_ROUTING_SHELL_ARGV:?}"
+printf '%s\0' "$0" "$@" > "$FM_ROUTING_SHELL_ARGV"
+SH
+  chmod +x "$SHELL_DIFF_PROBE"
+}
+
+ascii_character() { # <decimal-code>
+  local octal
+  octal=$(printf '%03o' "$1")
+  printf '%b' "\\$octal"
+}
+
+state_accepts_ascii() { # <plain|single|double> <decimal-code>
+  local state=$1 code=$2
+  case "$state" in
+    plain)
+      [ "$code" -eq 9 ] || [ "$code" -eq 32 ] \
+        || { [ "$code" -ge 48 ] && [ "$code" -le 57 ]; } \
+        || { [ "$code" -ge 65 ] && [ "$code" -le 90 ]; } \
+        || { [ "$code" -ge 97 ] && [ "$code" -le 122 ]; } \
+        || case "$code" in 37|43|44|45|46|47|58|61|64|95) return 0 ;; *) return 1 ;; esac
+      ;;
+    single)
+      case "$code" in 10|13|39) return 1 ;; *) return 0 ;; esac
+      ;;
+    double)
+      [ "$code" -eq 9 ] || [ "$code" -eq 32 ] \
+        || { [ "$code" -ge 48 ] && [ "$code" -le 57 ]; } \
+        || { [ "$code" -ge 65 ] && [ "$code" -le 90 ]; } \
+        || { [ "$code" -ge 97 ] && [ "$code" -le 122 ]; } \
+        || case "$code" in
+          35|37|38|39|40|41|42|43|44|45|46|47|58|59|60|61|62|63|64|91|93|94|95|123|124|125|126) return 0 ;;
+          *) return 1 ;;
+        esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+run_real_shell_differential() { # <state> <command>
+  local state=$1 command=$2 shell_name shell_path mode shell_input status
+  fm_routing_literal_words "$command" 1 \
+    || fail "$state allowlist rejected a character its differential corpus accepts"
+  printf '%s\0' "${FM_ROUTING_WORDS[@]}" > "$SHELL_DIFF_EXPECTED"
+  for shell_name in bash zsh; do
+    shell_path=$(command -v "$shell_name") \
+      || fail "$state differential requires installed $shell_name"
+    for mode in noninteractive interactive; do
+      shell_input=$command
+      if [ "$mode" = interactive ]; then
+        if [ "$shell_name" = bash ]; then
+          shell_input=$'history -s "routing-differential-seed"\n'"$command"
+        else
+          shell_input=$'print -s -- "routing-differential-seed"\n'"$command"
+        fi
+      fi
+      rm -f "$SHELL_DIFF_ACTUAL"
+      if [ "$shell_name" = bash ]; then
+        if [ "$mode" = interactive ]; then
+          FM_ROUTING_SHELL_ARGV="$SHELL_DIFF_ACTUAL" \
+            "$shell_path" --noprofile --norc -ic "$shell_input" >/dev/null 2>"$SHELL_DIFF_DIR/stderr"
+        else
+          FM_ROUTING_SHELL_ARGV="$SHELL_DIFF_ACTUAL" \
+            "$shell_path" --noprofile --norc -c "$shell_input" >/dev/null 2>"$SHELL_DIFF_DIR/stderr"
+        fi
+      elif [ "$mode" = interactive ]; then
+        FM_ROUTING_SHELL_ARGV="$SHELL_DIFF_ACTUAL" \
+          "$shell_path" -f -ic "$shell_input" >/dev/null 2>"$SHELL_DIFF_DIR/stderr"
+      else
+        FM_ROUTING_SHELL_ARGV="$SHELL_DIFF_ACTUAL" \
+          "$shell_path" -f -c "$shell_input" >/dev/null 2>"$SHELL_DIFF_DIR/stderr"
+      fi
+      status=$?
+      [ "$status" -eq 0 ] \
+        || fail "$state differential command failed under $shell_name $mode"
+      [ -f "$SHELL_DIFF_ACTUAL" ] \
+        || fail "$state differential command emitted no argv under $shell_name $mode"
+      cmp -s "$SHELL_DIFF_EXPECTED" "$SHELL_DIFF_ACTUAL" \
+        || fail "$state parser words differ from $shell_name $mode argv"
+      cp "$SHELL_DIFF_EXPECTED" "$SHELL_DIFF_COUNTEREXAMPLE"
+      printf '\001' >> "$SHELL_DIFF_COUNTEREXAMPLE"
+      if cmp -s "$SHELL_DIFF_COUNTEREXAMPLE" "$SHELL_DIFF_ACTUAL"; then
+        fail "$state $shell_name $mode differential counterexample did not fire"
+      fi
+      shell_differential_run_count=$((shell_differential_run_count + 1))
+      shell_differential_counterexample_count=$((shell_differential_counterexample_count + 1))
+      pass "$state parser words match $shell_name $mode argv with a firing byte-divergence counterexample"
+    done
+  done
+}
+
+exercise_shell_state_differential() { # <plain|single|double>
+  local state=$1 command code ch candidate accepted_count=0
+  command=$SHELL_DIFF_PROBE
+  if [ "$state" = plain ]; then
+    command+=" plain-space"
+    command+=$'\tplain-tab'
+    accepted_count=2
+  fi
+  for ((code = 1; code <= 127; code++)); do
+    case "$code" in
+      10) ch=$'\n' ;;
+      13) ch=$'\r' ;;
+      *) ch=$(ascii_character "$code") ;;
+    esac
+    case "$state" in
+      plain) candidate="${SHELL_DIFF_PROBE} p${ch}p" ;;
+      single) candidate="${SHELL_DIFF_PROBE} 's${ch}s'" ;;
+      double) candidate="${SHELL_DIFF_PROBE} \"d${ch}d\"" ;;
+    esac
+    if state_accepts_ascii "$state" "$code"; then
+      case "$state:$code" in
+        plain:9|plain:32) continue ;;
+        plain:61) command+=" p${ch}p" ;;
+        plain:*) command+=" p${ch}p ${ch}leading"; accepted_count=$((accepted_count + 1)) ;;
+        single:*) command+=" 's${ch}s'" ;;
+        double:*) command+=" \"d${ch}d\"" ;;
+      esac
+      accepted_count=$((accepted_count + 1))
+    elif fm_routing_literal_words "$candidate" 1 2>/dev/null; then
+      run_real_shell_differential "$state unexpected ASCII $code" "$candidate"
+      fail "$state allowlist unexpectedly accepted ASCII $code even though the real shells agreed"
+    fi
+  done
+  run_real_shell_differential "$state" "$command"
+  shell_differential_character_count=$((shell_differential_character_count + accepted_count))
+}
+
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
 exercise_negative "03 empty receipt" MALFORMED_SCHEMA setup_empty_receipt
@@ -449,13 +594,16 @@ exercise_negative "34 selected tuple outside candidates" INCAPABLE_CANDIDATE set
 exercise_negative "35 rule index out of range" DISPATCH_CONFIG_MISMATCH setup_rule_index_out_of_range
 exercise_negative "36 wrong quota schema" 'NOT_VERIFIABLE(QUOTA)' setup_wrong_quota_schema
 
-PLAIN_FORBIDDEN_PUNCT='!#$%&()*;<>?[\]^`{|}~'
+PLAIN_FORBIDDEN_PUNCT='!#$&()*;<>?[\]^`{|}~'
 for ((punct_index = 0; punct_index < ${#PLAIN_FORBIDDEN_PUNCT}; punct_index++)); do
   RAW_PUNCTUATION=${PLAIN_FORBIDDEN_PUNCT:punct_index:1}
   exercise_negative "P$((punct_index + 1)) raw plain-state punctuation" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_punctuation
 done
-exercise_negative "P22 raw embedded newline" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_newline
-exercise_negative "P23 raw embedded carriage return" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_carriage_return
+exercise_negative "P21 raw embedded newline" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_newline
+exercise_negative "P22 raw embedded carriage return" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_carriage_return
+exercise_negative "D1 raw double-quoted history expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_history
+exercise_negative "D2 raw double-quoted backslash" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_backslash
+exercise_negative "A1 raw leading equals" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_leading_equals
 
 while IFS='|' read -r shape_label RAW_SHAPE_COMMAND shape_detail; do
   [ -n "$shape_label" ] || continue
@@ -518,7 +666,19 @@ exercise_negative "59 rule source with malformed profile" DISPATCH_CONFIG_MISMAT
 exercise_negative "60 rule source with post-binding kind drift" DISPATCH_CONFIG_MISMATCH setup_rule_binding_kind_drift \
   "rule source requires canonical dispatch configuration"
 
-expected_count=$((70 + ${#PLAIN_FORBIDDEN_PUNCT}))
+write_shell_differential_probe
+exercise_shell_state_differential plain
+exercise_shell_state_differential single
+exercise_shell_state_differential double
+[ "$shell_differential_character_count" -eq 360 ] \
+  || fail "shell differential covered $shell_differential_character_count accepted ASCII state-position cases instead of 360"
+[ "$shell_differential_run_count" -eq 12 ] \
+  || fail "shell differential ran $shell_differential_run_count shell modes instead of 12"
+[ "$shell_differential_counterexample_count" -eq 12 ] \
+  || fail "shell differential counted $shell_differential_counterexample_count firing counterexamples instead of 12"
+pass "all accepted raw parser characters match real bash and zsh argv in interactive and noninteractive modes"
+
+expected_count=$((73 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \

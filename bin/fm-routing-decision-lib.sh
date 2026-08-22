@@ -68,7 +68,7 @@ fm_routing_private_input() {
 FM_ROUTING_WORDS=()
 
 fm_routing_literal_words() { # <command> <raw:0|1>
-  local input=$1 raw=${2:-0} state=plain token='' ch next i token_started=0
+  local input=$1 raw=${2:-0} state=plain token='' ch i token_started=0
   FM_ROUTING_WORDS=()
   if [ "$raw" -eq 1 ]; then
     case "$input" in *$'\n'*|*$'\r'*) return 1 ;; esac
@@ -87,7 +87,12 @@ fm_routing_literal_words() { # <command> <raw:0|1>
             ;;
           "'") state=single; token_started=1 ;;
           '"') state=double; token_started=1 ;;
-          [[:alnum:]]|'-'|'_'|'.'|'/'|'='|':'|','|'+'|'@')
+          '=')
+            [ -n "$token" ] || return 1
+            token+="$ch"
+            token_started=1
+            ;;
+          [[:alnum:]]|'-'|'_'|'.'|'/'|':'|','|'+'|'@'|'%')
             token+="$ch"
             token_started=1
             ;;
@@ -95,19 +100,17 @@ fm_routing_literal_words() { # <command> <raw:0|1>
         esac
         ;;
       single)
+        # POSIX shells treat every character inside single quotes literally;
+        # only the closing quote changes parser state.
         if [ "$ch" = "'" ]; then state=plain; else token+="$ch"; fi
         ;;
       double)
         case "$ch" in
           '"') state=plain ;;
-          \\)
-            i=$((i + 1))
-            [ "$i" -lt "${#input}" ] || return 1
-            next=${input:i:1}
-            token+="$next"
+          [[:alnum:]]|' '|$'\t'|'#'|'%'|'&'|"'"|'('|')'|'*'|'+'|','|'-'|'.'|'/'|':'|';'|'<'|'='|'>'|'?'|'@'|'['|']'|'^'|'_'|'{'|'|'|'}'|'~')
+            token+="$ch"
             ;;
-          '$'|'`') return 1 ;;
-          *) token+="$ch" ;;
+          *) return 1 ;;
         esac
         ;;
     esac

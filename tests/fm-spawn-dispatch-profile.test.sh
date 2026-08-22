@@ -656,15 +656,15 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --model custom-v1 --effort high --flag" \
-    --model custom-v1 --effort high)
+    "$id" "$PROJ_DIR" "custom-agent --model custom%v1 --effort high --flag" \
+    --model custom%v1 --effort high)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent custom-v1 high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent custom%v1 high
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --model custom-v1 --effort high --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows a fully observed raw launch command"
+  [ "$launch" = "custom-agent --model custom%v1 --effort high --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a fully observed raw launch with inert percent"
 }
 
 test_raw_launch_allows_shell_quoted_punctuation() {
