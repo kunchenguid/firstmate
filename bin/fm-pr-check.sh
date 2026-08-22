@@ -83,6 +83,15 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
+# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
+# head commit as a selectable field; plain glab exposes it only inside its JSON
+# output, which would need a JSON processor firstmate does not require, so a
+# GitLab task records no pr_head. Both consumers already treat it as optional:
+# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
+# metadata and falls back to its provider-agnostic content check, and
+# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
+# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
+# and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 case "$PROVIDER" in

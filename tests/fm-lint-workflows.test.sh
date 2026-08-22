@@ -253,11 +253,13 @@ test_missing_actionlint_fails_closed() {
   done
   rc=0
   out=$(PATH="$fakebin" "$LINT_WF" --root "$tmp" 2>&1) || rc=$?
-  [ "$rc" -eq 127 ] || fail "missing actionlint expected exit 127, got $rc"$'\n'"$out"
+  [ "$rc" -eq 1 ] || fail "missing actionlint expected exit 1, got $rc"$'\n'"$out"
   assert_contains "$out" "actionlint not found" \
     "missing actionlint did not name the required linter"
   assert_contains "$out" "$REQUIRED" \
     "missing actionlint did not name the pinned version"
+  assert_contains "$out" "fm-install-actionlint.sh" \
+    "missing actionlint did not name the pinned installer"
   pass "missing actionlint fails closed"
 }
 
