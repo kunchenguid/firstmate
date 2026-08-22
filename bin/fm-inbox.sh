@@ -166,23 +166,47 @@ wake_for() {
 queue_note() {
   local source=$1 body=$2 extra=${3:-}
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
-  mkdir -p "$INBOX"
+  mkdir -p "$INBOX" || die "cannot create the inbox directory $INBOX; nothing was queued"
 
-  local tmp id summary staging_name
-  tmp=$(mktemp "$INBOX/.staging-XXXXXX")
-  staging_name=$(basename "$tmp")
-  id="$(date +%s)-${staging_name#.staging-}"
+  local tmp id at epoch summary staging_name
+  tmp=$(mktemp "$INBOX/.staging-XXXXXX") \
+    || die "cannot open a staging file in $INBOX; nothing was queued"
+  staging_name=$(basename "$tmp") \
+    || { rm -f "$tmp"; die "cannot identify the staging file; nothing was queued"; }
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    || { rm -f "$tmp"; die "cannot read the clock; nothing was queued"; }
+
+  # The id is derived from the staging name, so it is already known here and the
+  # record is written ONCE, with its final id. This used to write id=PENDING and
+  # patch it with `sed -i <expr> <file>`, which is GNU-only: BSD/macOS sed reads
+  # the argument after -i as the backup SUFFIX, so it took the expression for a
+  # suffix and the path for a script, and the note was lost on macOS. Writing the
+  # id up front needs no -i on either platform, and removes the second pass that
+  # could half-succeed.
+  epoch=$(date +%s) \
+    || { rm -f "$tmp"; die "cannot read the clock; nothing was queued"; }
+  id="$epoch-${staging_name#.staging-}"
+
+  # Every write is chained, so a full disk fails here rather than publishing a
+  # truncated record, and the staging file never survives a failure: a capture
+  # surface that loses what it was handed is worse than one that refuses.
   {
-    printf 'id=%s\n' "$id"
-    printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'source=%s\n' "$source"
-    [ -z "$extra" ] || printf '%s\n' "$extra"
-    printf -- '--\n'
-    printf '%s\n' "$body"
-  } >"$tmp"
+    printf 'id=%s\n' "$id" &&
+      printf 'at=%s\n' "$at" &&
+      printf 'source=%s\n' "$source" &&
+      { [ -z "$extra" ] || printf '%s\n' "$extra"; } &&
+      printf -- '--\n' &&
+      printf '%s\n' "$body"
+  } >"$tmp" || {
+    rm -f "$tmp"
+    die "could not write the note into $INBOX; nothing was queued"
+  }
 
-  # Publish the completed note atomically.
-  mv "$tmp" "$INBOX/$id.note"
+  # Publish atomically.
+  mv "$tmp" "$INBOX/$id.note" || {
+    rm -f "$tmp"
+    die "could not publish the note as $INBOX/$id.note; nothing was queued"
+  }
 
   # One-line summary for the wake payload; the full body stays in the file.
   summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
