@@ -33,6 +33,9 @@ The first non-empty, non-`#` line is a lowercase language tag such as `en`, `de`
 An absent, unreadable, or unrecognized value defaults to `en`.
 English is the source catalog and the fallback; no other language is preferred by the resolver.
 Additional languages are optional JSON catalogs, either a tracked pack at `languages/<tag>.json` in the code root or a home-local overlay at `config/languages/<tag>.json`.
+Each pack is a JSON object mapping catalog keys to translated strings; non-string values are ignored.
+Keys match the English source catalog in `.pi/extensions/lib/fm-language.ts`, and missing keys fall back to English.
+Values may include `{name}` placeholders that the formatter replaces at runtime.
 A local overlay wins over a tracked pack for the same tag, and a more specific tag (`es-mx`) falls back through its primary tag (`es`) to English.
 Background diagnostics and internal logs stay English.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
