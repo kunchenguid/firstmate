@@ -3,10 +3,12 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -16,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 AUTHORITY_SCHEMA = "fm.worker-authority/v1"
 RELEASE_SCHEMA = "fm.worker-release/v2"
+PI_ACCOUNT_HOME_TOOL = ROOT / "bin" / "fm-pi-account-home.py"
 REQUIRED_HEADINGS = (
     "## Summary", "## What changed", "## Verification", "## Visual evidence",
     "## Artifacts", "## Follow-ups",
@@ -622,13 +625,19 @@ def secondmate_worktree_evidence(home, task, values, worker):
     return "{}\0{}\0{}".format(worktree, common.resolve(), git(worktree, "rev-parse", "HEAD")).encode(), worktree
 
 
-def account_evidence(values, task, home):
+def account_evidence(values, task, home, worker=None):
     account_home = exactly(values, "account_home")
     if not Path(account_home).resolve().is_dir():
         raise AuthorityError("account authority directory is unavailable")
-    account_task = values.get("account_task", [task])[0]
-    if account_task != task:
+    account_tasks = values.get("account_task", [])
+    if account_tasks and account_tasks != [task]:
         raise AuthorityError("account authority task identity differs")
+    account_task = task
+    placements = values.get("placement", [])
+    if placements:
+        if placements != ["azure"]:
+            raise AuthorityError("ordinary account authority placement is ambiguous")
+        return azure_account_evidence(values, task, worker)
     helper = ROOT / "bin" / "fm-account-directory.sh"
     if not helper.is_file():
         raise AuthorityError("ordinary account authority helper is unavailable")
@@ -659,6 +668,186 @@ def account_evidence(values, task, home):
     if Path(account_real).resolve() != Path(account_home).resolve():
         raise AuthorityError("ordinary account authority canonical home differs")
     return "{}\0{}\0ordinary-account-owner".format(Path(account_home).resolve(), account_task).encode()
+
+
+def load_pi_projection():
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "fm_pi_account_home", PI_ACCOUNT_HOME_TOOL)
+        if spec is None or spec.loader is None:
+            raise AuthorityError(
+                "ordinary Azure account authority projection helper is unavailable")
+        projection = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(projection)
+        return projection
+    except AuthorityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any import failure refuses
+        raise AuthorityError(
+            "ordinary Azure account authority projection helper failed: {}".format(
+                type(exc).__name__))
+
+
+def open_private_account_directory(path):
+    """Open an absolute directory one no-follow component at a time."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open("/", flags)
+    except OSError as exc:
+        raise AuthorityError(
+            "ordinary Azure account authority lease path is unreadable: {}".format(
+                type(exc).__name__))
+    identities = []
+    try:
+        components = path.parts[1:]
+        for index, component in enumerate(components):
+            if component in ("", ".", ".."):
+                raise AuthorityError(
+                    "ordinary Azure account authority lease path is malformed")
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode):
+                raise AuthorityError(
+                    "ordinary Azure account authority lease path is not a directory")
+            if index == len(components) - 1 and info.st_mode & (
+                    stat.S_IWGRP | stat.S_IWOTH):
+                raise AuthorityError(
+                    "ordinary Azure account authority lease directory is not owner-private")
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not (
+                    info.st_mode & stat.S_ISVTX):
+                raise AuthorityError(
+                    "ordinary Azure account authority lease path is writable by others")
+            identities.append((info.st_dev, info.st_ino))
+        leaf = os.fstat(descriptor)
+        if leaf.st_uid != os.geteuid() or leaf.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise AuthorityError(
+                "ordinary Azure account authority lease directory is not owner-private")
+        return descriptor, identities
+    except AuthorityError:
+        os.close(descriptor)
+        raise
+    except OSError as exc:
+        os.close(descriptor)
+        raise AuthorityError(
+            "ordinary Azure account authority lease path is unsafe: {}".format(
+                type(exc).__name__))
+
+
+def read_private_pi_pool(path, max_bytes, max_profiles):
+    """Read auth.json through one pinned descriptor and recheck its pathname."""
+    directory, chain = open_private_account_directory(path)
+    credential = None
+    try:
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        credential = os.open("auth.json", flags, dir_fd=directory)
+        before = os.fstat(credential)
+        if not stat.S_ISREG(before.st_mode):
+            raise AuthorityError(
+                "ordinary Azure account authority lease credential is not regular")
+        if before.st_uid != os.geteuid() or before.st_mode & (
+                stat.S_IRWXG | stat.S_IRWXO):
+            raise AuthorityError(
+                "ordinary Azure account authority lease credential is not owner-private")
+        if before.st_size > max_bytes:
+            raise AuthorityError(
+                "ordinary Azure account authority lease credential exceeds its byte bound")
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(credential, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        if len(body) > max_bytes:
+            raise AuthorityError(
+                "ordinary Azure account authority lease credential exceeds its byte bound")
+        after = os.fstat(credential)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        current = os.stat("auth.json", dir_fd=directory, follow_symlinks=False)
+        if identity(before) != identity(after) or before.st_size != len(body) or (
+                current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+            raise AuthorityError(
+                "ordinary Azure account authority lease credential changed during proof")
+        current_directory, current_chain = open_private_account_directory(path)
+        os.close(current_directory)
+        if current_chain != chain:
+            raise AuthorityError(
+                "ordinary Azure account authority lease path changed during proof")
+    except AuthorityError:
+        raise
+    except OSError as exc:
+        raise AuthorityError(
+            "ordinary Azure account authority lease credential is unreadable: {}".format(
+                type(exc).__name__))
+    finally:
+        if credential is not None:
+            os.close(credential)
+        os.close(directory)
+    try:
+        pool = json.loads(body.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise AuthorityError(
+            "ordinary Azure account authority lease credential is malformed: {}".format(
+                type(exc).__name__))
+    if not isinstance(pool, dict) or len(pool) > max_profiles:
+        raise AuthorityError(
+            "ordinary Azure account authority lease credential object is malformed")
+    return pool
+
+
+def azure_account_evidence(values, task, worker):
+    """Prove the exact controller-selected Pi account lease for cloud work.
+
+    `account_home` is deliberately the multi-profile Pi pool and has no
+    claude/codex path component. The controller-selected, single-profile home
+    is recorded separately and its credential content is what minted the
+    controller-owned account binding.
+    """
+    leased_home = Path(exactly(values, "worker_account_home"))
+    if not leased_home.is_absolute():
+        raise AuthorityError("ordinary Azure account authority lease directory is malformed")
+    profile = exactly(values, "worker_account_profile")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", profile):
+        raise AuthorityError("ordinary Azure account authority profile is malformed")
+    bindings = worker.get("bindings") if isinstance(worker, dict) else None
+    expected_binding = bindings.get("account_binding") if isinstance(bindings, dict) else None
+    if not isinstance(expected_binding, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_binding):
+        raise AuthorityError("ordinary Azure account authority binding is unavailable")
+    lease = worker.get("account_lease") if isinstance(worker, dict) else None
+    expected_home = lease.get("account_home") if isinstance(lease, dict) else None
+    expected_profile = lease.get("account_profile") if isinstance(lease, dict) else None
+    if not isinstance(expected_home, str) or not isinstance(expected_profile, str):
+        raise AuthorityError("ordinary Azure account authority lease identity is unavailable")
+    if str(leased_home) != expected_home or profile != expected_profile:
+        raise AuthorityError("ordinary Azure account authority lease identity differs")
+    projection = load_pi_projection()
+    pool = read_private_pi_pool(
+        leased_home, projection.MAX_SOURCE_BYTES, projection.MAX_PROFILES)
+    if len(pool) != 1:
+        raise AuthorityError("ordinary Azure account authority lease is not single-profile")
+    credential = next(iter(pool.values()))
+    if projection.entry_faults(credential):
+        raise AuthorityError("ordinary Azure account authority lease credential is malformed")
+    upstream = projection.account_digest(credential)
+    if upstream == "none":
+        raise AuthorityError("ordinary Azure account authority lease has no upstream identity")
+    observed_binding = digest({"provider": "pi", "upstream_account": upstream})
+    if observed_binding != expected_binding:
+        raise AuthorityError("ordinary Azure account authority lease binding differs")
+    return canonical({
+        "account_binding": expected_binding,
+        "account_home": expected_home,
+        "account_profile": profile,
+        "account_task": task,
+        "owner": "ordinary-account-owner",
+    })
 
 
 def main():
@@ -722,7 +911,10 @@ def main():
         "endpoint": receipt("endpoint", args.task, generation, args.assignment_generation, endpoint_evidence(home, args.task, values)),
         "report": receipt("report", args.task, generation, args.assignment_generation, report_authority()),
         "landing": receipt("landing", args.task, generation, args.assignment_generation, landing_authority()),
-        "account": receipt("account", args.task, generation, args.assignment_generation, account_evidence(values, args.task, home)),
+        "account": receipt(
+            "account", args.task, generation, args.assignment_generation,
+            account_evidence(values, args.task, home, worker),
+        ),
         "worktree": receipt("worktree", args.task, generation, args.assignment_generation, worktree_info),
     }
     proof = {

@@ -3800,8 +3800,9 @@ def command_authority_receipt(env, args):
         worker = state["workers"].get(str((item or {}).get("slot")))
         if item is None or worker is None or worker.get("assignment_generation") != args.assignment_generation:
             raise LifecycleError("authority receipt requires one exact assigned worker")
+        authority_worker = worker_authority_snapshot(worker, item)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as handle:
-            json.dump(worker, handle, sort_keys=True, separators=(",", ":"))
+            json.dump(authority_worker, handle, sort_keys=True, separators=(",", ":"))
             worker_path = handle.name
         try:
             result = subprocess.run([
@@ -4004,10 +4005,26 @@ def write_task_home_receipt(path, item, worker=None):
     Path(path).write_text("{}\n{}\n".format(parent, task_home), encoding="utf-8")
 
 
-def ordinary_authority_attempt(env, args, worker):
+def worker_authority_snapshot(worker, item):
+    """Add controller-owned placement identity to an authority subprocess.
+
+    The queue entry is the durable account lease; task metadata only records
+    where fm-spawn staged it. Keep the authority input ephemeral so existing
+    live worker records gain this proof without a state-schema migration.
+    """
+    snapshot = dict(worker)
+    snapshot["account_lease"] = {
+        "account_home": item.get("account_home"),
+        "account_profile": item.get("account_profile"),
+    }
+    return snapshot
+
+
+def ordinary_authority_attempt(env, args, worker, item):
     """Run the ordinary release authority; None on success, its refusal text otherwise."""
+    authority_worker = worker_authority_snapshot(worker, item)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as handle:
-        json.dump(worker, handle, sort_keys=True, separators=(",", ":"))
+        json.dump(authority_worker, handle, sort_keys=True, separators=(",", ":"))
         worker_path = handle.name
     output_path = worker_path + ".receipt"
     try:
@@ -4143,7 +4160,7 @@ def command_surrender(env, args):
                 "surrender refuses: {} active children name parent {}; pass "
                 "--confirm-orphan-children to reparent them to the primary deliberately".format(
                     len(live_children), args.task))
-        refusal = ordinary_authority_attempt(env, args, worker)
+        refusal = ordinary_authority_attempt(env, args, worker, item)
         if refusal is None:
             raise LifecycleError(
                 "ordinary release authority succeeded; use authority-receipt and release"

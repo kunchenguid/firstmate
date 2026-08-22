@@ -2788,7 +2788,9 @@ account_authority_real_helper() {
   FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
   FM_ACCOUNT_DIRECTORY_ROOT="$tmp/accounts" \
   python3 - "$AUTHORITY" "$tmp" "$tmp/accounts/claude/3" "$tmp/accounts/claude/link" <<'PY' || fail "account authority against the real helper failed"
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("worker_authority", sys.argv[1])
@@ -2811,8 +2813,122 @@ except module.AuthorityError:
     pass
 else:
     raise AssertionError("symlinked account home was accepted")
+try:
+    module.account_evidence(
+        {"account_home": [sys.argv[3]], "account_task": ["task-x", "foreign"]},
+        "task-x", home,
+    )
+except module.AuthorityError as exc:
+    assert "task identity differs" in str(exc), exc
+else:
+    raise AssertionError("duplicate account task identity was accepted")
+
+# Azure placement is Pi-only. Its task-level account_home is the vendor-neutral
+# multi-profile pool; the controller-selected worker_account_home is keyed by
+# the upstream-account binding and contains exactly one projected credential.
+# Exercise the live profile labels whose receipts exposed this defect.
+pool_home = home / "pi-agent-home"
+pool_home.mkdir()
+for index, profile in enumerate(
+    ("openai-codex", "openai-codex-2", "openai-codex-3", "openai-codex-4"),
+    start=1,
+):
+    credential = {
+        "type": "oauth",
+        "access": "fixture-access-{}".format(index),
+        "refresh": "fixture-refresh-{}".format(index),
+        "accountId": "fixture-account-{}".format(index),
+        "expires": 4102444800000,
+    }
+    upstream = hashlib.sha256(credential["accountId"].encode()).hexdigest()[:16]
+    binding = module.digest({"provider": "pi", "upstream_account": upstream})
+    leased = home / "projected" / binding
+    leased.mkdir(parents=True)
+    leased.chmod(0o700)
+    credential_path = leased / "auth.json"
+    credential_path.write_text(json.dumps({"openai-codex": credential}))
+    credential_path.chmod(0o600)
+    cloud_values = {
+        "account_home": [str(pool_home)],
+        "account_task": ["task-x"],
+        "placement": ["azure"],
+        "worker_account_home": [str(leased)],
+        "worker_account_profile": [profile],
+    }
+    worker = {
+        "bindings": {"account_binding": binding},
+        "account_lease": {
+            "account_home": str(leased),
+            "account_profile": profile,
+        },
+    }
+    evidence = module.account_evidence(cloud_values, "task-x", home, worker)
+    assert profile.encode() in evidence and binding.encode() in evidence, evidence
+    foreign = dict(worker)
+    foreign["bindings"] = {"account_binding": "f" * 64}
+    try:
+        module.account_evidence(cloud_values, "task-x", home, foreign)
+    except module.AuthorityError as exc:
+        assert "binding differs" in str(exc), exc
+    else:
+        raise AssertionError("foreign Azure account binding was accepted")
+
+    different_profile = dict(cloud_values)
+    different_profile["worker_account_profile"] = [profile + "-foreign"]
+    try:
+        module.account_evidence(different_profile, "task-x", home, worker)
+    except module.AuthorityError as exc:
+        assert "lease identity differs" in str(exc), exc
+    else:
+        raise AssertionError("task metadata substituted the Azure account profile")
+
+    alternate = home / "alternate" / binding
+    alternate.mkdir(parents=True)
+    alternate.chmod(0o700)
+    alternate_credential = alternate / "auth.json"
+    alternate_credential.write_text(json.dumps({"openai-codex": credential}))
+    alternate_credential.chmod(0o600)
+    different_home = dict(cloud_values)
+    different_home["worker_account_home"] = [str(alternate)]
+    try:
+        module.account_evidence(different_home, "task-x", home, worker)
+    except module.AuthorityError as exc:
+        assert "lease identity differs" in str(exc), exc
+    else:
+        raise AssertionError("task metadata substituted the Azure account home")
+
+    redirected = home / "redirected-{}".format(index)
+    redirected.symlink_to(home / "projected", target_is_directory=True)
+    redirected_values = dict(cloud_values)
+    redirected_values["worker_account_home"] = [str(redirected / binding)]
+    redirected_worker = dict(worker)
+    redirected_worker["account_lease"] = dict(worker["account_lease"])
+    redirected_worker["account_lease"]["account_home"] = str(redirected / binding)
+    try:
+        module.account_evidence(redirected_values, "task-x", home, redirected_worker)
+    except module.AuthorityError as exc:
+        assert "path is unsafe" in str(exc), exc
+    else:
+        raise AssertionError("redirected Azure account lease parent was accepted")
+
+    leased.chmod(0o770)
+    try:
+        module.account_evidence(cloud_values, "task-x", home, worker)
+    except module.AuthorityError as exc:
+        assert "owner-private" in str(exc), exc
+    else:
+        raise AssertionError("group-writable Azure account lease was accepted")
+    leased.chmod(0o700)
+    credential_path.chmod(0o660)
+    try:
+        module.account_evidence(cloud_values, "task-x", home, worker)
+    except module.AuthorityError as exc:
+        assert "owner-private" in str(exc), exc
+    else:
+        raise AssertionError("group-readable Azure account credential was accepted")
+    credential_path.chmod(0o600)
 PY
-  pass "account authority proves the exact home through the real sourceable helper"
+  pass "account authority proves direct homes and all four Azure Pi lease profiles"
 }
 
 partial_apply_never_persists() {
@@ -3520,7 +3636,7 @@ state = {
 module.load_state = lambda _env: state
 module.controller_lock = __import__("contextlib").nullcontext
 module.save_state = lambda _env, _state: (_ for _ in ()).throw(AssertionError("a refused surrender persisted state"))
-module.ordinary_authority_attempt = lambda _env, _args, _worker: None
+module.ordinary_authority_attempt = lambda _env, _args, _worker, _item: None
 module.provider_call = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("surrender consulted the provider after an authority success"))
 
 args = types.SimpleNamespace(
@@ -3666,14 +3782,15 @@ try:
     module.subprocess.run = lambda *_a, **_k: types.SimpleNamespace(
         returncode=1, stderr=b"Traceback (most recent call last): KeyError: 'window'", stdout=b"")
     try:
-        real_attempt(env, args(), worker_record())
+        real_attempt(env, args(), worker_record(), base_state()["queue"]["task-1@gen-1"])
     except module.LifecycleError as exc:
         assert "failed rather than refusing" in str(exc), exc
     else:
         raise AssertionError("a broken authority tool unlocked surrender")
     module.subprocess.run = lambda *_a, **_k: types.SimpleNamespace(
         returncode=2, stderr=b"WORKER AUTHORITY REFUSED: ordinary task metadata authority is absent", stdout=b"")
-    refusal = real_attempt(env, args(), worker_record())
+    refusal = real_attempt(
+        env, args(), worker_record(), base_state()["queue"]["task-1@gen-1"])
     assert "metadata authority is absent" in refusal
 finally:
     module.subprocess.run = real_run
@@ -5010,6 +5127,7 @@ account.mkdir(parents=True, exist_ok=True)
         "accountId": "fixture-account-2", "expires": 4102444800000,
     },
 }, sort_keys=True, indent=2))
+(account / "auth.json").chmod(0o600)
 git_dir = worktree / ".git"
 (home / "state" / "local-crew.meta").write_text(
     "generation_id=gen-local\nworktree={}\naccount_home={}\naccount_task=local-crew\n"
@@ -5166,7 +5284,7 @@ compartment_child_reaches_its_ordinary_exit() {
   fm_test_tmproot_into tmp fm-worker-task-home-release
   provider="$tmp/provider.py"
   fixture="$tmp/provider-state.json"
-  mkdir -p "$tmp/primary/data" "$tmp/primary/state" "$tmp/shim" "$tmp/accounts/codex/1"
+  mkdir -p "$tmp/primary/data" "$tmp/primary/state" "$tmp/shim" "$tmp/pi-agent-home"
   write_fixture_provider "$provider"
   # The endpoint oracle must prove the task's pane ABSENT through the real
   # backend helper, so give it a tmux that reports no server.
@@ -5259,7 +5377,7 @@ subprocess.run(["git", "clone", "-q", str(origin), str(worktree)], check=True,
                env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 # The account directory the real account helper validates, and the completion
 # report the report authority requires - both in the SECONDMATE's home.
-account = Path(env["FM_ACCOUNT_DIRECTORY_ROOT"]) / "codex" / "1"
+account = root / "pi-agent-home"
 # The same directory is this task's provider-account POOL, exactly as the real
 # cloud lane's account_home (the Pi coding-agent home) is: placement leases one
 # profile out of it and refuses a home it cannot identify an account in.
@@ -5303,6 +5421,16 @@ assert item["task_home"] == str(sub), item
 worker = state["workers"][str(item["slot"])]
 assert worker["task_home"] == str(sub), worker
 assignment = worker["assignment_generation"]
+# The real cloud spawn appends the controller-selected lease only after the
+# request succeeds. Its path has no claude/codex vendor component, so the
+# public authority-receipt command must use this exact placement record rather
+# than guess a direct-account vendor from account_home.
+with (sub / "state" / "child-1.meta").open("a") as stream:
+    stream.write(
+        "placement=azure\nworker_account_home={}\nworker_account_profile={}\n".format(
+            item["account_home"], item["account_profile"]
+        )
+    )
 
 # The ordinary exit, for real: authority-receipt runs the unmodified authority
 # tool, and it must find the child's metadata under the TASK home.
