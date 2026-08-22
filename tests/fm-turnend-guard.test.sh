@@ -433,6 +433,39 @@ test_hook_loop_guard_allows_retry() {
   pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
 }
 
+test_hook_codex_away_mode_uses_ordinary_loop_guard() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-away-loopguard")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1); status=$?
+  expect_code 2 "$status" "--codex away mode must block the first blind stop"
+  assert_contains "$out" "TURN WOULD END BLIND" "--codex away-mode block must carry the blind-turn banner"
+  out=$(printf '%s' '{"stop_hook_active":true}' | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1); status=$?
+  expect_code 0 "$status" "--codex away mode must allow the loop-guarded continuation stop"
+  [ -z "$out" ] || fail "--codex away-mode loop-guarded retry produced output: $out"
+  pass "fm-turnend-guard --codex: away mode retains the ordinary one-follow-up loop guard"
+}
+
+test_hook_codex_caps_checkpoint_below_stop_timeout() {
+  local dir out status observed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-checkpoint-cap")
+  : > "$dir/state/task1.meta"
+  cat > "$dir/bin/fm-watch-checkpoint.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$2" > "$FM_HOME/checkpoint-seconds"
+printf '%s\n' "checkpoint: no actionable wake within $2s"
+exit 124
+SH
+  chmod +x "$dir/bin/fm-watch-checkpoint.sh"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" FM_CODEX_WATCH_CHECKPOINT=600 bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1); status=$?
+  expect_code 2 "$status" "--codex must continue after a capped quiet checkpoint"
+  observed=$(cat "$dir/checkpoint-seconds")
+  [ "$observed" = 540 ] || fail "--codex checkpoint duration must leave hook timeout margin, got $observed"
+  assert_contains "$out" "quietly" "--codex capped checkpoint must preserve quiet-continuation feedback"
+  pass "fm-turnend-guard --codex: caps checkpoints below the synchronous Stop timeout"
+}
+
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
 # exactly like the main primary. This was the guard's proven blind spot: the
 # .fm-secondmate-home marker used to early-exit here, so an overnight secondmate
@@ -1701,6 +1734,8 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_hook_codex_away_mode_uses_ordinary_loop_guard
+test_hook_codex_caps_checkpoint_below_stop_timeout
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry

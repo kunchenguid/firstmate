@@ -73,6 +73,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CHECKPOINT="$SCRIPT_DIR/fm-watch-checkpoint.sh"
+CODEX_CHECKPOINT_MAX=540
 CLAUDE_MODE=0
 CODEX_MODE=0
 CURSOR_MODE=0
@@ -127,7 +128,8 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$CODEX_MODE" -eq 0 ] \
+if [ "$CLAUDE_MODE" -eq 0 ] \
+  && { [ "$CODEX_MODE" -eq 0 ] || [ -e "$STATE/.afk" ]; } \
   && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
@@ -177,6 +179,16 @@ fi
 codex_checkpoint() {
   local checkpoint_output checkpoint_status seconds
   seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
+  case "$seconds" in
+    ''|*[!0-9]*|0) seconds=180 ;;
+  esac
+  while [ "${#seconds}" -gt 1 ] && [ "${seconds#0}" != "$seconds" ]; do
+    seconds=${seconds#0}
+  done
+  if [ "${#seconds}" -gt "${#CODEX_CHECKPOINT_MAX}" ] \
+    || { [ "${#seconds}" -eq "${#CODEX_CHECKPOINT_MAX}" ] && [[ "$seconds" > "$CODEX_CHECKPOINT_MAX" ]]; }; then
+    seconds=$CODEX_CHECKPOINT_MAX
+  fi
   if [ ! -x "$CHECKPOINT" ]; then
     printf '%s\n' 'FIRSTMATE CODEX SUPERVISION FAILED: the tracked foreground checkpoint is unavailable; inspect the checkout before ending the turn blind.' >&2
     exit 2

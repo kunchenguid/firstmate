@@ -70,7 +70,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
 Codex runs the guard with `--codex`, which deliberately does not treat `stop_hook_active=true` as permission to end blind.
-While supervision is needed and no healthy watcher already owns the home, each Stop invocation runs one foreground `fm-watch-checkpoint.sh` cycle for `FM_CODEX_WATCH_CHECKPOINT` seconds.
+While supervision is needed and no healthy watcher already owns the home, each Stop invocation runs one foreground `fm-watch-checkpoint.sh` cycle for `FM_CODEX_WATCH_CHECKPOINT` seconds, capped at 540 seconds to leave cleanup margin beneath the hook's 600-second timeout.
 An actionable watcher close becomes the Stop continuation reason and leaves its durable wake for the continuation's first drain.
 A quiet checkpoint also forces one short handling continuation so queued captain input can be processed; ending that continuation invokes the hook again and starts the next checkpoint without a model-authored re-arm command.
 An expected checkpoint close can make the next cycle report the durable `check: rearm-resurface` boundary before its signal scan; the required drain still exposes every unread terminal status in that same continuation.

@@ -20,4 +20,5 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
-The Stop hook has a 600-second execution bound, comfortably above the default 180-second checkpoint, and never detaches the watcher from its owned process tree.
+The Stop hook has a 600-second execution bound, and checkpoint requests cap at 540 seconds to preserve its cleanup margin.
+It never detaches the watcher from its owned process tree.
