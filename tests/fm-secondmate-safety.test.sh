@@ -864,22 +864,59 @@ test_home_seed_refuses_missing_projects_without_signal() {
   pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
 }
 
-test_home_seed_refuses_local_only_project() {
-  local home subhome err
+# A local-only project's canonical copy is a folder outside projects/, and the
+# secondmate's clone must be a SIBLING of this home's clone off that same folder,
+# not a copy of the clone. Otherwise a landing would have to travel two hops to
+# reach the folder its owner actually reads.
+test_home_seed_clones_a_local_only_project_from_its_origin_folder() {
+  local home subhome folder expected actual
   home="$TMP_ROOT/local-only-seed-home"
   subhome="$TMP_ROOT/local-only-seed-subhome"
-  err="$TMP_ROOT/local-only-seed.err"
+  folder="$TMP_ROOT/local-only-seed-folder"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  # The folder has no remote of its own, exactly like a project that has never
+  # been near a forge.
+  fm_git_init_commit "$folder"
+  git clone --quiet "$folder" "$home/projects/alpha"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'the local-only domain' alpha \
+    || fail "charter scaffold failed for the local-only seed test"
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "seed refused a local-only project"
+
+  [ -d "$subhome/projects/alpha/.git" ] || fail "the local-only project was not cloned into the secondmate home"
+  expected=$(cd "$folder" && pwd -P)
+  actual=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$actual" = "$expected" ] \
+    || fail "the seeded clone points at $actual, not the project's own folder $expected"
+  # Reseeding must converge rather than refuse the origin it just wrote.
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "reseeding a local-only project did not converge"
+  pass "home seeding clones a local-only project from the folder that holds it"
+}
+
+# Without an origin there is no folder to seed from and nowhere for a landing to
+# return to, so this refuses with the concrete gap rather than cloning the local
+# clone and quietly building a chain nobody can land through.
+test_home_seed_refuses_a_local_only_project_with_no_origin() {
+  local home subhome err
+  home="$TMP_ROOT/local-only-noorigin-home"
+  subhome="$TMP_ROOT/local-only-noorigin-subhome"
+  err="$TMP_ROOT/local-only-noorigin.err"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed a local-only project into a secondmate home"
+    fail "seed accepted a local-only project with no origin to seed from"
   fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
-    || fail "seed did not explain local-only project rejection"
-  [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
-  pass "home seeding refuses local-only projects"
+  grep -F 'is local-only and' "$err" >/dev/null \
+    || fail "seed did not explain the missing local-only origin"
+  grep -F "git -C $home/projects/alpha remote add origin" "$err" >/dev/null \
+    || fail "seed did not name the command that closes the missing-origin gap"
+  [ ! -e "$subhome" ] || fail "seed created a subhome before refusing an originless local-only project"
+  pass "home seeding refuses a local-only project that has no origin folder"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -1119,6 +1156,9 @@ test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin() {
   pass "remote-backed subhome seeding validates existing destination origins"
 }
 
+# Which origin spellings are filesystem paths is bin/fm-project-origin-lib.sh's
+# to say, and bin/fm-home-seed.sh asks it before anchoring one, so a change to
+# that library is a change to what this case covers.
 test_home_seed_resolves_relative_source_origins() {
   local home subhome subhome_abs expected out actual
   home="$TMP_ROOT/relative-origin-home"
@@ -2980,7 +3020,8 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects
 test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
-test_home_seed_refuses_local_only_project
+test_home_seed_clones_a_local_only_project_from_its_origin_folder
+test_home_seed_refuses_a_local_only_project_with_no_origin
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

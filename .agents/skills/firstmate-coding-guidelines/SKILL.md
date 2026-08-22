@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and this repo's own style rules (one sentence per line, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -115,8 +115,9 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 
 - Put one full sentence per line in tracked Markdown.
 - Never wrap multiple sentences onto one physical line.
-- Plain dash `-`, never an em dash.
-- Never add an agent name as a commit co-author.
+  Those two are this repo's own unconditional bar for every tracked Markdown file, deliberately stricter than the fleet-wide guideline in `AGENTS.md`'s "General Guidelines for all crewmates, including firstmate" section, which is scoped to long Markdown and TeX files.
+- Never add an agent name as a commit co-author: no agent name, by any means, not only an auto-added one and not only your own.
+- Plain dash `-`, never an em dash, is owned fleet-wide by that same `AGENTS.md` section.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, pinned shellcheck version, and pinned actionlint workflow lint) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other version of either linter.
 - When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before shipping.

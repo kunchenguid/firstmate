@@ -107,4 +107,78 @@ refuses 'file:///srv/git/../../etc/app.git'
 refuses '/srv/git/..'
 pass "executable transports, option-shaped values, and unusable spellings are refused"
 
+# A caller holding the clone an origin belongs to may anchor a path-shaped
+# spelling before asking, so the library also answers which spellings are paths
+# at all. A colon only makes an origin scp-like when it precedes the first slash.
+path_form() {
+  fm_project_origin_is_path_form "$1" || fail "did not recognize a path-shaped origin: $1"
+}
+not_path_form() {
+  ! fm_project_origin_is_path_form "$1" || fail "read an origin on another host as a path: $1"
+}
+
+path_form '/Users/captain/JobSearch'
+path_form 'file:///Users/captain/JobSearch'
+path_form '../JobSearch'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this test writes, so it is classified unexpanded.
+path_form '~/JobSearch'
+path_form 'JobSearch'
+path_form './my:folder/JobSearch'
+path_form '../work:notes'
+path_form './work:notes'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, not a path this test writes, so it is classified unexpanded.
+path_form '~/work:notes'
+not_path_form 'https://example.com/owner/app.git'
+not_path_form 'ssh://git@example.com/owner/app.git'
+not_path_form 'git@example.com:owner/app.git'
+not_path_form 'example.com:owner/app.git'
+# No slash precedes the colon, so git opens an ssh connection to host "work" for
+# this value rather than reading a folder, even when ./work/notes exists beside
+# the clone. Following it as a folder would land the change somewhere git itself
+# would never fetch from.
+not_path_form 'work:notes'
+not_path_form 'ext::sh -c cat'
+not_path_form ''
+pass "path-shaped origin spellings are told apart from origins on another host"
+
+# Once a caller has anchored a spelling against its own clone it holds a path on
+# THIS machine, which is a different question from what may be handed to another
+# host: a folder named "Job Search" is ordinary here, so the landing must follow it
+# rather than refuse every landing that project will ever have. The transport rules
+# above are untouched by that, which is why this is a separate answer.
+anchored_path_is() {  # <origin> <expected-path>
+  local actual
+  actual=$(fm_project_origin_anchored_local_path "$1") \
+    || fail "refused a folder this machine can follow: $1"
+  [ "$actual" = "$2" ] || fail "resolved $1 to $actual, expected $2"
+  [ -z "$(fm_project_origin_anchored_local_fault "$1")" ] \
+    || fail "named a fault in a folder it followed anyway: $1"
+}
+anchored_fault_is() {  # <origin> <substring of the reason>
+  local reason
+  ! fm_project_origin_anchored_local_path "$1" >/dev/null \
+    || fail "followed an anchored origin that is not a usable local path: $1"
+  reason=$(fm_project_origin_anchored_local_fault "$1")
+  case $reason in
+    *"$2"*) ;;
+    *) fail "refused $1 without saying what is wrong with it: ${reason:-<nothing>}" ;;
+  esac
+}
+
+anchored_path_is '/Users/captain/Job Search' '/Users/captain/Job Search'
+anchored_path_is '/Users/captain/JobSearch' '/Users/captain/JobSearch'
+anchored_path_is 'file:///Users/captain/Job Search' '/Users/captain/Job Search'
+anchored_path_is "/Users/captain/Bewerbungen (2026)" "/Users/captain/Bewerbungen (2026)"
+anchored_fault_is 'JobSearch' 'absolute'
+anchored_fault_is '../JobSearch' 'absolute'
+# shellcheck disable=SC2088 # The tilde is a literal prefix in a value read from git config, so an unanchored one is refused rather than expanded here.
+anchored_fault_is '~/JobSearch' 'absolute'
+anchored_fault_is 'https://example.com/owner/app.git' 'absolute'
+anchored_fault_is 'file://relative.git' 'absolute'
+anchored_fault_is '' 'absolute'
+anchored_fault_is '/Users/captain/JobSearch/../../etc' '".." segment'
+anchored_fault_is 'file:///Users/captain/JobSearch/..' '".." segment'
+anchored_fault_is "$(printf '/Users/captain/Job\nSearch')" 'control character'
+pass "an origin already anchored on this machine is judged as a local path, spaces and all"
+
 echo "ALL TESTS PASSED"

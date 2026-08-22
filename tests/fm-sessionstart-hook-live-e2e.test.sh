@@ -107,7 +107,7 @@ make_lab() {  # <harness> -> echoes lab dir
   git -C "$lab" commit -q -m init >/dev/null 2>&1 || true
 
   for stub in fm-turnend-guard.sh fm-claude-stop-autoarm.sh fm-arm-pretool-check.sh \
-    fm-cd-pretool-check.sh fm-subagent-pretool-check.sh; do
+    fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-plainenglish-hook.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$lab/bin/$stub"
     chmod +x "$lab/bin/$stub"
   done

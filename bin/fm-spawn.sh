@@ -1727,24 +1727,67 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Put a pooled worktree on the tip its worker must start from, or refuse.
+#
+# With an origin configured that tip is origin/<default>, and EVERY way of
+# failing to reach it stays a refusal - an unreachable origin, an unresolvable
+# remote default branch, or an unfetchable target ref all mean the base may be
+# stale, which is the exact failure this function exists to prevent.
+#
+# A clone with NO origin at all is a different case, not a failure. A
+# local-only project's projects/<name> clone can be the project's only copy
+# (.agents/skills/project-management/SKILL.md), so there is nothing to fetch
+# and the clone's own default-branch tip is the only available truth; without
+# this the fetch exits 128 and no crewmate could be spawned into such a
+# project at all. Absence is detected positively by asking git for origin's
+# URL, never by reading a failed fetch as "no origin".
+#
+# That concession is granted only to a project the captain REGISTERED as
+# local-only in data/projects.md. A remote-backed project whose pool lost its
+# origin, by a damaged git config or a removed remote, looks identical to git
+# and would otherwise launch a worker from a local tip nobody verified, which
+# is the stale base this function exists to prevent. The registry is the right
+# authority for that question and the task's --mode is not: --mode says how
+# this one task ships, while the registered posture says whether the project
+# is supposed to have a remote at all. An unregistered project resolves to the
+# no-mistakes default, so it is refused too, and the refusal names the
+# registration that would allow it.
+#
+# Both paths keep the ordering below: the cleanliness refusal runs before any
+# reset, so a pooled worktree holding uncommitted work is refused rather than
+# discarded. Nothing here is ever forced or stashed.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  local worktree=$1 default target expected actual status posture proj_name
+  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    proj_name=$(basename "$PROJ_ABS")
+    posture=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$proj_name" 2>/dev/null | cut -d' ' -f1) || posture=
+    if [ "$posture" != local-only ]; then
+      echo "error: pooled worktree '$worktree' has no origin, but $proj_name is registered as ${posture:-no-mistakes}, which is remote-backed; refusing to launch from a local base no remote confirmed - restore that clone's origin, or register the project as local-only if it really has no remote" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the default branch of pooled worktree '$worktree', which has no origin to consult; refusing to launch from an arbitrary base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
