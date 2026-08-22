@@ -36,21 +36,39 @@ out-of-band capture already uses, rather than a second queue.
 
 ## What it costs in time
 
-Measured on 2026-08-21, `amazon.nova-2-sonic-v1:0` in `eu-north-1`, on a spoken
-question that makes the agent read the records before it can answer, which is the
-slowest ordinary case. Six runs each, all six answered each way.
+Measured on 2026-08-22 against the reviewed relay code, `amazon.nova-2-sonic-v1:0`
+in `eu-north-1`, on a spoken question that makes the agent read the records before
+it can answer, which is the slowest ordinary case. Six runs each, all six answered
+each way.
 
 | Path | First audio out, seconds | Median |
 | --- | --- | --- |
-| Direct from this desktop, no relay | 1.147 1.179 1.203 1.237 1.244 1.317 | 1.220 |
-| Over the relay, real client and framing | 1.229 1.379 1.428 1.447 1.481 1.516 | 1.438 |
+| Direct from this desktop, no relay | 1.165 1.190 1.215 1.250 1.281 1.352 | 1.232 |
+| Over the relay, real client and framing | 1.138 1.165 1.171 1.174 1.177 1.283 | 1.172 |
 
 The clock starts the instant the captain stops speaking and stops when the first
 byte of reply audio arrives. The direct figure reproduces the 1.164 second
-measurement in the earlier survey, which is what makes it usable as a control.
+measurement in the earlier survey, to within the noise floor below, which is what
+makes it usable as a control.
 
-**The relay costs about 0.22 seconds of the median.** That is framing, the extra
-process hop, and reconnecting the model session at the start of each turn.
+**The relay's own cost is smaller than this measurement can resolve.** The relay
+median lands below the direct control, which does not mean the relay is faster:
+two direct-control passes twenty minutes apart differ by 0.070 seconds of median,
+so that is the floor, and framing and the extra process hop are both under it.
+Read the two rows as the same number.
+
+The first pass, on the relay as first written, put it 0.22 seconds behind the
+control, and that gap read as framing, the process hop and the per-turn reconnect.
+It was none of them, and the difference is worth keeping, because a wrong number
+invites a re-measurement while a wrong cause invites a fix to the wrong part of
+the relay. Each relay run is six turns in one session, so a per-turn defect shows
+up as a step: that pass stepped from 1.229 on turn one to a 1.447 median across
+turns two to six, and the same step appeared independently on the
+talk-end-to-tool-request mark, 0.599 rising to 0.730. The re-measured passes are
+flat, stepping 0.009 and 0.021. The 0.22 seconds was the relay resolving AWS
+credentials again for every turn's session, which review found and fixed:
+`Credentials` in `bin/fm-voice-relay.py` resolves once, and every later session
+reuses that answer, so a reconnect costs a reconnect.
 
 What the relay figure does NOT include, and could not be measured from here:
 
@@ -62,10 +80,10 @@ What the relay figure does NOT include, and could not be measured from here:
   reports both device figures in its own output, so your first live run measures
   them rather than guessing.
 
-So your number is about 1.2 to 1.5 seconds plus your round trip time plus your
-audio devices. It is worth saying plainly that this came in at or under the
-bottom of the 1.5 to 2.5 second estimate the relay shape was given before it was
-built. The safer shape, with no credentials on the laptop, is not the slower one.
+So your number is about 1.15 to 1.3 seconds plus your round trip time plus your
+audio devices. It is worth saying plainly that this came in under the bottom of
+the 1.5 to 2.5 second estimate the relay shape was given before it was built. The
+safer shape, with no credentials on the laptop, is not the slower one.
 
 ## Setting up this desktop
 
@@ -175,11 +193,12 @@ Two settings control it, both optional and both in `config/`:
 `voice-read-deny` exists so that one future open item carrying a customer name
 can be excluded in a single line rather than by turning the feature off.
 
-The wider scope is not free. Measured on the same question, the wide answer is
-2872 bytes against 445, and it costs both time and consistency: 1.348, 1.866 and
-2.273 seconds against 1.351, 1.299 and 1.376. If the spoken answer only ever
-needs to be "three jobs running, two decisions waiting", `counts` is faster and
-steadier as well as narrower.
+The wider scope is not free. Measured on 2026-08-21 on the same question, on the
+relay as first written, so compare the two sides with each other rather than with
+the table above: the wide answer is 2872 bytes against 445, and it costs both time
+and consistency, at 1.348, 1.866 and 2.273 seconds against 1.351, 1.299 and 1.376.
+If the spoken answer only ever needs to be "three jobs running, two decisions
+waiting", `counts` is faster and steadier as well as narrower.
 
 An unreadable or misspelled `voice-read-scope` refuses rather than falling back
 to the wider setting, because falling back would widen what is sent on the
