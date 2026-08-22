@@ -18,6 +18,11 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# A run-step detail also carries a stable run-generation token when the run exposes
+# one (run-id=/run-head=, or runs-row= on the coarse fallback), so a watcher can tell
+# one run outcome from the next without re-reading the run; bin/fm-classify-lib.sh
+# parses it.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
