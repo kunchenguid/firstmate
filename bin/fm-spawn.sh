@@ -20,14 +20,15 @@
 #                                   [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either.
-#   --recover-missing is used only by the control plane when the recorded
-#   Herdr endpoint is authoritatively gone, and this script enforces that
+#   --recover-missing is reserved for ship and scout tasks and is used only by
+#   the control plane when the recorded Herdr endpoint is authoritatively gone,
+#   or is agent-free after a failed recovery attempt. This script enforces that
 #   reservation itself: it refuses the flag unless the invoking process is a
 #   live bin/fm-control.sh relaunch holding this task's control lock, or the
 #   recovery-attempt marker from that plane's prior attempt authorizes the
-#   retry. It creates one replacement pane in
-#   the recorded workspace when possible, or the same home's flat workspace,
-#   while preserving the task's existing local copy and validation ownership.
+#   retry. It creates one replacement pane in the recorded workspace when
+#   possible, or the same home's flat workspace, while preserving the task's
+#   existing local copy and validation ownership.
 #   It is never a fresh spawn and never allocates another worktree. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
 #   owns the checkpoint, the progress note, stopping the previous agent, and the
@@ -37,12 +38,12 @@
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free (or authoritatively gone under --recover-missing) on a backend
-#   with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   ordinary relaunch. Ordinary relaunch refuses unless the recorded endpoint
+#   is positively agent-free on a backend with a recovery-grade agent-state
+#   classifier (tmux or herdr) and its shell is sitting in the recorded
+#   worktree. An authorized --recover-missing path accepts only a missing or
+#   agent-free Herdr endpoint, creates one replacement pane, and proves its
+#   shell is in the recorded worktree before arming the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

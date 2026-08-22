@@ -46,8 +46,9 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. When the recorded Herdr endpoint is
-#              authoritatively gone, or reads agent-free while a durable
+#              bin/fm-spawn.sh --relaunch. For ship and scout tasks, when the
+#              recorded Herdr endpoint is authoritatively gone, or reads
+#              agent-free while a durable
 #              recovery-attempt marker proves a prior missing-endpoint recovery
 #              of this task failed here, the launch delegates with
 #              --recover-missing instead (fm-spawn's header owns that contract):

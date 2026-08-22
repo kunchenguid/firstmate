@@ -33,7 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
-| `relaunch` on a gone Herdr endpoint | Rebuild exactly one replacement pane in the recorded session/workspace instead of adopting an endpoint that no longer exists. | The new agent is alive on the rebuilt pane, the recorded local copy and records are unchanged, and the durable record names the harness that is actually running. |
+| `relaunch` on a gone Herdr endpoint for a ship or scout | Rebuild exactly one replacement pane in the recorded session/workspace instead of adopting an endpoint that no longer exists. | The new agent is alive on the rebuilt pane, the existing local copy and task identity remain under the same validation ownership, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -70,10 +70,10 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-   A recorded Herdr endpoint that is authoritatively missing, or reads agent-free while a durable recovery-attempt marker proves a prior missing-endpoint recovery of this task failed here, skips this step because there is nothing left to stop.
+   For a ship or scout, a recorded Herdr endpoint that is authoritatively missing, or reads agent-free while a durable recovery-attempt marker proves a prior missing-endpoint recovery of this task failed here, skips this step because there is nothing left to stop.
    An ordinary failed relaunch leaves the same dead-pane shape with no marker, and its retry keeps the ordinary same-endpoint path.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
-   That skipped stop passes `--recover-missing`, so the launch rebuilds exactly one replacement pane in the recorded session/workspace - or the home's flat workspace when the recorded workspace is gone too - while keeping the task's existing local copy, records, and validation ownership.
+   That skipped stop passes `--recover-missing`, so the launch rebuilds exactly one replacement pane in the recorded session/workspace - or the home's flat workspace when the recorded workspace is gone too - while keeping the task's existing local copy, task identity, durable ownership, and validation ownership.
    An endpoint that turns live or ambiguous between checks refuses rather than risking a duplicate recovery.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
@@ -81,7 +81,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
-- A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A launch failure **before the replacement record is published** restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -103,8 +103,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
-  `--recover-missing` is control-plane-only: the launch owner accepts it only from a live `bin/fm-control.sh relaunch` holding that task's control lock, or when the durable recovery-attempt marker from that plane's prior attempt authorizes finishing it, and under it the same gate accepts only an authoritatively missing Herdr endpoint, or an agent-free one left by a failed recovery attempt.
+- Ordinary `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  `--recover-missing` is reserved for ship and scout tasks and is control-plane-only: the launch owner accepts it only from a live `bin/fm-control.sh relaunch` holding that task's control lock, or when the durable recovery-attempt marker from that plane's prior attempt authorizes finishing it.
+  Its gate accepts only an authoritatively missing or agent-free Herdr endpoint, creates exactly one replacement pane in the recorded or same-home flat workspace, and proves that pane's shell is in the recorded worktree before launch; live or ambiguous states refuse.
 
 ## Capability matrix
 
