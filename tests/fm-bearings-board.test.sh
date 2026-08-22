@@ -171,6 +171,30 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "an unanswerable captains_call item was accepted"
 
   write_valid_payload "$data"
+  jq '.captains_call[0].options = [] | .captains_call[0].allow_freeform = true' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a freeform-only captains_call item without options was accepted"
+
+  write_valid_payload "$data"
+  jq '.captains_call[1].options = [] | .captains_call[1].allow_freeform = false' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an optionless merge card with freeform disabled was accepted"
+
+  write_valid_payload "$data"
+  jq '.captains_call[0].type = "credential"
+    | .captains_call[0].options = []
+    | del(.captains_call[0].allow_freeform)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an optionless credential card without freeform permission was accepted"
+
+  write_valid_payload "$data"
+  jq '.captains_call[0].options[0].value = "__drop__"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a captains_call option reserved for close/drop was accepted"
+
+  write_valid_payload "$data"
   jq '.captains_call[1].pr_url = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-HTTPS Captain’s Call PR URL was accepted"
@@ -188,6 +212,22 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
 
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
+}
+
+test_build_accepts_a_freeform_only_credential_card() {
+  local home data board
+  home=$(make_home credential)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call[0].type = "credential"
+    | .captains_call[0].options = []
+    | .captains_call[0].allow_freeform = true' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "a freeform-only credential card was refused"
+  [ -f "$board" ] || fail "a valid freeform-only credential card did not build a board"
+  pass "build keeps freeform-only credential cards valid"
 }
 
 test_build_injects_binds_then_arms() {
@@ -370,10 +410,128 @@ test_build_refuses_a_template_without_exactly_one_slot() {
   pass "build refuses a template without exactly one data slot"
 }
 
+# The board Close / drop control emits the reserved answer `__drop__`. The
+# keyed-answer intake must decline that hold with a dropped-by-captain record
+# so it leaves Captain's Call, without treating the encoding as a choice.
+test_drop_answer_declines_the_hold_without_a_substantive_choice() {
+  local home origin key hold routed_hold result out show json rc
+  home=$(make_home drop-close)
+  origin=sample-board-drop
+  key=stale-choice
+  hold="$origin-decision-$key"
+  result="$home/drop.result"
+
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; return 0; }
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/$origin.meta" "project=$home/projects/sample" "kind=scout"
+  (cd "$home" && tasks-axi add "$origin" "Review sample board drop" --kind scout --repo sample --start) >/dev/null \
+    || fail "could not create the drop-close origin"
+  run_decisions "$home" hold "$origin" "$key" \
+    --title "Drop this stale choice" --reason "captain stale choice pending" --repo sample >/dev/null \
+    || fail "could not create the drop-close captain hold"
+  run_decisions "$home" complete "$origin" "$key" >/dev/null \
+    || fail "completion failed for the drop-close hold"
+
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-20T12:00:00Z \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed before a reserved close/drop"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    .decisions_open | any(.id == $hold)
+  ' >/dev/null || fail "the drop-close hold was not an open Captain's Call before drop: $json"
+
+  cat > "$result" <<EOF
+session:
+  file: /bearings-board.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  "2","Stale choice: __drop__\\n\\nContext data:\\n{\\n  \\"question\\": \\"$hold\\",\\n  \\"answer\\": \\"__drop__\\"\\n}","form",choice,"Stale choice -> __drop__"
+EOF
+
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-procevent-lavish.sh" answers "$result") \
+    || fail "the adapter did not report the reserved close/drop answer"
+  assert_contains "$out" "$hold	__drop__" \
+    "the adapter dropped the reserved close/drop encoding: $out"
+
+  set +e
+  out=$(printf '%s\n' "$out" | run_decisions "$home" answers --any-origin \
+    --source "the captured result board-drop sequence 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a reserved close/drop answer did not close its hold: $out"
+  assert_contains "$out" "closed: $hold" "the intake did not close the dropped hold: $out"
+
+  show=$(cd "$home" && tasks-axi show "$hold" --full) \
+    || fail "the dropped captain hold disappeared"
+  assert_contains "$show" "state: done" "a reserved close/drop answer left the hold open"
+  assert_contains "$show" "Resolution mode: declined" \
+    "a reserved close/drop answer was recorded as a substantive answer"
+  assert_contains "$show" "dropped by captain" \
+    "a reserved close/drop answer lost the dropped-by-captain decision record"
+  assert_not_contains "$show" "Answer: __drop__" \
+    "a reserved close/drop answer was recorded as if __drop__ were a choice"
+
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-20T12:00:00Z \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed after a reserved close/drop"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    (.decisions_open | any(.id == $hold) | not)
+  ' >/dev/null || fail "a dropped decision remained an open Captain's Call: $json"
+
+  set +e
+  out=$(printf '%s\t%s\t%s\n' "$hold" "__drop__" "Stale choice -> __drop__" \
+    | run_decisions "$home" answers --any-origin \
+      --source "the captured result board-drop sequence 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "replaying an identical close/drop was not idempotent: $out"
+
+  routed_hold=$(run_decisions "$home" hold "$origin" still-routed \
+    --title "Still routed" --reason "captain routed choice pending" --repo sample) \
+    || fail "could not create the routed drop-close hold"
+  (cd "$home" && tasks-axi add sample-routed-drop "Apply the routed drop" \
+    --kind ship --repo sample --blocked-by "$routed_hold") >/dev/null \
+    || fail "could not route work behind the drop-close hold"
+  set +e
+  out=$(printf '%s\t%s\t%s\n' "$routed_hold" "__drop__" "Close / drop" \
+    | run_decisions "$home" answers --any-origin \
+      --source "the captured result board-drop sequence 2" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a close/drop did not close a hold with existing routed work: $out"
+  assert_contains "$out" "closed: $routed_hold" \
+    "a close/drop on routed work was not reported as closed: $out"
+  show=$(cd "$home" && tasks-axi show "$routed_hold" --full)
+  assert_contains "$show" "state: done" \
+    "a close/drop left the routed hold open"
+  show=$(cd "$home" && tasks-axi show sample-routed-drop --full)
+  assert_contains "$show" "state: queued" \
+    "a close/drop cascaded into the existing dependent work"
+  assert_contains "$show" "blocked: no" \
+    "existing dependent work did not become independent after the hold closed"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-20T12:00:00Z \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed after dropping a hold with routed work"
+  printf '%s' "$json" | jq -e --arg hold "$routed_hold" '
+    (.decisions_open | any(.id == $hold) | not)
+  ' >/dev/null || fail "a dropped routed decision remained in Captain's Call: $json"
+  pass "a reserved close/drop answer declines the hold and leaves Captain's Call"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_build_accepts_a_freeform_only_credential_card
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
+test_drop_answer_declines_the_hold_without_a_substantive_choice

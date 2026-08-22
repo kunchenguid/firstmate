@@ -77,6 +77,8 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 - A Captain's Call decision key is the FULL hold identity from `decisions_open`; a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
+- Every decision card must include at least one selectable option, and the board always renders freeform as a supplementary "something else" input, never the only control.
+- Do not use `__drop__` as an option value: that reserved answer is the card's Close / drop control, recognized by the keyed-answer intake as a decline.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
 Run `build` once after composing the payload.
@@ -87,7 +89,11 @@ Never run `lavish-axi poll` for the board yourself: the armed source's supervise
 ### Handling a board wake
 
 A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake. Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
-Decision answers need no routing from you: the runner feeds the board's any-origin binding into `bin/fm-decision-hold.sh`'s one keyed-answer intake, which closes each full-identity hold at answer time; reconcile any `skipped:` key yourself, using `resolve` when routed work exists.
+Decision answers need no routing from you: the runner feeds the board's any-origin binding into `bin/fm-decision-hold.sh`'s one keyed-answer intake, which closes each full-identity hold at answer time.
+A reserved `__drop__` answer is the captain closing or dropping that hold, not a substantive choice and not a merge.
+The intake declines it through `bin/fm-decision-hold.sh` with a "dropped by captain" decision record, so the hold leaves Captain's Call on the next rebuild.
+Existing work routed behind that hold remains independent queued work; dropping does not close those dependents.
+Reconcile any other `skipped:` key yourself, using `resolve` when routed work exists.
 Route the non-decision keys yourself:
 
 - `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.

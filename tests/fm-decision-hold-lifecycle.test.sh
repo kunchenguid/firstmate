@@ -651,6 +651,12 @@ test_declined_decision_closes_without_routed_work() {
   assert_contains "$show" "state: queued" "refused routed decline closed the hold"
   show=$(tasks_in "$home" show sample-upstream-work --full)
   assert_contains "$show" "blocked: yes" "refused routed decline released dependent work"
+  if run_decisions "$home" decline "$id" upstream --decision-file "$home/half-run-decision.txt" --drop \
+    > "$home/public-drop.out" 2> "$home/public-drop.err"; then
+    fail "public decline accepted the private drop flag"
+  fi
+  show=$(tasks_in "$home" show "$routed_hold" --full)
+  assert_contains "$show" "state: queued" "public drop bypass closed the routed hold"
   if run_decisions "$home" resolve "$id" upstream --decision-file "$home/half-run-decision.txt" \
     > "$home/unrouted-resolve.out" 2> "$home/unrouted-resolve.err"; then
     fail "the routed close path accepted a resolution with no routed work"

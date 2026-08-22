@@ -32,8 +32,13 @@
 # Captain's Call item explicitly carries `repo`; the composer fills it from the
 # snapshot and task records wherever known, and uses null or an empty string
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
-# the template may display the routing id. Anything else refuses before the
-# existing board is touched.
+# the template may display the routing id. Decision cards must include at least
+# one selectable option; every other Captain's Call item must either include an
+# option or explicitly allow freeform input. Option values cannot
+# be `__drop__`: that reserved answer is the board Close / drop encoding,
+# recognized by fm-decision-hold.sh's keyed-answer intake as a decline rather
+# than a substantive choice. Anything else refuses before the existing board
+# is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -85,10 +90,14 @@ validate_payload() {  # <data.json>
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true)
+      and (if .type == "decision"
+        then (.options | length) > 0
+        else ((.options | length) > 0 or .allow_freeform == true)
+        end)
       and ([.options[]
         | type == "object"
           and (.value | slug(128))
+          and .value != "__drop__"
           and (.label | nonempty_string)
           and optional_string("hint")] | all)
       and (optional_string("about"))
