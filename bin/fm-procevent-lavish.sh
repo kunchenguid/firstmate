@@ -186,7 +186,9 @@ arm_probe_live() {  # <source-id> <registration-identity> <status-file>
 # most recent probe has finished. An abandoned probe is left running - its own
 # fm_run_bash_timeout bound still terminates it eventually, so it cannot leak
 # forever, but nothing here waits for that to happen, and the status file it
-# was writing to is left for it to (harmlessly) recreate.
+# was writing to is deliberately left in place (not unlinked) for it to
+# finish writing to, rather than removed out from under that pending write -
+# see the removal guard at the bottom of this function.
 arm_await_live() {  # <source-id> <registration-identity> <deadline-ms>
   local id=$1 identity=$2 deadline_ms=$3
   local status_file probe_pid now_ms remaining_ms rc frac live=1
@@ -217,7 +219,21 @@ arm_await_live() {  # <source-id> <registration-identity> <deadline-ms>
     printf -v frac '%03d' "$remaining_ms"
     sleep "0.$frac"
   done
-  rm -f "$status_file" 2>/dev/null || true
+  # Only unlink status_file when no probe is outstanding (probe_pid empty):
+  # every probe still in flight when the deadline hits is left running (see
+  # above) and will later reopen this exact path for its delayed write via a
+  # plain `>` redirection, which follows a symlink. Removing the path here
+  # while that write is still pending would hand a local attacker a window to
+  # replace it with a symlink to an arbitrary file the arm-running user can
+  # write, so the abandoned probe's delayed write clobbers that file instead
+  # of the status file it thinks it is writing to. Leaving the real file in
+  # place - rather than deleting it out from under a write we know is still
+  # coming - is what makes that write land on the file we created, symlink or
+  # not. The only cost is a single leaked temp file in the rare case a probe
+  # is still outstanding at the deadline; it is small, bounded to one file
+  # per arm_await_live call, and self-overwrites harmlessly once the
+  # abandoned probe finally does write to it.
+  [ -n "$probe_pid" ] || rm -f "$status_file" 2>/dev/null || true
   return "$live"
 }
 

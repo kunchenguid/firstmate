@@ -848,6 +848,60 @@ await_deadline_elapsed_ms=${AWAIT_DEADLINE_OUT##*elapsed_ms=}
   || fail "arm_await_live took ${await_deadline_elapsed_ms}ms to give up on an already-exhausted deadline against a hung probe (expected single-digit ms, not the old 50ms-floor overrun): $AWAIT_DEADLINE_OUT"
 pass "arm_await_live gives up at its own deadline even while its most recently launched probe is still hung"
 
+# --- an abandoned probe never follows a symlink planted at its status path -
+# Regression for the "delayed probe follows replaced path" defect:
+# arm_await_live used to unconditionally `rm -f` its shared status_file right
+# before returning, even when the most recently launched probe was still
+# outstanding (deadline reached before that probe wrote its result). That
+# probe keeps running in the background and eventually performs
+# `printf '%s\n' "$?" > "$status_file"` - a plain `>` redirection that follows
+# a symlink. Removing the file first, then returning control to a caller
+# while that write is still pending, opened a window: a local process that
+# plants a symlink at the exact (now-unlinked) status path before the
+# abandoned probe's delayed write lands gets that write - and whatever it
+# points at truncated - instead. This exercises the real shipped
+# arm_now_ms/arm_probe_live/arm_await_live (same byte-range extraction as the
+# tests above) with a fm_procevent_generation_live stand-in that outlives an
+# already-short deadline, captures the actual status-file path a real
+# `mktemp` call produces (by shadowing the `mktemp` command with a logging
+# wrapper, not by guessing a name), races a symlink to a canary file into
+# that exact path the instant arm_await_live returns control, then lets the
+# abandoned probe's delayed write actually happen and asserts the canary
+# survived - the observable proof that removal is skipped whenever a probe
+# write to that path is still pending, not a read of the source text.
+SYMLINK_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/arm-symlink-race.XXXXXX")
+CANARY="$SYMLINK_TMPDIR/canary"
+printf 'do-not-touch\n' > "$CANARY"
+MKTEMP_LOG="$SYMLINK_TMPDIR/mktemp.log"
+: > "$MKTEMP_LOG"
+bash -c '
+  . "$1/bin/fm-timeout-lib.sh"
+  eval "$(sed -n "/^FM_PROCEVENT_LAVISH_ARM_PROBE_TIMEOUT_S=/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  eval "$(sed -n "/^arm_now_ms()/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  eval "$(sed -n "/^arm_probe_live()/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  eval "$(sed -n "/^arm_await_live()/,/^}/p" "$1/bin/fm-procevent-lavish.sh")"
+  die() { printf "error: %s\n" "$1" >&2; exit 1; }
+  real_mktemp=$(command -v mktemp)
+  mktemp_log=$2
+  mktemp() { local p; p=$("$real_mktemp" "$@"); printf "%s\n" "$p" >> "$mktemp_log"; printf "%s\n" "$p"; }
+  fm_procevent_generation_live() { sleep 0.3; return 1; }
+  start_ms=$(arm_now_ms)
+  deadline_ms=$(( start_ms + 100 ))
+  arm_await_live x y "$deadline_ms"
+' _ "$ROOT" "$MKTEMP_LOG"
+SYMLINK_RACE_STATUS_FILE=$(head -n1 "$MKTEMP_LOG")
+[ -n "$SYMLINK_RACE_STATUS_FILE" ] \
+  || fail "arm_await_live's probe status file path was never captured"
+# Only succeeds pre-fix, where the file was already unlinked at this point;
+# post-fix the real file is still there so this is a harmless no-op.
+ln -s "$CANARY" "$SYMLINK_RACE_STATUS_FILE" 2>/dev/null || true
+sleep 1
+SYMLINK_RACE_CANARY_CONTENT=$(cat "$CANARY")
+rm -rf "$SYMLINK_TMPDIR"
+[ "$SYMLINK_RACE_CANARY_CONTENT" = "do-not-touch" ] \
+  || fail "an abandoned arm liveness probe followed a symlink planted at its removed status path and clobbered an unrelated file (got: $SYMLINK_RACE_CANARY_CONTENT)"
+pass "an abandoned arm liveness probe never follows a symlink planted at its status path"
+
 # --- arm's background reconcile kick is single-flighted, not one-per-call ---
 # Regression for the "background reconciles remain unowned" defect: arm used
 # to fire an unconditional `fm-procevent.sh reconcile &` on every call, so a
