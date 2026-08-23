@@ -497,7 +497,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="$FM_CLASSIFY_CHECKS_GREEN_DETAIL" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -534,7 +534,7 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+              RUN_DETAIL="$FM_CLASSIFY_CHECKS_GREEN_DETAIL (still monitoring for merge/close)"
             fi
             ;;
           fixing)

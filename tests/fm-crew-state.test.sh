@@ -25,6 +25,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) crew_absorb_class's merge-wait verdict end-to-end over the REAL helper on
+#       a real `outcome: checks-passed` run, so the detail this helper emits is
+#       the detail the classifier admits a declared merge wait on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -288,6 +291,19 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/9"
+  findings: none
+outcome: checks-passed
 EOF
 }
 
@@ -1306,6 +1322,57 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+# (l) crew_absorb_class's merge-wait verdict end-to-end over the REAL
+# fm-crew-state.sh, closing the one seam the colocated classifier coverage in
+# tests/fm-watch-triage.test.sh cannot: those cases feed the classifier a canned
+# verdict line built from FM_CLASSIFY_CHECKS_GREEN_DETAIL, so they pin the READER
+# of that constant while assuming its WRITER. This drives a real
+# `outcome: checks-passed` run through the real helper instead, so the detail the
+# helper actually emits is the detail the classifier actually admits on. A literal
+# copied into the checks-passed branch here, or a reworded one, would leave every
+# merge-wait case green and silently stop absorbing in production.
+test_checks_passed_outcome_admits_a_declared_merge_wait() {
+  reset_fakes
+  local d pr; d=$(new_case checks-passed-merge-wait)
+  pr='https://github.com/o/r/pull/9'
+  make_repo_on_branch "$d/wt" fm/feat-mergewait
+  make_fakebin "$d" >/dev/null
+  # No forge CLI: bin/fm-pr-check.sh consults gh only for the optional pr_head,
+  # and a real one here would reach the network for a fixture pull request.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$d/fakebin/gh"
+  chmod +x "$d/fakebin/gh"
+  fm_write_meta "$d/state/feat-mergewait.meta" "window=fm:fm-feat-mergewait" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-mergewait)"
+
+  # The reader's own verdict for the ONE outcome a declaration may be admitted under.
+  local out; out=$(run_crew_state "$d" feat-mergewait)
+  assert_contains "$out" "state: done" "checks-passed outcome -> done"
+  assert_contains "$out" "source: run-step" "checks-passed outcome -> run-step source"
+  assert_contains "$out" "$FM_CLASSIFY_CHECKS_GREEN_DETAIL" \
+    "the checks-passed branch must emit the detail the classifier admits merge waits on"
+
+  # A declaration on top of that verdict, both armed through their real writers.
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$ROOT/bin/fm-pr-check.sh" feat-mergewait "$pr" >/dev/null 2>&1 \
+    || fail "could not arm the fixture merge poll"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$ROOT/bin/fm-merge-wait.sh" declare feat-mergewait >/dev/null \
+    || fail "could not declare the fixture merge wait"
+  [ "$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_absorb_class feat-mergewait "$d/state")" = merge-wait ] \
+    || fail "a declared merge wait on a real checks-passed run was not classified merge-wait"
+
+  # And without the declaration the same run is ordinary aging again, so the
+  # outcome alone never absorbs.
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$ROOT/bin/fm-merge-wait.sh" clear feat-mergewait >/dev/null \
+    || fail "could not withdraw the fixture merge wait"
+  [ "$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_absorb_class feat-mergewait "$d/state")" = none ] \
+    || fail "a checks-passed run with no declaration was classified as a merge wait"
+  pass "a real checks-passed run plus a real declaration classifies merge-wait, and the run alone classifies none"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1456,6 +1523,7 @@ test_remote_dead_reports_remote_verdict
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
+test_checks_passed_outcome_admits_a_declared_merge_wait
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
