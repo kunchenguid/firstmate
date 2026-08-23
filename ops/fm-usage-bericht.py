@@ -34,7 +34,8 @@
 # statt "nicht abrufbar" - eine Warnung ohne moegliche Aktion gibt es hier
 # nicht mehr. Der Uebergang zu "Neu-Anmeldung noetig" wird zusaetzlich EINMAL
 # gesondert gemeldet, nicht stuendlich wiederholt (Einmal-pro-Verfall).
-# --dry-run: Bericht nur ausgeben, nichts senden/schreiben.
+# --dry-run: Bericht nur ausgeben; nichts senden und seit 23.08.2026 auch
+# keinen Zustand mehr schreiben.
 import json
 import os
 import subprocess
@@ -555,7 +556,11 @@ def main():
             merke_basis()
 
     state["band"]["zustand"] = "95" if warnen else ("90" if band else "ok")
-    json.dump(state, open(STATE, "w"))
+    # Repariert 23.08.2026: Der Probelauf verschob frueher heimlich den
+    # Stundentakt (letzter_bericht/tages_basis), obwohl er nichts sendet.
+    # Jetzt schreibt nur ein echter Lauf Zustand.
+    if not DRY_RUN:
+        json.dump(state, open(STATE, "w"))
 
 
 if __name__ == "__main__":

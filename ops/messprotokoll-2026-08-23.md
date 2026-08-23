@@ -97,3 +97,29 @@ Simuliertes Konto mit totem Refresh-Token (`FM_KONTO_AUTH_STATE_DIR` +
 Siehe `ops/fm-usage-bericht.py`: Recheck vor jeder Unlesbar-Meldung; nur
 nachweislich tote Refresh-Tokens erhalten den handlungsableitenden Text plus
 EINMAL eine gesonderte Warnung je Verfall (Zustand in state.json).
+
+## Echte Telegram-Zustellung des neuen Berichts (20:23 Uhr)
+
+`~/.local/share/claw-notify/history.jsonl`, Eintrag 381:
+
+```
+2026-08-23T20:23:02+0200 | bot TELEGRAM_BOT_TOKEN | status "ok @Kimi_Cool_fst_bot"
+<b>Nutzungsbericht</b> 20:23
+Konto 1: 5h 34%, Woche 9%, Fable 3%
+Konto 2: 5h 1%, Woche 85%, Fable 7%
+Konto 3: 5h 0%, Woche 94%, Fable 86%   <- heute Morgen noch unlesbar ('?')
+Konto 4: 5h 23%, Woche 56%, Fable 9%
+```
+
+Alle vier Konten mit echten Zahlen, kein „nicht abrufbar". Konto 3 ist
+dasselbe, das der Captain heute öffnen musste, damit es wieder lesbar wird —
+seit 17:21 UTC erledigt das die Erneuerung selbstständig.
+
+## Nebenbefund (repariert): Probelauf verschob den Stundentakt
+
+Der alte Bericht schrieb seinen Zustand auch im Probelauf (`--dry-run`)
+zurück — darunter den Zeitstempel der letzten Volllieferung. Ein Probelauf
+verzögerte also die nächste echte Stunde zustellungsfrei um seine eigene
+Laufzeit (heute 20:07/20:22 unschädlich beobachtet, 20:23 dann regulär
+gesendet). Repariert: Probelauf schreibt jetzt gar nichts mehr.
+
