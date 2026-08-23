@@ -743,6 +743,47 @@ test_open_decision_clears_on_keyed_resolution() {
 # defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
 # must not linger as pending. Decisions come purely from the keyed fold reconciled
 # against the crew lifecycle; report prose never opens or reopens a decision.
+# A parsed backlog past the kernel's per-argv-string ceiling cannot travel to jq as
+# a command-line value at all: execve fails and every snapshot mode dies with it.
+# tests/lib.sh owns the ceiling and the fixture.
+test_oversized_backlog_survives_the_argv_string_ceiling() {
+  local home fakebin json summary backlog_bytes
+  home=$(make_home oversized-backlog)
+  fm_write_oversized_backlog "$home"
+  mkdir -p "$home/projects/filler-001"
+  fm_write_meta "$home/state/filler-001.meta" \
+    "window=firstmate:fm-filler-001" \
+    "worktree=$home/projects/filler-001" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  record_claude_idle "$home/state" filler-001
+  fakebin=$(make_fakebin "$home")
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "the fleet snapshot must survive a backlog wider than one argv string"
+  # Assert the size the fixture actually reached, so a narrower parser output cannot
+  # let this case pass without ever crossing the ceiling.
+  backlog_bytes=$(printf '%s' "$json" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt "$(fm_argv_string_ceiling)" ] \
+    || fail "fixture never crossed the ceiling: parsed backlog is only $backlog_bytes bytes"
+  printf '%s' "$json" | jq -e --argjson want "$FM_OVERSIZED_BACKLOG_ITEMS" '
+    .schema == "fm-fleet-snapshot.v1"
+    and (.backlog.records | length) == $want
+    and (.backlog.records | map(select(.structured == true)) | length) == $want
+    and ([.tasks[] | select(.id == "filler-001" and .backlog.id == "filler-001")] | length) == 1
+  ' >/dev/null || fail "an oversized backlog must still render every record and its task join: $json"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "the home summary must survive a backlog wider than one argv string"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+    and (.queued | type) == "array" and (.counts | type) == "object"
+  ' >/dev/null || fail "oversized-backlog home summary is malformed: $summary"
+  pass "a backlog wider than one argv string still renders both snapshot modes ($backlog_bytes parsed bytes)"
+}
+
 test_completed_scout_report_is_pointer_not_pending() {
   local home fakebin out
   home=$(make_home completed-scout)
@@ -814,3 +855,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_oversized_backlog_survives_the_argv_string_ceiling

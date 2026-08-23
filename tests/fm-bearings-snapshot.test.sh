@@ -910,6 +910,47 @@ test_default_is_bounded_and_local_only() {
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
+# Bearings is what the captain actually asks for, and it dies with the canonical
+# snapshot underneath it. A parsed backlog past the kernel's per-argv-string ceiling
+# used to take out the whole chart, so pin the chain end to end here as well.
+# tests/lib.sh owns the ceiling and the fixture.
+test_oversized_backlog_still_charts_bearings() {
+  local home fakebin toon json canon backlog_bytes
+  home=$(make_home oversized-bearings)
+  fm_write_oversized_backlog "$home"
+  mkdir -p "$home/projects/filler-001"
+  fm_write_meta "$home/state/filler-001.meta" \
+    "window=firstmate:fm-filler-001" \
+    "worktree=$home/projects/filler-001" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  record_claude_state "$home/state" filler-001 busy
+  printf 'working: widening the backlog\n' > "$home/state/filler-001.status"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the canonical snapshot must survive a backlog wider than one argv string"
+  # Assert the size the fixture actually reached, so a narrower parser output cannot
+  # let this case pass without ever crossing the ceiling.
+  backlog_bytes=$(printf '%s' "$canon" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt "$(fm_argv_string_ceiling)" ] \
+    || fail "fixture never crossed the ceiling: parsed backlog is only $backlog_bytes bytes"
+
+  toon=$(run "$home" "$fakebin") \
+    || fail "bearings TOON must survive a backlog wider than one argv string"
+  assert_contains "$toon" 'schema: fm-bearings.v1' "oversized-backlog TOON must still carry its schema"
+  assert_contains "$toon" 'filler-001' "oversized-backlog TOON must still chart the live task"
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "bearings JSON must survive a backlog wider than one argv string"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+    and ([.in_flight[] | select(.id == "filler-001")] | length) == 1
+  ' >/dev/null || fail "oversized-backlog bearings JSON is malformed: $json"
+  pass "bearings still charts a backlog wider than one argv string ($backlog_bytes parsed bytes)"
+}
+
 test_toon_json_parity() {
   local home fakebin toon json keys k
   home=$(make_home parity); write_fixture "$home"
@@ -1062,7 +1103,11 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  # A deliberately minimal toolset: `timeout` is absent, which is the whole point.
+  # `mktemp` and `rm` are present because the canonical snapshot creates and removes a
+  # private directory for its jq input, the same coreutils baseline the session lock
+  # already requires.
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1988,3 +2033,4 @@ test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_oversized_backlog_still_charts_bearings
