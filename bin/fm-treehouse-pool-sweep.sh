@@ -11,14 +11,18 @@
 #
 # The sweep checks two conditions and refuses on either:
 #   1. Dirty worktree: tracked modifications, staged changes, or untracked
-#      non-ignored files. A HEAD that cannot be inspected at all counts as a
-#      refusal too, reported separately so the diagnostic is not "dirty".
+#      non-ignored files.
 #   2. HEAD contains at least one commit not reachable from an approved durable ref:
 #      - refs/heads/* (local branches)
 #      - refs/tags/* (tags)
 #      - refs/firstmate/rescue/* (reserved rescue namespace)
 #
 # Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
+#
+# A question git cannot answer - an unreadable HEAD, a corrupt ref database, an
+# unreadable object - refuses under the same exit code as the negative answer it
+# resembles, but with its own diagnostic, so the operator is not sent looking for
+# uncommitted work or orphaned commits that do not exist.
 #
 # For refs/remotes/*: they are counted for reachability so an ordinary freshly-
 # checked-out pool worktree is not falsely refused, but the case where HEAD's
@@ -27,8 +31,9 @@
 #
 # Exit codes:
 #   0 - Worktree is safe to acquire (or sweep is disabled)
-#   1 - Worktree is unsafe: dirty, or HEAD cannot be inspected
-#   2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs
+#   1 - Worktree is unsafe: dirty, or its dirty state cannot be determined
+#   2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs,
+#       or that reachability cannot be computed
 #   3 - Worktree is unsafe: HEAD covered only by remote-tracking refs (prunable)
 #   4 - Worktree does not exist
 #  64 - Usage error (no worktree path given)
@@ -107,16 +112,26 @@ head_is_inspectable() {
 }
 
 is_dirty() {
-  local wt=$1
+  local wt=$1 st untracked
   git -C "$wt" update-index -q --ignore-submodules --refresh >/dev/null 2>&1 || true
-  if ! git -C "$wt" diff-index --quiet --ignore-submodules HEAD 2>/dev/null; then
+
+  st=0
+  git -C "$wt" diff-index --quiet --ignore-submodules HEAD 2>/dev/null || st=$?
+  if [ "$st" -eq 1 ]; then
     return 0
+  elif [ "$st" -ne 0 ]; then
+    return 2
   fi
-  if ! git -C "$wt" diff-index --quiet --ignore-submodules --cached HEAD 2>/dev/null; then
+
+  st=0
+  git -C "$wt" diff-index --quiet --ignore-submodules --cached HEAD 2>/dev/null || st=$?
+  if [ "$st" -eq 1 ]; then
     return 0
+  elif [ "$st" -ne 0 ]; then
+    return 2
   fi
-  local untracked
-  untracked=$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)
+
+  untracked=$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null) || return 2
   if [ -n "$untracked" ]; then
     return 0
   fi
@@ -130,36 +145,51 @@ count_refs() {
 
 has_durable_refs() {
   local wt=$1
-  local count
-  count=$(count_refs "$wt" 'refs/heads/')
-  count=$((count + $(count_refs "$wt" 'refs/tags/')))
-  count=$((count + $(count_refs "$wt" 'refs/firstmate/rescue/')))
-  [ "$count" -gt 0 ]
+  local ns count total=0
+  for ns in 'refs/heads/' 'refs/tags/' 'refs/firstmate/rescue/'; do
+    count=$(count_refs "$wt" "$ns") || return 2
+    count=$(printf '%s' "$count" | tr -d '[:space:]')
+    case "$count" in
+      '' | *[!0-9]*) return 2 ;;
+    esac
+    total=$((total + count))
+  done
+  [ "$total" -gt 0 ]
 }
 
 head_covered_by_remotes() {
   local wt=$1
   local unremoted
-  unremoted=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || return 1
+  unremoted=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || return 2
   case "$unremoted" in
-    '' | *[!0-9]*) return 1 ;;
+    '' | *[!0-9]*) return 2 ;;
   esac
   [ "$unremoted" -eq 0 ]
 }
 
 check_head_reachable() {
   local wt=$1
-  local unique_count
-  if ! has_durable_refs "$wt"; then
-    if head_covered_by_remotes "$wt"; then
+  local unique_count durable_rc=0 remote_rc=0
+
+  has_durable_refs "$wt" || durable_rc=$?
+  if [ "$durable_rc" -eq 2 ]; then
+    return 5
+  fi
+  if [ "$durable_rc" -ne 0 ]; then
+    head_covered_by_remotes "$wt" || remote_rc=$?
+    if [ "$remote_rc" -eq 2 ]; then
+      return 5
+    fi
+    if [ "$remote_rc" -eq 0 ]; then
       return 3
     fi
     return 2
   fi
+
   unique_count=$(git -C "$wt" rev-list --count HEAD --not --branches --tags \
-    --glob='refs/firstmate/rescue/*' 2>/dev/null) || return 2
+    --glob='refs/firstmate/rescue/*' 2>/dev/null) || return 5
   case "$unique_count" in
-    '' | *[!0-9]*) return 2 ;;
+    '' | *[!0-9]*) return 5 ;;
   esac
   if [ "$unique_count" -gt 0 ]; then
     return 2
@@ -172,20 +202,33 @@ if ! head_is_inspectable "$WT"; then
   exit 1
 fi
 
-if is_dirty "$WT"; then
+dirty_rc=0
+is_dirty "$WT" || dirty_rc=$?
+
+if [ "$dirty_rc" -eq 0 ]; then
   echo "unsafe: dirty worktree at $WT" >&2
+  exit 1
+elif [ "$dirty_rc" -eq 2 ]; then
+  echo "unsafe: cannot determine whether $WT is dirty" >&2
   exit 1
 fi
 
 rc=0
 check_head_reachable "$WT" || rc=$?
 
-if [ $rc -eq 2 ]; then
-  echo "unsafe: HEAD contains commits not reachable from durable refs in $WT" >&2
-  exit 2
-elif [ $rc -eq 3 ]; then
-  echo "unsafe: HEAD commits covered only by remote-tracking refs (prunable) in $WT" >&2
-  exit 3
-fi
+case "$rc" in
+  2)
+    echo "unsafe: HEAD contains commits not reachable from durable refs in $WT" >&2
+    exit 2
+    ;;
+  3)
+    echo "unsafe: HEAD commits covered only by remote-tracking refs (prunable) in $WT" >&2
+    exit 3
+    ;;
+  5)
+    echo "unsafe: cannot compute HEAD reachability in $WT" >&2
+    exit 2
+    ;;
+esac
 
 exit 0

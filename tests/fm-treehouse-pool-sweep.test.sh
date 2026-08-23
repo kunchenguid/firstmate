@@ -503,7 +503,7 @@ test_allows_with_local_branch() {
 # rev-list exit 128. The sweep must treat an unanswerable reachability question
 # as unsafe rather than green-lighting the worktree.
 test_refuses_when_reachability_cannot_be_computed() {
-  local tmp config_dir rc git_dir
+  local tmp config_dir rc git_dir err
   tmp=$(fm_test_tmproot sweep-broken-ref)
   config_dir="$tmp/config"
   fm_config_sweep_on "$config_dir"
@@ -520,10 +520,16 @@ test_refuses_when_reachability_cannot_be_computed() {
   git rev-list --count HEAD --not --branches >/dev/null 2>&1 \
     && fail "broken ref: fixture did not actually break rev-list"
 
-  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 2 ] || fail "broken ref: expected exit 2, got $rc"
-  pass "refuses when HEAD reachability cannot be computed"
+  assert_contains "$err" "cannot compute HEAD reachability" \
+    "broken ref: missing the cannot-compute diagnostic"
+  case "$err" in
+    *"contains commits not reachable"*)
+      fail "broken ref: reported as orphaned commits, but the question was unanswerable" ;;
+  esac
+  pass "refuses an uncomputable reachability question with its own diagnostic"
 }
 
 test_nonexistent_worktree() {
