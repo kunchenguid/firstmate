@@ -26,10 +26,20 @@
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
+#       Set FM_SECONDMATE_CLAUDE_CONFIG_DIR='<absolute-store-path>' to bind this
+#       one second mate to a durable Claude config store, recorded as the
+#       optional claude-config-dir: registry field. Every launch and relaunch
+#       re-resolves it, so the account this second mate and its own workers
+#       authenticate and bill against cannot silently follow whichever store the
+#       relaunching process happened to carry. The path must be absolute and
+#       must already exist as a directory at seed time; anything else refuses
+#       and rolls the seed back. Leave it unset for the ordinary single-account
+#       case, which records no field and inherits the ambient store as before.
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
-#       duplicate ids or homes, and nested or overlapping homes.
+#       duplicate ids or homes, nested or overlapping homes, and a
+#       claude-config-dir that is non-absolute, traversing, or on a remote route.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +73,38 @@ validate_registry_home_text() {
       return 1
       ;;
   esac
+}
+
+# The optional per-mate Claude config-store binding, validated as a SEED-time
+# input. Structure (absolute, delimiter-free, local-route-only) is re-validated
+# on every registry read by secondmate_registry_validate_bindings; existence is
+# checked here and again at launch, because a store can be removed between the
+# two and only the launch can refuse meaningfully.
+validate_claude_config_dir_input() {
+  local ccd=$1
+  case "$ccd" in
+    /*) ;;
+    *)
+      echo "error: FM_SECONDMATE_CLAUDE_CONFIG_DIR must be an absolute path: $ccd" >&2
+      return 1
+      ;;
+  esac
+  case "$ccd" in
+    *';'*|*')'*|*$'\n'*|*$'\t'*|*$'\r'*)
+      echo "error: FM_SECONDMATE_CLAUDE_CONFIG_DIR contains registry delimiters: $ccd" >&2
+      return 1
+      ;;
+  esac
+  case "/$ccd/" in
+    */../*|*/./*)
+      echo "error: FM_SECONDMATE_CLAUDE_CONFIG_DIR contains traversal components: $ccd" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "$ccd" ]; then
+    echo "error: FM_SECONDMATE_CLAUDE_CONFIG_DIR is not an existing directory: $ccd" >&2
+    return 1
+  fi
 }
 
 normalize_joined_path() {
@@ -729,10 +771,11 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today ccd
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
+  ccd=${FM_SECONDMATE_CLAUDE_CONFIG_DIR:-}
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
@@ -740,7 +783,13 @@ write_registry() {
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
+  # An unset binding writes the record byte-identically to before this field
+  # existed, so an ordinary single-account seed produces no new bytes at all.
+  if [ -n "$ccd" ]; then
+    printf -- '- %s - %s (home: %s; scope: %s; projects: %s; claude-config-dir: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$ccd" "$today" >> "$tmp"
+  else
+    printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
+  fi
   mv "$tmp" "$REG"
 }
 
@@ -830,6 +879,9 @@ seed_home() {
   trap seed_exit_cleanup EXIT
 
   validate_registry
+  if [ -n "${FM_SECONDMATE_CLAUDE_CONFIG_DIR:-}" ]; then
+    validate_claude_config_dir_input "$FM_SECONDMATE_CLAUDE_CONFIG_DIR" || return 1
+  fi
   for project in "$@"; do
     validate_seed_project "$project"
   done

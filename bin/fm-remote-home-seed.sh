@@ -62,6 +62,12 @@ cleanup() {
 trap cleanup EXIT
 
 [ "$#" -ge 5 ] || usage
+# The per-mate Claude config-store binding is a local-route capability: a remote
+# second mate's account store lives on its own host, out of reach of this home's
+# launch path. Refuse the variable here rather than accepting a seed whose
+# binding would never be honored.
+[ -z "${FM_SECONDMATE_CLAUDE_CONFIG_DIR:-}" ] \
+  || die "FM_SECONDMATE_CLAUDE_CONFIG_DIR applies only to local secondmate routes; a remote second mate's Claude account store must be selected on its own host"
 ID=$1
 HOST=$2
 REMOTE_ROOT=$3

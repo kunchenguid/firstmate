@@ -25,6 +25,10 @@
 #   - The sweep converges: once a secondmate reads alive, a later run never
 #     re-touches it (idempotent by construction, not by remembering what it
 #     already did).
+#   - A relaunch re-resolves the second mate's own recorded Claude config store
+#     from data/secondmates.md, so a sweep driven from a primary session on a
+#     different Claude account cannot silently move that mate onto the
+#     primary's; an unbound mate still inherits the primary's store.
 #   - The sweep is skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1 (the
 #     read-only session path), matching the other mutating sweeps.
 #   - The sweep is naturally scoped to the primary: with no kind=secondmate
@@ -300,6 +304,18 @@ case "${1:-}" in
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
+  send-keys)
+    # Only when a caller opts in, so every window-op assertion elsewhere keeps
+    # reading an unchanged FM_TMUX_CALL_LOG.
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        [ "$prev" = "-l" ] && printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
   has-session) exit 0 ;;
 esac
 exit 0
@@ -504,6 +520,62 @@ test_sweep_converges_no_retouch_once_alive() {
   pass "sweep: idempotent by construction - a live secondmate is never re-touched on a later run"
 }
 
+# The regression the per-mate account binding exists for: the sweep relaunches a
+# dead second mate by calling `fm-spawn.sh <id> --secondmate` bare, from the
+# PRIMARY's session, so before the binding a mate deliberately started on another
+# Claude account came back on the primary's, with nothing in the pane to show it.
+# Here the primary is authenticated against one store and the mate records
+# another; the relaunch must land on the mate's own.
+test_sweep_relaunch_uses_the_secondmates_own_claude_store() {
+  local w fb tmuxfb log launchlog store out launch
+  w=$(new_world sweep-claude-store)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  store="$w/claude-client"
+  mkdir -p "$store" "$w/claude-personal" "$w/home/data"
+  printf -- '- sm1 - client domain (home: %s; scope: client work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+    "$(cd "$w/sm1" && pwd -P)" "$store" > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  launchlog="$w/launch.log"; : > "$launchlog"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    CLAUDE_CONFIG_DIR="$w/claude-personal" FM_FAKE_LAUNCH_LOG="$launchlog")
+
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "the sweep relaunch must use the second mate's own recorded Claude store"$'\n'"$out"
+  assert_not_contains "$launch" "claude-personal" \
+    "the primary session's own Claude store must not reach a bound second mate on relaunch"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the confirmed-dead second mate should still be relaunched"$'\n'"$out"
+  pass "sweep: a relaunch from a primary on a different Claude account still lands the second mate on its own"
+}
+
+# The unbound case is unchanged: with no recorded store the relaunch still
+# inherits the primary's ambient one.
+test_sweep_relaunch_without_binding_inherits_primary_store() {
+  local w fb tmuxfb log launchlog out
+  w=$(new_world sweep-claude-store-absent)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  mkdir -p "$w/claude-personal" "$w/home/data"
+  printf -- '- sm1 - client domain (home: %s; scope: client work; projects: alpha; added 2026-08-23)\n' \
+    "$(cd "$w/sm1" && pwd -P)" > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  launchlog="$w/launch.log"; : > "$launchlog"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    CLAUDE_CONFIG_DIR="$w/claude-personal" FM_FAKE_LAUNCH_LOG="$launchlog")
+
+  assert_contains "$(cat "$log")" "new-window" \
+    "the confirmed-dead second mate should still be relaunched"$'\n'"$out"
+  assert_contains "$(cat "$launchlog")" "CLAUDE_CONFIG_DIR='$w/claude-personal'" \
+    "an unbound second mate must keep inheriting the primary's ambient Claude store"$'\n'"$out"
+  pass "sweep: an unbound second mate still inherits the primary's store on relaunch"
+}
+
 test_sweep_skipped_under_detect_only() {
   local w fb tmuxfb log out
   w=$(new_world sweep-detect-only)
@@ -553,6 +625,8 @@ test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
+test_sweep_relaunch_uses_the_secondmates_own_claude_store
+test_sweep_relaunch_without_binding_inherits_primary_store
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 
