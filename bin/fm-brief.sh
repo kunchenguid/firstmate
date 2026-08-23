@@ -101,6 +101,7 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# The emitted PUBLISH_SECTION below owns worker publication-language guidance.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -597,6 +598,16 @@ When the report is complete, append \`done: {one-line conclusion}\` to the statu
 EOF
 SCOUT_DOD_COMMON=${SCOUT_DOD_COMMON%$'\n'}
 
+# PUBLISH_SECTION is the single emitted publication-language contract owner.
+IFS= read -r -d '' PUBLISH_SECTION <<'EOF' || true
+# What you publish
+Nothing you publish outside the fleet may carry firstmate's internal role vocabulary - captain, first mate, crewmate, scout, second mate - or its nautical flavor: no commit message, no pull request title or body, no review comment, no issue, and no file committed to the project.
+When published text must name a person, write "the repository owner" or "the owner of the pull request", never an internal role label.
+Apply the same rule to task text you write for any tool that authors published text, including a no-mistakes `--intent`.
+This rule governs only what you publish; it does not change how this brief addresses you, and the status and escalation vocabulary in this brief stays as written.
+EOF
+PUBLISH_SECTION=${PUBLISH_SECTION%$'\n'}
+
 # The evidence archive is access-agnostic: it lives under data/<id>/sources,
 # outside any scratch or worktree, so BOTH scout scaffolds must honor the flag
 # with the same provenance contract - an accepted --evidence-archive that
@@ -636,6 +647,8 @@ READER_RULE_2="2. Stay inside this scratch directory; the only files you may wri
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 Access contract: access=reader
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}
@@ -685,6 +698,8 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}
@@ -784,6 +799,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+\`--intent\` feeds the pipeline that authors this task's commits and pull request, so apply \`# What you publish\` to the intent you compose: keep every requirement's substance in plain task language, without the fleet's internal role labels.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
@@ -872,6 +888,8 @@ esac
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}
