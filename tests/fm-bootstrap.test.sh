@@ -735,6 +735,7 @@ test_bootstrap_reregisters_recorded_worktrees_as_durable_leases() {
     {
       "name": "1",
       "path": "$worktree",
+      "destroying": true,
       "owner_pid": 999999,
       "owner_started_at": 1
     }
@@ -764,7 +765,7 @@ const [stateFile, expectedPath] = process.argv.slice(2);
 const entry = JSON.parse(fs.readFileSync(stateFile, 'utf8')).worktrees[0];
 if (entry.path !== expectedPath || entry.leased !== true || !entry.lease_id ||
     entry.lease_holder !== 'firstmate:live-task' || !entry.leased_at ||
-    'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
+    'destroying' in entry || 'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
 NODE
   node - "$worktree/treehouse-state.json" "$remote_state_file" <<'NODE' \
     || fail "bootstrap mutated project-owned state or a remote secondmate pool"
@@ -805,6 +806,23 @@ if (!entry.leased || entry.lease_holder !== 'firstmate:fallback' ||
     'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
 NODE
   pass "treehouse guard uses the Perl flock fallback without a flock executable"
+}
+
+test_treehouse_guard_refuses_without_node() {
+  local case_dir state fallback_bin dirname_bin
+  case_dir="$TMP_ROOT/treehouse-missing-node"
+  state="$case_dir/state"
+  fallback_bin="$case_dir/fallback-bin"
+  dirname_bin=$(command -v dirname)
+  mkdir -p "$state" "$fallback_bin"
+  printf 'worktree=%s\n' "$case_dir/pool/1/project" > "$state/live-task.meta"
+  ln -s "$dirname_bin" "$fallback_bin/dirname"
+  if PATH="$fallback_bin" /bin/bash -c \
+    '. "$1"; fm_treehouse_guard_recorded_worktrees "$2"' \
+    bash "$ROOT/bin/fm-treehouse-lease-lib.sh" "$state" >/dev/null 2>&1; then
+    fail "treehouse guard succeeded without its state-discovery runtime"
+  fi
+  pass "treehouse guard refuses recorded-worktree scans without node"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
@@ -1258,6 +1276,7 @@ test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_bootstrap_reregisters_recorded_worktrees_as_durable_leases
 test_treehouse_guard_uses_perl_flock_fallback
+test_treehouse_guard_refuses_without_node
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

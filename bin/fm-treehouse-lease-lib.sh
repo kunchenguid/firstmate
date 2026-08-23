@@ -108,6 +108,10 @@ fm_treehouse_register_durable_lease() {  # <treehouse-state.json> <worktree> <ho
 fm_treehouse_guard_recorded_worktrees() {  # <state-dir>
   local state=$1 meta id worktree state_file
   [ -d "$state" ] || return 0
+  command -v node >/dev/null 2>&1 || {
+    echo "treehouse durable guard requires node" >&2
+    return 1
+  }
   while IFS= read -r -d '' meta; do
     id=$(basename "$meta" .meta)
     worktree=$(fm_treehouse_meta_worktree "$meta" 2>/dev/null || true)

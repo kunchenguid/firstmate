@@ -18,6 +18,7 @@ entry.leased = true;
 entry.lease_id ||= crypto.randomBytes(16).toString('hex');
 entry.lease_holder ||= holder;
 entry.leased_at ||= new Date().toISOString();
+delete entry.destroying;
 delete entry.owner_pid;
 delete entry.owner_started_at;
 const mode = fs.statSync(stateFile).mode;
