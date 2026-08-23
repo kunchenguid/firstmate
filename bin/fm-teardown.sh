@@ -22,6 +22,12 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Landing is not the only question: a pooled copy can hold landed work and still
+# belong to somebody else. A project that published a `check:worktree-custody`
+# script is asked for that verdict from an authenticated snapshot of the
+# canonical clone after the landed check and before anything destructive, and
+# its nonzero exit refuses cleanup (docs/configuration.md "Worktree pools";
+# opt-in and runner mechanics in bin/fm-project-script-lib.sh).
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -168,6 +174,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-project-script-lib.sh
+. "$SCRIPT_DIR/fm-project-script-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -180,6 +188,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+TASK_SET_LOCK=
+TASK_SET_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -202,9 +212,23 @@ teardown_release_locks() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
+  if [ "$TASK_SET_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TASK_SET_LOCK" || true
+    TASK_SET_LOCK_HELD=0
+  fi
   return "$status"
 }
 trap teardown_release_locks EXIT
+TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve the task-set lock for $STATE; nothing was changed" >&2
+  exit 1
+}
+# A fresh spawn refuses while teardown owns this lock. In the opposite
+# direction teardown waits for publication to finish, then validates the now
+# complete task set. Waiting also preserves the existing contract that two
+# cleanups in one home serialize rather than making one fail spuriously.
+fm_lock_acquire_wait "$TASK_SET_LOCK"
+TASK_SET_LOCK_HELD=1
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
@@ -1200,6 +1224,61 @@ validate_worktree_teardown_safety() {
   fi
 }
 
+# The landed-work check above answers "would work be lost?". It does not answer
+# "does this copy still have exactly one owner?" - a pooled copy handed to a
+# second task, or one whose branch was advanced from another checkout, passes
+# the first and fails the second. Only the project knows how to read its own
+# working copy, so a project may publish that verdict as a
+# `check:worktree-custody` script and firstmate refuses on its nonzero exit.
+#
+# Opt-in by presence, per bin/fm-project-script-lib.sh: a project that published
+# no such script tears down exactly as before. A project that DID publish one
+# and cannot be asked refuses rather than tearing down on an unread verdict.
+CUSTODY_CHECK_SCRIPT=check:worktree-custody
+CUSTODY_CHECK_TIMEOUT=${FM_TEARDOWN_CUSTODY_TIMEOUT:-120}
+
+validate_worktree_custody() {  # <worktree> <project>
+  local wt=$1 project=$2 out rc=0 project_declared=0 wt_declared=0
+  fm_project_script_declared "$project" "$CUSTODY_CHECK_SCRIPT" || project_declared=$?
+  fm_project_script_declared "$wt" "$CUSTODY_CHECK_SCRIPT" || wt_declared=$?
+  if [ "$project_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "REFUSED: cannot confirm whether project $project publishes a $CUSTODY_CHECK_SCRIPT check." >&2
+    echo "Make its package.json readable and valid before retrying." >&2
+    return 1
+  fi
+  if [ "$wt_declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "REFUSED: cannot confirm whether worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check." >&2
+    echo "Make its package.json readable and valid before retrying." >&2
+    return 1
+  fi
+  if [ "$project_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ] \
+     && [ "$wt_declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
+    return 0
+  fi
+  if ! fm_project_script_timeout_valid "$CUSTODY_CHECK_TIMEOUT"; then
+    echo "REFUSED: $CUSTODY_CHECK_SCRIPT requires a positive integer timeout, not '$CUSTODY_CHECK_TIMEOUT'." >&2
+    echo "Set FM_TEARDOWN_CUSTODY_TIMEOUT correctly before retrying." >&2
+    return 1
+  fi
+  out=$(fm_project_script_run_canonical_head "$project" "$CUSTODY_CHECK_SCRIPT" \
+    "$CUSTODY_CHECK_TIMEOUT" --worktree "$wt" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq "$FM_PROJECT_SCRIPT_CANONICAL_UNAVAILABLE" ]; then
+    echo "REFUSED: cannot authenticate and execute $CUSTODY_CHECK_SCRIPT from canonical project $project." >&2
+    echo "Restore its published HEAD check before retrying." >&2
+    return 1
+  fi
+  if [ "$rc" -eq 127 ]; then
+    echo "REFUSED: canonical project $project publishes a $CUSTODY_CHECK_SCRIPT check but $(fm_project_script_manager "$project") is unavailable to run it." >&2
+    echo "Install it before retrying." >&2
+    return 1
+  fi
+  echo "REFUSED: $CUSTODY_CHECK_SCRIPT says worktree $wt is not this task's to discard (exit $rc)." >&2
+  printf '%s\n' "$out" >&2
+  echo "Resolve what that check reports first, then retry." >&2
+  return 1
+}
+
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
@@ -2038,6 +2117,30 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+validate_firstmate_home_children_custody() {
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    child_wt=$(meta_value "$child_meta" worktree)
+    child_proj=$(meta_value "$child_meta" project)
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_kind" = secondmate ]; then
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      validate_firstmate_home_children_custody "$child_home" || return 1
+    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_worktree_custody "$child_wt" "$child_proj" || {
+        echo "REFUSED: child task $child_id failed its custody check; forced cleanup changed nothing." >&2
+        return 1
+      }
+    fi
+  done
+}
+
 TEARDOWN_HERDR_LOCK_RECORDS=
 teardown_release_herdr_locks() {
   local lock_session lock_path
@@ -2287,6 +2390,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    validate_firstmate_home_children_custody "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
@@ -2389,6 +2493,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Custody comes after the landed-work verdict and before anything destructive:
+# a copy whose work has landed can still be somebody else's copy. Not for
+# kind=secondmate, whose home is not a pooled task working copy.
+if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  validate_worktree_custody "$WT" "$PROJ" || exit 1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

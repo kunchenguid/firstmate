@@ -216,6 +216,42 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Worktree pools (FM_POOL_ROOT_BASE)
+
+Crewmate and scout worktrees come from a treehouse pool, and treehouse keys a pool by the repository rather than by the checkout.
+Two firstmate homes that clone the same project would therefore draw from one pool while neither can see the other's task records, so each home gives its dispatches a pool of their own instead.
+`bin/fm-pool-root.sh` owns that derivation and creates a generated Git config view under the canonical home's `state/treehouse-config/`; `bin/fm-spawn.sh` runs the unwrapped `treehouse get` from that view before every crewmate or scout worktree is acquired.
+The view points Git at the same backing repository and carries the home-specific Treehouse root, while the captain's primary project checkout, its `treehouse.toml`, and its Git exclusion metadata remain untouched.
+By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<full SHA-256 of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
+`FM_POOL_ROOT_BASE` moves the directory those per-home roots live in while preserving the mandatory per-home suffix.
+The legacy literal `FM_POOL_ROOT` override is refused because the same inherited value could make multiple homes share a pool.
+The separation applies only to worktrees leased from that point on; reconfiguration never moves, resets, returns, invalidates, or recycles a worktree already leased.
+That existing lease keeps its absolute path and later follows ordinary teardown, so previously shared pools drain without a migration step.
+Pool paths are encoded as TOML basic strings in the generated view, so quotes, backslashes, and control characters in valid filesystem paths cannot corrupt Treehouse configuration.
+
+After treehouse hands a fresh spawn a path, Firstmate checks every `state/*.meta` record in that same home before refreshing the copy or launching the agent.
+An unreadable, non-regular, missing, empty, or ambiguous worktree declaration fails closed, as does another task record that resolves to the acquired path.
+An unpublished lease is returned when spawn otherwise aborts.
+When rejection detects another owner for the acquired copy, Firstmate neither returns nor resets it and leaves its new endpoint parked there, so the recorded owner can be reconciled without losing work.
+A fresh spawn also refuses before endpoint or lease creation when its task id already has a durable record; [`agent-control.md`](agent-control.md) owns how `relaunch` safely reuses that task's recorded endpoint and worktree.
+
+A pool also runs out when delivered copies are never handed back, and a dispatch then fails for want of a slot rather than for want of work.
+A project may publish that housekeeping as a `pool:release-delivered` script.
+[`bin/fm-project-script-lib.sh`](../bin/fm-project-script-lib.sh) owns the shared opt-in contract: only Git-proven `package.json` views from the working tree, index, or `HEAD` count; an untracked manifest publishes nothing; and confirmed absence remains distinct from an unavailable or unreadable published view.
+`bin/fm-spawn.sh` runs the script once with `--yes` from a temporary authenticated snapshot of the canonical clone's `HEAD` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
+This one is capacity rather than safety, so a release that fails or cannot be confirmed warns and the spawn continues.
+`FM_SPAWN_RELEASE_DELIVERED_TIMEOUT` is a positive integer number of seconds and defaults to 60; an invalid value makes this optional housekeeping warn and leaves the spawn free to continue.
+
+A project may also publish its own custody verdict as a `check:worktree-custody` script under that same Git-proven opt-in contract, run with the package manager its lockfile selects.
+Teardown resolves that opt-in independently from the canonical clone and protected worktree, and requires custody whenever either one declares it.
+It treats the check as absent only when every available published view omits it; an unavailable repository, unreadable published view, or otherwise unconfirmable result refuses cleanup.
+`bin/fm-teardown.sh` then runs the version committed at the canonical clone's `HEAD` from an authenticated Git snapshot, passing `--worktree <absolute-path>` for the copy being judged, after its landed-work verdict and before any destructive operation.
+The mutable code in that protected copy is never trusted to authorize its own return, and an unavailable or unauthenticated canonical check refuses cleanup.
+A non-zero verdict also refuses cleanup, which covers the copies a landed-work test cannot judge: one handed to a second owner, or one whose branch was advanced from another checkout.
+`--force` does not bypass this custody verdict.
+A project that publishes no such script is unaffected.
+`FM_TEARDOWN_CUSTODY_TIMEOUT` must be a positive integer number of seconds and defaults to 120; an invalid value refuses cleanup before the check runs.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
@@ -625,6 +661,10 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_POOL_ROOT=            # unsupported literal override; non-empty values refuse and must migrate to FM_POOL_ROOT_BASE
+FM_POOL_ROOT_BASE=$HOME/.treehouse-homes  # directory the per-home pool roots live in
+FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=60  # positive integer seconds bounding a project's own pool:release-delivered run before a spawn leases
+FM_TEARDOWN_CUSTODY_TIMEOUT=120  # positive integer seconds bounding a project's own check:worktree-custody run during cleanup
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

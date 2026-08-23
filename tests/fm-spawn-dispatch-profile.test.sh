@@ -36,13 +36,37 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# FM_FAKE_PANE_PATH_DIR models a real pool: every window created here reports
+# its OWN copy under that directory, named for the task. Without it the stub
+# keeps its single-copy behavior.
+fake_tmux_arg_after() {  # <flag> <args...>
+  local flag=$1 prev= a
+  shift
+  for a in "$@"; do
+    [ "$prev" != "$flag" ] || { printf '%s' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ]; then
+      target=$(fake_tmux_arg_after -t "$@") || target=
+      printf '%s\n' "$FM_FAKE_PANE_PATH_DIR/${target#@}"
+      exit 0
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ]; then
+      name=$(fake_tmux_arg_after -n "$@") || name=
+      printf '@%s\n' "$name"
+    fi
+    exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -80,17 +104,22 @@ SH
 }
 
 make_spawn_case() {
-  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
+  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id pool_root
   shift 2
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
-  wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  fm_git_init_commit "$proj"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$home/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  wt="$pool_root/.treehouse/fixture/1/project"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -114,9 +143,10 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 fake_pane_path=$2
   shift 4
   : > "$launchlog"
+  [ -z "${FM_FAKE_PANE_PATH_DIR:-}" ] || fake_pane_path=
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -124,7 +154,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_POOL_ROOT_BASE="$home/pools" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$fake_pane_path" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
@@ -200,6 +231,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
     CDPATH="$CASE_DIR/cdpath" FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_POOL_ROOT_BASE="$home_real/pools" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
@@ -229,6 +261,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_POOL_ROOT_BASE="$home_real/pools" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
@@ -244,11 +277,16 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # The second spawn reuses this one fake pooled copy, so the first task's claim
+  # on it is released first: spawn refuses a copy another task still names
+  # (tests/fm-worktree-custody.test.sh).
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_POOL_ROOT_BASE="$linked_home/pools" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
@@ -277,6 +315,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_POOL_ROOT_BASE="$linked_home/pools" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
@@ -706,6 +745,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_POOL_ROOT_BASE="$HOME_DIR/pools" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
@@ -741,14 +781,24 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status pool pool_root
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  # A batch dispatches two tasks in one invocation, and a pool gives each its
+  # OWN copy - spawn refuses a copy another task claims
+  # (tests/fm-worktree-custody.test.sh), so the fixture models one copy per task.
+  pool_root=$(FM_HOME="$HOME_DIR" FM_POOL_ROOT_BASE="$HOME_DIR/pools" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  pool="$pool_root/.treehouse/batch"
+  mkdir -p "$pool"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$pool/fm-$id1" HEAD
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$pool/fm-$id2" HEAD
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(FM_FAKE_PANE_PATH_DIR="$pool" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"

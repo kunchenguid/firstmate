@@ -58,6 +58,14 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Every treehouse-get spawn first claims this home's OWN worktree pool through
+#   a home-private Treehouse config view that never mutates the project clone
+#   (bin/fm-pool-root.sh, which refuses rather than sharing a pool), then asks
+#   the project to release its delivered copies when it published a
+#   `pool:release-delivered` script, and finally refuses the acquired copy if
+#   another task in this home already claims it - before the base refresh
+#   touches that copy. docs/configuration.md "Worktree pools" is the
+#   operator-facing owner.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -75,15 +83,18 @@
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
-#   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   parent, and label bindings. A durable task record always blocks a fresh
+#   spawn before backend or worktree side effects; neither that binding nor an
+#   agent-free restart husk authorizes endpoint replacement. Relaunch instead
+#   reuses the task's exact recorded endpoint and worktree, or refuses without
+#   mutation when they no longer agree. The journal, visible token, and labels
+#   alone are never endpoint or ownership authority, and every ambiguous orphan
+#   recovery stays on the flat fallback after duplicate-agent risk is
+#   independently absent.
+#   A clean projected create or orphan-journal recovery makes one bounded
+#   attempt to hold the one session-scoped presentation-order lock (keyed by
+#   named session plus canonical socket, outside any home's state/) through
+#   launch handoff. Lock
 #   contention warns and falls back to the ordinary flat layout before any
 #   projection mutation. The exact response-derived new workspace is inserted
 #   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
@@ -258,6 +269,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-project-script-lib.sh
+. "$SCRIPT_DIR/fm-project-script-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -672,6 +685,22 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TREEHOUSE_LEASE_HOLDER=
+TREEHOUSE_ABORT_RETURN_PENDING=0
+TREEHOUSE_ABORT_RETURN_WORKTREE=
+TREEHOUSE_ABORT_RETURN_VIEW=
+TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=
+
+treehouse_abort_lease_is_published() {
+  local meta worktree holder
+  [ -n "${ID:-}" ] && [ -n "${STATE:-}" ] || return 1
+  meta="$STATE/$ID.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+  holder=$(fm_backend_meta_exact_value "$meta" treehouse_lease_holder) || return 1
+  [ "$holder" = "$ID" ] || return 1
+  [ "$(real_path_or_raw "$worktree")" = "$(real_path_or_raw "$TREEHOUSE_ABORT_RETURN_WORKTREE")" ]
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -692,6 +721,15 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$TREEHOUSE_ABORT_RETURN_PENDING" = 1 ]; then
+    TREEHOUSE_ABORT_RETURN_PENDING=0
+    if treehouse_abort_lease_is_published; then
+      :
+    elif ! (cd "$TREEHOUSE_ABORT_RETURN_VIEW" 2>/dev/null \
+      && treehouse return --force "$TREEHOUSE_ABORT_RETURN_WORKTREE"); then
+      echo "warning: could not return unpublished Treehouse lease '$TREEHOUSE_ABORT_RETURN_WORKTREE' after spawn $ID aborted" >&2
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -928,6 +966,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    echo "error: task $ID already has a durable record at $STATE/$ID.meta; refusing a fresh spawn that could replace its endpoint or worktree. Use --relaunch to reuse an existing task." >&2
+    exit 1
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -1727,6 +1769,115 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# A pool runs out when delivered copies are never handed back, and a dispatch
+# then fails for want of a slot rather than for want of work. Only the project
+# knows which of its copies are delivered, so a project may publish that
+# housekeeping as a `pool:release-delivered` script and firstmate calls it once,
+# before asking for a slot (opt-in by presence, per bin/fm-project-script-lib.sh;
+# the script owns its own idempotency and pool lock, and exits 0 with nothing to
+# release). This is capacity, not safety: a release that cannot run warns and
+# the spawn continues, because refusing to dispatch over failed housekeeping
+# would be a worse outage than the one it prevents.
+RELEASE_DELIVERED_SCRIPT=pool:release-delivered
+RELEASE_DELIVERED_TIMEOUT=${FM_SPAWN_RELEASE_DELIVERED_TIMEOUT:-60}
+
+release_delivered_pool_copies() {  # <project>
+  local project=$1 out rc=0 declared=0
+  fm_project_script_declared "$project" "$RELEASE_DELIVERED_SCRIPT" || declared=$?
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
+    return 0
+  fi
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "warning: cannot confirm whether $project publishes a $RELEASE_DELIVERED_SCRIPT step; leasing without releasing delivered copies" >&2
+    return 0
+  fi
+  out=$(fm_project_script_run_canonical_head "$project" "$RELEASE_DELIVERED_SCRIPT" \
+    "$RELEASE_DELIVERED_TIMEOUT" --yes 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  echo "warning: $RELEASE_DELIVERED_SCRIPT failed for $project (exit $rc); leasing without releasing delivered copies" >&2
+  printf '%s\n' "$out" >&2
+  return 0
+}
+
+# A pooled copy has exactly one owner. New acquisitions use Treehouse's durable
+# lease, while this home's records remain the custody authority consumed by
+# spawn and teardown.
+#
+# The refusal deliberately does NOT return the slot. `treehouse return`
+# terminates the processes inside a copy and hard-resets it, which is exactly
+# the damage this guard exists to prevent, and the conflicting task may still be
+# working in there. Firstmate reconciles the claim instead; the copy, its
+# processes, and this spawn's endpoint are all left exactly as they are.
+validate_worktree_metadata_before_lease() {  # <pool-root>
+  local pool_root=$1 meta claimed claimed_real holder other_id
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    if [ "$other_id" = "$ID" ]; then
+      echo "error: task $ID acquired a durable record while its fresh spawn was preparing to lease; refusing to replace that task's ownership. No worktree lease was requested. Use --relaunch to reuse the existing task." >&2
+      exit 1
+    fi
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
+      echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing before requesting a worktree lease" >&2
+      exit 1
+    fi
+    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      echo "error: cannot confirm worktree ownership because task $other_id has missing, empty, or ambiguous worktree metadata in '$meta'; refusing before requesting a worktree lease" >&2
+      exit 1
+    }
+    claimed_real=$(real_path_or_raw "$claimed")
+    case "$claimed_real" in
+      "$pool_root"/.treehouse/*)
+        holder=$(fm_backend_meta_exact_value "$meta" treehouse_lease_holder) || {
+          echo "error: task $other_id claims '$claimed' in this home's pool without confirmable durable-lease metadata; refusing before Treehouse can recycle that copy" >&2
+          exit 1
+        }
+        if [ "$holder" != "$other_id" ]; then
+          echo "error: task $other_id claims '$claimed' with mismatched durable-lease holder '$holder'; refusing before Treehouse can recycle that copy" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+}
+
+preserve_conflicted_worktree_lease() {
+  TREEHOUSE_ABORT_RETURN_PENDING=0
+}
+
+assert_worktree_unclaimed() {  # <worktree>
+  local worktree=$1 meta claimed claimed_real other_id wt_real
+  wt_real=$(real_path_or_raw "$worktree")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    if [ "$other_id" = "$ID" ]; then
+      preserve_conflicted_worktree_lease
+      echo "error: task $ID acquired a durable record while its fresh spawn was leasing '$worktree'; refusing to replace that task's ownership. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    fi
+    if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ]; then
+      preserve_conflicted_worktree_lease
+      echo "error: cannot confirm worktree ownership because task metadata '$meta' is not a readable regular file; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    fi
+    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || {
+      preserve_conflicted_worktree_lease
+      echo "error: cannot confirm worktree ownership because task $other_id has missing, empty, or ambiguous worktree metadata in '$meta'; refusing to use '$worktree'. Nothing was returned or reset. Endpoint $T is parked in that copy." >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+      exit 1
+    }
+    claimed_real=$(real_path_or_raw "$claimed")
+    [ "$claimed_real" = "$wt_real" ] || continue
+    preserve_conflicted_worktree_lease
+    echo "error: task $other_id already claims the working copy '$claimed' that treehouse just handed task $ID; refusing to launch a second owner into it, because either task's cleanup would hard-reset the other's work. Nothing was returned or reset - reconcile $other_id first (tear it down once its work has landed, or correct its record), then spawn $ID again. Endpoint $T is parked in that copy." >&2
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    exit 1
+  done
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2212,53 +2363,101 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Claim this home's own worktree pool before asking treehouse for a slot.
+  # Treehouse keys a pool by the repository, so without this two homes cloning
+  # the same project draw from one pool and hand each other's live slots out.
+  # bin/fm-pool-root.sh owns the derivation and refuses rather than guessing.
+  TREEHOUSE_POOL_ROOT=$("$FM_ROOT/bin/fm-pool-root.sh" "$PROJ_ABS") || {
+    echo "error: could not give this home its own worktree pool for $PROJ_ABS; refusing to lease a slot another home may already have handed out" >&2
+    exit 1
+  }
+  TREEHOUSE_CONFIG_VIEW=$("$FM_ROOT/bin/fm-pool-root.sh" --view "$PROJ_ABS") || {
+    echo "error: could not resolve this home's isolated Treehouse config view; refusing to lease" >&2
+    exit 1
+  }
+  TREEHOUSE_CONFIG_VIEW_REAL=$(cd "$TREEHOUSE_CONFIG_VIEW" 2>/dev/null && pwd -P) || {
+    echo "error: could not canonicalize this home's isolated Treehouse config view; refusing to lease" >&2
+    exit 1
+  }
+  release_delivered_pool_copies "$PROJ_ABS"
+  validate_worktree_metadata_before_lease "$TREEHOUSE_POOL_ROOT"
+  TREEHOUSE_LEASE_HOLDER=$ID
+  TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-HUP}' HUP
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-INT}' INT
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-TERM}' TERM
+  treehouse_acquire_status=0
+  WT=$(trap '' HUP INT TERM
+    cd "$TREEHOUSE_CONFIG_VIEW_REAL" \
+      && treehouse get --lease --lease-holder "$TREEHOUSE_LEASE_HOLDER") \
+    || treehouse_acquire_status=$?
+  if [ "$treehouse_acquire_status" -eq 0 ] && [ -n "$WT" ]; then
+    TREEHOUSE_ABORT_RETURN_WORKTREE=$WT
+    TREEHOUSE_ABORT_RETURN_VIEW=$TREEHOUSE_CONFIG_VIEW_REAL
+    TREEHOUSE_ABORT_RETURN_PENDING=1
+  fi
+  trap - HUP INT TERM
+  case "$TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL" in
+    HUP) exit 129 ;;
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+  esac
+  if [ "$treehouse_acquire_status" -ne 0 ]; then
+    echo "error: treehouse could not acquire a durable worktree lease for task $ID" >&2
+    exit 1
+  fi
+  [ -n "$WT" ] || {
+    echo "error: treehouse returned no path for task $ID's durable worktree lease" >&2
+    exit 1
+  }
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait until the pane enters the synchronously acquired worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
+  # Two matching reads reject transient stale paths reported by a new pane.
+  leased_real=$(real_path_or_raw "$WT")
+  settled_reads=0
+  worktree_settled=0
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+    p_real=$(real_path_or_raw "$p")
+    if [ -n "$p" ] && [ "$p_real" = "$leased_real" ]; then
+      settled_reads=$((settled_reads + 1))
+      if [ "$settled_reads" -ge 2 ]; then
+        worktree_settled=1
+        break
       fi
     else
-      candidate=""
+      settled_reads=0
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
+  if [ "$worktree_settled" != 1 ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
+  wt_pool_real=$(real_path_or_raw "$WT")
+  case "$wt_pool_real" in
+    "$TREEHOUSE_POOL_ROOT"/.treehouse/*) ;;
+    *)
+      echo "error: treehouse get entered '$WT' outside this home's pool root '$TREEHOUSE_POOL_ROOT'; refusing before refresh" >&2
+      exit 1
+      ;;
+  esac
+  acquired_status=$(git -C "$WT" status --porcelain 2>/dev/null) || {
+    echo "error: could not inspect newly leased worktree '$WT'; refusing to publish custody" >&2
+    exit 1
+  }
+  if [ -n "$acquired_status" ]; then
+    echo "error: newly leased worktree '$WT' is not clean; refusing to publish custody" >&2
+    exit 1
+  fi
   validate_spawn_worktree "treehouse get" "$T"
+  assert_worktree_unclaimed "$WT"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2628,6 +2827,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
+else
+  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
   awk -F= '
@@ -2638,10 +2840,11 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-{
+if ! {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
+  [ -z "${TREEHOUSE_LEASE_HOLDER:-}" ] || echo "treehouse_lease_holder=$TREEHOUSE_LEASE_HOLDER"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
@@ -2686,7 +2889,10 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH"; then
+  echo "error: could not prepare durable metadata for task $ID" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2695,6 +2901,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+else
+  if ! mv -f -- "$SPAWN_META_TMP" "$STATE/$ID.meta"; then
+    echo "error: could not publish durable metadata for task $ID" >&2
+    exit 1
+  fi
+  TREEHOUSE_ABORT_RETURN_PENDING=0
+  SPAWN_META_TMP=
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

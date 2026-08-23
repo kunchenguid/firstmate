@@ -378,15 +378,8 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-presentation-e2e.test.sh
 ```
 
-Observed restart-reclaim guarantees:
-
-```text
-ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
-ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
-ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
-```
+That run established projection compatibility with Herdr 0.7.5.
+The current restart-custody contract is owned by [`herdr-backend.md`](../herdr-backend.md#presentation-spaces) and enforced by `tests/fm-backend-herdr-presentation-e2e.test.sh`, which requires a fresh launch and relaunch after a server restart to refuse without moving or rewriting the existing endpoint, worktree, or durable task record.
 
 The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and the value `off` opts out; since 2026-08-05 an absent file enables the projection only at or above the 0.8.0 floor recorded under "Presentation version floor" below, and `on` is the explicit opt-in that survives the floor:
 
@@ -405,7 +398,6 @@ ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session
 ```
 
 The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
-One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:

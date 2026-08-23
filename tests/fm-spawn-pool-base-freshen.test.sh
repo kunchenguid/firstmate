@@ -30,17 +30,24 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TREEHOUSE_LOG"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial pool_root
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
@@ -56,6 +63,10 @@ make_case() {
   git clone --quiet --bare "$project" "$origin"
   git -C "$project" remote add origin "file://$origin"
   initial=$(git -C "$project" rev-parse HEAD)
+  pool_root=$(FM_HOME="$home" FM_POOL_ROOT_BASE="$case_dir/base" \
+    "$ROOT/bin/fm-pool-root.sh" --print)
+  pool="$pool_root/.treehouse/fixture/1/$(basename "$project")"
+  mkdir -p "$(dirname "$pool")"
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
   git clone --quiet "file://$origin" "$publisher"
@@ -79,7 +90,9 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_POOL_ROOT_BASE="$CASE_DIR/base" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -104,12 +117,19 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # The repeat models a LATER task receiving this same recycled slot, so the
+  # first task's claim on it is released first: a pooled copy has exactly one
+  # owner at a time, and spawn refuses a copy another task still names
+  # (tests/fm-worktree-custody.test.sh).
+  rm -f "$HOME_DIR/state/$id.meta"
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
+  assert_no_grep 'return --force' "$CASE_DIR/treehouse.log" \
+    "spawn returned a lease after transferring custody to durable metadata"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
     || fail "an idempotent repeat moved the pool away from current origin/main"
 
@@ -150,6 +170,10 @@ test_unreachable_origin_refuses_stale_pool_base() {
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
   assert_contains "$out" "could not fetch origin" \
     "spawn did not clearly refuse an unreachable origin"
+  assert_grep "return --force $POOL_DIR" "$CASE_DIR/treehouse.log" \
+    "spawn leaked the durable lease after base refresh failed"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published custody metadata after returning an aborted lease"
   after=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$after" = "$before" ] || fail "spawn changed the pooled worktree after origin became unreachable"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -183,7 +207,7 @@ test_direct_pr_and_scout_refresh_before_launch() {
   pass "direct-PR ships and scouts both refresh stale pooled worktrees before launch"
 }
 
-test_dirty_pool_refuses_without_discarding_work() {
+test_dirty_new_lease_aborts_and_returns() {
   local rec id out status before
   id='pool-dirty-refusal-r4'
   rec=$(make_case dirty-refusal "$id")
@@ -197,13 +221,15 @@ test_dirty_pool_refuses_without_discarding_work() {
   assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
-  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
-    "spawn discarded uncommitted work while refusing the pool"
+  assert_grep "return --force $POOL_DIR" "$CASE_DIR/treehouse.log" \
+    "spawn preserved an unpublished dirty lease outside the owner-conflict path"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published custody metadata for a dirty lease"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed dirty refusal: %s; preserved=%s\n' \
-      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+    printf '# observed dirty refusal: %s; cleanup=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(tail -n 1 "$CASE_DIR/treehouse.log")"
   fi
-  pass "a dirty pooled worktree is refused without discarding its local work"
+  pass "a dirty newly acquired lease is aborted and returned"
 }
 
 test_unresolved_remote_default_refuses_pool() {
@@ -230,7 +256,7 @@ test_unresolved_remote_default_refuses_pool() {
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
-test_dirty_pool_refuses_without_discarding_work
+test_dirty_new_lease_aborts_and_returns
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 
