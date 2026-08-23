@@ -426,6 +426,7 @@ secondmate_sync() {
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
   local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  fm_config_inherit_primary_preflight "$CONFIG" >/dev/null 2>&1 || true
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -494,7 +495,7 @@ secondmate_sync() {
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+  local remote_host sync_out inherit_out inherit_rc nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
@@ -529,9 +530,14 @@ secondmate_sync() {
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
       converged=0
     fi
-    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+    inherit_rc=0
+    inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) || inherit_rc=$?
+    if [ "$inherit_rc" -eq 0 ] || [ "$inherit_rc" -eq 3 ]; then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+      if [ "$inherit_rc" -ne 0 ]; then
+        echo "SECONDMATE_SYNC: secondmate $id: model catalog skipped on $remote_host: $(printf '%s\n' "$inherit_out" | grep '^catalog-error:' | head -1)"
+      fi
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
       converged=0

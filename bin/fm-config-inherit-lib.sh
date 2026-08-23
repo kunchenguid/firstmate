@@ -7,7 +7,9 @@
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
-# bounds that home's startup-memory curation, and primary
+# bounds that home's startup-memory curation, primary config/model-catalog.json
+# carries the paid model-pool inventory secondmates inherit for dispatch
+# eligibility, and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
 # choice - that item is default-ON, so an absent primary file and an absent
 # destination file both mean on and the generic absence mirror below already
@@ -53,6 +55,8 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-model-catalog-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-model-catalog-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -63,7 +67,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json model-catalog.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -148,6 +152,28 @@ copy_inheritable_file() {
     return 0
   fi
   rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+copy_model_catalog_file() {
+  local src=$1 dest=$2 dest_parent tmp
+  dest_parent=${dest%/*}
+  mkdir -p "$dest_parent" 2>/dev/null || return 1
+  tmp=$(mktemp "$dest_parent/.fm-model-catalog.XXXXXX" 2>/dev/null) || return 1
+  if ! cp "$src" "$tmp" 2>/dev/null || ! fm_model_catalog_file_valid "$tmp"; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if ! fm_model_catalog_file_valid "$dest"; then
+      fm_model_catalog_file_safe_existing "$dest" || { rm -f -- "$tmp"; return 1; }
+      fm_model_catalog_quarantine_invalid "$dest" >/dev/null || { rm -f -- "$tmp"; return 1; }
+    fi
+  fi
+  if mv -f -- "$tmp" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
   return 1
 }
 
@@ -439,6 +465,18 @@ propagate_secondmate_inheritance() {
   return "$rc"
 }
 
+fm_config_inherit_primary_preflight() {
+  local src_config=$1 src
+  src="$src_config/$FM_MODEL_CATALOG_FILE"
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    fm_model_catalog_config_dir_safe "$src_config" || return 1
+    fm_model_catalog_validate_primary "$src" || return 1
+  else
+    fm_model_catalog_absence_allowed "$src_config" || return 1
+  fi
+  return 0
+}
+
 propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest reason rc
   [ -n "$src_config" ] || return 1
@@ -495,6 +533,52 @@ propagate_inheritable_config() {
         fi
       fi
     fi
+    if [ "$item" = "$FM_MODEL_CATALOG_FILE" ]; then
+      if [ -e "$src_config" ] || [ -L "$src_config" ]; then
+        if ! fm_model_catalog_config_dir_safe "$src_config"; then
+          reason="unsafe primary config directory: $FM_MODEL_CATALOG_ERROR"
+          warn_inheritable_config_error "$item" "$src_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$dest_config" ] || [ -L "$dest_config" ]; then
+        if ! fm_model_catalog_config_dir_safe "$dest_config"; then
+          reason="unsafe destination config directory: $FM_MODEL_CATALOG_ERROR"
+          warn_inheritable_config_error "$item" "$dest_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$src" ] || [ -L "$src" ]; then
+        if ! fm_model_catalog_validate_primary "$src"; then
+          reason="unsafe or invalid primary source: $FM_MODEL_CATALOG_ERROR"
+          warn_inheritable_config_error "$item" "$src" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      elif ! fm_model_catalog_absence_allowed "$src_config"; then
+        reason="invalid primary source state: $FM_MODEL_CATALOG_ERROR"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! fm_model_catalog_file_valid "$dest"; then
+          if ! fm_model_catalog_file_safe_existing "$dest"; then
+            reason="unsafe destination: $FM_MODEL_CATALOG_ERROR"
+            warn_inheritable_config_error "$item" "$dest" "$reason"
+            record_inheritable_config_result "$item" error "$reason"
+            rc=1
+            continue
+          fi
+        fi
+      fi
+    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
@@ -503,7 +587,8 @@ propagate_inheritable_config() {
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        if copy_inheritable_file "$src" "$dest"; then
+        if { [ "$item" = "$FM_MODEL_CATALOG_FILE" ] && copy_model_catalog_file "$src" "$dest"; } || \
+          { [ "$item" != "$FM_MODEL_CATALOG_FILE" ] && copy_inheritable_file "$src" "$dest"; }; then
           record_inheritable_config_result "$item" pushed ""
         else
           reason="failed to copy"

@@ -109,6 +109,8 @@ if [ ! -s "$records" ]; then
   exit 0
 fi
 
+fm_config_inherit_primary_preflight "$CONFIG" >/dev/null 2>&1 || true
+
 echo "config-push: $FM_HOME -> live secondmate homes"
 
 seen_homes=""
@@ -145,9 +147,11 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      printf '%s\n' "$remote_out" | sed 's/^/  /'
+    remote_rc=0
+    remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) || remote_rc=$?
+    [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
+    if [ "$remote_rc" -eq 0 ] || [ "$remote_rc" -eq 3 ]; then
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
@@ -163,8 +167,8 @@ while IFS='|' read -r id home _window meta; do
       else
         rm -f -- "$remote_marker"
       fi
+      [ "$remote_rc" -eq 0 ] || errors=1
     else
-      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
     fm_lock_release "$remote_lock" || true

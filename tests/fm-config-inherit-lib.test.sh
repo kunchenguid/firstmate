@@ -9,6 +9,7 @@ set -u
 
 expected_items=$(cat <<'EOF'
 config/crew-dispatch.json
+config/model-catalog.json
 config/crew-harness
 config/backlog-backend
 config/backend

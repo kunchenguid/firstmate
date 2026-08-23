@@ -384,6 +384,45 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness and its attestation; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Model catalog (config/model-catalog.json)
+
+`config/model-catalog.json` is an optional local, gitignored JSON file listing every paid model pool the fleet may spawn.
+It is primary-authoritative and inherited into secondmate homes through the same declared inherited-local-material contract as `config/crew-dispatch.json`.
+The primary's bytes converge byte-exact into validated secondmate homes, and primary absence removes the destination copy.
+Inheritance validates the file with `jq` before publication and refuses unsafe or malformed artifacts rather than copying them.
+After a successful change under an already-running secondmate, the shared `CONFIG_REREAD` contract delivers the validated destination bytes before later task intake.
+
+```json
+{
+  "pools": [
+    {
+      "pool": "codex-cli",
+      "provider": "openai",
+      "plan": "pro",
+      "harness": "codex",
+      "account": "primary",
+      "models": ["gpt-5.6-sol"],
+      "quota_readable": true
+    }
+  ],
+  "excluded": [
+    {
+      "what": "legacy pool",
+      "why": "retired by captain policy"
+    }
+  ]
+}
+```
+
+Each pool needs non-empty `pool`, `provider`, `plan`, `harness`, and `account` strings, a non-empty `models` array of non-empty strings, and a boolean `quota_readable`.
+Optional pool fields `gap` and `note` are strings when present.
+The optional top-level `excluded` array contains objects with non-empty `what` and `why` strings.
+Underscore-prefixed metadata keys such as `_purpose` are allowed but not required.
+Malformed JSON, an empty `pools` array, or a pool missing required fields is reported through the inheritance helper as a per-item `error` and does not publish invalid bytes downstream.
+An invalid primary catalog is moved to a collision-safe quarantine and leaves a durable `.model-catalog.invalid-primary` marker, so later convergence remains blocked instead of interpreting quarantine as intentional absence.
+Publishing a corrected valid catalog clears that marker; to intentionally converge absence after a quarantine, remove the marker explicitly.
+Missing `jq` blocks validation the same way other JSON-backed inherited config does.
+
 ## Routing cooldowns (data/quota-cooldowns.json)
 
 Provider-refused limits and exhausted measured quota windows become home-local durable routing cooldowns in `data/quota-cooldowns.json`.
@@ -523,7 +562,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `model-catalog.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

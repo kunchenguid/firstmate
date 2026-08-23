@@ -53,8 +53,16 @@ EMPTY="$TMP/empty"
 EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
 
 ITEMS=$(fm_config_inherit_items)
+CATALOG_ERROR=""
+if ! fm_config_inherit_primary_preflight "$CONFIG"; then
+  CATALOG_ERROR=$FM_MODEL_CATALOG_ERROR
+fi
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
+  if [ "$rel" = config/model-catalog.json ] && [ -n "$CATALOG_ERROR" ]; then
+    printf 'catalog-error: config/model-catalog.json: %s\n' "$CATALOG_ERROR" >&2
+    continue
+  fi
   if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ]; then
     case "$rel" in
       config/*)
@@ -75,16 +83,26 @@ while IFS= read -r rel; do
     if [ "$rel" = data/captain-shared.md ]; then
       shared_captain_header_valid "$source" || die "shared captain preferences have no valid primary-authoritative header"
     fi
+    if [ "$rel" = config/model-catalog.json ]; then
+      # shellcheck source=bin/fm-model-catalog-lib.sh
+      . "$SCRIPT_DIR/fm-model-catalog-lib.sh"
+      fm_model_catalog_validate_primary "$source" || die "model catalog is invalid: $FM_MODEL_CATALOG_ERROR"
+    fi
     snapshot="$TMP/$(printf '%s' "$rel" | tr '/' '_')"
     cp -p -- "$source" "$snapshot" || die "cannot snapshot inherited source: $source"
     [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || die "inherited source snapshot is unsafe: $source"
     bytes=$(LC_ALL=C wc -c < "$snapshot" | tr -d ' ')
     hash=$(sha256_file "$snapshot") || die "cannot hash inherited source: $source"
-    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" < "$snapshot"
+    if ! "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" < "$snapshot"; then
+      exit 1
+    fi
   else
     # This loop's heredoc is its control stream, not remote command input.
-    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" < /dev/null
+    if ! "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" < /dev/null; then
+      exit 1
+    fi
   fi
 done <<EOF
 $ITEMS
 EOF
+[ -z "$CATALOG_ERROR" ] || exit 3
