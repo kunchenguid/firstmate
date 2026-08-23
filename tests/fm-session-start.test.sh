@@ -2397,6 +2397,43 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# --- active-orders pin (hardening 1: recite before acting) -------------------
+
+test_order_pin_empty_book_prints_compact_line() {
+  local rec root home fakebin out
+  rec=$(new_world order-pin-leer)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "ACTIVE ORDERS (PIN)" "digest did not print the active-orders section"
+  assert_contains "$out" "no active orders in the order book" "an empty order book must print the compact line"
+
+  pass "session start prints the compact line for an empty order book"
+}
+
+test_order_pin_active_order_demands_recitation() {
+  local rec root home fakebin out
+  rec=$(new_world order-pin-voll)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  FM_HOME="$home" "$ROOT/bin/fm-order.sh" record --type decision --subject pin-probe \
+    --quote "Der Wortlaut reist mit." >/dev/null
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "ORDER PIN v1" "an active order must render the pin block"
+  assert_contains "$out" "pin-probe" "the pin block must carry the recorded order"
+  assert_contains "$out" "RECITE FIRST" "the pin block must demand recitation before acting"
+
+  pass "session start pins active orders and demands recitation"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
@@ -2444,5 +2481,7 @@ test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
+test_order_pin_empty_book_prints_compact_line
+test_order_pin_active_order_demands_recitation
 
 echo "# fm-session-start.test.sh: all assertions passed"

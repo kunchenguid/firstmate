@@ -721,6 +721,25 @@ else
   fi
 fi
 
+# --- 3b. active captain orders: constraint pin + recitation duty -------------
+# The pin re-injects every active order verbatim at each window rebuild, and
+# the session recites the listed ids before acting, so a restart can never
+# again cost an order (plan v3 U1.1, hardening 1; failure patterns L10/L45).
+# Reading the order book needs no lock, so the read-only path prints it too.
+# A tool failure prints loudly instead of masquerading as an empty book (L13).
+stage order-pin
+subsection "ACTIVE ORDERS (PIN)"
+if ORDER_PIN_OUT=$("$SCRIPT_DIR/fm-order.sh" pin 2>&1); then
+  if printf '%s\n' "$ORDER_PIN_OUT" | grep -q '^O-'; then
+    printf '%s\n' "$ORDER_PIN_OUT"
+    printf 'RECITE FIRST: before any other action this session, recite the ids above with the printed command; a failed recitation means re-read the order book before acting.\n'
+  else
+    printf '(no active orders in the order book yet - standing orders may still live in data/captain.md until the U2 memory rebuild)\n'
+  fi
+else
+  printf 'ORDER_PIN: FAILED - %s\n' "$ORDER_PIN_OUT"
+fi
+
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
