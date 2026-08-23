@@ -61,7 +61,8 @@
 # decision. It exists because the only prior ways to shrink the queue were to
 # leave a known duplicate on it or to fabricate a decision the captain never
 # gave; both are worse than an explicit non-decision. `--surviving` names the
-# task that still carries the live question - it must already exist, and this
+# task that still carries the live question - it must already exist and carry
+# (or have carried, through a close) an actual captain hold, and this
 # command never holds, answers, or otherwise touches it. The retired task's
 # body records a duplicate-retirement block naming the surviving task and
 # stating plainly that no captain decision was made, so the record stays
@@ -368,12 +369,13 @@ duplicate_retirement_block() {  # <surviving-task-id>
     "$1" "$1" "$1"
 }
 
-# A record written by `retire-duplicate` below, never by `answer`.
+# A record written by `retire-duplicate` below, never by `answer`. Checks only
+# the newest record (via recorded_resolution_mode), matching how
+# recorded_decision_digest and recorded_resolution_mode already read just the
+# newest prepended record: a stale retirement block surviving underneath a
+# later genuine answer must not be misread as the current state.
 body_has_duplicate_retirement_record() {  # <task-body>
-  case "$1" in
-    *"Resolution recorded by fm-captain-hold."*"Resolution mode: retired-duplicate"*"Surviving task: "*) return 0 ;;
-  esac
-  return 1
+  [ "$(recorded_resolution_mode "$1" || true)" = retired-duplicate ]
 }
 
 # The recorded surviving task id from a duplicate-retirement record.
@@ -552,7 +554,7 @@ command_answer() {
 
   if [ "$state" = "done" ]; then
     if body_has_duplicate_retirement_record "$body"; then
-      fail "task $id was retired as a duplicate of $(recorded_surviving_task "$body" || echo unknown); it never received a captain decision, and answer cannot invent one retroactively - answer the surviving task, or hold $id again first if it was retired in error"
+      fail "task $id was retired as a duplicate of $(recorded_surviving_task "$body" || echo unknown); it never received a captain decision, and answer cannot invent one retroactively - answer the surviving task instead, or if $id was retired in error, open a new task and hold it for the captain (a closed task cannot be re-held)"
     fi
     if body_has_resolution_record "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
@@ -623,6 +625,7 @@ command_answer() {
 
 command_retire_duplicate() {
   local id=${1:-} surviving='' show state hold_kind body recorded_surviving
+  local surviving_show surviving_hold_kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -636,8 +639,13 @@ command_retire_duplicate() {
   validate_slug surviving-task-id "$surviving"
   [ "$id" != "$surviving" ] || fail "task $id cannot be retired as a duplicate of itself"
   require_tasks_axi
-  task_show "$surviving" >/dev/null 2>&1 \
+  surviving_show=$(task_show "$surviving" 2>/dev/null) \
     || fail "surviving task $surviving does not exist in $FM_HOME/data/backlog.md; name the real surviving call"
+  # tasks-axi keeps hold_kind through a close, so this is the same surviving
+  # proof `answer`'s repair path already trusts for the real captain call.
+  surviving_hold_kind=$(show_field_value "$surviving_show" hold_kind)
+  [ "$surviving_hold_kind" = captain ] \
+    || fail "surviving task $surviving was never a captain call; name the real surviving call"
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)

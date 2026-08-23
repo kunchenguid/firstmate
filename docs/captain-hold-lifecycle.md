@@ -20,7 +20,7 @@ On a task closed outside the script, `answer` records the missing block only whe
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held, so an expired deferral remains answerable.
 
 The `retire-duplicate` subcommand closes a captain-held task that duplicates another captain call's question, without recording any captain decision.
-`--surviving` names the task that still carries the live question; that task must already exist and is never held, answered, or otherwise modified by this command.
+`--surviving` names the task that still carries the live question; that task must already exist, must itself be (or have been, through a close) an actual captain call, and is never held, answered, or otherwise modified by this command.
 The retired task's body carries a `Resolution mode: retired-duplicate` block naming the surviving task and stating plainly that no captain decision was made, so the record can never be mistaken for an `answer` record: it carries no `Captain decision:` text and no decision digest.
 `verify_hold_durable` - the check `complete` and `verify` both use - accepts a retired duplicate as durable exactly like an answered task, so a completion attestation whose inventory already names the duplicate key keeps verifying after the retirement.
 A replay against the same surviving task is idempotent; a replay against a different surviving task, or a retire-duplicate call against a task already closed by other means, is refused.

@@ -390,6 +390,10 @@ test_retire_duplicate_closes_without_recording_a_decision() {
   tasks_in "$home" add sample-route-work "Apply the route choice" \
     --kind ship --repo sample --blocked-by sample-route-call >/dev/null \
     || fail "could not route work behind the surviving captain-held task"
+  run_captain "$home" hold sample-route-call-other \
+    --title "Choose route: east, west" --reason "captain route choice pending, other" \
+    --repo sample >/dev/null \
+    || fail "could not register another captain-held task"
 
   if run_captain "$home" retire-duplicate sample-route-call-dup --surviving sample-absent-call \
     > "$home/absent-surviving.out" 2> "$home/absent-surviving.err"; then
@@ -403,6 +407,12 @@ test_retire_duplicate_closes_without_recording_a_decision() {
     > "$home/unheld-dup.out" 2> "$home/unheld-dup.err"; then
     fail "retire-duplicate closed a task that is not held for the captain"
   fi
+  if run_captain "$home" retire-duplicate sample-route-call-dup --surviving sample-route-work \
+    > "$home/unheld-surviving.out" 2> "$home/unheld-surviving.err"; then
+    fail "retire-duplicate accepted a surviving task that was never a captain call"
+  fi
+  assert_grep "never a captain call" "$home/unheld-surviving.err" \
+    "the refusal did not explain that the surviving task was never a captain call"
 
   out=$(run_captain "$home" retire-duplicate sample-route-call-dup --surviving sample-route-call) \
     || fail "retire-duplicate could not close the duplicate captain-held task"
@@ -435,7 +445,7 @@ test_retire_duplicate_closes_without_recording_a_decision() {
     || fail "an identical retire-duplicate replay was not idempotent"
   assert_contains "$out" "retired-duplicate: sample-route-call-dup -> sample-route-call" \
     "the idempotent replay did not report the same outcome"
-  if run_captain "$home" retire-duplicate sample-route-call-dup --surviving sample-route-work \
+  if run_captain "$home" retire-duplicate sample-route-call-dup --surviving sample-route-call-other \
     > "$home/mismatch.out" 2> "$home/mismatch.err"; then
     fail "retire-duplicate replay accepted a different surviving task"
   fi
@@ -510,6 +520,40 @@ test_retire_duplicate_preserves_completion_durability() {
   run_captain "$home" verify "$id" >/dev/null \
     || fail "verify failed once the surviving task was answered and the duplicate stayed retired"
   pass "retiring a duplicate already named in a completion attestation keeps that attestation durable"
+}
+
+# A duplicate-retirement record only ever means something when it is the
+# newest record on the body. If `tasks-axi done` fails right after
+# retire-duplicate writes that record, the task stays open and held, and a
+# later genuine answer prepends a real decision block on top; the stale
+# retirement text underneath must not be misread as the task's current state.
+test_stale_retirement_record_does_not_mask_a_later_answer() {
+  local home body
+  home=$(make_home retire-duplicate-stale)
+  run_captain "$home" hold sample-stale-call \
+    --title "Choose the sample cut" --reason "captain cut choice pending" \
+    --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+
+  printf 'Resolution recorded by fm-captain-hold.\nResolution mode: retired-duplicate\nSurviving task: sample-other-call\n\nNo captain decision was made on this task.\nIt duplicated an existing captain call; the surviving call is sample-other-call.\nAnswer sample-other-call instead - this task was closed only to remove a duplicate row from the captain queue.\n' \
+    > "$home/stale-body.txt"
+  tasks_in "$home" update sample-stale-call --body-file "$home/stale-body.txt" --archive-body >/dev/null \
+    || fail "could not stage a stale retirement record as if tasks-axi done had failed"
+  body=$(tasks_in "$home" show sample-stale-call --full)
+  assert_contains "$body" "state: queued" \
+    "the staged task must still be open, as if closing it had failed"
+
+  printf 'Captain chose the aggressive cut.\n' > "$home/cut.txt"
+  run_captain "$home" answer sample-stale-call --decision-file "$home/cut.txt" >/dev/null \
+    || fail "a genuine answer was refused because a stale retirement record sat underneath it"
+  body=$(tasks_in "$home" show sample-stale-call --full)
+  assert_contains "$body" "state: done" "the genuine answer did not close the task"
+  assert_contains "$body" "Captain chose the aggressive cut." \
+    "the genuine answer's decision text was not recorded"
+
+  run_captain "$home" answer sample-stale-call --decision-file "$home/cut.txt" >/dev/null \
+    || fail "replaying the genuine answer was refused as if the task were still retired as a duplicate"
+  pass "a stale retirement record underneath a newer answer is not mistaken for the task's current state"
 }
 
 # Deferral is a date, not a live card: hold --until keeps the task out of
@@ -1312,6 +1356,7 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_retire_duplicate_closes_without_recording_a_decision
 test_retire_duplicate_preserves_completion_durability
+test_stale_retirement_record_does_not_mask_a_later_answer
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
