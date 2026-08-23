@@ -494,7 +494,7 @@ secondmate_sync() {
   # "move on to the next secondmate".
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out inherit_out inherit_line nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -529,6 +529,18 @@ secondmate_sync() {
     if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+      # A remote home holding its own value for a deviable config item, or a
+      # record it refused, reaches the primary as the same divergence line a
+      # local home's convergence prints for itself.
+      while IFS= read -r inherit_line; do
+        case "$inherit_line" in
+          deviation:*|deviation-rejected:*)
+            echo "SECONDMATE_SYNC: secondmate $id: $inherit_line"
+            ;;
+        esac
+      done <<EOF
+$inherit_out
+EOF
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
       converged=0

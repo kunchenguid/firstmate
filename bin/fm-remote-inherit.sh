@@ -8,6 +8,8 @@
 # Only the inherited-material allowlist is writable or removable. Writes are
 # atomic ordinary-file replacements. Divergent data/captain-shared.md bytes are
 # quarantined before replacement or removal and its converged copy is read-only.
+# A config item this home holds under an evidence-backed deviation record is left
+# at the home's own value and reported as "deviation: <path> ..." instead.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -122,6 +124,29 @@ commit_generation() {
   GENERATION_TMP=
 }
 
+# The destination home's OWN deviation record keeps a deviable config item at
+# this home's value. Reported on stdout, where the pushing primary already reads
+# pushed/removed/unchanged, so a remote divergence is as visible as a local one
+# (bin/fm-config-inherit-lib.sh owns the record contract).
+deviation_holds() {
+  local item answer rc
+  case "$REL" in
+    config/*) item=${REL#config/} ;;
+    *) return 1 ;;
+  esac
+  answer=$(fm_config_deviation_evidence "$PARENT_REAL" "$item") && rc=0 || rc=$?
+  case "$rc" in
+    0)
+      printf 'deviation: %s held locally: %s\n' "$REL" "$answer"
+      return 0
+      ;;
+    2)
+      printf 'deviation-rejected: %s (%s)\n' "$REL" "$answer"
+      ;;
+  esac
+  return 1
+}
+
 quarantine_shared() {
   local reason=$1 quarantine stamp base n=0
   [ "$REL" = data/captain-shared.md ] && [ -f "$DEST" ] || return 0
@@ -146,6 +171,9 @@ case "$COMMAND" in
     [ "$BYTES" -eq "$EXPECTED_BYTES" ] || die "inherited material length does not match its commitment"
     ACTUAL_HASH=$(sha256_file "$TMP") || die "cannot hash inherited material"
     [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || die "inherited material digest does not match its commitment"
+    if deviation_holds; then
+      exit 0
+    fi
     commit_generation
     if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
@@ -166,6 +194,9 @@ case "$COMMAND" in
     EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
+    if deviation_holds; then
+      exit 0
+    fi
     commit_generation
     if [ ! -e "$DEST" ]; then
       printf 'unchanged: %s\n' "$REL"

@@ -31,6 +31,10 @@
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
+# The one opt-in exception is FM_DEVIABLE_CONFIG below: a destination home that
+# holds an explicit evidence-backed deviation record keeps its own value for
+# that item, and every convergence names that divergence back to the primary
+# instead of reverting it in silence.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
@@ -65,6 +69,27 @@ FM_SHARED_CAPTAIN_MODE="444"
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
 
+# The declared DEVIATION escape hatch. Inheritance stays primary-authoritative by
+# default and this changes no default: it is the narrow set of items a secondmate
+# home may hold at its OWN value, and only for as long as it keeps an explicit
+# evidence-backed deviation record beside that item in its own config dir.
+# Extend it deliberately, one item at a time, and only where a home can have a
+# legitimate local safety reason to diverge from the fleet. `backend` is here
+# because an experimental runtime backend can kill that home's workers while the
+# primary's value is fine everywhere else. Override via the environment only in
+# tests.
+FM_DEVIABLE_CONFIG="${FM_DEVIABLE_CONFIG:-backend}"
+
+# The record for config/<item> is config/<item>.deviation. The deviating VALUE
+# stays in the config item itself, where every consumer already reads it; the
+# record only states that this home holds its own value there and why, so
+# nothing downstream needs a second source of truth.
+FM_CONFIG_DEVIATION_SUFFIX=".deviation"
+
+# A deviation record is a short human note, which also bounds every read of it.
+FM_CONFIG_DEVIATION_MAX_BYTES=4096
+FM_CONFIG_DEVIATION_MAX_LINE=120
+
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
 # the primary also hands the new process its frozen on/off decision, and left
@@ -79,6 +104,108 @@ fm_config_inherit_item_session_scoped() {  # <item>
     [ "$candidate" = "$item" ] && return 0
   done
   return 1
+}
+
+# True when <item> is in the declared deviable set above.
+fm_config_deviation_item_deviable() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_DEVIABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
+# The file's first non-blank line, control characters stripped, surrounding
+# whitespace trimmed, and length-capped, so one oversized or hostile local file
+# cannot flood the primary's session-start digest. Non-zero when there is none.
+fm_config_deviation_line() {  # <path>
+  local path=$1 line stripped
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=$(printf '%s' "$line" | tr -d '[:cntrl:]')
+    stripped=${stripped#"${stripped%%[![:space:]]*}"}
+    stripped=${stripped%"${stripped##*[![:space:]]}"}
+    [ -n "$stripped" ] || continue
+    printf '%.*s' "$FM_CONFIG_DEVIATION_MAX_LINE" "$stripped"
+    return 0
+  done < <(head -c "$FM_CONFIG_DEVIATION_MAX_BYTES" "$path" 2>/dev/null)
+  return 1
+}
+
+# fm_config_deviation_evidence <dest-config-dir> <item>
+# Whether the destination home holds an honored local deviation for <item>:
+#   rc 0  honored; stdout is the record's evidence line
+#   rc 1  no record; stdout empty
+#   rc 2  a record exists but cannot be honored; stdout is the concrete reason
+# The answer travels entirely through stdout and the exit code so it survives the
+# command substitution every caller reads it with.
+fm_config_deviation_evidence() {
+  local dest_config=$1 item=$2 record bytes evidence
+  record="$dest_config/$item$FM_CONFIG_DEVIATION_SUFFIX"
+  [ -e "$record" ] || [ -L "$record" ] || return 1
+  if ! fm_config_deviation_item_deviable "$item"; then
+    printf '%s' "config/$item is not a deviable item"
+    return 2
+  fi
+  if [ -L "$record" ] || [ ! -f "$record" ]; then
+    printf '%s' "record is not an ordinary file"
+    return 2
+  fi
+  if [ "$(fm_inherit_file_link_count "$record")" != 1 ]; then
+    printf '%s' "record is hardlinked"
+    return 2
+  fi
+  bytes=$(LC_ALL=C wc -c < "$record" 2>/dev/null | tr -d ' ') || bytes=""
+  case "$bytes" in
+    ''|*[!0-9]*)
+      printf '%s' "record cannot be read"
+      return 2
+      ;;
+  esac
+  if [ "$bytes" -gt "$FM_CONFIG_DEVIATION_MAX_BYTES" ]; then
+    printf '%s' "record exceeds $FM_CONFIG_DEVIATION_MAX_BYTES bytes"
+    return 2
+  fi
+  if ! evidence=$(fm_config_deviation_line "$record"); then
+    printf '%s' "record carries no evidence line"
+    return 2
+  fi
+  printf '%s' "$evidence"
+  return 0
+}
+
+# The bounded value a config item currently presents, quoted, or the word
+# "absence" when it holds none.
+fm_config_deviation_display() {  # <path>
+  local value
+  if [ -f "$1" ] && value=$(fm_config_deviation_line "$1"); then
+    printf '"%s"' "$value"
+  else
+    printf 'absence'
+  fi
+}
+
+# fm_config_deviation_holds <dest-config-dir> <item> <src> <dest>
+# Called only where convergence is about to CHANGE <dest>, so an item the
+# primary already agrees with reports nothing. Returns 0 when the destination
+# home holds an honored deviation, in which case the caller leaves that item
+# alone; the divergence is named on stdout for the primary either way, and a
+# record that cannot be honored converges as usual after saying so. Neither
+# direction is silent: the home never keeps a value the primary cannot see, and
+# the primary never reverts a deviation without reporting it.
+fm_config_deviation_holds() {
+  local dest_config=$1 item=$2 src=$3 dest=$4 answer rc home
+  answer=$(fm_config_deviation_evidence "$dest_config" "$item") && rc=0 || rc=$?
+  [ "$rc" -ne 1 ] || return 1
+  home=${dest_config%/config}
+  if [ "$rc" -eq 2 ]; then
+    printf 'SECONDMATE_SYNC: secondmate home %s: config/%s deviation record rejected (%s); converging to the primary value\n' \
+      "$home" "$item" "$answer"
+    return 1
+  fi
+  printf 'SECONDMATE_SYNC: secondmate home %s: config/%s held locally at %s against primary %s: %s\n' \
+    "$home" "$item" "$(fm_config_deviation_display "$dest")" "$(fm_config_deviation_display "$src")" "$answer"
+  record_inheritable_config_result "$item" deviated "$answer"
+  return 0
 }
 
 # The complete declared inherited-material set as home-relative paths, one per
@@ -171,8 +298,10 @@ destination_allows_inherited_item() {
 
 # propagate_inheritable_config <src-config-dir> <dest-config-dir>
 # Copy each declared inheritable item from the primary's config dir (src) into a
-# secondmate home's config dir (dest). SILENT on stdout - callers parse stdout,
-# so this writes nothing there. It emits concise stderr diagnostics only for
+# secondmate home's config dir (dest). Its only stdout is a SECONDMATE_SYNC
+# divergence line for an item a destination home holds at its own value, or for
+# a deviation record it refused, exactly as propagate_shared_captain_preferences
+# reports a quarantine; it emits concise stderr diagnostics only for other
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
 # churns mtimes). A source item that is absent is mirrored as a missing
@@ -183,8 +312,9 @@ destination_allows_inherited_item() {
 # backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
-# Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
-# do not affect the exit code. Returns non-zero only when a real propagation
+# Status is pushed, unchanged, deviated, skipped, or error. Skipped items are
+# warnings and deviated items are the destination home's declared choice; neither
+# affects the exit code. Returns non-zero only when a real propagation
 # error, such as copy or remove failure, occurs.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
@@ -503,6 +633,9 @@ propagate_inheritable_config() {
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+        if fm_config_deviation_holds "$dest_config" "$item" "$src" "$dest"; then
+          continue
+        fi
         if copy_inheritable_file "$src" "$dest"; then
           record_inheritable_config_result "$item" pushed ""
         else
@@ -522,6 +655,9 @@ propagate_inheritable_config() {
         continue
       fi
       # Primary has no value for this item: mirror the absence downstream.
+      if fm_config_deviation_holds "$dest_config" "$item" "$src" "$dest"; then
+        continue
+      fi
       if rm -f "$dest" 2>/dev/null; then
         record_inheritable_config_result "$item" pushed "mirrored primary absence"
       else

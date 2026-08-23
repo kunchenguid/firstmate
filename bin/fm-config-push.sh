@@ -13,6 +13,8 @@
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
 # through their SSH route. Unchanged config and data/captain-shared.md-only
 # updates send no reread unless a previous send failure is pending for that home.
+# An item a home holds under its own evidence-backed deviation record is
+# reported as a named divergence line and left alone (fm-config-inherit-lib.sh).
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -29,7 +31,7 @@ This is local-material-only:
     one durable marked remote reread nudge
     (no message when config is unchanged unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
-    skipped, or error
+    deviated, skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
 
 Live homes come from state/*.meta records with kind=secondmate.
