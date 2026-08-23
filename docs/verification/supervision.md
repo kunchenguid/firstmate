@@ -413,8 +413,9 @@ fm-claude-stop-autoarm: ok
 
 ## Exhaustive review routing
 
-Verified 2026-08-22 on Pi 0.82.1 through the public Pi skill-loading interface.
-The opt-in guard runs a real primary agent turn against isolated brief and spawn interfaces, then requires the spawned worker runtime to invoke the GSD review interface from its own directory with the committed immutable SHA.
+The opt-in guard loads the checked-in Firstmate instruction surface in an isolated source copy, then runs the real `bin/fm-brief.sh`, `bin/fm-spawn.sh`, Treehouse, and private tmux interfaces.
+Only the spawned worker executable is substituted, so the guard does not launch a second credentialed agent; that worker receives the real typed launch brief in a worktree of a cloned project and records its immutable-SHA GSD handoff.
+The same guard replaces the skill with a deliberately broken temporary copy and requires the worker boundary to reject the missing immutable-SHA and canonical-ledger policy.
 It does not inspect instruction-source bytes.
 
 ```sh
@@ -422,14 +423,15 @@ FM_EXHAUSTIVE_REVIEW_ROUTING_LIVE_E2E=1 \
   bin/fm-test-run.sh tests/fm-exhaustive-review-routing-live-e2e.test.sh
 ```
 
-Observed output:
+Expected successful output:
 
 ```text
-ok - real Pi primary dispatched the configured worker, and only that worker ran the immutable-SHA GSD review
+ok - real Pi primary used fm-brief and fm-spawn to hand off the immutable project SHA from an isolated worker
+ok - removing the routing policy produced required red evidence at the worker boundary
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
-This confirms the live Pi path routes an exhaustive-review request through the configured worker boundary instead of executing the review at the primary layer.
+A successful run confirms the live Pi path routes an exhaustive-review request through the configured worker boundary with the real brief, spawn, worktree, and immutable project SHA, and proves the behavioral assertion turns red when the routing skill is removed.
 Other harnesses are not covered by this Pi-specific live result.
 
 ## Watcher continuity

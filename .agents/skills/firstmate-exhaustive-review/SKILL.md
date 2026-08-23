@@ -23,6 +23,10 @@ The primary remains the captain-facing supervisor, and the worker remains the so
 1. Resolve the project, delivery mode, `yolo` posture, and any fitting secondmate route under `AGENTS.md` section 7.
    A routed secondmate is the Firstmate layer that launches and supervises its own configured worker.
 2. Before dispatch, load `harness-adapters` and apply the captain override, dispatch-profile, quota-array, effort, and spawn-capable backend rules in `AGENTS.md` section 4.
+   When `config/crew-dispatch.json` exists, read its matching rule or default before writing the brief; a harness-only spawn does not satisfy a selected profile.
+   Resolve every selected profile axis before launching: pass its concrete harness, model, and effort to `fm-spawn`, and preserve the selected backend through the supported backend selection path.
+   When a configured profile supplies model or effort, never omit either axis or replace it with a generic fallback.
+   For a profile array, retain the quota and candidate-accounting evidence that selected those concrete axes.
    Do not hard-code a harness, model, effort, or backend for this workflow.
 3. Create one task-specific brief and launch the project worker only through `bin/fm-spawn.sh` on the resolved backend.
    The brief must name this skill, require the immutable-SHA and canonical-ledger gates below, and preserve the selected delivery mode.
