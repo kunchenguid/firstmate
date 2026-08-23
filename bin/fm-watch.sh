@@ -331,6 +331,10 @@ inbox_steer_check() {  # <window> <task>
       ring_rc=0
       fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+        if [ ! -f "$rec" ]; then
+          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+          return 0
+        fi
         if [ -d "${rec%/*}" ]; then
           reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
           fm_wake_append stale "$w" "$reason" || exit 1

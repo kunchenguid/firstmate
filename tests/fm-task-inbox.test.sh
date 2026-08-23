@@ -66,6 +66,9 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
+      if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
+        mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -332,6 +335,36 @@ test_watcher_quiet_on_healthy_inbox() {
   pass "watcher: a healthy or empty inbox stays completely silent"
 }
 
+test_watcher_ack_silences_unwritable_ladder() {
+  local dir state out log pid rec rings i=0
+  dir=$(setup_watch_case ack-unwritable-ladder)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  mkdir "$state/t1.inbox/.ring-state"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_ACK_RECORD="$rec" FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    [ -f "$state/t1.inbox/handled/001.msg" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || { kill "$pid" 2>/dev/null; fail "the doorbell stub did not acknowledge the record"; }
+  sleep 2
+  kill -0 "$pid" 2>/dev/null \
+    || fail "the watcher escalated ladder failure after the record was acknowledged:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "acknowledgement should silence retries, got $rings doorbells:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an acknowledged record queued a bookkeeping wake:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: acknowledgement silences an unwritable ladder without a stale wake"
+}
+
 test_watcher_surfaces_unwritable_ladder() {
   local dir state out log pid rec rings wakes
   dir=$(setup_watch_case unwritable-ladder)
@@ -390,5 +423,6 @@ test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
+test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
