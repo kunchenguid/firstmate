@@ -450,6 +450,77 @@ YML
   pass "delivery-path does not conflate a plain printf's marker mention with a PR-body enforcement check"
 }
 
+test_delivery_path_direct_pr_incidental_grep_word_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-grepword")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The job reads the PR body and assigns the marker to a variable (both
+  # tracked operands), but the only line mentioning both variables is a plain
+  # echo whose quoted message happens to contain the word "grep" as prose,
+  # not an invocation of the grep command. Treating any occurrence of "grep"
+  # on a line with both operands as a comparison construct - even inside a
+  # quoted string - would wrongly treat this as PR-body enforcement.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - run: |
+          marker='git push no-mistakes'
+          echo "note: not using grep here, just mentioning $PR_BODY and $marker in this message"
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-grepword-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "the word 'grep' inside a quoted echo message must not count as a comparison construct"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when 'grep' only appears as prose inside a quoted string: $out"
+  pass "delivery-path does not treat the word 'grep' inside a quoted string as an actual comparison construct"
+}
+
+test_delivery_path_direct_pr_pull_request_target_trigger_out_of_scope() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-prtarget")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # This workflow genuinely compares a PR-body-derived value against the
+  # marker, but it is triggered by pull_request_target, not pull_request.
+  # The header comment scopes detection to "a pull_request-triggered
+  # workflow" specifically; a substring search for "pull_request" anywhere in
+  # the file also matches "pull_request_target" (and the
+  # github.event.pull_request.body context expression that any such workflow
+  # necessarily contains), which would wrongly pull this out-of-scope trigger
+  # into the same refusal.
+  cat > "$dir/.github/workflows/no-mistakes-required.yml" <<'YML'
+on:
+  pull_request_target:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - run: |
+          marker='git push no-mistakes'
+          if printf '%s' "$PR_BODY" | grep -qF -- "$marker"; then
+            exit 0
+          fi
+          exit 1
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-prtarget-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "a pull_request_target trigger is out of the stated pull_request-only scope"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse for a pull_request_target-triggered workflow: $out"
+  pass "delivery-path does not match a pull_request_target trigger (or its pull_request.body context field) as the pull_request trigger"
+}
+
 test_delivery_path_direct_pr_heredoc_body_mention_does_not_refuse() {
   local dir fakebin out status
   dir=$(make_repo "$TMP_ROOT/dp-directpr-heredoc")
@@ -701,6 +772,8 @@ test_delivery_path_direct_pr_variable_indirected_marker_refuses
 test_delivery_path_direct_pr_step_name_mention_does_not_refuse
 test_delivery_path_direct_pr_env_value_mention_does_not_refuse
 test_delivery_path_direct_pr_printf_mention_does_not_refuse
+test_delivery_path_direct_pr_incidental_grep_word_does_not_refuse
+test_delivery_path_direct_pr_pull_request_target_trigger_out_of_scope
 test_delivery_path_direct_pr_heredoc_body_mention_does_not_refuse
 test_quota_stale_refuses
 test_quota_exhausted_refuses

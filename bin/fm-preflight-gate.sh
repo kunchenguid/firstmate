@@ -216,9 +216,38 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
 
 # --- check 2: delivery path --------------------------------------------------
 
+fm_preflight_workflow_has_pull_request_trigger() {  # <file> -> 0 if 'on:' structurally declares the pull_request trigger
+  local f=$1
+  # A word-exact structural check of the 'on:' block, not a file-wide
+  # substring search: "pull_request" would also match "pull_request_target"
+  # (a different trigger) and the github.event.pull_request.body context
+  # expression that ANY job reading the PR body contains, regardless of what
+  # actually triggers the workflow.
+  awk '
+    BEGIN { in_on = 0; found = 0 }
+    /^on:[[:space:]]*\[/ {
+      line = $0
+      sub(/^on:[[:space:]]*\[/, "", line)
+      sub(/\].*/, "", line)
+      n = split(line, arr, ",")
+      for (i = 1; i <= n; i++) {
+        tok = arr[i]
+        gsub(/[[:space:]]/, "", tok)
+        if (tok == "pull_request") found = 1
+      }
+      next
+    }
+    /^on:[[:space:]]*pull_request[[:space:]]*$/ { found = 1; next }
+    /^on:[[:space:]]*$/ { in_on = 1; next }
+    in_on && /^[^[:space:]]/ { in_on = 0 }
+    in_on && /^[[:space:]]+pull_request:([[:space:]]|$)/ { found = 1 }
+    END { if (found) print "MATCH" }
+  ' "$f" 2>/dev/null | grep -q MATCH
+}
+
 fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job actually compares a PR-body value to the marker
   local f=$1
-  awk '
+  awk -v sq="'" '
     function clear(arr) { for (k in arr) delete arr[k] }
     BEGIN { clear(body_vars); clear(marker_vars); in_jobs = 0 }
     /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
@@ -251,8 +280,18 @@ fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job 
       # operands: a bare mention of the body or the marker anywhere in the
       # job (a step name, an unrelated env value, an echo/printf string, a
       # heredoc body) proves nothing about whether they are ever checked
-      # against each other.
-      if (trimmed !~ /grep|case[[:space:]]|\[[[:space:]]|=~|==|contains\(|startsWith\(/) next
+      # against each other. The keyword itself must be real code too, not
+      # incidental prose inside a quoted string (e.g. an echo message that
+      # happens to say "grep") or part of a longer identifier - so blank out
+      # quoted string contents and require a word-bounded match before
+      # treating the line as a comparison. Operands (checked below) may still
+      # be literal quoted text, so that check still reads the full line.
+      code = trimmed
+      gsub(/"[^"]*"/, "", code)
+      gsub(sq "[^" sq "]*" sq, "", code)
+      if (code !~ /(^|[^A-Za-z0-9_])(grep|case)([^A-Za-z0-9_]|$)/ \
+          && code !~ /\[\[?[[:space:]]/ \
+          && code !~ /=~|==|contains\(|startsWith\(/) next
 
       has_body = (trimmed ~ /pull_request\.body/)
       if (!has_body) {
@@ -297,7 +336,7 @@ fm_preflight_check_delivery_path() {  # <project-dir> <mode>
         # both phrases appearing anywhere in the file, which would conflate
         # an unrelated job's PR-body read with a different unrelated job's
         # incidental mention of "git push no-mistakes".
-        if grep -q 'pull_request' "$f" 2>/dev/null \
+        if fm_preflight_workflow_has_pull_request_trigger "$f" \
           && fm_preflight_workflow_step_reads_no_mistakes_body "$f"; then
           FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (a step checks pull_request.body for the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
           return 1
