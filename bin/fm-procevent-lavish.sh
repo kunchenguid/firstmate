@@ -138,10 +138,50 @@ POLL_RETRY_DELAY_MAX=60
 # response must be those two lines with those exact bytes: whitespace variants,
 # a longer response that merely opens with them, and any other SERVER_ERROR are
 # genuine errors this adapter must never swallow.
-poll_response_is_interrupted() {  # <response-file>
-  cmp -s "$1" <(printf '%s\n' \
-    'error: Lavish Editor poll response was interrupted' \
-    'code: SERVER_ERROR')
+poll_response_filter() {  # <response-file>
+  perl -e '
+    use strict;
+    use warnings;
+    my ($stage) = @ARGV;
+    my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
+    open my $staged, ">", $stage or exit 2;
+    binmode STDIN;
+    binmode STDOUT;
+    binmode $staged;
+    my ($candidate, $streaming) = ("", 0);
+    sub write_all {
+      my ($handle, $bytes) = @_;
+      my $offset = 0;
+      while ($offset < length $bytes) {
+        my $written = syswrite $handle, $bytes, length($bytes) - $offset, $offset;
+        exit 2 unless defined $written;
+        $offset += $written;
+      }
+    }
+    while (1) {
+      my $count = sysread STDIN, my $chunk, 65536;
+      exit 2 unless defined $count;
+      last if $count == 0;
+      if ($streaming) {
+        write_all(*STDOUT, $chunk);
+        next;
+      }
+      my $room = length($expected) + 1 - length($candidate);
+      my $take = length($chunk) < $room ? length($chunk) : $room;
+      my $prefix = substr($chunk, 0, $take);
+      $candidate .= $prefix;
+      write_all($staged, $prefix);
+      my $matches_prefix = length($candidate) <= length($expected)
+        && substr($expected, 0, length($candidate)) eq $candidate;
+      if (!$matches_prefix) {
+        write_all(*STDOUT, $candidate);
+        write_all(*STDOUT, substr($chunk, $take));
+        $streaming = 1;
+      }
+    }
+    exit 10 if !$streaming && $candidate eq $expected;
+    write_all(*STDOUT, $candidate) unless $streaming;
+  ' "$1"
 }
 
 # Seconds between retries. FM_LAVISH_POLL_RETRY_DELAY is a bounded test
@@ -162,11 +202,9 @@ poll_retry_delay() {
   printf '%s\n' "$delay"
 }
 
-# The registered listener command. Its response is written to a file rather than
-# captured in a variable so what the runner captures is the poll's bytes exactly,
-# and so the retry decision reads the whole response instead of a prefix.
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc
+  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
+  local pipeline_status
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -184,13 +222,24 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" > "$response"
-    rc=$?
-    poll_response_is_interrupted "$response" && [ "$attempt" -lt "$POLL_RETRY_LIMIT" ] || break
-    attempt=$((attempt + 1))
-    sleep "$delay"
+    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    pipeline_status=("${PIPESTATUS[@]}")
+    rc=${pipeline_status[0]}
+    filter_rc=${pipeline_status[1]}
+    case "$filter_rc" in
+      0) break ;;
+      10)
+        if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
+          attempt=$((attempt + 1))
+          sleep "$delay"
+        else
+          cat -- "$response"
+          break
+        fi
+        ;;
+      *) die "cannot classify the poll response" ;;
+    esac
   done
-  cat -- "$response"
   return "$rc"
 }
 

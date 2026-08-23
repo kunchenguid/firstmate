@@ -626,6 +626,11 @@ case "${plan[$i]}" in
     printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
+  stream)
+    printf 'x%.0s' {1..4096}
+    printf 'ready\n' > "$LAVISH_STREAM_READY"
+    while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
+    printf '\n' ;;
 esac
 SH
 chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
@@ -644,10 +649,8 @@ PE_TRACKED+=("$HRETRY|$retry_id")
 LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
-for _ in $(seq 1 6); do
-  PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
-  sleep 0.3
-done
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
+wait_for "$HRETRY/state/.wake-queue" || fail "feedback after interrupted polls produced no wake"
 [ "$(cat "$LAVISH_COUNT")" = 3 ] \
   || fail "the interrupted listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
 [ "$(count_results "$HRETRY" "$retry_id")" = 1 ] \
@@ -752,6 +755,35 @@ quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
 [ ! -e "${quoted_staged[0]}" ] \
   || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"
 pass "poll cleanup safely handles an apostrophe-containing TMPDIR"
+
+HSTREAM="$TMP_ROOT/hstream"; new_home "$HSTREAM"
+STREAM_ART="$TMP_ROOT/stream-board.html"
+STREAM_TMPDIR="$TMP_ROOT/stream-stage"
+LAVISH_STREAM_READY="$TMP_ROOT/stream-ready"
+LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
+mkdir -p "$STREAM_TMPDIR"
+printf '<h1>stream</h1>\n' > "$STREAM_ART"
+stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
+PE_TRACKED+=("$HSTREAM|$stream_id")
+LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STREAM_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
+  LAVISH_STREAM_READY="$LAVISH_STREAM_READY" LAVISH_STREAM_RELEASE="$LAVISH_STREAM_RELEASE" \
+  FM_PROCEVENT_MAX_OUTPUT_BYTES=100 pe "$HSTREAM" reconcile >/dev/null
+wait_for "$LAVISH_STREAM_READY" || fail "streaming poll did not start"
+stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
+[ -e "${stream_staged[0]}" ] || fail "streaming poll created no classifier staging file"
+[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le 100 ] \
+  || fail "streaming poll exceeded its bounded classifier staging"
+: > "$LAVISH_STREAM_RELEASE"
+wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
+stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
+[ "$(wc -c < "$stream_result" | tr -d ' ')" -le 100 ] \
+  || fail "streaming poll bypassed the runner output bound"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$STREAM_ART" >/dev/null
+pass "Lavish classification staging stays bounded while nonmatches stream"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
