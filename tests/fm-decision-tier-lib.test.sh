@@ -341,6 +341,45 @@ wait "$LEGACYDIR_ACQUIRE_PID" 2>/dev/null
 [ ! -e "$LEGACYDIR_LOG.lock" ] || fail "a broken legacy lock directory must end up released, not just bypassed once"
 pass "lock_acquire detects a leftover legacy lock directory and breaks it instead of blocking forever"
 
+# --- a lock whose PID was reassigned to an unrelated live process must -----
+# --- not block every later writer -------------------------------------------
+#
+# Greptile flagged that recovering a stale lock by checking only `kill -0`
+# against the recorded PID cannot tell a still-live original holder apart
+# from an unrelated process the OS later handed the same, recycled PID:
+# `kill -0` succeeds for both, so a reused-PID lock would look permanently
+# held and every later writer would retry forever. Pairing the recorded PID
+# with a process-start-time fingerprint (`ps -o lstart=`) closes that gap:
+# a reused PID's start time does not match what was recorded when the lock
+# was created. This fabricates that directly: a lock recorded against this
+# test's own live PID (so `kill -0` succeeds) but a start time that is
+# nothing like this process's real start time - standing in for "this PID
+# now belongs to a different process than the one that created the lock".
+# Change fm_decision_tier_lock_is_stale to treat a live recorded PID as
+# never stale (i.e. drop the start-time comparison) to see this go red (it
+# will hang until the poll loop below gives up and fails).
+PIDREUSE_LOG="$TMP_ROOT/decisions-pidreuse.log"
+mkdir -p "$(dirname "$PIDREUSE_LOG")"
+ln -s "$$:Mon Jan  1 00:00:00 1990" "$PIDREUSE_LOG.lock"
+
+( fm_decision_tier_lock_acquire "$PIDREUSE_LOG" && fm_decision_tier_lock_release "$PIDREUSE_LOG" ) &
+PIDREUSE_ACQUIRE_PID=$!
+PIDREUSE_ACQUIRED=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$PIDREUSE_ACQUIRE_PID" 2>/dev/null; then
+    PIDREUSE_ACQUIRED=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$PIDREUSE_ACQUIRED" -ne 1 ]; then
+  kill "$PIDREUSE_ACQUIRE_PID" 2>/dev/null
+  fail "lock_acquire must break a lock whose recorded start time no longer matches its still-live recorded PID"
+fi
+wait "$PIDREUSE_ACQUIRE_PID" 2>/dev/null
+[ ! -e "$PIDREUSE_LOG.lock" ] || fail "a broken PID-reuse lock must end up released, not just bypassed once"
+pass "lock_acquire detects a lock whose recorded PID is alive but was reassigned (start time mismatch) and breaks it instead of blocking forever"
+
 # --- successful logging for each tier ---------------------------------------
 
 fm_decision_tier_log_auto "$LOG" 1000 dec-auto-1 precedent-match "matched the sibling ruling from dec-0" \

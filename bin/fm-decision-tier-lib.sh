@@ -132,21 +132,34 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 # fm_decision_tier_lock_acquire / _release: a minimal mutex around the
 # check-and-append sequence that opens a decision's lifecycle
 # (require_unused_id followed by the log write). The lock is a symlink
-# whose target is the holder's PID, created with `ln -s`: symlink creation
-# is a single atomic syscall, so the lock's existence and its holder's PID
-# are established in the exact same instant - there is no window where the
-# lock exists but its PID is not yet readable (unlike a two-step
-# mkdir-then-write-pid-file scheme, where a holder killed between the two
-# steps would leave a lock no contender could ever identify as abandoned).
+# whose target is "<holder_pid>:<holder_start_time>", created with `ln -s`:
+# symlink creation is a single atomic syscall, so the lock's existence and
+# its holder's identity are established in the exact same instant - there
+# is no window where the lock exists but its holder is not yet readable
+# (unlike a two-step mkdir-then-write-pid-file scheme, where a holder
+# killed between the two steps would leave a lock no contender could ever
+# identify as abandoned).
 #
 # A holder that dies (killed, crashes, or the append itself fails) before
 # releasing leaves the symlink behind with nothing left to remove it -
 # every later writer would then retry `ln -s` forever. To recover from
-# that, a contender that fails to `ln -s` reads the symlink's target
-# (`readlink`) and checks whether that PID is still alive (`kill -0`); if
-# it is not - or the lock isn't a valid PID symlink at all, e.g. a
-# leftover/corrupt artifact - the lock is treated as abandoned and broken
-# before retrying.
+# that, a contender that fails to `ln -s` calls fm_decision_tier_lock_is_stale,
+# which treats the lock as abandoned - and breaks it before retrying -
+# whenever any of these hold: the lock isn't a valid PID:start-time symlink
+# at all (e.g. a leftover/corrupt artifact), the recorded PID is no longer
+# alive (`kill -0` fails), or the recorded PID IS alive but its current
+# process-start time no longer matches what was recorded when the lock was
+# created.
+#
+# That last case is the one a bare `kill -0 <recorded_pid>` cannot catch:
+# PIDs are recycled by the OS, so a holder that dies and is later reused
+# for an unrelated, still-running process would make `kill -0` succeed
+# forever, wedging every subsequent writer on a lock nobody is actually
+# holding. Recording the holder's process-start time (`ps -o lstart=`)
+# alongside its PID closes that gap - an unrelated process handed the same
+# recycled PID essentially never has the exact same start time as the
+# original holder, so the mismatch outs it as an impostor rather than a
+# still-legitimate lock.
 #
 # A plain DIRECTORY left at the lock path (e.g. by the earlier mkdir-based
 # locking scheme this replaced) needs its own check ahead of the `ln -s`
@@ -157,26 +170,56 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 # catches that case directly (a symlink also passes `-d` when its target is
 # a directory, so `-L` is checked first to exclude a legitimate lock),
 # removing it with `rm -rf` (not `rm -f`, which cannot remove a directory at
-# all) before every `ln -s` attempt. A live holder's PID always answers
-# `kill -0`, so none of this ever steals a lock that is still legitimately
-# held.
+# all) before every `ln -s` attempt.
 fm_decision_tier_lock_acquire() {  # <log_file>
   local log=$1
-  local lockdir="$log.lock" dir holder_pid
+  local lockdir="$log.lock" dir start
   dir=$(dirname "$log")
   [ -d "$dir" ] || mkdir -p "$dir" || return 1
+  start=$(fm_decision_tier_pid_start_time "$$")
   while :; do
     if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
       rm -rf "$lockdir" 2>/dev/null
     fi
-    ln -s "$$" "$lockdir" 2>/dev/null && break
-    holder_pid=$(readlink "$lockdir" 2>/dev/null) || holder_pid=""
-    if [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
+    ln -s "$$:$start" "$lockdir" 2>/dev/null && break
+    if fm_decision_tier_lock_is_stale "$lockdir"; then
       rm -rf "$lockdir" 2>/dev/null
       continue
     fi
     sleep 0.05
   done
+}
+
+# fm_decision_tier_pid_start_time: prints the process-start timestamp
+# (`ps -o lstart=`) for a still-living <pid>, or an empty string if no
+# process with that PID currently exists. `lstart` is supported by both
+# GNU/Linux and BSD/macOS `ps`, so this is portable across the platforms
+# this library runs on. Whitespace is collapsed so the result compares
+# reliably regardless of column-padding differences between `ps`
+# implementations.
+fm_decision_tier_pid_start_time() {  # <pid>
+  ps -o lstart= -p "$1" 2>/dev/null | LC_ALL=C tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//'
+}
+
+# fm_decision_tier_lock_is_stale: true (exit 0) if the lock symlink at
+# <lockdir> was left by a holder that is no longer the process the lock
+# was created for - the symlink isn't a valid "<pid>:<start_time>" target,
+# the recorded PID is dead, or the recorded PID is alive but its current
+# start time no longer matches the recorded one (the PID was reused by an
+# unrelated process since the lock was created). Only when the recorded PID
+# is alive AND its start time still matches is the lock still legitimately
+# held (exit 1).
+fm_decision_tier_lock_is_stale() {  # <lockdir>
+  local lockdir=$1 holder holder_pid holder_start current_start
+  holder=$(readlink "$lockdir" 2>/dev/null) || return 0
+  [ -n "$holder" ] || return 0
+  holder_pid=${holder%%:*}
+  holder_start=${holder#*:}
+  [ -n "$holder_pid" ] || return 0
+  kill -0 "$holder_pid" 2>/dev/null || return 0
+  current_start=$(fm_decision_tier_pid_start_time "$holder_pid")
+  [ -n "$current_start" ] && [ "$current_start" = "$holder_start" ] && return 1
+  return 0
 }
 
 fm_decision_tier_lock_release() {  # <log_file>
