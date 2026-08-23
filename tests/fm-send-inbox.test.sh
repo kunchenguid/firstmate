@@ -18,7 +18,9 @@
 #      "$" to codex, an explicit backend target, and the --key path.
 #   7. A marked secondmate steer carries its marker + corr token in the record
 #      body, and the pending-reply expectation is marked delivered at enqueue.
-#   8. An unwritable inbox is a real local failure: nonzero exit, nothing
+#   8. Pending-reply bookkeeping failure after enqueue never reports a
+#      retryable send failure that could duplicate the durable instruction.
+#   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
@@ -247,6 +249,39 @@ test_secondmate_marker_and_enqueue_delivery() {
   pass "fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue"
 }
 
+test_post_enqueue_bookkeeping_failure_is_not_retryable() {
+  local dir err rc rec body
+  dir=$(setup_case bookkeeping-failure); err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_arg=${@: -2:1}
+target_arg=${@: -1}
+if [ "${FM_FAIL_DELIVERY_CONFIRM:-0}" = 1 ] \
+  && grep -q '^confirmed=' "$source_arg" 2>/dev/null; then
+  # Simulate losing both the delivery commit and its prepared recovery marker.
+  rm -f "$target_arg"
+  exit 1
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"; rc=$?
+  expect_code 0 "$rc" "post-enqueue bookkeeping failure must not invite a duplicate retry"
+  rec="$dir/home/state/domain.inbox/001.msg"
+  [ -f "$rec" ] || fail "bookkeeping failure test did not durably enqueue the steer"
+  body=$(record_body _ "$rec")
+  case "$body" in
+    "$FM_FROMFIRST_MARK"corr=*) : ;;
+    *) fail "bookkeeping failure test lost the secondmate marker: $body" ;;
+  esac
+  assert_contains "$(cat "$err")" "Do not resend" \
+    "post-enqueue bookkeeping failure should give explicit operator recovery guidance"
+  pass "fm-send inbox: post-enqueue bookkeeping failure cannot signal a duplicate-producing retry"
+}
+
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock); err="$dir/send.err"
@@ -298,5 +333,6 @@ test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
+test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
