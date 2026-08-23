@@ -127,6 +127,27 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Worktree pool sweep (config/worktree-pool-sweep)
+
+The optional local `config/worktree-pool-sweep` file enables the pre-acquire worktree pool safety sweep.
+When present and non-empty (any value other than `off`), the sweep is activated.
+The sweep inspects pooled worktrees before a spawn uses them and refuses when unsafe state is observed.
+
+The sweep checks two conditions and refuses on either:
+- Dirty worktree: tracked modifications, staged changes, or untracked non-ignored files.
+- HEAD contains commits not reachable from an approved durable ref: local branches (`refs/heads/*`), tags (`refs/tags/*`), or rescue refs (`refs/firstmate/rescue/*`).
+
+Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
+
+For `refs/remotes/*`: they are counted for reachability so an ordinary freshly-checked-out pool worktree is not falsely refused, but the case where HEAD's commits are covered ONLY by remote-tracking refs (and no local head or tag) is classified as unsafe.
+
+This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant.
+Two structural gaps this mitigation cannot close:
+1. A direct `treehouse get` by anything other than firstmate bypasses the sweep.
+2. Another firstmate home can race between sweep and acquire.
+
+The sweep is currently disabled by default. Two live lanes hold pooled worktrees and must not be disturbed until they are free.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

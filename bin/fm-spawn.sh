@@ -2259,6 +2259,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+    if [ -x "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" ]; then
+      "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" "$WT"
+      sweep_rc=$?
+      if [ "$sweep_rc" -ne 0 ]; then
+        echo "error: worktree pool sweep refused worktree $WT (exit $sweep_rc); inspect unsafe state or disable sweep in config/worktree-pool-sweep" >&2
+        exit 1
+      fi
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
