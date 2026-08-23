@@ -7,6 +7,12 @@
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
 # distinct real files or wrong symlinks.
+# Promotion relocates content, never removes it: every CLAUDE.md line moves
+# into AGENTS.md, the canonical self-governance section is appended, and the
+# original CLAUDE.md is replaced by the two-line pointer. Those root-file
+# changes are side effects a caller should anticipate before running this in a
+# project whose CI gates check doc placement or a doc budget - AGENTS.md grows
+# while CLAUDE.md shrinks, and no input line is lost.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and any existing AGENTS.md that still lacks it.
@@ -27,9 +33,25 @@ usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
 }
 
+help() {
+  cat <<'EOF'
+usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
+
+Ensure the worktree follows the agent-memory convention: AGENTS.md is the
+real memory file and CLAUDE.md is a two-line @AGENTS.md pointer. When only a
+real CLAUDE.md exists, its content is relocated, never removed: every line
+moves into AGENTS.md and the original CLAUDE.md becomes the pointer.
+Promotion appends the canonical "## Maintaining this file" section to AGENTS.md
+and replaces the real CLAUDE.md with the two-line pointer; anticipate those
+root-file changes before running this in a project whose CI gates check doc
+placement or a doc budget.
+Refuses to clobber distinct real files or wrong symlinks.
+EOF
+}
+
 case "${1:-}" in
   -h|--help)
-    usage
+    help
     exit 0
     ;;
 esac
