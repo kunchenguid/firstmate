@@ -471,14 +471,6 @@ classify_unknown() {  # <reason>
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
-_watcher_key() {
-  fm_window_markers_migrate "$1" "$2" \
-    .hash- .count- .stale- .stale-since- .wedge-escalations- \
-    .paused- .paused-rechecked- .paused-resurfaced- \
-    .writing-since- .writing-resurfaced-
-  fm_window_marker_key "$2"
-}
-
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win" "$state")")
@@ -516,7 +508,7 @@ clear_pause_tracking() {  # <window> <state>
   local win=$1 state=$2 task key watcher_key
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
-  watcher_key=$(_watcher_key "$state" "$win")
+  watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
@@ -528,7 +520,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
-  watcher_key=$(_watcher_key "$state" "$win")
+  watcher_key=$(_stale_key "$win")
   if status_is_paused_or_captain_held "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
@@ -545,7 +537,7 @@ migrate_watcher_pause_markers() {  # <state>
     [ -n "$win" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
-    watcher_key=$(_watcher_key "$state" "$win")
+    watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"

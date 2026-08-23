@@ -3210,11 +3210,10 @@ fm_backend_herdr_event_reader_cmd() {
 
 # fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
 # <window> ("<session>:<pane_id>"), keyed identically to the watcher's
-# .stale-<key>, under <state_dir>.
+# .stale-<key> (tr ':/.' '___'), under <state_dir>.
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   local state=$1 window=$2 key
-  fm_window_markers_migrate "$state" "$window" "$FM_BACKEND_HERDR_ESCALATED_PREFIX"
-  key=$(fm_window_marker_key "$window")
+  key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 
