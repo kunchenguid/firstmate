@@ -1,0 +1,18 @@
+[Unit]
+Description=Alle 6 Stunden: OAuth-Refresh fuer Claude-Konten 1-4
+# Kanonische Kopie: firstmate-Arbeitszweig ops/systemd/ (2026-08-23).
+# Installationsort: ~/.config/systemd/user/fm-konto-auth.timer
+#
+# Warum 6h: Access-Token leben ~8h (gemessen); das Skript erneuert bei <=2h
+# Restlauf. 6h Takt garantiert, dass zwischen zwei Laeufen nie ein Token
+# verfaellt, solange der Rechner laeuft. Persistent holt verpasste Laeufe nach
+# (Rechner aus).
+
+[Timer]
+OnCalendar=*-*-* 05,11,17,23:11:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=fm-konto-auth.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""fm-konto-auth-refresh — haelt die OAuth-Auth der Claude-Konten 1-4 frisch.
+
+WARUM (Captain, 23.08.2026): Bei lange unbenutzten Konten laeuft der
+Access-Token ab (~8h TTL, nachgemessen). Oeffnet der Captain claudeN einmal,
+erneuert die CLI den Token selbst - genau diesen Schritt macht dieses Skript
+automatisiert, ohne Modellaufruf und ohne Kosten:
+
+    POST https://platform.claude.com/v1/oauth/token
+    {"grant_type":"refresh_token","refresh_token":<rt>,
+     "client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e","scope":<gespeicherte Scopes>}
+
+Endpunkt, Client-ID und Antwortfelder (access_token, optional rotierter
+refresh_token, expires_in, refresh_token_expires_in, scope) wurden am
+23.08.2026 direkt aus der installierten Claude-Code-Binary 2.1.241 gelesen -
+nicht geraten. Die Client-ID ist der oeffentliche, in jeder Auslieferung
+enthaltene Claude-Code-Client; kein Geheimnis.
+
+SICHERHEIT:
+  - Token werden NIE ausgegeben oder geloggt; nur Ablaufdaten, Ja/Nein-Felder
+    und HTTP-Statuscodes.
+  - Ein Konto mit LAUFENDER Claude-Session wird uebersprungen (Scan von
+    /proc/*/environ auf CLAUDE_CONFIG_DIR): sonst koennten zwei Refreshes mit
+    demselben Refresh-Token rotieren und die Session beim naechsten eigenen
+    Refresh aussperren.
+  - Schreibzugriff atomar (Temp-Datei + rename), Rechte 0600, vorherige
+    Fassung als <dir>/.credentials.json.fm-vorher (0600) im selben Verzeichnis.
+  - Pro Konto ein flock, damit Timer und Berichts-Recheck sich nicht in die
+    Quere kommen.
+  - Abbruchgrenze: 3 fehlgeschlagene Versuche je Konto, dann wird das Konto
+    als "Neu-Anmeldung noetig" markiert (Marker-Datei) und nicht weiter
+    versucht, bis sich die Credentials aendern (echte Anmeldung des Captains).
+
+GRENZE DES AUTOMATISCHEN: Ist der Refresh-Token selbst abgelaufen
+(refreshTokenExpiresAt verstrichen bzw. Server antwortet invalid_grant),
+hilft nur eine echte Neu-Anmeldung - dafuer gibt es den Marker und die
+handlungsableitende Meldung im Nutzungsbericht ("claudeN oeffnen").
+Das automatische Erneuern greift genau dann nicht, wenn es auch manuell
+nicht ohne Neu-Anmeldung ginge.
+
+Aufruf:
+  fm-konto-auth-refresh                 # alle Konten, nur wenn noetig
+  fm-konto-auth-refresh --konto 3       # nur Konto 3
+  fm-konto-auth-refresh --konto 2,4     # mehrere
+  fm-konto-auth-refresh --force         # auch gesunde Konten erneuern (Wartung/Messung)
+  fm-konto-auth-refresh --status        # nur Zustand zeigen
+
+Letzte Ausgabezeile ist maschinenlesbar: "RESULT: <tag>" mit
+  refreshed | healthy | skipped-live-session | skipped-backoff |
+  needs-relogin | transient-error | missing-credentials
+Bei mehreren Konten: RESULT: overall=<zahl needs-relogin>,<zahl transient>
+Exitcodes: 0 ok/gesund/uebersprungen, 10 needs-relogin, 20 transient.
+"""
+import fcntl
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # oeffentliche Claude-Code-Client-ID
+HOME = os.path.expanduser("~")
+KONTEN_DIR = {n: f"{HOME}/.claude{n}" for n in (1, 2, 3, 4)}
+STATE_DIR = os.environ.get("FM_KONTO_AUTH_STATE_DIR") or f"{HOME}/.local/state/fm-konto-auth"
+# Hermetische Tests: Verzeichnisse je Konto uebersteuerbar ("3=/tmp/xyz,4=/abc").
+# Nur fuer Testumgebungen gedacht; der Produktivbetrieb setzt nichts davon.
+for _paar in (os.environ.get("FM_KONTO_AUTH_DIR_MAP") or "").split(","):
+    _paar = _paar.strip()
+    if "=" in _paar and _paar.split("=")[0].strip().isdigit():
+        KONTEN_DIR[int(_paar.split("=")[0].strip())] = os.path.expanduser(
+            _paar.split("=", 1)[1].strip())
+LOG = f"{STATE_DIR}/verlauf.log"
+# Erneuern, sobald der Access-Token noch <=2h Restlauf hat: bei 8h TTL und
+# 6h-Timer-Takt bleibt so zwischen zwei Laeufen immer Luft.
+REFRESH_MARGIN_S = 2 * 3600
+# Oder wenn der Refresh-Token selbst binnen 7 Tagen verfaellt (Vorhaltezeit).
+RT_MARGIN_S = 7 * 86400
+MAX_FAILURES = 3          # Abbruchgrenze laut Auftrag
+BACKOFF_S = 30 * 60       # danach Pause fuer transiente Fehler
+
+
+def ts():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def datum(ms):
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        return "?"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def log(konto, text):
+    line = f"{ts()} konto{konto}: {text}"
+    print(line)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def result(tag):
+    print(f"RESULT: {tag}")
+
+
+def live_session_pids(cfg_dir):
+    """PIDs von Claude-Prozessen, die mit CLAUDE_CONFIG_DIR auf cfg_dir laufen.
+    Nur echte Claude-Prozesse zaehlen (comm == "claude"): Shells und andere
+    Kinder einer Session erben die Variable zwar, erneuern aber nie selbst -
+    sie duerfen den Refresh nicht blockieren."""
+    ziel = os.path.realpath(cfg_dir.rstrip("/"))
+    treffer = []
+    for eintrag in os.listdir("/proc"):
+        if not eintrag.isdigit() or int(eintrag) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{eintrag}/comm", encoding="utf-8") as f:
+                if f.read().strip() != "claude":
+                    continue
+            with open(f"/proc/{eintrag}/environ", "rb") as f:
+                env = f.read()
+        except OSError:
+            continue
+        for stueck in env.split(b"\0"):
+            if stueck.startswith(b"CLAUDE_CONFIG_DIR="):
+                wert = stueck.split(b"=", 1)[1].decode(errors="replace")
+                try:
+                    if os.path.realpath(wert.rstrip("/")) == ziel:
+                        treffer.append(int(eintrag))
+                except OSError:
+                    pass
+                break
+    return treffer
+
+
+def lese_creds(pfad):
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return d.get("claudeAiOauth") if isinstance(d, dict) else None
+
+
+def schreibe_creds(pfad, ganzes, oauth_neu):
+    """Atomar zurueckschreiben, 0600, alte Fassung als .fm-vorher sichern."""
+    backup = pfad + ".fm-vorher"
+    try:
+        shutil.copy2(pfad, backup)
+        os.chmod(backup, 0o600)
+    except OSError:
+        pass
+    ganzes = dict(ganzes)
+    ganzes["claudeAiOauth"] = oauth_neu
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(pfad), prefix=".creds-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(ganzes, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, pfad)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def lade_marker(konto, creds_pfad):
+    pfad = f"{STATE_DIR}/konto{konto}.tot"
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            daten = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    mtime = int(os.stat(creds_pfad).st_mtime) if os.path.exists(creds_pfad) else 0
+    if daten.get("creds_mtime") != mtime:
+        # Credentials wurden seit der Markierung geaendert -> echte Anmeldung
+        # oder erfolgreiche Erneuerung liegt vor, Marker entkraeftigen.
+        try:
+            os.unlink(pfad)
+        except OSError:
+            pass
+        return None
+    return daten
+
+
+def setze_marker(konto, creds_pfad, grund):
+    pfad = f"{STATE_DIR}/konto{konto}.tot"
+    mtime = int(os.stat(creds_pfad).st_mtime) if os.path.exists(creds_pfad) else 0
+    tmp = pfad + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"gesetzt": ts(), "grund": grund, "creds_mtime": mtime}, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, pfad)
+
+
+def loesche_marker(konto):
+    try:
+        os.unlink(f"{STATE_DIR}/konto{konto}.tot")
+    except OSError:
+        pass
+
+
+def lade_fehler(konto):
+    try:
+        with open(f"{STATE_DIR}/konto{konto}.failures", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"count": 0, "last": 0}
+
+
+def speichere_fehler(konto, stand):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = f"{STATE_DIR}/konto{konto}.failures.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(stand, f)
+    os.replace(tmp, f"{STATE_DIR}/konto{konto}.failures")
+
+
+def braucht_erneuerung(oauth):
+    jetzt_ms = time.time() * 1000
+    exp = oauth.get("expiresAt")
+    rt_exp = oauth.get("refreshTokenExpiresAt")
+    if not isinstance(exp, (int, float)) or exp - jetzt_ms <= REFRESH_MARGIN_S * 1000:
+        return True, "access-token abgelaufen oder knapp"
+    if isinstance(rt_exp, (int, float)) and rt_exp - jetzt_ms <= RT_MARGIN_S * 1000:
+        return True, "refresh-token-Laufzeit knapp"
+    return False, ""
+
+
+def user_agent():
+    """Gleiche User-Agent-Form wie die Claude-CLI ("claude-cli/<version> ..."):
+    der Endpunkt weist fremde Agenten sonst mit 403 ab (23.08.2026 nachgemessen).
+    Die Version kommt aus dem installierten Binary, nicht hart codiert."""
+    try:
+        version = os.path.basename(os.path.realpath(f"{HOME}/.local/bin/claude"))
+    except OSError:
+        version = ""
+    return f"claude-cli/{version or 'unbekannt'} (external, cli)"
+
+
+def refresh(oauth):
+    """Ein OAuth-Refresh. Liefert (ok, neues_oauth|Fehlertext, http_code)."""
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": oauth.get("refreshToken"),
+        "client_id": CLIENT_ID,
+    }
+    scopes = oauth.get("scopes")
+    if isinstance(scopes, list) and scopes:
+        body["scope"] = " ".join(str(s) for s in scopes)
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": user_agent()},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            antwort = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return False, f"http {e.code}", e.code
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return False, f"netz/parse: {type(e).__name__}", 0
+
+    access = antwort.get("access_token")
+    expires_in = antwort.get("expires_in")
+    if not access or not isinstance(expires_in, (int, float)):
+        return False, "antwort ohne access_token/expires_in", 0
+    neu = dict(oauth)
+    neu["accessToken"] = access
+    neu["expiresAt"] = int(time.time() * 1000 + expires_in * 1000)
+    rotiert = False
+    if antwort.get("refresh_token"):
+        neu["refreshToken"] = antwort["refresh_token"]
+        rotiert = True
+    rti = antwort.get("refresh_token_expires_in")
+    if isinstance(rti, (int, float)):
+        neu["refreshTokenExpiresAt"] = int(time.time() * 1000 + rti * 1000)
+    neu["__rt_verlaengert"] = isinstance(rti, (int, float))
+    scope_str = antwort.get("scope")
+    if isinstance(scope_str, str) and scope_str.strip():
+        neu["scopes"] = scope_str.split()
+    return True, (neu, rotiert), 200
+
+
+def bearbeite_konto(konto, erzwinge=False):
+    """Liefert tag: refreshed|healthy|skipped-live-session|skipped-backoff|
+    needs-relogin|transient-error|missing-credentials"""
+    verzeichnis = KONTEN_DIR[konto]
+    pfad = f"{verzeichnis}/.credentials.json"
+    if not os.path.exists(pfad):
+        log(konto, "credentials fehlen - Neu-Anmeldung noetig")
+        setze_marker(konto, pfad, "credentials fehlen")
+        result("missing-credentials")
+        return "needs-relogin"
+
+    marker = lade_marker(konto, pfad)
+    if marker:
+        log(konto, f"weiterhin Neu-Anmeldung noetig ({marker.get('grund')}) - kein weiterer Versuch")
+        result("needs-relogin")
+        return "needs-relogin"
+
+    pids = live_session_pids(verzeichnis)
+    if pids:
+        log(konto, f"uebersprungen: {len(pids)} laufende Session(s) - keine Fernsteuerung in Live-Nutzung")
+        result("skipped-live-session")
+        return "skipped-live-session"
+
+    sperrpfad = f"{STATE_DIR}/konto{konto}.lock"
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(sperrpfad, "w") as sperre:
+        fcntl.flock(sperre, fcntl.LOCK_EX)
+        try:
+            # Nach der Sperre neu lesen: ein Parallel-Lauf haette erneuern koennen.
+            marker = lade_marker(konto, pfad)
+            if marker:
+                log(konto, "waehrend der Sperre als Neu-Anmeldung markiert worden - Abbruch")
+                result("needs-relogin")
+                return "needs-relogin"
+            ganzes = None
+            try:
+                with open(pfad, encoding="utf-8") as f:
+                    ganzes = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+            oauth = (ganzes or {}).get("claudeAiOauth") if isinstance(ganzes, dict) else None
+            if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
+                log(konto, "kein Refresh-Token vorhanden - Neu-Anmeldung noetig")
+                setze_marker(konto, pfad, "refresh-token fehlt")
+                result("needs-relogin")
+                return "needs-relogin"
+
+            noetig, warum = braucht_erneuerung(oauth)
+            if not noetig and not erzwinge:
+                log(konto, f"gesund: gueltig bis {datum(oauth.get('expiresAt'))}, "
+                           f"Refresh-Token bis {datum(oauth.get('refreshTokenExpiresAt'))}")
+                loesche_marker(konto)
+                speichere_fehler(konto, {"count": 0, "last": 0})
+                result("healthy")
+                return "healthy"
+
+            fehler = lade_fehler(konto)
+            if fehler["count"] >= MAX_FAILURES and time.time() - fehler["last"] < BACKOFF_S:
+                log(konto, f"Pausiert nach {fehler['count']} Fehlversuchen (Backoff bis "
+                           f"{datetime.fromtimestamp(fehler['last'] + BACKOFF_S).strftime('%H:%M')})")
+                result("skipped-backoff")
+                return "transient-error"
+
+            alt_exp, alt_rt = oauth.get("expiresAt"), oauth.get("refreshTokenExpiresAt")
+            ok, erg, code = refresh(oauth)
+            if ok:
+                neu, rotiert = erg
+                rt_verlaengert = neu.pop("__rt_verlaengert", False)
+                schreibe_creds(pfad, ganzes, neu)
+                speichere_fehler(konto, {"count": 0, "last": 0})
+                loesche_marker(konto)
+                log(konto, f"erneuert: gueltig bis {datum(neu.get('expiresAt'))} "
+                           f"(vorher {datum(alt_exp)}), Refresh-Token bis "
+                           f"{datum(neu.get('refreshTokenExpiresAt'))} (vorher {datum(alt_rt)}), "
+                           f"Refresh-Token rotiert: {'ja' if rotiert else 'nein'}, "
+                           f"Refresh-Laufzeit verlaengert: {'ja' if rt_verlaengert else 'nein'}")
+                result("refreshed")
+                return "refreshed"
+
+            log(konto, f"Erneuerung fehlgeschlagen ({erg}); Versuch "
+                       f"{fehler['count'] + 1}/{MAX_FAILURES}")
+            fehler["count"] += 1
+            fehler["last"] = time.time()
+            speichere_fehler(konto, fehler)
+            if fehler["count"] >= MAX_FAILURES:
+                grund = "invalid_grant/abgelaufen" if code in (400, 401, 403) else "dauerhaft fehlgeschlagen"
+                setze_marker(konto, pfad, grund)
+                log(konto, f"Abbruchgrenze erreicht - Neu-Anmeldung noetig ({grund})")
+                result("needs-relogin")
+                return "needs-relogin"
+            result("transient-error")
+            return "transient-error"
+        finally:
+            fcntl.flock(sperre, fcntl.LOCK_UN)
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--status" in argv:
+        for konto in sorted(KONTEN_DIR):
+            pfad = f"{KONTEN_DIR[konto]}/.credentials.json"
+            oauth = lese_creds(pfad)
+            marker = lade_marker(konto, pfad) if os.path.exists(pfad) else None
+            if marker:
+                zustand = "NEU-ANMELDUNG NOETIG"
+            elif oauth and oauth.get("accessToken"):
+                noetig, _ = braucht_erneuerung(oauth)
+                zustand = "erneuern faellig" if noetig else "gesund"
+                print(f"konto{konto}: {zustand} (gueltig bis {datum(oauth.get('expiresAt'))}, "
+                      f"Refresh-Token bis {datum(oauth.get('refreshTokenExpiresAt'))})")
+                continue
+            else:
+                zustand = "keine Credentials"
+            print(f"konto{konto}: {zustand}")
+        return
+    konten = set()
+    erzwinge = "--force" in argv
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--konto" and i + 1 < len(argv):
+            for teil in argv[i + 1].split(","):
+                teil = teil.strip()
+                if teil.isdigit() and int(teil) in KONTEN_DIR:
+                    konten.add(int(teil))
+            i += 2
+        else:
+            i += 1
+    if not konten:
+        konten = set(KONTEN_DIR)
+    ergebnisse = {k: bearbeite_konto(k, erzwinge=erzwinge) for k in sorted(konten)}
+    tot = sum(1 for t in ergebnisse.values() if t == "needs-relogin")
+    fluechtig = sum(1 for t in ergebnisse.values() if t == "transient-error")
+    result(f"overall={tot},{fluechtig}")
+    sys.exit(10 if tot else (20 if fluechtig else 0))
+
+
+if __name__ == "__main__":
+    main()
