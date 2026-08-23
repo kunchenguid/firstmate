@@ -75,6 +75,9 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+# Confirmed done/failed status signals also trigger bin/fm-auto-close.sh after
+# the actionable wake is durable. It stops only ordinary workers and delegates
+# cleanup to fm-teardown's unchanged safety checks.
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
@@ -1224,6 +1227,9 @@ while :; do
           else
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
           fi
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+            "$SCRIPT_DIR/fm-auto-close.sh" finish "$id" >/dev/null 2>&1 || \
+            triage_log "automatic merged-PR cleanup deferred for $id"
         fi
         touch "$STATE/.last-check"
         wake "$reason"
@@ -1270,9 +1276,16 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      auto_close_tasks=
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        case "$f" in
+          "$STATE"/*.status)
+            id=$(basename "$f" .status)
+            case " $auto_close_tasks " in *" $id "*) ;; *) auto_close_tasks="$auto_close_tasks $id" ;; esac
+            ;;
+        esac
       done <<EOF
 $pending
 EOF
@@ -1283,6 +1296,11 @@ EOF
       done <<EOF
 $pending
 EOF
+      for id in $auto_close_tasks; do
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-auto-close.sh" maybe "$id" >/dev/null 2>&1 || \
+          triage_log "automatic terminal cleanup deferred for $id"
+      done
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do

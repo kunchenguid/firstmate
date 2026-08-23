@@ -58,10 +58,14 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force|--auto-terminal]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --auto-terminal requires bin/fm-auto-close.sh's exact incarnation/status
+#   receipt. It keeps every ordinary safety check, except that residual dirty
+#   files may be discarded only after the recorded PR is proved merged and the
+#   committed work is proved contained in that PR or the default branch.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -152,6 +156,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-auto-close-lib.sh
+. "$SCRIPT_DIR/fm-auto-close-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -180,6 +186,11 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+AUTO_TERMINAL=0
+if [ "$FORCE" = --auto-terminal ]; then
+  AUTO_TERMINAL=1
+  FORCE=
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -231,7 +242,7 @@ CONTROL_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-FM_LOCK_LOG_PREFIX=teardown
+export FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -665,6 +676,19 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+AUTO_CLOSE_RECEIPT=$(fm_auto_close_receipt_path "$STATE" "$ID")
+AUTO_CLOSE_STATUS_SIGNATURE=
+if [ "$AUTO_TERMINAL" = 1 ]; then
+  AUTO_CLOSE_STATUS_SIGNATURE=$(fm_wake_signal_sig "$STATE/$ID.status") || {
+    echo "REFUSED: automatic cleanup status for $ID is missing or unreadable" >&2
+    exit 1
+  }
+  fm_auto_close_receipt_validate "$AUTO_CLOSE_RECEIPT" "$ID" \
+    "$(fm_meta_get "$META" spawn_gen)" "$AUTO_CLOSE_STATUS_SIGNATURE" || {
+    echo "REFUSED: automatic cleanup receipt for $ID is missing, malformed, or stale" >&2
+    exit 1
+  }
+fi
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -1056,6 +1080,24 @@ EOF
 # for both the PR state and head. Returns non-zero when the PR is not merged, the
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
+pr_state_is_merged() {
+  local target view state
+  target=${1:-$PR_URL}
+  fm_pr_url_parse "$target" || return 1
+  case "$FM_PR_PROVIDER" in
+    github)
+      state=$(cd "$WT" && gh pr view "$target" --json state -q .state 2>/dev/null) || return 1
+      ;;
+    gitlab)
+      view=$(glab mr view "$FM_PR_NUMBER" -R "https://$FM_PR_HOST/$FM_PR_PATH" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$view" | sed -n 's/^state:[[:space:]]*//p' | head -1)
+      ;;
+    *) return 1 ;;
+  esac
+  case "$state" in MERGED|merged) return 0 ;; esac
+  return 1
+}
+
 pr_is_merged() {
   local branch=$1 target view state head current
   if [ -n "$PR_URL" ]; then
@@ -1374,6 +1416,23 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  if [ -n "$dirty" ] && [ "$AUTO_TERMINAL" = 1 ]; then
+    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+    if [ -z "$branch" ]; then
+      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+    fi
+    if pr_state_is_merged "$PR_URL" && work_is_landed "$branch"; then
+      echo "teardown: discarding residual worker-copy changes after confirmed merged PR containing the committed work for $ID" >&2
+      git -C "$WT" reset --hard -q || return 1
+      git -C "$WT" clean -fdq || return 1
+      dirty=
+    else
+      echo "REFUSED: worktree $WT has uncommitted changes and its recorded PR is not confirmed merged." >&2
+      echo "uncommitted changes present" >&2
+      return 1
+    fi
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2797,7 +2856,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$AUTO_CLOSE_RECEIPT" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \

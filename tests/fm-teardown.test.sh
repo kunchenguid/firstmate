@@ -30,6 +30,8 @@
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
 #   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
+#   (i2) auto-terminal + dirty + merged recorded PR             -> ALLOW (residual only)
+#   (i3) auto-terminal + dirty + unmerged recorded PR           -> REFUSE (preserve)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
@@ -274,6 +276,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"--json state -q .state"*) printf '%s\n' 'MERGED' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -929,6 +932,68 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+test_auto_terminal_dirty_requires_merged_recorded_pr() {
+  local case_dir rc signature
+  case_dir=$(make_case auto-terminal-dirty-merged)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'spawn_gen=spawn-one' 'pr=https://github.com/example/repo/pull/7' \
+    >> "$case_dir/state/task-x1.meta"
+  printf 'done: merged\n' > "$case_dir/state/task-x1.status"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf '%s\n' residual > "$case_dir/wt/residual.txt"
+  git -C "$case_dir/wt" config remote.origin.url https://github.com/example/repo
+  signature=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_signal_sig "$2"' _ \
+    "$ROOT" "$case_dir/state/task-x1.status")
+  bash -c '. "$1/bin/fm-auto-close-lib.sh"; fm_auto_close_receipt_write "$2" task-x1 spawn-one done "$3"' _ \
+    "$ROOT" "$case_dir/state" "$signature"
+
+  set +e
+  run_teardown "$case_dir" --auto-terminal > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "auto-terminal merged PR should allow residual dirty cleanup"
+  grep -Fq 'discarding residual worker-copy changes after confirmed merged PR' "$case_dir/stderr" \
+    || fail "auto-terminal merged PR did not report narrow residual discard"
+
+  case_dir=$(make_case auto-terminal-dirty-open)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'spawn_gen=spawn-one' 'pr=https://github.com/example/repo/pull/7' \
+    >> "$case_dir/state/task-x1.meta"
+  printf 'done: PR open\n' > "$case_dir/state/task-x1.status"
+  printf '%s\n' residual > "$case_dir/wt/residual.txt"
+  signature=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_signal_sig "$2"' _ \
+    "$ROOT" "$case_dir/state/task-x1.status")
+  bash -c '. "$1/bin/fm-auto-close-lib.sh"; fm_auto_close_receipt_write "$2" task-x1 spawn-one done "$3"' _ \
+    "$ROOT" "$case_dir/state" "$signature"
+  set +e
+  run_teardown "$case_dir" --auto-terminal > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "auto-terminal open PR must preserve dirty work"
+  [ -f "$case_dir/wt/residual.txt" ] || fail "auto-terminal open PR discarded residual work"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "auto-terminal open PR removed task identity"
+  pass "automatic cleanup discards residual dirt only for a confirmed merged recorded PR"
+}
+
+test_auto_terminal_stale_receipt_refuses() {
+  local case_dir rc
+  case_dir=$(make_case auto-terminal-stale)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'spawn_gen=spawn-new' >> "$case_dir/state/task-x1.meta"
+  printf 'done: terminal\n' > "$case_dir/state/task-x1.status"
+  bash -c '. "$1/bin/fm-auto-close-lib.sh"; fm_auto_close_receipt_write "$2" task-x1 spawn-old done 1:1' _ \
+    "$ROOT" "$case_dir/state"
+  set +e
+  run_teardown "$case_dir" --auto-terminal > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stale automatic cleanup receipt must refuse"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale receipt removed task identity"
+  pass "automatic cleanup receipt is bound to exact worker incarnation and status"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -2621,6 +2686,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_auto_terminal_dirty_requires_merged_recorded_pr
+test_auto_terminal_stale_receipt_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

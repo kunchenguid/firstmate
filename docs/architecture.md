@@ -38,6 +38,8 @@ No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start performs the same bounded local scan immediately.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
+For a direct ordinary worker whose unchanged status and authoritative current-state result both say `done` or `failed`, the watcher first durably queues the terminal notification, then `bin/fm-auto-close.sh` stops the worker through the control plane and delegates cleanup to `bin/fm-teardown.sh`.
+The automatic path refuses open decisions, secondmates, active or ambiguous state, changed incarnations or status, and all ordinary dirty or unlanded work; only a recorded PR proved merged and containing the committed work permits discarding residual changes in that isolated worker copy.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
