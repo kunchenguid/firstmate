@@ -95,6 +95,13 @@ collect_workflow_files() {
 # getting the check branch protection requires. The reminder to add a new
 # long-lived base at all lives in each workflow's own `on:` block comment.
 #
+# `pull_request_target` gates a base the same way and so counts the same here,
+# but it reads the workflow file from the repository's DEFAULT branch rather
+# than from the PR merge commit. That changes where a fix has to land: a
+# `pull_request` filter edit gates itself once merged into the integration
+# branch, while a `pull_request_target` filter edit takes effect only once it
+# reaches the default branch. Do not carry `pull_request` reasoning across.
+#
 # Stated limitation: base names are compared literally. A glob or pattern in
 # the required check's branch list is not understood here, so a required check
 # written with one fails this lint loudly rather than passing silently. That is
@@ -105,13 +112,15 @@ collect_workflow_files() {
 REQUIRED_CHECK_WORKFLOW=no-mistakes-required.yml
 
 # Prints exactly one classification line for one workflow file:
-#   none                  no `pull_request` trigger
-#   all                   `pull_request` with no base filter, so every base
-#   bases <base>...       `pull_request` filtered to these bases
-#   unsupported <reason>  a form this gate refuses to guess at
-# A definite verdict carries a `paths <key> ` prefix when the `pull_request`
-# trigger is also narrowed by a `paths:` or `paths-ignore:` filter, because
-# such a trigger produces no run at all for a PR touching no matching file.
+#   none                          no base-gating trigger
+#   event <event> all             that event with no base filter, so every base
+#   event <event> bases <base>... that event filtered to these bases
+#   unsupported <reason>          a form this gate refuses to guess at
+# <event> is `pull_request` or `pull_request_target`; both gate a PR by its
+# base branch, so both are read, and the verdict names the one actually used.
+# A definite verdict carries a `paths <key> ` prefix ahead of the base part
+# when the trigger is also narrowed by a `paths:` or `paths-ignore:` filter,
+# because such a trigger can produce no run at all for a given PR.
 fm_lint_workflows_pr_filter() {
   awk '
 function ind(s) { match(s, /^ */); return RLENGTH }
@@ -127,13 +136,8 @@ function unq(s, q) {
   }
   return s
 }
-function emit(v) {
-  if (pathsfilter != "" && (v == "all" || substr(v, 1, 5) == "bases")) \
-    v = "paths " pathsfilter " " v
-  print v
-  emitted = 1
-  exit
-}
+function emit(v) { print v; emitted = 1; exit }
+function gating(e) { return e == "pull_request" || e == "pull_request_target" }
 function tokens(s, n, i, a, t, r) {
   gsub(/[\[\]]/, " ", s)
   gsub(/,/, " ", s)
@@ -142,18 +146,38 @@ function tokens(s, n, i, a, t, r) {
   for (i = 1; i <= n; i++) { t = unq(a[i]); if (t != "") r = r " " t }
   return r
 }
-function events(s, n, i, a) {
+function events(s, n, i, a, e) {
   n = split(tokens(s), a, / /)
-  for (i = 1; i <= n; i++) if (a[i] == "pull_request") return "all"
-  return "none"
+  e = ""
+  for (i = 1; i <= n; i++) {
+    if (!gating(a[i])) continue
+    if (e != "" && e != a[i]) \
+      return "unsupported both pull_request and pull_request_target triggers"
+    e = a[i]
+  }
+  return e == "" ? "none" : "event " e " all"
 }
 function branch_list() {
   return bases == "" ? "unsupported empty branches list" : "bases" bases
 }
-# The pull_request block is only classified once it ends, because a narrowing
-# `paths:` sibling may follow the `branches:` list it narrows.
+# An event block is only classified once it ends, because a narrowing `paths:`
+# sibling may follow the `branches:` list it narrows.
 function pr_verdict() {
   return has_branches ? branch_list() : "all"
+}
+# The banked verdict for the base-gating event this file uses, if any. Scanning
+# continues past that block so a second gating event cannot go unread.
+function banked(v) {
+  if (found_event == "") return "none"
+  v = found_verdict
+  if (found_paths != "") v = "paths " found_paths " " v
+  return "event " found_event " " v
+}
+function bank() {
+  found_event = pr_event
+  found_verdict = pr_verdict()
+  found_paths = pathsfilter
+  pathsfilter = ""
 }
 {
   line = $0
@@ -186,19 +210,59 @@ function pr_verdict() {
     }
     next
   }
-  if (mode == 3) {
-    if (dash && i >= br_indent) {
-      b = unq(trim(substr(t, 2)))
-      if (b == "") emit("unsupported empty branches entry")
-      bases = bases " " b
-      next
+  # A line that is not a member of the innermost open block closes it, and is
+  # then reconsidered by the block that encloses it.
+  reconsider = 1
+  while (reconsider) {
+    reconsider = 0
+    if (mode == 3) {
+      if (dash && i >= br_indent) {
+        b = unq(trim(substr(t, 2)))
+        if (b == "") emit("unsupported empty branches entry")
+        bases = bases " " b
+        next
+      }
+      if (i > br_indent) emit("unsupported non-sequence entry under branches")
+      mode = 2
+      reconsider = 1
+      continue
     }
-    # Anything that is not an item of this sequence ends the branches list and
-    # is reconsidered below as a sibling key of the pull_request block.
-    if (i > br_indent) emit("unsupported non-sequence entry under branches")
-    mode = 2
-  }
-  if (mode == 1) {
+    if (mode == 2) {
+      if (i <= on_indent) {
+        bank()
+        mode = 1
+        reconsider = 1
+        continue
+      }
+      if (pr_indent < 0) {
+        if (dash) emit("unsupported sequence under " pr_event)
+        pr_indent = i
+      }
+      if (i != pr_indent) next
+      if (key == "branches-ignore") \
+        emit("unsupported branches-ignore under " pr_event)
+      # A paths filter makes the trigger conditional on which files a PR
+      # touches, whatever its value, so only the key itself needs reading.
+      if (key == "paths" || key == "paths-ignore") {
+        pathsfilter = key
+        next
+      }
+      if (key != "branches") next
+      if (val == "") {
+        mode = 3
+        br_indent = i
+        has_branches = 1
+        next
+      }
+      if (substr(val, 1, 1) == "[") {
+        if (index(val, "]") == 0) \
+          emit("unsupported multi-line flow sequence under branches")
+        bases = tokens(val)
+        has_branches = 1
+        next
+      }
+      emit("unsupported scalar branches value")
+    }
     # The first member line decides whether on: holds a sequence or a mapping;
     # under a mapping, deeper `-` lines belong to some other event key.
     if (on_indent < 0) {
@@ -215,54 +279,38 @@ function pr_verdict() {
       if (i == 0) emit(events(ev))
       emit("unsupported mixed sequence in on: block")
     }
-    # A top-level key ends the on: block, so the verdict is whatever we have.
-    if (i == 0) emit("none")
-    if (i != on_indent || key != "pull_request") next
-    if (val != "") emit("unsupported inline pull_request value")
+    # A top-level key ends the on: block, so the verdict is whatever we banked.
+    if (i == 0) emit(banked())
+    if (i != on_indent || !gating(key)) next
+    if (found_event == key) emit("unsupported duplicate " key " key in on: block")
+    if (found_event != "") \
+      emit("unsupported both pull_request and pull_request_target triggers")
+    if (val != "") emit("unsupported inline " key " value")
+    pr_event = key
     mode = 2
     pr_indent = -1
     next
   }
-  # A line at or above the pull_request key ends its block, so the collected
-  # branches list, or its absence, is the verdict.
-  if (i <= on_indent) emit(pr_verdict())
-  if (pr_indent < 0) {
-    if (dash) emit("unsupported sequence under pull_request")
-    pr_indent = i
-  }
-  if (i != pr_indent) next
-  if (key == "branches-ignore") \
-    emit("unsupported branches-ignore under pull_request")
-  # A paths filter makes the trigger conditional on which files a PR touches,
-  # whatever its value, so only the key itself needs reading.
-  if (key == "paths" || key == "paths-ignore") {
-    pathsfilter = key
-    next
-  }
-  if (key != "branches") next
-  if (val == "") {
-    mode = 3
-    br_indent = i
-    has_branches = 1
-    next
-  }
-  if (substr(val, 1, 1) == "[") {
-    if (index(val, "]") == 0) \
-      emit("unsupported multi-line flow sequence under branches")
-    bases = tokens(val)
-    has_branches = 1
-    next
-  }
-  emit("unsupported scalar branches value")
 }
 END {
   if (emitted) exit
   if (mode == 0) emit("unsupported no top-level on: key")
   if (seq) emit(events(ev))
-  if (mode == 1) emit("none")
-  emit(pr_verdict())
+  if (mode == 2 || mode == 3) bank()
+  emit(banked())
 }
 ' "$1"
+}
+
+# `pull_request_target` reads the workflow file from the default branch, so a
+# reader acting on one of these findings must not assume the merge-commit
+# behavior `pull_request` has. Every diagnostic naming that event says so.
+fm_lint_workflows_event_note() {
+  case "$1" in
+    pull_request_target)
+      printf ' Note: pull_request_target reads the workflow file from the default branch, not from the PR merge commit as pull_request does, so that edit only takes effect once it reaches the default branch.'
+      ;;
+  esac
 }
 
 # Compares the scanned workflow set against REQUIRED_CHECK_WORKFLOW. Runs only
@@ -271,7 +319,8 @@ END {
 fm_lint_workflows_pr_gating() {
   local file name verdict required_verdict='' required_set='' found_required=0
   local rc=0 i n base missing paths_filter required_paths='' glob_note='' skip_when
-  local names=() verdicts=()
+  local verdict_event required_event='' event note
+  local names=() verdicts=() wf_events=()
 
   for file in "${FILES[@]}"; do
     name=${file##*/}
@@ -287,7 +336,15 @@ fm_lint_workflows_pr_gating() {
         return 1
         ;;
     esac
+    verdict_event=''
     paths_filter=''
+    case "$verdict" in
+      "event "*)
+        verdict=${verdict#event }
+        verdict_event=${verdict%% *}
+        verdict=${verdict#* }
+        ;;
+    esac
     case "$verdict" in
       "paths "*)
         verdict=${verdict#paths }
@@ -299,10 +356,12 @@ fm_lint_workflows_pr_gating() {
       found_required=1
       required_verdict=$verdict
       required_paths=$paths_filter
+      required_event=$verdict_event
       continue
     fi
     names+=("$name")
     verdicts+=("$verdict")
+    wf_events+=("$verdict_event")
   done
 
   n=${#names[@]}
@@ -324,7 +383,7 @@ fm_lint_workflows_pr_gating() {
         "$REQUIRED_CHECK_WORKFLOW" "$missing" "$REQUIRED_CHECK_WORKFLOW" >&2
       return 1
     fi
-    printf 'fm-lint-workflows.sh: PR base gating: no workflow in this set has a pull_request trigger, so %s is not needed here.\n' \
+    printf 'fm-lint-workflows.sh: PR base gating: no workflow in this set has a pull_request or pull_request_target trigger, so %s is not needed here.\n' \
       "$REQUIRED_CHECK_WORKFLOW" >&2
     return 0
   fi
@@ -342,14 +401,16 @@ fm_lint_workflows_pr_gating() {
       paths-ignore) skip_when='a PR touching only files the filter ignores' ;;
       *) skip_when='a PR touching no file the filter matches' ;;
     esac
+    note=$(fm_lint_workflows_event_note "$required_event")
     if [ "$required_verdict" = all ]; then
-      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so on every PR base it gates, %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
-        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "$skip_when" \
-        "$required_paths" "$REQUIRED_CHECK_WORKFLOW" >&2
+      printf 'fm-lint-workflows.sh: %s narrows its %s trigger with a %s filter, so on every PR base it gates, %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.%s\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_event" "$required_paths" "$skip_when" \
+        "$required_paths" "$REQUIRED_CHECK_WORKFLOW" "$note" >&2
     else
-      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so PR base(s)%s are only conditionally gated: %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
-        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "${required_verdict#bases}" \
-        "$skip_when" "$required_paths" "$REQUIRED_CHECK_WORKFLOW" >&2
+      printf 'fm-lint-workflows.sh: %s narrows its %s trigger with a %s filter, so PR base(s)%s are only conditionally gated: %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.%s\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_event" "$required_paths" \
+        "${required_verdict#bases}" "$skip_when" "$required_paths" \
+        "$REQUIRED_CHECK_WORKFLOW" "$note" >&2
     fi
     return 1
   fi
@@ -366,13 +427,15 @@ fm_lint_workflows_pr_gating() {
   while [ "$i" -lt "$n" ]; do
     name=${names[$i]}
     verdict=${verdicts[$i]}
+    event=${wf_events[$i]}
     i=$((i + 1))
     [ "$verdict" != none ] || continue
+    note=$(fm_lint_workflows_event_note "$event")
     [ "$required_verdict" != all ] || continue
     if [ "$verdict" = all ]; then
-      printf 'fm-lint-workflows.sh: %s gates every PR base while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s\n' \
-        "$name" "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}" \
-        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" >&2
+      printf 'fm-lint-workflows.sh: %s gates every PR base through its %s trigger while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s%s\n' \
+        "$name" "$event" "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}" \
+        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" "$note" >&2
       rc=1
       continue
     fi
@@ -389,9 +452,9 @@ fm_lint_workflows_pr_gating() {
     done
     set +f
     if [ -n "$missing" ]; then
-      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.%s\n' \
-        "$name" "$missing" "$REQUIRED_CHECK_WORKFLOW" "$REQUIRED_CHECK_WORKFLOW" \
-        "$glob_note" >&2
+      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s through its %s trigger that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.%s%s\n' \
+        "$name" "$missing" "$event" "$REQUIRED_CHECK_WORKFLOW" \
+        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" "$note" >&2
       rc=1
     fi
   done

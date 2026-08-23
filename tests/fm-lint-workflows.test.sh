@@ -710,8 +710,9 @@ test_required_check_with_paths_filter_fails() {
 }
 
 # The same filter elsewhere only makes that workflow conditional, which cannot
-# defeat the required check, so it must not fail the lint. The block-sequence
-# form doubles as coverage of the non-flow paths spelling.
+# defeat the required check, so it must not fail the lint. This proves the
+# scoping only; the block-sequence spelling is pinned where it changes the
+# verdict, in test_required_check_with_block_sequence_paths_fails.
 test_paths_filter_on_other_workflow_passes() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-other-paths)
@@ -811,6 +812,108 @@ test_single_line_flow_on_value_still_classifies() {
   pass "a single-line flow on: value still classifies as before"
 }
 
+# The paths detection is key-based, so the block-sequence spelling has to be
+# pinned where recognizing it is what produces the failure: on the required
+# check itself, with the dashes at the key's own indentation.
+test_required_check_with_block_sequence_paths_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-required-block-paths)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]' '    paths:' '    - "bin/**"'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a block-sequence paths filter on the required check passed"$'\n'"$out"
+  assert_contains "$out" "no-mistakes-required.yml" \
+    "the failure did not name the conditionally triggered required check"
+  assert_contains "$out" "paths" \
+    "the failure did not name the filter that made the check conditional"
+  assert_contains "$out" "main" \
+    "the failure did not name the base left only conditionally gated"
+  pass "a block-sequence paths filter on the required check fails the lint"
+}
+
+# `pull_request_target` filters the PR BASE branch exactly as `pull_request`
+# does, so a base it gates must be covered by the required check too. Reading
+# it as not PR-triggered would let that base merge with no required check.
+test_pull_request_target_base_is_gated() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-prt-base)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request_target:' '    branches: [main, feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pull_request_target-gated base with no required check passed"$'\n'"$out"
+  assert_contains "$out" "feat/omp-adaptor" \
+    "the failure did not name the base gated without the required check"
+  assert_contains "$out" "pull_request_target" \
+    "the failure did not name the event that gates that base"
+  assert_contains "$out" "default branch" \
+    "the failure did not state how pull_request_target differs from pull_request"
+  pass "a pull_request_target base filter is held to the same gating rule"
+}
+
+# The scalar form of the same event must be read too, not only the mapping.
+test_pull_request_target_scalar_trigger_is_gated() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-prt-scalar)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI 'on: pull_request_target'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unfiltered pull_request_target trigger passed"$'\n'"$out"
+  assert_contains "$out" "gates every PR base" \
+    "a scalar pull_request_target value was not read as gating every PR base"
+  assert_contains "$out" "pull_request_target" \
+    "the failure did not name the event that gates every base"
+  pass "a scalar pull_request_target value is read as a base-gating trigger"
+}
+
+# A required check narrowed by paths is defeated the same way whichever
+# base-gating event it uses.
+test_required_check_pull_request_target_paths_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-prt-paths)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request_target:' '    branches: [main]' '    paths: ["bin/**"]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a paths-filtered pull_request_target required check passed"$'\n'"$out"
+  assert_contains "$out" "pull_request_target" \
+    "the failure did not name the trigger it narrowed"
+  assert_contains "$out" "paths" \
+    "the failure did not name the filter that made the check conditional"
+  assert_contains "$out" "main" \
+    "the failure did not name the base left only conditionally gated"
+  pass "a paths filter on a pull_request_target required check fails the lint"
+}
+
+# Reading only the first of two base-gating events would under-report the bases
+# a file gates, so the gate refuses the combination rather than guessing.
+test_both_gating_events_in_one_workflow_fails_closed() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-both-events)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]' \
+    '  pull_request_target:' '    branches: [feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a workflow using both gating events unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "both pull_request and pull_request_target" \
+    "the refusal did not name the combination it will not read"
+  assert_contains "$out" "ci.yml" \
+    "the refusal did not name the workflow it cannot read"
+  pass "a workflow declaring both base-gating events fails closed"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -858,4 +961,9 @@ test_glob_base_in_required_check_fails_loudly
 test_required_check_with_paths_ignore_filter_fails
 test_multiline_flow_on_value_fails_closed
 test_single_line_flow_on_value_still_classifies
+test_required_check_with_block_sequence_paths_fails
+test_pull_request_target_base_is_gated
+test_pull_request_target_scalar_trigger_is_gated
+test_required_check_pull_request_target_paths_fails
+test_both_gating_events_in_one_workflow_fails_closed
 test_explicit_path_skips_set_level_gating
