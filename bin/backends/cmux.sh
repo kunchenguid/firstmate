@@ -407,6 +407,14 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
 # fm_backend_cmux_surface_exists (never read-screen - see that function's
 # header for the fresh-surface pitfall this avoids). When the caller knows
 # the owning firstmate task label, refresh stale workspace/surface ids by label.
+# fm_backend_cmux_target_exists: the cmux half of fm_backend_target_exists's
+# cheap READ-ONLY presence probe. target_ready already verifies surface
+# existence without starting anything (never read-screen), so this thin alias
+# keeps the dispatcher uniform.
+fm_backend_cmux_target_exists() {  # <target> [expected-label]
+  fm_backend_cmux_target_ready "$@"
+}
+
 fm_backend_cmux_target_ready() {  # <target> [expected-label]
   local expected_label=${2:-} expected_title title wsid sfid
   fm_backend_cmux_parse_target "$1" || return 1

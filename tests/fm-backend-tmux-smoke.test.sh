@@ -156,6 +156,40 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- target_exists presence probe (list-panes, exact-match) -----------------
+# The old raw `tmux display-message -p -t "$target"` probe answered from the
+# client's ACTIVE window whenever any server was running, so it reported an
+# absent window or session as present. list-panes with `=sess:=win` anchoring
+# is authoritative: it exists ONLY for the exact target.
+
+fm_backend_tmux_target_exists "$TARGET" \
+  || fail "target_exists should find the live window '$TARGET'"
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "the dispatcher should find the live window '$TARGET'"
+fm_backend_tmux_target_exists "$SESSION:definitely-absent-xyz" \
+  && fail "target_exists must fail for an absent window in a live session (not fall back to the active window)"
+fm_backend_tmux_target_exists "no-such-session-xyz:$WINDOW" \
+  && fail "target_exists must fail for an absent session"
+
+# Exact-match, not prefix: a window named "fm-task" must never be satisfied by a
+# live "fm-task-2".
+tmux new-window -t "$SESSION" -n fm-task-2 \
+  || fail "could not create the prefix-collision window fm-task-2"
+fm_backend_tmux_target_exists "$SESSION:fm-task-2" \
+  || fail "target_exists should find the live window 'fm-task-2'"
+fm_backend_tmux_target_exists "$SESSION:fm-task" \
+  && fail "target_exists must NOT match the prefix 'fm-task' against a live 'fm-task-2'"
+tmux kill-window -t "=$SESSION:=fm-task-2" 2>/dev/null || true
+
+# Bare pane-id (%N) targets, as the away-mode supervisor pane uses.
+pane_id=$(tmux list-panes -t "=$SESSION:=$WINDOW" -F '#{pane_id}' 2>/dev/null | head -n1)
+[ -n "$pane_id" ] || fail "could not read the live pane id for the %N probe"
+fm_backend_tmux_target_exists "$pane_id" \
+  || fail "target_exists should find the live pane by its %N id '$pane_id'"
+fm_backend_tmux_target_exists "%999999" \
+  && fail "target_exists must fail for an absent %N pane id"
+pass "real tmux: target_exists finds live window/pane targets and fails for absent windows, sessions, prefixes, and %N ids"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
