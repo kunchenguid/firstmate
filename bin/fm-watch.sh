@@ -444,6 +444,7 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$matches" = 1 ] || return 1
     prev=$(cat "$STATE/.hash-$key" 2>/dev/null) || return 1
     [ -n "$prev" ] || return 1
+    [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
     now=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1

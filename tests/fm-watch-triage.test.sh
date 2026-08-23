@@ -837,6 +837,33 @@ test_turn_ended_still_pane_surfaced() {
   pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
 }
 
+test_turn_ended_malformed_prior_hash_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-malformed-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexmalformed"
+  : > "$state/codexmalformed.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexmalformed.meta"
+  printf 'stopped after rendering this' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'x' > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a malformed prior hash"
+  grep -F "signal: $state/codexmalformed.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced malformed-hash turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the malformed-hash turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexmalformed.turn-ended" >/dev/null \
+    || fail "malformed-hash turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end backed by a malformed prior hash surfaces"
+}
+
 test_secondmate_turn_ended_churning_pane_surfaced() {
   local dir state fakebin out drain_out capture_file window key pid
   dir=$(make_case secondmate-turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3276,6 +3303,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_still_pane_surfaced
+test_turn_ended_malformed_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
 test_working_note_not_working_surfaced
