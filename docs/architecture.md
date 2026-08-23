@@ -165,6 +165,7 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 A project with no origin remote configured has no upstream its base can be stale against, so that refresh is skipped with a notice rather than refused.
+That skip does not lower the clean-worktree bar: a pooled worktree carrying uncommitted work is still refused, because no task may start on top of another task's unlanded work.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

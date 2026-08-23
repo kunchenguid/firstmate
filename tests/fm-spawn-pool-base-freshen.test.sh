@@ -9,6 +9,8 @@
 # They also pin the boundary between the two: a project with no origin remote
 # configured has no upstream to be stale against, so it launches with a notice,
 # while a configured origin that cannot be reached still refuses.
+# Skipping that refresh still refuses a pooled worktree carrying uncommitted
+# work, which no upstream is needed to detect.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -279,6 +281,33 @@ test_remoteless_project_spawns_with_a_skip_notice() {
   pass "a project with no origin remote spawns and says the base refresh was skipped"
 }
 
+test_dirty_remoteless_pool_still_refuses() {
+  local rec id out status before
+  id='pool-no-origin-dirty-r7'
+  rec=$(make_remoteless_case no-origin-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local-only work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded on a dirty pooled worktree that has no origin remote"
+  assert_contains "$out" "has uncommitted work; refusing to start a new task on top of it" \
+    "spawn did not clearly refuse unlanded work on a project with no origin remote"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty pooled worktree that has no origin remote"
+  assert_grep 'keep this local-only work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing a pool that has no origin remote"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin dirty refusal: %s; preserved=%s\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$(cat "$POOL_DIR/uncommitted.txt")"
+  fi
+  pass "a dirty pooled worktree on a project with no origin remote is still refused"
+}
+
 test_unreachable_origin_is_not_read_as_a_missing_remote() {
   local rec id out status before after
   id='pool-unreachable-not-missing-r6'
@@ -312,6 +341,7 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_project_spawns_with_a_skip_notice
+test_dirty_remoteless_pool_still_refuses
 test_unreachable_origin_is_not_read_as_a_missing_remote
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
