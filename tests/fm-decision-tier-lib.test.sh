@@ -106,6 +106,37 @@ fi
 [ ! -s "$LOG" ] || fail "a refused zero-window open_default must not write anything to the log"
 pass "open_default refuses a zero-second window"
 
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "" "apply default" 300 2>/dev/null; then
+  fail "open_default must refuse an empty recommendation"
+fi
+[ ! -s "$LOG" ] || fail "a refused empty-recommendation open_default must not write anything to the log"
+pass "open_default refuses an empty recommendation"
+
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "prefer A" "" 300 2>/dev/null; then
+  fail "open_default must refuse an empty default action"
+fi
+[ ! -s "$LOG" ] || fail "a refused empty-default-action open_default must not write anything to the log"
+pass "open_default refuses an empty default action"
+
+# --- mutators refuse an id that already has any record in the log ----------
+
+REUSE_LOG="$TMP_ROOT/decisions-reuse.log"
+
+fm_decision_tier_log_auto "$REUSE_LOG" 1000 dec-reuse-1 precedent-match "first use of this id" \
+  || fail "log_auto should succeed for a fresh id"
+if fm_decision_tier_log_auto "$REUSE_LOG" 2000 dec-reuse-1 precedent-match "second use, same id" 2>/dev/null; then
+  fail "log_auto must refuse an id that already has a record"
+fi
+if fm_decision_tier_log_hard_stop "$REUSE_LOG" 2000 dec-reuse-1 merge "reuse via a different mutator" 2>/dev/null; then
+  fail "log_hard_stop must refuse an id already used by log_auto"
+fi
+if fm_decision_tier_open_default "$REUSE_LOG" 2000 dec-reuse-1 two-option-tradeoff "rec" "default" 300 2>/dev/null; then
+  fail "open_default must refuse an id already used by log_auto"
+fi
+REUSE_RECORD_COUNT=$(fm_decision_tier_find_records "$REUSE_LOG" dec-reuse-1 | grep -c .)
+[ "$REUSE_RECORD_COUNT" = "1" ] || fail "every refused reuse attempt must leave the id with exactly its original record, got $REUSE_RECORD_COUNT"
+pass "log_auto, log_hard_stop, and open_default all refuse an id that already has a record, from any mutator"
+
 # --- successful logging for each tier ---------------------------------------
 
 fm_decision_tier_log_auto "$LOG" 1000 dec-auto-1 precedent-match "matched the sibling ruling from dec-0" \
