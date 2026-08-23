@@ -313,6 +313,30 @@ SH
   pass "fm-lint.sh keeps full ShellCheck analysis by default in CI"
 }
 
+test_ci_rejects_explicit_fast_mode() {
+  local tmp fakebin log fixture out rc
+  tmp=$(fm_test_tmproot fm-lint-ci-reject-fast)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    "$LINT" --fast "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "CI accepted explicit fast lint mode (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "--fast is local-only" \
+    "CI fast-mode rejection did not explain the policy"
+  [ ! -s "$log" ] || fail "CI invoked ShellCheck after rejecting fast mode"
+  pass "fm-lint.sh rejects explicit --fast mode in CI"
+}
+
 test_fast_mode_catches_a_real_lint_defect() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): fast lint-defect regression check"
@@ -974,6 +998,7 @@ test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
 test_ci_defaults_to_full_analysis
+test_ci_rejects_explicit_fast_mode
 test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
