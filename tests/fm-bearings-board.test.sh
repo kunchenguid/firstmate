@@ -110,7 +110,10 @@ extract_payload() {  # <board-path>
 # browser that the runner may not have. The board page is generated public
 # output and the renderer is the real consumer under test.
 render_board_nodes() {  # <board-path>
-  BOARD_PAGE="$1" node --input-type=module <<'JS'
+  local render
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to render the board for the tooltip assertions"
+  render=$(BOARD_PAGE="$1" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.env.BOARD_PAGE, "utf8");
@@ -231,6 +234,22 @@ collect(main);
 byId.forEach((node) => collect(node));
 process.stdout.write(JSON.stringify({ errored, nodes }) + "\n");
 JS
+  ) || return 1
+  # title reflects a DOMString, so absent text left to the DOM would surface as
+  # the literal "null" - no rendered node may ever advertise that as its value.
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
+    || fail "the rendered board exposed a stringified null as a tooltip"
+  printf '%s\n' "$render"
+}
+
+# Assert a rendered node of <class> carries <want> as its exact full tooltip.
+# Pass "visible" to also require that the visible text is that same exact value.
+assert_node_title() {  # <render> <class> <want> [visible]
+  local also=""
+  [ "${4:-}" = visible ] && also=' and .text == $want'
+  printf '%s' "$1" | jq -e --arg cls "$2" --arg want "$3" \
+    "any(.nodes[]; (.classes | index(\$cls)) != null and .title == \$want$also)" \
+    >/dev/null || fail "the rendered board hid the full text of .$2: $3"
 }
 
 test_path_is_stable_and_home_scoped() {
@@ -356,9 +375,7 @@ test_build_injects_binds_then_arms() {
 }
 
 test_rendered_truncated_text_has_full_native_tooltips() {
-  local home data board marker long_id render entry cls want
-  command -v node >/dev/null 2>&1 \
-    || fail "node is required to render the board for the tooltip assertions"
+  local home data board marker long_id render entry
   home=$(make_home tooltips)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -453,11 +470,7 @@ test_rendered_truncated_text_has_full_native_tooltips() {
     "bb-row__title|${marker}charted title" \
     "bb-row__sub|${marker}charted reason · ${marker}charted repo" \
     "bb-row__sub|$long_id"; do
-    cls=${entry%%|*}
-    want=${entry#*|}
-    printf '%s' "$render" | jq -e --arg cls "$cls" --arg want "$want" \
-      'any(.nodes[]; (.classes | index($cls)) != null and .title == $want)' >/dev/null \
-      || fail "the rendered board omitted the exact full tooltip on .$cls: $want"
+    assert_node_title "$render" "${entry%%|*}" "${entry#*|}"
   done
 
   # Tooltips carry the payload text verbatim - the renderer must not smuggle
@@ -477,16 +490,12 @@ test_rendered_truncated_text_has_full_native_tooltips() {
     any(.nodes[]; (.classes | index("bb-decision__repo")) != null
       and .text == "" and .title == null)
   ' >/dev/null || fail "a repo-less Captain's Call item produced a tooltip for absent text"
-  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
-    || fail "the rendered board exposed a stringified null as a tooltip"
 
   pass "the rendered board exposes exact full tooltips and none for absent text"
 }
 
 test_rendered_decision_body_text_exposes_full_values() {
-  local home data board token render entry cls want
-  command -v node >/dev/null 2>&1 \
-    || fail "node is required to render the board for the tooltip assertions"
+  local home data board token render entry
   home=$(make_home decision-body)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -517,14 +526,9 @@ test_rendered_decision_body_text_exposes_full_values() {
     "bb-opt__label|Adopt per $token" \
     "bb-opt__hint|rationale at $token" \
     "bb-decision__detail|validation green, evidence at $token"; do
-    cls=${entry%%|*}
-    want=${entry#*|}
     # The visible label keeps the text and the tooltip carries the same exact
     # value - the affordance adds reach, it never replaces what is on screen.
-    printf '%s' "$render" | jq -e --arg cls "$cls" --arg want "$want" \
-      'any(.nodes[]; (.classes | index($cls)) != null and .title == $want and .text == $want)' \
-      >/dev/null \
-      || fail "the rendered decision card hid the full text of .$cls: $want"
+    assert_node_title "$render" "${entry%%|*}" "${entry#*|}" visible
   done
 
   # Static context keys are fully exposed, so they must stay tooltip-free.
@@ -532,16 +536,12 @@ test_rendered_decision_body_text_exposes_full_values() {
     [.nodes[] | select((.classes | index("bb-ctx__k")) != null)] as $keys
     | ($keys | length) >= 2 and ($keys | all(.title == null))
   ' >/dev/null || fail "a fully exposed context key gained a redundant tooltip"
-  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
-    || fail "the rendered board exposed a stringified null as a tooltip"
 
   pass "decision card body text exposes its exact full value without hiding the label"
 }
 
 test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
   local home data board hint render
-  command -v node >/dev/null 2>&1 \
-    || fail "node is required to render the board for the tooltip assertions"
   home=$(make_home freeform-hint)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -580,16 +580,12 @@ test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
     any(.nodes[]; (.classes | index("bb-freeform")) != null
       and .placeholder == "or answer in your own words\u2026" and .title == null)
   ' >/dev/null || fail "the default freeform placeholder gained a tooltip"
-  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
-    || fail "the rendered board exposed a stringified null as a tooltip"
 
   pass "the freeform input exposes its exact full hint and none for the default"
 }
 
 test_rendered_static_badges_stay_tooltip_free() {
   local home data board risk state render
-  command -v node >/dev/null 2>&1 \
-    || fail "node is required to render the board for the tooltip assertions"
   home=$(make_home badge-tooltips)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
