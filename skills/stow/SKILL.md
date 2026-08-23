@@ -68,7 +68,7 @@ Everything files to a local destination by default; an external system such as a
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
-   Evaluate each dated entry against its tier clock per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
+   Evaluate each dated entry against its tier clocks per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
    Archive what is no longer current, including completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Prefer one concise current rule, or a pointer to the authoritative source, over duplicate prose.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live on-demand owner or a consolidation merge that preserves the fact.
