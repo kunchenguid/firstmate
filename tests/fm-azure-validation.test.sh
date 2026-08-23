@@ -1267,6 +1267,8 @@ principal="33333333-3333-4333-8333-333333333333"
 client="44444444-4444-4444-8444-444444444444"
 operator="22222222-2222-4222-8222-222222222222"
 root_one="azr-111111111111"; root_two="azr-222222222222"; retry_one="azr-333333333333-a2"
+later_request_digest="sha256:"+"4"*64
+later_root="azr-"+hashlib.sha256(later_request_digest.encode()).hexdigest()[:12]
 command_digest="sha256:"+"c"*64
 env={"home":root,"state_dir":state_dir,"subscription":sub,"resource_group":"rg",
      "storage":"storage","operator_object_id":operator}
@@ -1294,7 +1296,16 @@ state={
    {"invocation":root_one,"shard":1,"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family","amount_usd":10.0},
    {"invocation":root_two,"shard":2,"sku":"Standard_D4ds_v6","sku_family":"standardDdsv6Family","amount_usd":11.0},
  ]},
- "shard_runs":{"sha256:"+"d"*64:{"invocation":root_one,"command_digest":command_digest}},
+ "shard_runs":{
+   "sha256:"+"d"*64:{"request_digest":"sha256:"+"d"*64,
+                         "invocation":root_one,"command_digest":command_digest,
+                         "shard":1,"sku":"Standard_D4s_v6","round":"round-one",
+                         "generation":"round-one","task":cell+"-s1"},
+   later_request_digest:{"request_digest":later_request_digest,
+                         "invocation":later_root,"command_digest":command_digest,
+                         "shard":1,"sku":"Standard_D4s_v6","round":"round-two",
+                         "generation":"round-two","task":cell+"-s1"},
+ },
  "events":[],
 }
 m.ensure_dirs(env); m.save_state(env,state,create=True)
@@ -1309,7 +1320,8 @@ runner={
  "request":{"schema":"fm.azure-command/v1","invocation":root_one,"parent_invocation":None,
             "request_digest":"sha256:"+"e"*64,"command_digest":command_digest,
             "capacity_parent":cell,"capacity_fence":fence.split(":",1)[1],
-            "lineage_root_invocation":root_one},
+            "lineage_root_invocation":root_one,"task":cell+"-s1","generation":"round-one",
+            "limits":{"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family"}},
  "resources":runner_resources,
  "shared_capacity_reservation":{"reservation_id":root_one,"fence_binding":fence.split(":",1)[1],
                                  "status":"released","cleanup_receipt":"sha256:"+"f"*64},
@@ -1327,6 +1339,20 @@ retry_runner["shared_capacity_reservation"]={"reservation_id":retry_one,
  "fence_binding":fence.split(":",1)[1],"status":"released","amount_usd":9.0,
  "cleanup_receipt":"sha256:"+"8"*64}
 (runner_dir/(retry_one+".json")).write_text(json.dumps(retry_runner))
+later_runner=copy.deepcopy(runner)
+later_runner.update({"invocation":later_root,"parent_invocation":None})
+later_runner["request"].update({"invocation":later_root,"parent_invocation":None,
+                                "lineage_root_invocation":later_root,
+                                "request_digest":"sha256:"+"3"*64,
+                                "task":cell+"-s1","generation":"round-two",
+                                "limits":{"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family"}})
+later_runner["request_digest"]="sha256:"+"3"*64
+later_runner["resources"]={key:value.replace("/runner/","/later/") if isinstance(value,str) else value
+                           for key,value in runner_resources.items()}
+later_runner["shared_capacity_reservation"]={"reservation_id":later_root,
+ "fence_binding":fence.split(":",1)[1],"status":"released","amount_usd":9.25,
+ "cleanup_receipt":"sha256:"+"2"*64}
+(runner_dir/(later_root+".json")).write_text(json.dumps(later_runner))
 resources={
  worktree_id:{"id":worktree_id,"properties":{"uniqueId":"work-unique"},
               "tags":{"validation-cell":cell,"fence":fence}},
@@ -1435,8 +1461,10 @@ capacity_records={
  root_one:reservation(root_one,"Standard_D4s_v6","standardDsv6Family",4,10.0,"released","sha256:"+"f"*64),
  root_two:reservation(root_two,"Standard_D4ds_v6","standardDdsv6Family",4,11.0,"reserved"),
  retry_one:reservation(retry_one,"Standard_D4s_v6","standardDsv6Family",4,9.0,"released","sha256:"+"8"*64),
+ later_root:reservation(later_root,"Standard_D4s_v6","standardDsv6Family",4,9.25,"released","sha256:"+"2"*64),
 }
 capacity_records[retry_one].pop("shape_id")
+capacity_records[later_root].pop("shape_id")
 def provider_capacity(record,active=False):
  return {key:record[key] for key in (
   "reservation_id","role","sku","sku_family","vcpus","amount_usd"
@@ -1468,6 +1496,42 @@ capacity_records[cell]["cleanup_receipt"]="sha256:"+"9"*64
 _, released_control_plan, _=m.plan_purge_shards(env,m.load_state(env,cell))
 assert [item["reservation_id"] for item in released_control_plan]==[root_two]
 capacity_records[cell]["status"]="reserved"; capacity_records[cell]["cleanup_receipt"]=None
+
+# A later owner-decision round receives a deterministic root invocation outside
+# the original four-shard admission plan. Its exact durable dispatch record,
+# complete runner state, released constituent, and compute-zero proof make it
+# part of the purge census rather than an orphan.
+planned,_,_=m.plan_purge_shards(env,m.load_state(env,cell))
+assert later_root in {item["invocation"] for item in planned}
+
+# The controller-owned dispatch record is the authority for a later-round
+# standalone root. Each field used to derive or bind that root refuses before
+# purge planning when changed independently.
+for field,bad in (
+ ("request_digest","sha256:"+"5"*64),("shard",2),("generation","round-foreign"),
+ ("task",cell+"-s2"),("command_digest","sha256:"+"1"*64),
+):
+ current=m.load_state(env,cell); record=current["shard_runs"].pop(later_request_digest)
+ key=bad if field=="request_digest" else later_request_digest
+ record[field]=bad; current["shard_runs"][key]=record; m.save_state(env,current)
+ try: m.plan_purge_shards(env,m.load_state(env,cell))
+ except m.ValidationError: pass
+ else: raise AssertionError("purge admitted a mismatched later-round "+field)
+ current=m.load_state(env,cell); current["shard_runs"].pop(key)
+ record[field]=later_request_digest if field=="request_digest" else {
+  "shard":1,"generation":"round-two","task":cell+"-s1","command_digest":command_digest,
+ }[field]
+ current["shard_runs"][later_request_digest]=record; m.save_state(env,current)
+
+later_path=runner_dir/(later_root+".json"); current_later=json.loads(later_path.read_text())
+current_later["parent_invocation"]=root_one
+current_later["request"]["parent_invocation"]=root_one
+later_path.write_text(json.dumps(current_later))
+try: m.plan_purge_shards(env,m.load_state(env,cell))
+except m.ValidationError as exc: assert "retry lineage" in str(exc)
+else: raise AssertionError("purge admitted a later-round root with a foreign parent")
+current_later["parent_invocation"]=None; current_later["request"]["parent_invocation"]=None
+later_path.write_text(json.dumps(current_later))
 
 # Admit-red confirmations and phase checks perform no destructive mutation.
 for bad in (

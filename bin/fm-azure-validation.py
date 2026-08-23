@@ -5235,11 +5235,48 @@ def plan_purge_shards(env, state):
     ):
         raise ValidationError("purge shard capacity plan is incomplete or ambiguous")
     runner_states = load_purge_runner_states(env, state)
+    shard_runs = state.get("shard_runs") or {}
+    if not isinstance(shard_runs, dict):
+        raise ValidationError("cell shard dispatch ledger is corrupt")
+    plan_by_shard = {entry["shard"]: entry for entry in shard_plan}
+    fence = state["request"]["fence"].split(":", 1)[-1]
+    recorded_roots = set()
+    for request_digest, record in shard_runs.items():
+        plan = plan_by_shard.get(record.get("shard")) if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("request_digest") != request_digest
+            or not SHA256.match(str(request_digest))
+            or not isinstance(plan, dict)
+            or record.get("sku") != plan.get("sku")
+            or record.get("round") != record.get("generation")
+            or record.get("task") != "{}-s{}".format(state["cell"], record.get("shard"))
+            or not SHA256.match(str(record.get("command_digest", "")))
+        ):
+            raise ValidationError("cell shard dispatch record is corrupt")
+        live = runner_states.get(record.get("invocation"))
+        live_request = (live or {}).get("request") or {}
+        root = live_request.get("lineage_root_invocation") or (live or {}).get("invocation")
+        derived_root = "azr-" + hashlib.sha256(request_digest.encode("utf-8")).hexdigest()[:12]
+        limits = live_request.get("limits") or {}
+        if (
+            not live
+            or root not in (plan["invocation"], derived_root)
+            or live_request.get("task") != record.get("task")
+            or live_request.get("generation") != record.get("generation")
+            or live_request.get("capacity_parent") != state["cell"]
+            or live_request.get("capacity_fence") != fence
+            or live_request.get("command_digest") != record.get("command_digest")
+            or limits.get("sku") != record.get("sku")
+            or str(limits.get("sku_family", "")).lower()
+            != str(plan.get("sku_family", "")).lower()
+        ):
+            raise ValidationError("dispatched shard lineage lacks exact terminal runner evidence")
+        recorded_roots.add(root)
     reservations, provider_reservations = capacity_authority_snapshot(env)
     capacity = exact_purge_capacity_constituents(
         state, shard_plan, runner_states, reservations, provider_reservations
     )
-    fence = state["request"]["fence"].split(":", 1)[-1]
     planned = []
     for invocation, value in sorted(runner_states.items()):
         request = value.get("request") or {}
@@ -5249,7 +5286,7 @@ def plan_purge_shards(env, state):
         if invocation not in capacity:
             capacity[invocation] = exact_purge_retry_constituent(state, value, reservations)
         if (
-            root not in roots
+            (root not in roots and root not in recorded_roots)
             or request.get("schema") != "fm.azure-command/v1"
             or request.get("invocation") != invocation
             or request.get("parent_invocation") != parent
@@ -5284,12 +5321,7 @@ def plan_purge_shards(env, state):
             "cleanup_receipt": reservation["cleanup_receipt"],
             "compute_ids": [[kind, resource_id] for kind, resource_id in compute_ids],
         })
-    shard_runs = state.get("shard_runs") or {}
-    if not isinstance(shard_runs, dict):
-        raise ValidationError("cell shard dispatch ledger is corrupt")
     for record in shard_runs.values():
-        if not isinstance(record, dict):
-            raise ValidationError("cell shard dispatch record is corrupt")
         live = runner_states.get(record.get("invocation"))
         if not live or (live.get("request") or {}).get("command_digest") != record.get("command_digest"):
             raise ValidationError("dispatched shard lineage lacks exact terminal runner evidence")
