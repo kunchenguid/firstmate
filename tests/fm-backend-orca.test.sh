@@ -758,8 +758,8 @@ test_spawn_launches_omp_through_the_orca_backend() {
   assert_no_grep "traceparent=" "$state/$id.meta" "omp must not enable trace propagation"
   assert_contains "$(cat "$log")" "FM_OMP_HARNESS=1" \
     "omp launch did not reach the Orca terminal with the firstmate-owned marker"
-  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash" \
-    "omp launch did not carry the contained argv through Orca"
+  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep" \
+    "omp launch did not carry the reduced approved tool surface through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: launches the omp candidate harness with Orca as the backend"
 }
