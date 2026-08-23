@@ -749,6 +749,28 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
+# T3 primary host: bind + ensure park when opted in (config/t3-primary) or already bound.
+# Fail closed with an actionable line when opt-in is present and bind fails.
+if [ "$READ_ONLY" -eq 0 ]; then
+  if [ -f "$CONFIG/t3-primary" ] || [ -f "$STATE/.t3-primary-binding" ]; then
+    subsection "T3 PRIMARY"
+    if BIND_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-t3-primary-bind.sh" 2>&1); then
+      printf '%s\n' "$BIND_OUT"
+      if [ -f "$STATE/.t3-primary-binding" ] && grep -q '^thread_id=.' "$STATE/.t3-primary-binding" 2>/dev/null; then
+        ENSURE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+          "$SCRIPT_DIR/fm-t3-primary-park.sh" ensure 2>&1) || ENSURE_OUT="t3-primary-park: ensure failed"
+        printf '%s\n' "$ENSURE_OUT"
+      fi
+    else
+      printf 'T3_PRIMARY: bind failed - %s\n' "$BIND_OUT"
+      if [ -f "$CONFIG/t3-primary" ]; then
+        printf 'T3_PRIMARY: config/t3-primary is present but binding could not be established; fix auth/thread match before relying on proactive captain wakes in T3.\n'
+      fi
+    fi
+  fi
+fi
+
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
 # exactly what drops a closing reminder, and this contract is what stops the

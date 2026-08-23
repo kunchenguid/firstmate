@@ -103,6 +103,13 @@ case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# T3-hosted primary continuity is owned by bin/fm-t3-primary-park.sh while a
+# binding is active. Stand down so Desktop stop-hook park does not fight it.
+if [ -f "$STATE/.t3-primary-binding" ] \
+  && grep -q '^thread_id=.' "$STATE/.t3-primary-binding" 2>/dev/null; then
+  exit 0
+fi
+
 lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0
   while [ "$attempt" -lt "$LOCK_ATTEMPTS" ]; do

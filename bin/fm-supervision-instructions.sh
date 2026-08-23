@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
@@ -80,11 +81,21 @@ if [ -z "$HARNESS" ]; then
   HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 fi
 
+# T3-bound Cursor primary uses the T3 park protocol instead of Desktop stop-hook park.
+T3_BOUND=0
+if [ -f "$STATE/.t3-primary-binding" ] \
+  && grep -q '^thread_id=.' "$STATE/.t3-primary-binding" 2>/dev/null; then
+  T3_BOUND=1
+fi
+
 case "$HARNESS" in
   claude|codex|opencode|pi|grok|cursor) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
+if [ "$T3_BOUND" -eq 1 ] && [ -f "$DOC_DIR/t3.md" ]; then
+  SNIPPET="$DOC_DIR/t3.md"
+fi
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
@@ -150,7 +161,11 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
       ;;
     cursor)
-      printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
+      if [ "${T3_BOUND:-0}" -eq 1 ]; then
+        printf '%s%s\n' "$prefix" 'repair missing T3 primary park continuity with bin/fm-t3-primary-park.sh ensure (foreground); do not use shell &.'
+      else
+        printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
+      fi
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
@@ -176,7 +191,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
       ;;
     cursor)
-      printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      if [ "${T3_BOUND:-0}" -eq 1 ]; then
+        printf '%s\n' '- Ordinary wake: the T3 primary park (bin/fm-t3-primary-park.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      else
+        printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      fi
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'
@@ -191,7 +210,11 @@ fi
 
 RULE='================================================================================'
 printf '%s\n' "$RULE"
-printf 'SUPERVISION OPERATING INSTRUCTIONS - primary harness: %s\n' "$HARNESS"
+if [ "$T3_BOUND" -eq 1 ]; then
+  printf 'SUPERVISION OPERATING INSTRUCTIONS - primary harness: %s (t3 host)\n' "$HARNESS"
+else
+  printf 'SUPERVISION OPERATING INSTRUCTIONS - primary harness: %s\n' "$HARNESS"
+fi
 printf '%s\n' "$RULE"
 printf 'Current state:\n'
 if [ "$READ_ONLY" -eq 1 ]; then

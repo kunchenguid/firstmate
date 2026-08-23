@@ -130,6 +130,9 @@ Without those records an older park still running after the next `stop` could le
 Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
 That hook is deliberately left to a follow-up alongside the deferred `preCompact` surface and is not registered in this change.
 
+When `state/.t3-primary-binding` is active, this Desktop stop-hook park stands down entirely.
+T3-hosted Cursor continuity is owned by `bin/fm-t3-primary-park.sh` and documented in [`t3-primary-supervision.md`](t3-primary-supervision.md).
+
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 

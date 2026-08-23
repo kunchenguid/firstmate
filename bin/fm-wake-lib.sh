@@ -160,6 +160,13 @@ fm_supervision_model() {
   case "${FM_SUPERVISION_MODEL:-}" in
     autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
+  # T3 primary park owns continuity while a binding is active: treat like a
+  # persistent daemon host, not Desktop Cursor autoarm (docs/t3-primary-supervision.md).
+  if [ -f "$STATE/.t3-primary-binding" ] \
+    && grep -q '^thread_id=.' "$STATE/.t3-primary-binding" 2>/dev/null; then
+    printf 'persistent\n'
+    return 0
+  fi
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;

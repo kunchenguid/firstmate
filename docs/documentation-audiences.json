@@ -333,8 +333,16 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/t3.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/t3-primary-supervision.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/tmux-backend.md",
