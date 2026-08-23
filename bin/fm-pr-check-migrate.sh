@@ -76,18 +76,35 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+# Classify one watcher check file by today's evaluation order: a valid current
+# X-mode shim, then a registered custom check, then a canonical PR poll, else a
+# legacy check to migrate. Prints exactly one of x-shim|custom|poll|legacy.
+classify_check() {
+  local check=$1 id
+  if [ "$(basename "$check")" = x-watch.check.sh ] \
+    && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    printf 'x-shim\n'
+    return 0
+  fi
+  id=$(basename "$check" .check.sh)
+  if fm_custom_check_registered "$STATE" "$id"; then
+    printf 'custom\n'
+    return 0
+  fi
+  if fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
+    printf 'poll\n'
+    return 0
+  fi
+  printf 'legacy\n'
+}
+
 current_checks_authenticated() {
-  local check id
+  local check
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
-      continue
-    fi
-    id=$(basename "$check" .check.sh)
-    fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+    [ "$(classify_check "$check")" = legacy ] && return 1
   done
+  return 0
 }
 
 private_migration_boundaries_valid() {
@@ -381,35 +398,14 @@ if [ -e "$SCAN_MARKER" ] || [ -L "$SCAN_MARKER" ]; then
   rm -f -- "$SCAN_MARKER" || exit 1
   [ ! -e "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || exit 1
 fi
+# Migration is needed exactly when some check is not already authenticated.
 migration_needed() {
-  local check id
-  for check in "$STATE"/*.check.sh; do
-    [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
-      continue
-    fi
-    id=$(basename "$check" .check.sh)
-    fm_custom_check_registered "$STATE" "$id" && continue
-    if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
-      return 0
-    fi
-  done
-  return 1
+  ! current_checks_authenticated
 }
 
+# Byte-identical to current_checks_authenticated: no legacy check remains armed.
 unsafe_checks_absent() {
-  local check id
-  for check in "$STATE"/*.check.sh; do
-    [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
-      continue
-    fi
-    id=$(basename "$check" .check.sh)
-    fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
-  done
+  current_checks_authenticated
 }
 
 revoke_migration_marker() {
@@ -1034,13 +1030,8 @@ if migration_needed; then
 
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
-      continue
-    fi
+    [ "$(classify_check "$check")" = legacy ] || continue
     id=$(basename "$check" .check.sh)
-    fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
 
     if fm_pr_task_id_valid "$id"; then
       prefix=$id
