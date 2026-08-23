@@ -227,6 +227,11 @@ case "$FORCE" in
   --retire-stale-record) RETIRE_STALE_RECORD=1; FORCE='' ;;
   *) echo "error: invalid teardown option: $FORCE" >&2; exit 2 ;;
 esac
+if [ "$#" -gt 2 ]; then
+  echo "error: unexpected extra argument: $3" >&2
+  echo "usage: $0 <task-id> [--force|--retire-stale-record]; --force and --retire-stale-record are mutually exclusive" >&2
+  exit 2
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -384,6 +389,10 @@ remote_secondmate_teardown() {
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
   [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
+  [ "$RETIRE_STALE_RECORD" = 1 ] && {
+    echo "REFUSED: --retire-stale-record only applies to a plain treehouse-pool ship or scout task, not kind=secondmate." >&2
+    return 1
+  }
   remote_root=$(fm_meta_get "$META" remote_root)
   remote_home=$(fm_meta_get "$META" home)
   [ -n "$remote_root" ] && [ -n "$remote_home" ] || { echo "REFUSED: remote secondmate metadata is incomplete" >&2; return 1; }
