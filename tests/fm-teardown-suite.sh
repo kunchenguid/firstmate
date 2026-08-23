@@ -6553,21 +6553,51 @@ test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
 }
 
 test_secondmate_network_fetches_pin_validated_addresses() {
-  local case_dir clone source firstmate_source firstmate_tip root_default default tip rc count
+  local case_dir clone source firstmate_source firstmate_tip root_default default head_tip tip rc count missing_default_tip original_path
   case_dir=$(make_case secondmate-pinned-network-authority)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
   clone="$case_dir/wt/projects/test"
   source="$case_dir/source-projects/test"
   firstmate_source="$case_dir/firstmate-source"
+  missing_default_tip=1111111111111111111111111111111111111111
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 5 ] \
+  && [ "${1:-}" = -C ] \
+  && [ "${2:-}" = "${FM_TEST_DANGLING_ROOT:-}" ] \
+  && [ "${3:-}" = rev-parse ] \
+  && [ "${4:-}" = --verify ] \
+  && [ "${5:-}" = "${FM_TEST_DANGLING_REF:-}" ]; then
+  printf '%s\n' "${FM_TEST_DANGLING_TIP:?}"
+  exit 0
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  original_path=$PATH
+  local PATH="$case_dir/fakebin:$original_path"
   root_default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
   default=${root_default#origin/}
-  firstmate_tip=$(git -C "$ROOT" rev-parse --verify "refs/remotes/origin/$default^{commit}" 2>/dev/null) \
-    || firstmate_tip=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
+  if "$REAL_GIT_FOR_TEST" -C "$ROOT" cat-file -e "$missing_default_tip^{commit}" 2>/dev/null; then
+    fail "missing-default fixture unexpectedly names a local commit"
+  fi
+  firstmate_tip=$(FM_TEST_DANGLING_ROOT="$ROOT" \
+    FM_TEST_DANGLING_REF="refs/remotes/origin/$default^{commit}" \
+    FM_TEST_DANGLING_TIP="$missing_default_tip" \
+    git -C "$ROOT" rev-parse --verify "refs/remotes/origin/$default^{commit}" 2>/dev/null) || firstmate_tip=
+  if [ -z "$firstmate_tip" ] \
+    || ! GIT_NO_LAZY_FETCH=1 git -C "$ROOT" cat-file -e "$firstmate_tip^{commit}" 2>/dev/null; then
+    firstmate_tip=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
+  fi
+  head_tip=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
+  [ "$firstmate_tip" = "$head_tip" ] \
+    || fail "missing remote-default object did not fall back to exact HEAD"
   git init --quiet "$firstmate_source"
   git -C "$firstmate_source" fetch --quiet "$ROOT" "$firstmate_tip"
   git -C "$firstmate_source" checkout --quiet -b "$default" FETCH_HEAD
   git -C "$case_dir/project" remote set-url origin "$firstmate_source"
+  PATH=$original_path
   tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
   git -C "$clone" remote set-url origin https://example.com/repository.git
   git -C "$source" remote set-url origin https://example.com/repository.git
@@ -6628,7 +6658,17 @@ if [ -n "$network_operation" ]; then
 fi
 exec "$FM_REAL_GIT" "$@"
 SH
-  chmod +x "$case_dir/fakebin/git"
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "${1:-}" = - ] && [ "${2:-}" = example.com ]; then
+  [ "${FM_ACCOUNT_ROUTING_TEST_LAB:-}" = firstmate-account-routing-test-lab-v1 ] || exit 96
+  [ "${FM_TEARDOWN_TEST_NETWORK_ADDRESSES:-}" = 203.0.113.10 ] || exit 97
+  printf '%s\n' "$FM_TEARDOWN_TEST_NETWORK_ADDRESSES"
+  exit 0
+fi
+exec "${REAL_PYTHON_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/python3"
   : > "$case_dir/pinned-network.log"
   : > "$case_dir/unexpected-network.log"
   set +e
@@ -6648,7 +6688,7 @@ SH
   count=$(wc -l < "$case_dir/pinned-network.log" | tr -d ' ')
   [ "$count" -ge 1 ] || fail \
     "network authority did not exercise its graph probe: $(cat "$case_dir/pinned-network.log"); teardown: $(cat "$case_dir/stderr")"
-  if grep -v $'\thttp.curloptResolve=example.com:443:' "$case_dir/pinned-network.log" >/dev/null; then
+  if grep -v $'\thttp.curloptResolve=example.com:443:203.0.113.10' "$case_dir/pinned-network.log" >/dev/null; then
     fail "network authority re-resolved an unpinned hostname: $(cat "$case_dir/pinned-network.log")"
   fi
   assert_present "$case_dir/wt" "failed pinned authority proof removed the secondmate home"

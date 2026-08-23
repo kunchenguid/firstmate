@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
@@ -81,11 +81,26 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
+function isSecondmateHome(root, home) {
+  const rootReal = resolvePath(root);
+  const homeReal = resolvePath(home);
+  if (rootReal !== homeReal) return false;
+  const marker = `${rootReal}/.fm-secondmate-home`;
+  try {
+    const markerStat = lstatSync(marker);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) return false;
+    const firstLine = readFileSync(marker, "utf8").split(/\r?\n/, 1)[0];
+    const id = firstLine.replace(/[ \t\v\f\r]/g, "");
+    return /^[A-Za-z0-9._-]+$/.test(id);
+  } catch {
+    return false;
+  }
+}
+
 async function isPrimaryRoot(root, home) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
+  if (isSecondmateHome(root, home)) return true;
   const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
   if (gitDir.code !== 0 || commonDir.code !== 0) return false;

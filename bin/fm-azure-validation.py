@@ -5235,11 +5235,48 @@ def plan_purge_shards(env, state):
     ):
         raise ValidationError("purge shard capacity plan is incomplete or ambiguous")
     runner_states = load_purge_runner_states(env, state)
+    shard_runs = state.get("shard_runs") or {}
+    if not isinstance(shard_runs, dict):
+        raise ValidationError("cell shard dispatch ledger is corrupt")
+    plan_by_shard = {entry["shard"]: entry for entry in shard_plan}
+    fence = state["request"]["fence"].split(":", 1)[-1]
+    recorded_roots = set()
+    for request_digest, record in shard_runs.items():
+        plan = plan_by_shard.get(record.get("shard")) if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("request_digest") != request_digest
+            or not SHA256.match(str(request_digest))
+            or not isinstance(plan, dict)
+            or record.get("sku") != plan.get("sku")
+            or record.get("round") != record.get("generation")
+            or record.get("task") != "{}-s{}".format(state["cell"], record.get("shard"))
+            or not SHA256.match(str(record.get("command_digest", "")))
+        ):
+            raise ValidationError("cell shard dispatch record is corrupt")
+        live = runner_states.get(record.get("invocation"))
+        live_request = (live or {}).get("request") or {}
+        root = live_request.get("lineage_root_invocation") or (live or {}).get("invocation")
+        derived_root = "azr-" + hashlib.sha256(request_digest.encode("utf-8")).hexdigest()[:12]
+        limits = live_request.get("limits") or {}
+        if (
+            not live
+            or root not in (plan["invocation"], derived_root)
+            or live_request.get("task") != record.get("task")
+            or live_request.get("generation") != record.get("generation")
+            or live_request.get("capacity_parent") != state["cell"]
+            or live_request.get("capacity_fence") != fence
+            or live_request.get("command_digest") != record.get("command_digest")
+            or limits.get("sku") != record.get("sku")
+            or str(limits.get("sku_family", "")).lower()
+            != str(plan.get("sku_family", "")).lower()
+        ):
+            raise ValidationError("dispatched shard lineage lacks exact terminal runner evidence")
+        recorded_roots.add(root)
     reservations, provider_reservations = capacity_authority_snapshot(env)
     capacity = exact_purge_capacity_constituents(
         state, shard_plan, runner_states, reservations, provider_reservations
     )
-    fence = state["request"]["fence"].split(":", 1)[-1]
     planned = []
     for invocation, value in sorted(runner_states.items()):
         request = value.get("request") or {}
@@ -5249,7 +5286,7 @@ def plan_purge_shards(env, state):
         if invocation not in capacity:
             capacity[invocation] = exact_purge_retry_constituent(state, value, reservations)
         if (
-            root not in roots
+            (root not in roots and root not in recorded_roots)
             or request.get("schema") != "fm.azure-command/v1"
             or request.get("invocation") != invocation
             or request.get("parent_invocation") != parent
@@ -5284,12 +5321,7 @@ def plan_purge_shards(env, state):
             "cleanup_receipt": reservation["cleanup_receipt"],
             "compute_ids": [[kind, resource_id] for kind, resource_id in compute_ids],
         })
-    shard_runs = state.get("shard_runs") or {}
-    if not isinstance(shard_runs, dict):
-        raise ValidationError("cell shard dispatch ledger is corrupt")
     for record in shard_runs.values():
-        if not isinstance(record, dict):
-            raise ValidationError("cell shard dispatch record is corrupt")
         live = runner_states.get(record.get("invocation"))
         if not live or (live.get("request") or {}).get("command_digest") != record.get("command_digest"):
             raise ValidationError("dispatched shard lineage lacks exact terminal runner evidence")
@@ -5733,7 +5765,7 @@ def discover_owner_gate(env, state):
             raise ValidationError("owner-decision exchange lost the pending challenge")
         decision_blob = current.get("decision")
         if decision_blob is None:
-            return pending_gate
+            return pending_gate, False
         if decision_blob != pending.get("decision_blob"):
             raise ValidationError("owner-decision exchange changed the pending decision path")
         temporary = write_private_json(env, ".owner-decision-readback-", {"placeholder": True})
@@ -5748,7 +5780,7 @@ def discover_owner_gate(env, state):
             temporary.unlink(missing_ok=True)
         successor = parsed.get(index + 1, {}).get("challenge")
         if successor is None:
-            return pending_gate
+            return pending_gate, True
         successor_path = write_private_json(env, ".owner-successor-", {"placeholder": True})
         try:
             storage_download(
@@ -5792,7 +5824,7 @@ def discover_owner_gate(env, state):
     entries = next_entries
     challenge_blob = entries.get("challenge")
     if challenge_blob is None:
-        return None
+        return None, False
     temporary = write_private_json(env, ".owner-gate-", {"placeholder": True})
     try:
         storage_download(
@@ -5824,7 +5856,7 @@ def discover_owner_gate(env, state):
         env, state, "needs-decision",
         "exact live protected owner-decision challenge discovered",
     )
-    return gate
+    return gate, False
 
 
 def extract_shard_request(archive_path, destination):
@@ -5881,14 +5913,21 @@ def validate_shard_request(state, request, bundle_path, blob):
                 CELL_HOST_CAPABILITY_DECLARATION, shard, count, shard
             ),
         ]
-        if command != exact or request.get("artifacts") != ["results/executed-{}.tsv".format(shard)]:
+        if (
+            command != exact
+            or request.get("artifacts") != ["results/executed-{}.tsv".format(shard)]
+            or request.get("resource_class") != "behavior-heavy"
+        ):
             raise ValidationError("behavior shard command differs from the sealed planner route")
     elif kind == "lint":
         exact = [
             "bin/fm-azure-runner-command.sh", "bash", "-c",
             "bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .",
         ]
-        if count != 1 or shard != 1 or request.get("artifacts") != [] or command != exact:
+        if (
+            count != 1 or shard != 1 or request.get("artifacts") != []
+            or command != exact or request.get("resource_class") != "validation-standard"
+        ):
             raise ValidationError("lint shard differs from the trusted default-branch command")
     else:
         raise ValidationError("shard kind is unsupported")
@@ -6010,7 +6049,7 @@ def follow_shard_lineage(env, record):
         current = advanced
 
 
-def run_shard_invocations(env, state, records):
+def launch_shard_invocations(env, state, records):
     processes = []
     runner = ROOT / "bin" / "fm-azure-runner.sh"
     rebound = False
@@ -6083,6 +6122,11 @@ def run_shard_invocations(env, state, records):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         processes.append((record, process))
+    return processes
+
+
+def finish_shard_invocations(env, state, processes):
+    rebound = False
     failures = []
     for record, process in processes:
         stdout, stderr = process.communicate()
@@ -6096,11 +6140,17 @@ def run_shard_invocations(env, state, records):
             rebound = True
         if process.returncode == 125 or process.returncode < 0:
             failures.append("{} rc={}".format(record["invocation"], process.returncode))
-    # The tails and any rebind must survive the failure raise below, or a
-    # refused transport leaves no durable ground truth for the operator.
-    save_state(env, state)
+    return failures
+
+
+def run_shard_invocations(env, state, records):
+    processes = launch_shard_invocations(env, state, records)
+    failures = finish_shard_invocations(env, state, processes)
     if failures:
-        raise ValidationError("one or more shard transports retained ambiguous state: " + ", ".join(failures))
+        raise ValidationError(
+            "one or more shard transports retained ambiguous state: "
+            + ", ".join(failures)
+        )
 
 
 def extract_runner_archive(path, destination):
@@ -6224,15 +6274,20 @@ def drive(env, args):
                 if state["phase"] not in ("running", "responding", "reattaching", "needs-decision"):
                     print_status(state)
                     return
-                gate = discover_owner_gate(env, state)
+                gate, pending_decision_blob_validated = discover_owner_gate(env, state)
+                pending_owner_decision = None
                 if gate is not None:
                     if (state.get("owner_decision") or {}).get("pending_decision"):
-                        print(
-                            "AZURE VALIDATION OWNER DECISION PENDING cell={} attempt={} gate={} head={}".format(
-                                cell, state["attempt"], gate["gate_index"],
-                                state["owner_decision"]["history_head"],
+                        if not pending_decision_blob_validated:
+                            print(
+                                "AZURE VALIDATION OWNER DECISION PENDING cell={} attempt={} gate={} head={}".format(
+                                    cell, state["attempt"], gate["gate_index"],
+                                    state["owner_decision"]["history_head"],
+                                )
                             )
-                        )
+                            return
+                        exact_live_run_command(env, state)
+                        pending_owner_decision = gate
                     else:
                         print(
                             "AZURE VALIDATION OWNER DECISION cell={} attempt={} gate={} step={} head={}".format(
@@ -6241,7 +6296,7 @@ def drive(env, args):
                                 gate["challenge"]["gate_head_sha"],
                             )
                         )
-                    return
+                        return
                 names = list_cell_blobs(env, state)
                 requests = [name for name in names if re.match(r"^shards/round-[a-z0-9]{12}/request-[1-8]\.tar\.gz$", name)]
                 pending = []
@@ -6266,21 +6321,95 @@ def drive(env, args):
                     plan = shard_plan_entry(state, int(request["shard"]))
                     record = prepare_shard_runner(env, state, blob, request, extracted, plan)
                     pending.append((request, record, request_root, response_blob))
+                if not pending and pending_owner_decision is not None:
+                    print(
+                        "AZURE VALIDATION OWNER DECISION PENDING cell={} attempt={} gate={} head={}".format(
+                            cell, state["attempt"], pending_owner_decision["gate_index"],
+                            state["owner_decision"]["history_head"],
+                        )
+                    )
+                    return
             if pending:
-                run_shard_invocations(env, state, [item[1] for item in pending])
+                if pending_owner_decision is not None:
+                    with lock(env, cell):
+                        allocation = load_state(env, cell)
+                        expected_identity = (
+                            state["cell"], state["request_digest"],
+                            state["attempt"], state["phase"],
+                        )
+                        observed_identity = (
+                            allocation["cell"], allocation["request_digest"],
+                            allocation["attempt"], allocation["phase"],
+                        )
+                        if observed_identity != expected_identity:
+                            raise ValidationError(
+                                "cell identity or phase changed before pending-decision shard allocation"
+                            )
+                        allocation_gate, decision_validated = discover_owner_gate(
+                            env, allocation
+                        )
+                        if (
+                            allocation["phase"] != state["phase"]
+                            or allocation_gate != pending_owner_decision
+                            or not decision_validated
+                            or not (allocation.get("owner_decision") or {}).get("pending_decision")
+                        ):
+                            raise ValidationError(
+                                "pending owner decision changed before shard allocation"
+                            )
+                        exact_live_run_command(env, allocation)
+                        allocation_pending = []
+                        for request, record, request_root, response_blob in pending:
+                            live_record = allocation.get("shard_runs", {}).get(
+                                record["request_digest"]
+                            )
+                            if (
+                                not live_record
+                                or live_record.get("invocation") != record["invocation"]
+                            ):
+                                raise ValidationError(
+                                    "shard invocation identity changed before allocation"
+                                )
+                            allocation_pending.append((
+                                request, live_record, request_root, response_blob,
+                            ))
+                        pending = allocation_pending
+                        state = allocation
+                        processes = launch_shard_invocations(
+                            env, state, [item[1] for item in pending]
+                        )
+                else:
+                    processes = launch_shard_invocations(
+                        env, state, [item[1] for item in pending]
+                    )
+                launched_invocations = {
+                    record["request_digest"]: record["invocation"]
+                    for _request, record, _root, _blob in pending
+                }
+                transport_failures = finish_shard_invocations(env, state, processes)
                 with lock(env, cell):
                     live = load_state(env, cell)
                     if live["request_digest"] != state["request_digest"]:
                         raise ValidationError("cell identity changed while shard VMs were running")
                     for _request, record, _root, _blob in pending:
                         live_record = live.get("shard_runs", {}).get(record["request_digest"])
-                        if not live_record or live_record.get("invocation") != record["invocation"]:
+                        if (
+                            not live_record
+                            or live_record.get("invocation")
+                            != launched_invocations[record["request_digest"]]
+                        ):
                             raise ValidationError("shard invocation identity changed while running")
                         live_record.update({
+                            "invocation": record["invocation"],
                             "runner_stdout_tail": record.get("runner_stdout_tail", ""),
                             "runner_stderr_tail": record.get("runner_stderr_tail", ""),
                         })
                     save_state(env, live)
+                if transport_failures:
+                    raise ValidationError(
+                        "one or more shard transports retained ambiguous state: "
+                        + ", ".join(transport_failures)
+                    )
                 for request, record, request_root, response_blob in pending:
                     archive = package_shard_response(env, live, request, record, request_root)
                     storage_upload(
