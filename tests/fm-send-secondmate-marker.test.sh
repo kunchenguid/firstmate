@@ -246,7 +246,7 @@ test_marker_transformation_is_idempotent() {
 }
 
 test_marked_send_preserves_trailing_newlines() {
-  local dir fb log home rc payload got_hex body_hex corr
+  local dir fb log home rc payload corr expected actual expected_message
   dir="$TMP_ROOT/sm-trailing-newlines"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-trailing-newlines)
@@ -258,15 +258,13 @@ test_marked_send_preserves_trailing_newlines() {
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   corr=$(fm_pending_reply_extract_corr "$(record_body "$home/state/domain.inbox/001.msg")")
   [ -n "$corr" ] || fail "marked send should embed a corr id"
-  # The record's raw body region is the exact enqueued text plus the writer's
-  # single terminating newline, so the payload's own trailing newlines must
-  # survive byte-exact ahead of that one added 0a.
-  body_hex=$(printf '%s' "$payload" | od -An -tx1 | tr -d ' \n')
-  got_hex=$(sed -e '1,/^--$/d' "$home/state/domain.inbox/001.msg" | od -An -tx1 | tr -d ' \n')
-  case "$got_hex" in
-    *"${body_hex}0a") : ;;
-    *) fail "the record lost trailing newline body bytes: got $got_hex expected to end with ${body_hex}0a" ;;
-  esac
+  fm_pending_reply_embed_corr "$payload" "$corr" expected_message
+  expected="$dir/expected.body"
+  actual="$dir/actual.body"
+  printf '%s' "$expected_message" > "$expected"
+  record_body "$home/state/domain.inbox/001.msg" > "$actual"
+  cmp -s "$expected" "$actual" \
+    || fail "the marked record did not preserve trailing newline bytes exactly"
   pass "fm-send: marked secondmate payload preserves trailing newline bytes in its record"
 }
 

@@ -139,7 +139,7 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
       printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
       printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf -- '--\n'
-      printf '%s\n' "$text"
+      printf '%s' "$text"
     } > "$tmp" && mv "$tmp" "$rec" || status=1
     [ "$status" -eq 0 ] || rm -f "$tmp"
   else
@@ -150,10 +150,17 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
   printf '%s' "$rec"
 }
 
-# The exact enqueued text (newline-terminated) back out of a record.
+# The exact enqueued text back out of a record.
 fm_task_inbox_body() {  # <record-path>
+  local line
   [ -f "$1" ] || return 1
-  awk 'body { print; next } /^--$/ { body = 1 }' "$1"
+  while IFS= read -r line; do
+    if [ "$line" = -- ]; then
+      cat
+      return 0
+    fi
+  done < "$1"
+  return 1
 }
 
 # The constant self-describing doorbell line for one record. Self-describing
@@ -169,8 +176,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
 # backend's submit machinery with a minimal retry budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 the record was
-# acknowledged before this ring committed. No return value is
+# (the watcher re-rings later), 2 the backend send failed. No return value is
 # delivery proof; the acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
@@ -185,7 +191,6 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   case "$cstate" in
     pending) return 1 ;;
   esac
-  [ -f "$rec" ] || return 3
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi

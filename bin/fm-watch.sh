@@ -329,15 +329,20 @@ inbox_steer_check() {  # <window> <task>
     ring)
       ring_rc=0
       fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
-      [ "$ring_rc" -ne 3 ] || return 0
       fm_task_inbox_record_ring "$STATE" "$task" "$rec"
-      triage_log "steer-inbox re-ring: $task ${rec##*/}"
+      triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell re-rings with an idle pane; inspect the worker)"
-      [ -f "$rec" ] || return 0
+      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      if [ ! -f "$rec" ]; then
+        fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+        return 0
+      fi
       fm_wake_append stale "$w" "$reason" || exit 1
-      fm_task_inbox_record_escalated "$STATE" "$task" "$rec"
+      if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
+        echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
+        exit 1
+      fi
       wake "$reason"
       ;;
   esac

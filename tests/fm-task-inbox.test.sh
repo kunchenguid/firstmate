@@ -72,14 +72,6 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT:-}" ]; then
-      count=$(cat "$FM_FAKE_TMUX_CAPTURE_COUNT" 2>/dev/null || printf '0')
-      count=$((count + 1))
-      printf '%s\n' "$count" > "$FM_FAKE_TMUX_CAPTURE_COUNT"
-      if [ "$count" -ge 2 ] && [ -f "${FM_FAKE_TMUX_ACK_RECORD:-}" ]; then
-        mv "$FM_FAKE_TMUX_ACK_RECORD" "${FM_FAKE_TMUX_ACK_RECORD%/*}/handled/"
-      fi
-    fi
     if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
       cat "$FM_FAKE_TMUX_CAPTURE"
     else
@@ -121,18 +113,32 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 }
 
 test_write_is_durable_and_exact() {
-  local state rec body doorbell
+  local state rec rec2 doorbell expected actual expected2 actual2 text
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
-  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 $'line one\nline two with  spaces\n/slash body') \
+  text=$'line one\nline two with  spaces\n/slash body\n\n'
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
     || fail "inbox write failed"
   [ -f "$rec" ] || fail "inbox write printed a path that does not exist: $rec"
   case "$rec" in
     "$state/t1.inbox/001.msg") : ;;
     *) fail "first record should be 001.msg under the task inbox, got $rec" ;;
   esac
-  body=$(inbox_lib "$state" fm_task_inbox_body "$rec")
-  [ "$body" = $'line one\nline two with  spaces\n/slash body' ] \
-    || fail "record body did not round-trip exactly:"$'\n'"$body"
+  expected="$state/expected.body"
+  actual="$state/actual.body"
+  printf '%s' "$text" > "$expected"
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" \
+    || fail "record body could not be read"
+  cmp -s "$expected" "$actual" \
+    || fail "record body did not preserve trailing and blank-line bytes"
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "no trailing newline") \
+    || fail "second inbox write failed"
+  expected2="$state/expected-no-newline.body"
+  actual2="$state/actual-no-newline.body"
+  printf '%s' "no trailing newline" > "$expected2"
+  inbox_lib "$state" fm_task_inbox_body "$rec2" > "$actual2" \
+    || fail "second record body could not be read"
+  cmp -s "$expected2" "$actual2" \
+    || fail "record body added a trailing newline"
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
   assert_contains "$doorbell" "$state/t1.inbox/001.msg" "doorbell should name the record"
   assert_contains "$doorbell" "$state/t1.inbox/handled/" "doorbell should name the handled dir"
@@ -274,26 +280,6 @@ test_watcher_rerings_idle_pane_quietly() {
   pass "watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it"
 }
 
-test_watcher_ack_during_ring_check_stays_quiet() {
-  local dir state out log pid rec
-  dir=$(setup_watch_case ack-race)
-  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
-  : > "$dir/capture.count"
-  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "already handled")
-  age_path "$rec"
-  watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
-    FM_FAKE_TMUX_CAPTURE_COUNT="$dir/capture.count" FM_FAKE_TMUX_ACK_RECORD="$rec" \
-    FM_TASK_INBOX_RING_MAX=99
-  pid=$!
-  sleep 3
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-  [ -f "$state/t1.inbox/handled/001.msg" ] || fail "the worker acknowledgement did not win the ring race"
-  [ ! -s "$log" ] || fail "the watcher rang after the record was acknowledged:"$'\n'"$(cat "$log")"
-  [ ! -s "$state/.wake-queue" ] || fail "the acknowledgement race queued a wake"
-  pass "watcher: an acknowledgement during final ring checks stays silent"
-}
-
 test_watcher_waits_on_busy_pane() {
   local dir state out log pid rec
   dir=$(setup_watch_case busywait)
@@ -358,7 +344,6 @@ test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
-test_watcher_ack_during_ring_check_stays_quiet
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_escalates_once_after_budget

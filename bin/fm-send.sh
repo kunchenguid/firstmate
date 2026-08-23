@@ -18,7 +18,8 @@
 # legal), and the terminal receives only one short constant self-describing
 # doorbell line plus Enter, best-effort. Exit 0 = the steer is durably sent
 # (recorded); nonzero = a real local failure (unresolvable target, unwritable
-# record, or a failed decision-close append). There is no delivered-unconfirmed
+# record, failed decision-close append, or pending-reply bookkeeping for which
+# neither the commit nor its recovery marker could be written). There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously by the
 # worker's acknowledgement move into handled/, with the watcher re-ringing an
@@ -66,8 +67,10 @@
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
 # success and reply success are separate facts: delivery never resolves the
 # expectation. On the inbox plane the durable enqueue IS delivery to the task's
-# record, so the expectation is marked delivered at enqueue time; only a failed
-# enqueue discards it. On the typed plane an unconfirmed submit (exit 3) keeps
+# record, so the expectation is marked delivered at enqueue time; when that
+# bookkeeping commit fails after its durable recovery marker is stored, the
+# send remains successful and watcher reconciliation owns the repair. Only a
+# failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
 # it armed rather than dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
@@ -664,11 +667,11 @@ else
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
-          echo "error: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+          echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
         else
           echo "error: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+          exit 1
         fi
-        exit 1
       fi
     fi
     # The answer is durably sent: close each answered decision at enqueue time
