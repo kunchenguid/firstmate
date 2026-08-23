@@ -27,16 +27,8 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
-ack_stopped_cycle() {  # <state>
-  local state=$1 err sequence generation
-  err="$state/.test-cycle-drain.err"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+ack_stopped_cycle() {  # <state> - a drain consumes presented rows itself (U1.3)
+  FM_STATE_OVERRIDE="$1" "$DRAIN" >/dev/null 2>&1
 }
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
@@ -167,23 +159,27 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
-test_signal_reason_is_actionable_classifier() {
+test_content_wake_classifier() {
   local dir state
   dir=$(make_case classify-signal); state="$dir/state"
   printf 'working: step 1\nworking: step 2\n' > "$state/a.status"
-  signal_reason_is_actionable "$state/a.status" && fail "benign working: signal classified actionable"
+  [ "$(status_lines_from_offset "$state/a.status" 0 | status_span_wake_class '')" = bundle ] \
+    || fail "routine working: content classified actionable"
   printf 'working: x\nneeds-decision: pick A or B\n' > "$state/b.status"
-  signal_reason_is_actionable "$state/b.status" || fail "captain-relevant signal classified benign"
-  : > "$state/c.turn-ended"
-  signal_reason_is_actionable "$state/c.turn-ended" && fail "a bare turn-ended marker classified actionable"
-  # Coalesced batch: one benign + one captain-relevant -> actionable.
-  signal_reason_is_actionable "$state/a.status" "$state/b.status" || fail "coalesced benign+actionable not actionable"
-  # A failure and a merge result are captain-relevant and must always wake.
+  [ "$(status_lines_from_offset "$state/b.status" 0 | status_span_wake_class '')" = wake ] \
+    || fail "captain-relevant content classified routine"
   printf 'failed: build broke on main\n' > "$state/d.status"
-  signal_reason_is_actionable "$state/d.status" || fail "a failed: line was not actionable"
+  [ "$(status_lines_from_offset "$state/d.status" 0 | status_span_wake_class '')" = wake ] \
+    || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
-  signal_reason_is_actionable "$state/e.status" || fail "a legacy merged line was not actionable"
-  pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
+  [ "$(status_lines_from_offset "$state/e.status" 0 | status_span_wake_class '')" = wake ] \
+    || fail "a legacy merged line was not actionable"
+  # A decision buried under a later routine append still wakes - the last
+  # line's verb alone never decides (the pre-U1.3 prefix rule's blind spot).
+  printf 'needs-decision [key=k]: pick\nworking: moved on\n' > "$state/f.status"
+  [ "$(status_lines_from_offset "$state/f.status" 0 | status_span_wake_class '')" = wake ] \
+    || fail "a buried open decision classified routine"
+  pass "content wake rule: routine bundles, captain-relevant and buried-decision content wakes"
 }
 
 test_stale_is_terminal_classifier() {
@@ -844,8 +840,7 @@ test_actionable_signal_surfaced() {
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
-  [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
-  pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+  pass "captain-relevant signal is surfaced (queue + exit)"
 }
 
 test_terminal_stale_surfaced() {
@@ -912,7 +907,6 @@ test_stale_terminal_status_overridden_by_active_run() {
   [ ! -s "$state/.wake-queue" ] || fail "the overridden stale terminal status enqueued a wake during absorb"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on absorb"
   [ -s "$state/.stale-since-$key" ] || fail "stale-since escalation timer was not recorded on absorb"
-  [ ! -e "$state/.hb-surfaced-validating" ] || fail "an absorbed wake must not mark the status line as surfaced"
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
@@ -2884,7 +2878,7 @@ test_procevent_captured_result_surfaces_proactively() {
 }
 
 test_procevent_unacknowledged_result_redrains_until_handled() {
-  local dir state out replay_out replay_err pid before after sequence generation
+  local dir state out replay_out replay_err pid before after
   dir=$(make_case procevent-redrain); state="$dir/state"
   out="$dir/watch.out"; replay_out="$dir/replay.out"; replay_err="$dir/replay.err"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
@@ -2908,14 +2902,8 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   grep "$(printf '\tcheck\t')" "$replay_out" | grep -F 'procevent lavish delivery-src 1' >/dev/null \
     || fail "the successor drain did not re-print the durable process-event row"
 
+  [ ! -s "$state/.wake-queue" ] || fail "the re-presented process-event row was not consumed at presentation"
   pe_case "$dir" handled delivery-src 1 >/dev/null || fail "could not acknowledge the captured result"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] \
-    || fail "the replay drain omitted its post-handling acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
-    || fail "completed process-event handling could not acknowledge the replay"
-  [ ! -s "$state/.wake-queue" ] || fail "acknowledged process-event replay remained durable"
 
   before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   : > "$out"
@@ -2994,7 +2982,7 @@ test_procevent_surface_serializes_with_drain() {
 }
 
 test_procevent_surface_crash_boundaries() {
-  local dir state out fifo pid reader marker exit_status replay_err sequence generation
+  local dir state out fifo pid reader marker exit_status replay_err
   dir=$(make_case procevent-output-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
   append_wake "$state" check "procevent:output-fail:1" "check: procevent fixture output-fail 1"
   mkfifo "$fifo"
@@ -3048,14 +3036,8 @@ test_procevent_surface_crash_boundaries() {
     || fail "post-marker successor drain failed"
   grep "$(printf '\tcheck\t')" "$out.replay.drain" | grep -F 'procevent fixture after-marker 1' >/dev/null \
     || fail "post-marker successor did not re-drain the durable record"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] \
-    || fail "post-marker replay omitted its post-handling acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
-    || fail "post-marker replay acknowledgement failed"
-  [ ! -s "$state/.wake-queue" ] || fail "post-marker acknowledgement left the durable record queued"
-  pass "surfacing failures replay until post-handling acknowledgement"
+  [ ! -s "$state/.wake-queue" ] || fail "the post-marker successor drain left the durable record queued"
+  pass "surfacing failures replay until a drain presents and consumes the record"
 }
 
 test_procevent_marker_failure_exits_and_replays() {
@@ -3110,26 +3092,55 @@ test_heartbeat_no_change_absorbed() {
   pass "a heartbeat with no captain-relevant change is absorbed and backs off the cadence"
 }
 
-test_heartbeat_backstop_surfaces_unsurfaced_status() {
+test_heartbeat_backstop_resurfaces_open_decisions() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
-  # A captain-relevant status whose .seen-* signature ALREADY matches (so the
-  # per-poll signal scan stays quiet) but which was never surfaced (no
-  # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
-  # fleet-scan backstop must catch it and wake firstmate.
-  printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
+  # An OPEN decision whose .seen-* signature ALREADY matches (so the per-poll
+  # signal scan stays quiet) and whose bounded re-surface is due (no throttle
+  # marker). The content-rule heartbeat backstop must wake once for it.
+  printf 'needs-decision [key=k1]: pick the synthetic option\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
+  wait_for_exit "$pid" 100 || fail "heartbeat backstop did not re-surface an open decision due its cadence"
   grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
-  [ "$(cat "$state/.hb-surfaced-miss" 2>/dev/null || true)" = "done: PR https://example.test/pr/5" ] \
-    || fail "backstop did not record the status as surfaced (would re-fire next heartbeat)"
+  [ -e "$state/.last-open-decisions-resurface" ] \
+    || fail "backstop did not record the re-surface (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
-  pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+  grep -F 'miss [key=k1] needs-decision: pick the synthetic option' "$drain_out" >/dev/null \
+    || fail "the drain did not fold the still-open decision for the heartbeat turn"
+
+  # Inside the throttle window the same open decision does not re-fire.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a throttled open decision re-fired the heartbeat: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a throttled open decision printed a wake reason: $(cat "$out")"
+
+  # A resolved decision stops the cadence entirely, even with the throttle gone.
+  # The reaped watcher's close reopened a recovery episode by design; retire it
+  # with an empty drain so this leg tests the heartbeat, not downtime recovery.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "inter-leg empty drain failed"
+  printf 'resolved [key=k1]: answered: synthetic option chosen\n' >> "$state/miss.status"
+  sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  rm -f "$state/.last-open-decisions-resurface"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a resolved decision re-fired the heartbeat backstop: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a resolved decision printed a wake reason: $(cat "$out")"
+  pass "heartbeat backstop re-surfaces an open decision once per window and stops when it closes"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
@@ -3227,7 +3238,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
-test_signal_reason_is_actionable_classifier
+test_content_wake_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
@@ -3293,7 +3304,7 @@ test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
-test_heartbeat_backstop_surfaces_unsurfaced_status
+test_heartbeat_backstop_resurfaces_open_decisions
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

@@ -121,21 +121,16 @@ prime_seen() { # <state> <status>
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # The main retains a terminal presentation receipt until the corresponding wake
-# is handled and acknowledged.
+# is presented and consumed by a drain (U1.3: consumption at presentation).
 test_main_direct_terminal_presentation_receipt() {
-  local err seq generation
   make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "main did not retain presentation receipt"
 
-  err="$WORLD/drain.err"
-  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2> "$err"
-  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
-  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
-  [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" >/dev/null 2>&1
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "the presenting drain did not record the presentation receipt"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "the presented wake was not consumed"
   pass "main direct terminal presentation has a durable receipt"
 }
 
@@ -412,7 +407,7 @@ test_full_scan_budget_includes_wake_lock_wait() {
 }
 
 test_notice_recovery_does_not_duplicate_wake() {
-  local record err seq generation
+  local record
   make_world notice-recovery; bind_secondmate remote
   printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
   write_child "$MATE" child 'failed: terminal'
@@ -425,14 +420,10 @@ test_notice_recovery_does_not_duplicate_wake() {
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
   [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "recovery duplicated an already queued notice"
 
-  err="$WORLD/drain.err"
-  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" >/dev/null 2> "$err"
-  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" "$DRAIN" >/dev/null 2>&1
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
-  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 0 ] || fail "acknowledged notice was emitted again"
-  pass "notice recovery remains idempotent across queue acknowledgement"
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 0 ] || fail "a presented notice was emitted again"
+  pass "notice recovery remains idempotent across presentation"
 }
 
 # Forge command shims fail loudly. A successful scan proves this path never uses

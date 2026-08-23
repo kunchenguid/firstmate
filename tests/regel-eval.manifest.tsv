@@ -24,9 +24,9 @@ probe-failure-honest	L13 L39	a failed probe is reported as failed and never read
 register-derived	L04 L09 L23	the captain register renders from the backlog, keyed per line, never hand-fed	test:tests/fm-register.test.sh
 ten-cap-mechanical	L19	the ten-per-area cap is enforced by the machine with a disclosed overflow row	test:tests/fm-register.test.sh
 hand-register-protected	HR3	the hand-kept register is never overwritten without explicit takeover plus archive	test:tests/fm-register.test.sh
-wake-ack-one-owner	L15	the wake-acknowledgement wording has exactly one emit/parse owner	test:tests/fm-wake-ack-lib.test.sh
+wake-content-one-owner	L15	the content wake rule has exactly one owner shared by signal triage and the heartbeat backstop	test:tests/fm-classify-span-wake.test.sh
 climb-one-owner	L11	parent-chain climbing has exactly one mechanical owner	test:tests/fm-proctree-lib.test.sh
-wake-durability	L15	queued wakes stay durable until their handling is acknowledged	test:tests/fm-wake-queue.test.sh
+wake-durability	L15	queued wakes stay durable until a drain presents them, and an open decision resurfaces on every drain until answered	test:tests/fm-wake-queue.test.sh
 open-decisions-fold	L62	open captain calls resurface from the durable status fold, not from memory	test:tests/fm-wake-drain-open-decisions.test.sh
 unread-status	L56	unread status lines are presented once and never silently dropped	test:tests/fm-wake-drain-unread-status.test.sh
 teardown-unlanded	HR3	teardown refuses while uncommitted or unlanded work exists	test:tests/fm-teardown.test.sh

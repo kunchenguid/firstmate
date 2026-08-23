@@ -196,8 +196,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-wake-ack-lib.sh
-. "$FM_DAEMON_DIR/fm-wake-ack-lib.sh"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
@@ -1769,7 +1767,7 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
+  local handled=0
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1788,16 +1786,12 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   done < "$out"
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
 
-  ack_through=$(fm_wake_ack_parse_through "$err")
-  ack_generation=$(fm_wake_ack_parse_generation "$err")
-  grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
+  # The drain consumes presented rows at presentation (U1.3); anything the
+  # per-row handling above missed stays durable in its own upstream record and
+  # in the folds the next drain prints.
+  cat "$err" >&2 || true
   rm -f "$out" "$err"
-  if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
-    log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
-    return 1
-  fi
-  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-    --recovery-generation "$ack_generation"
+  return 0
 }
 
 # --- log --------------------------------------------------------------------
@@ -2027,7 +2021,7 @@ fm_super_main() {
         fi
         log "wake: $reason"
         if ! handle_durable_wakes "$reason" "$STATE"; then
-          log "durable wake handling was not acknowledged; restarting for recovery"
+          log "durable wake drain failed; restarting for recovery"
         fi
         trim_log
       fi

@@ -45,19 +45,18 @@ No adapter starts a replacement with shell `&`.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
 
-## Recovery episode acknowledgement
+## Recovery episode retirement
 
-A recovery episode is one generation of `state/.watcher-down`, and it is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
-An unacknowledged downtime generation is announced at most once: the first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
-A non-successor watcher start after an announced-but-unacked episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
+A recovery episode is one generation of `state/.watcher-down`, and the drain retires it in the same invocation that consumes the episode's presented rows (consumption at presentation; the pre-U1.3 post-handling acknowledgement no longer exists).
+An unretired downtime generation is announced at most once: the first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
+A non-successor watcher start after an announced-but-unretired episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
 Every watcher close and every durable queue append publishes downtime, so a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
-That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and trapping later arms in repeated recovery presentation.
-An acknowledgement carries two separable facts: queue-row consumption is bound to the monotonic `--ack-through` sequence, while only retiring the episode is bound to `--recovery-generation`.
-A generation mismatch therefore does not block consumption of rows through that sequence; it is a non-fatal result that names its own remedy - re-drain, then acknowledge the newer episode.
-The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
-A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
-Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
-An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+Queue-row consumption is bound to the monotonic presented-sequence cutoff, while retiring the episode is bound to its generation: the drain retires the marker only when no rows remain after cutoff-bound consumption.
+A concurrently appended wake has a higher sequence, remains queued, and keeps an episode pending for its own presentation.
+A generation that moved mid-drain stays untouched: its rows arrived after the cutoff, and the next drain owns them.
+A drain interrupted before consumption leaves every presented row durable for an idempotent re-presentation.
+For content beyond the rows themselves, the delivery guarantee is carried by the drain's cursor-backed folds: a still-open decision re-appears in OPEN DECISIONS on every drain until an explicit resolution closes it, and each upstream obligation keeps its own durable record until its own receipt.
+A retired episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
 ## Arm-layer cycle contract
 
@@ -66,7 +65,7 @@ An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
-A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was presented and consumed, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.

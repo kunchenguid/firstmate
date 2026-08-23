@@ -1171,22 +1171,88 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
-# 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
-signal_reason_is_actionable() {  # <file> ...
-  local f last
-  for f in "$@"; do
-    [ -e "$f" ] || continue
-    case "$f" in *.status) ;; *) continue ;; esac
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
+# --- the content wake rule (U1.3: wake on content, never on the last line) ---
+#
+# A signal used to wake on the LAST status line's verb alone, which had two
+# failure shapes: a decision buried under a quick routine append never woke at
+# all, and a stale terminal leftover kept re-reading as current. The rule below
+# replaces that prefix test: a span of NEWLY APPENDED status lines wakes the
+# supervisor iff it carries actionable content. Decision lines go through the
+# same _fm_decision_fold_line rule status_open_decisions owns, so a decision
+# opened and closed inside one span is routine while one still open at span end
+# always wakes - the two consumers can never disagree on what is open. Routine
+# lines (working:, paused:, note:, resolutions of older decisions) never wake;
+# they bundle into the next presentation, whose UNREAD STATUS / OPEN DECISIONS
+# folds carry the delivery guarantee. Callers own their span cursor mechanics
+# (the watcher uses its .seen-* signature size, the heartbeat backstop the same);
+# this rule is pure text classification.
+
+# Print every non-blank line of <status-file> starting at byte <offset>. An
+# invalid or beyond-EOF offset reads the whole current file from byte 0 (the
+# recreated-file case must classify fresh content, never silently skip it).
+# Prints nothing on a missing, unreadable, or symlinked file, or on I/O failure.
+status_lines_from_offset() {  # <status-file> <offset>
+  local f=$1 offset=$2 size chunk_file line rc=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  size=$(_fm_status_file_size "$f") || return 0
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  [ "$offset" -le "$size" ] || offset=0
+  [ "$offset" -lt "$size" ] || return 0
+  chunk_file=$(mktemp "${TMPDIR:-/tmp}/fm-status-span.XXXXXX") || return 1
+  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
+    esac
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  return "$rc"
+}
+
+# Classify a span of newly appended status lines (stdin) for <kind>. Prints one
+# token:
+#   wake   - the span carries actionable content: a decision opened and still
+#            open at span end, a terminal or legacy captain-relevant line, or
+#            ANY non-blank line on a kind=secondmate stream (that stream is the
+#            mate's parent-directed reply channel, so every append is content
+#            the supervisor must read);
+#   bundle - only routine lines; present them at the next drain, no wake;
+#   none   - the span has no non-blank line at all.
+status_span_wake_class() {  # <kind>; span lines on stdin
+  local kind=${1:-} line verb open='' resolve held any=0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    any=1
+    if [ "$kind" = secondmate ]; then
+      printf 'wake'
+      return 0
+    fi
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+        ;;
+      *)
+        if status_is_captain_relevant "$line"; then
+          printf 'wake'
+          return 0
+        fi
+        ;;
+    esac
   done
-  return 1
+  if [ -n "$open" ]; then
+    printf 'wake'
+    return 0
+  fi
+  if [ "$any" -eq 1 ]; then printf 'bundle'; else printf 'none'; fi
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,

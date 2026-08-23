@@ -12,9 +12,11 @@
 # no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#   signal: <file>...      status/turn-end signals, surfaced when a listed
+#                          status file's newly appended CONTENT classifies as
+#                          wake (status_span_wake_class in fm-classify-lib.sh)
+#                          OR a routine-content signal's crew is not provably
+#                          working, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -65,8 +67,9 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#   heartbeat              fleet-scan backstop found unclassified actionable
+#                          content, or an open decision due its bounded
+#                          re-surface, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -678,6 +681,33 @@ scan_signals() {
   return 0
 }
 
+# Content triage for a changed-signal file list (U1.3: wake on content, never on
+# the last line's verb alone). 0 when any listed status file's newly appended
+# span - the bytes since this watcher's own .seen-* signature - classifies as
+# wake. The rule itself is owned by bin/fm-classify-lib.sh
+# (status_span_wake_class); this function owns only the span-cursor mechanics,
+# reusing the seen signature's recorded size as the already-classified byte
+# offset so no second cursor exists. Non-.status arguments (.turn-ended markers
+# carry no content) are skipped.
+signal_span_actionable() {  # <file> ...
+  local f prev offset kind span task
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    prev=$(cat "$(fm_wake_signal_seen_path "$STATE" "$f")" 2>/dev/null || true)
+    offset=${prev%%:*}
+    task=${f##*/}
+    task=${task%.status}
+    kind=$(grep '^kind=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    span=$(status_lines_from_offset "$f" "$offset") || span=''
+    [ -n "$span" ] || continue
+    if [ "$(printf '%s\n' "$span" | status_span_wake_class "$kind")" = wake ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -809,35 +839,32 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Surfaced-marker bookkeeping for the heartbeat backstop is owned by
-# fm-push-transition-lib.sh because push and poll paths must write one format.
-# Mark every current captain-relevant status as surfaced. Called after the
-# heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
-mark_all_captain_relevant_surfaced() {
-  local f task last
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-  done < <(scan_captain_relevant_statuses "$STATE")
-}
-
-# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# Content-rule heartbeat backstop (U1.3). 0 if either:
+#   - any status file's span since its .seen-* signature classifies as wake -
+#     content the signal path never classified, which only a crash or race can
+#     produce, caught here so it cannot rot;
+#   - or the fleet-wide open-decisions fold still carries an open decision and
+#     none has been re-surfaced for PAUSE_RESURFACE_SECS - the same bounded
+#     anti-rot cadence a declared pause gets, so a forgotten open decision
+#     re-wakes once per window instead of waiting silently for the next drain.
+# Pure detect, no side effects: the caller enqueues its heartbeat wake first,
+# then records the re-surface by touching the throttle marker. The fold call
+# reuses the drain's own presentation lock via a non-blocking try, so a drain
+# mid-presentation (which is itself about to print OPEN DECISIONS) skips the
+# duplicate re-surface instead of contending.
+OPEN_DECISIONS_RESURFACE_MARKER="$STATE/.last-open-decisions-resurface"
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
-  while IFS=$(printf '\t') read -r f task last; do
-    [ -n "$f" ] || continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
-    [ "$surfaced" = "$last" ] && continue
+  local open
+  if signal_span_actionable "$STATE"/*.status; then
     return 0
-  done < <(scan_captain_relevant_statuses "$STATE")
+  fi
+  if [ "$(age_of "$OPEN_DECISIONS_RESURFACE_MARKER")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    if fm_lock_try_acquire "$STATE/.status-presentation-lock"; then
+      open=$(scan_open_decisions_incremental "$STATE") || open=''
+      fm_lock_release "$STATE/.status-presentation-lock"
+      [ -n "$open" ] && return 0
+    fi
+  fi
   return 1
 }
 
@@ -1168,19 +1195,26 @@ EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    #   - the newly appended status CONTENT since this watcher's own seen
+    #     signature classifies as wake (signal_span_actionable above, rule owned
+    #     by bin/fm-classify-lib.sh's status_span_wake_class) - never the last
+    #     line's verb alone, so a decision buried under a quick routine append
+    #     still wakes and a stale terminal leftover no longer re-reads as new;
+    #   - or it is a routine-content wake (a bare turn-end, working: lines) whose
+    #     crew is NOT provably working - the crew stopped its turn with no
+    #     actively-running pipeline and no busy pane, so it may be done (even via
+    #     an interactive menu that wrote no done: status), waiting on a decision,
+    #     or wedged. Absorbing such a turn-end is exactly the swallowed-finish
+    #     this guard exists for.
+    # Actionable -> enqueue, advance .seen-* markers, exit. Routine content with
+    # a provably-working crew is BUNDLED: the markers advance so it will not
+    # re-fire, and the content reaches the next presentation's annotations and
+    # UNREAD STATUS sections instead of costing its own wake turn. The
+    # provably-working check is the only costly one (it may run a bounded
+    # no-mistakes call), so the || ordering evaluates it ONLY for a non-afk,
+    # routine-content signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_span_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1190,7 +1224,6 @@ EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
       done <<EOF
 $pending
 EOF
@@ -1202,7 +1235,7 @@ EOF
       done <<EOF
 $pending
 EOF
-      triage_log "absorbed benign $reason"
+      triage_log "absorbed routine $reason (bundled for the next presentation)"
     fi
   fi
 
@@ -1287,7 +1320,6 @@ EOF
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
@@ -1410,12 +1442,14 @@ EOF
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      # Backstop: unclassified actionable content, or an open decision due its
+      # bounded re-surface. Enqueue first, then advance the re-surface throttle
+      # so the next heartbeat does not re-fire it (enqueue-before-suppress
+      # preserved; the still-open decision itself keeps re-appearing on every
+      # drain until answered - the throttle bounds only the extra wake).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      date +%s > "$OPEN_DECISIONS_RESURFACE_MARKER"
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
