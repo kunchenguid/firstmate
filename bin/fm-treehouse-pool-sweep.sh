@@ -119,6 +119,7 @@ fi
 
 is_dirty() {
   local wt=$1
+  git -C "$wt" update-index -q --ignore-submodules --refresh >/dev/null 2>&1 || true
   if ! git -C "$wt" diff-index --quiet --ignore-submodules HEAD 2>/dev/null; then
     return 0
   fi
@@ -147,15 +148,6 @@ has_durable_refs() {
   [ "$count" -gt 0 ]
 }
 
-has_only_remote_refs() {
-  local wt=$1
-  local local_count remote_count
-  local_count=$(count_refs "$wt" 'refs/heads/')
-  local_count=$((local_count + $(count_refs "$wt" 'refs/tags/')))
-  remote_count=$(count_refs "$wt" 'refs/remotes/')
-  [ "$local_count" -eq 0 ] && [ "$remote_count" -gt 0 ]
-}
-
 head_covered_by_remotes() {
   local wt=$1
   local unremoted
@@ -170,7 +162,7 @@ check_head_reachable() {
   local wt=$1
   local unique_count
   if ! has_durable_refs "$wt"; then
-    if has_only_remote_refs "$wt" && head_covered_by_remotes "$wt"; then
+    if head_covered_by_remotes "$wt"; then
       return 3
     fi
     return 2

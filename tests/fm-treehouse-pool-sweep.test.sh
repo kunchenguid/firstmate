@@ -11,6 +11,12 @@ set -u
 
 SWEEP="$ROOT/bin/fm-treehouse-pool-sweep.sh"
 
+# The sweep resolves its config dir as FM_CONFIG_OVERRIDE, else $FM_HOME/config.
+# An ambient export of either would outrank the per-test FM_HOME below and make
+# these assertions read a config dir the fixture never wrote.
+unset FM_CONFIG_OVERRIDE
+unset FM_ROOT_OVERRIDE
+
 fm_create_bare_repo() {
   local path=$1
   mkdir -p "$path"
@@ -186,6 +192,30 @@ test_refuses_staged_change_restored_in_worktree() {
   pass "refuses an index that differs from HEAD even when the worktree matches HEAD"
 }
 
+# A pool worktree returned by teardown has fresh mtimes, so its index stat data
+# is stale while its content still matches HEAD. That is clean, not dirty, and
+# must agree with the `git status --porcelain` gate fm-spawn.sh applies later.
+test_allows_stat_dirty_but_clean_worktree() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-stat-dirty)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  printf 'content\n' > file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  touch -t 203001010101 file.txt
+  [ -z "$(git status --porcelain)" ] \
+    || fail "stat-dirty: fixture is genuinely dirty, not merely stat-dirty"
+
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "stat-dirty: expected exit 0 for a stat-only mtime change, got $rc"
+  pass "allows a stat-dirty worktree whose content matches HEAD"
+}
+
 test_refuses_untracked_files() {
   local tmp config_dir
   tmp=$(fm_test_tmproot sweep-untracked)
@@ -356,6 +386,33 @@ test_refuses_remote_only_refs() {
 
 # Exit 3 claims the commits survive on a remote-tracking ref. When the only refs
 # are remote but HEAD is not contained in any of them, the honest answer is 2.
+# With no refs at all, exit 3 must not be claimed: there is no remote-tracking
+# ref the commits could be recovered from.
+test_refuses_head_when_no_refs_exist_at_all() {
+  local tmp config_dir rc err
+  tmp=$(fm_test_tmproot sweep-no-refs)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  touch file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  head_commit=$(git rev-parse HEAD)
+  git checkout "$head_commit" 2>/dev/null
+  git branch -D main 2>/dev/null
+  [ -z "$(git for-each-ref --format='%(refname)')" ] \
+    || fail "no refs: fixture still has refs"
+
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "no refs: expected exit 2, got $rc"
+  assert_contains "$err" "not reachable from durable refs" \
+    "no refs: must not claim remote-tracking coverage"
+  pass "refuses HEAD as unreachable when no refs exist at all"
+}
+
 test_refuses_orphan_head_with_unrelated_remote_ref() {
   local tmp config_dir rc err
   tmp=$(fm_test_tmproot sweep-orphan-vs-remote)
@@ -486,6 +543,7 @@ test_config_override_activates_sweep
 test_refuses_dirty_worktree
 test_refuses_staged_changes
 test_refuses_staged_change_restored_in_worktree
+test_allows_stat_dirty_but_clean_worktree
 test_refuses_untracked_files
 test_allows_branch_reachable_head
 test_allows_tag_reachable_head
@@ -493,6 +551,7 @@ test_allows_detached_head_fully_in_main
 test_refuses_reflog_only_reachability
 test_historical_reproduction
 test_refuses_remote_only_refs
+test_refuses_head_when_no_refs_exist_at_all
 test_refuses_orphan_head_with_unrelated_remote_ref
 test_allows_with_local_branch
 test_refuses_when_reachability_cannot_be_computed
