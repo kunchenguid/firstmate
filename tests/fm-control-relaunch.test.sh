@@ -194,11 +194,13 @@ routing_sha_text() {
 }
 
 write_committed_routing_receipt() {
-  local dir=$1 id=$2 task_dir="$1/home/data/$2" brief receipt generation generation_dir
+  local dir=$1 id=$2 task_dir="$1/home/data/$2" brief intent receipt generation generation_dir
   brief="$task_dir/committed-brief.md"
   printf 'committed brief\n' > "$brief"
+  intent="$task_dir/routing-intent.json"
+  jq -cn --arg brief_hash "$(routing_sha_file "$brief")" '{brief_sha256: $brief_hash}' > "$intent"
   receipt="$task_dir/committed-receipt.json"
-  jq -cn --arg brief_hash "$(routing_sha_file "$brief")" '{brief_sha256: $brief_hash}' > "$receipt"
+  jq -cn --arg intent_hash "$(routing_sha_file "$intent")" '{intent_sha256: $intent_hash}' > "$receipt"
   generation=$(routing_sha_file "$receipt")
   generation_dir="$task_dir/routing-generation.$generation"
   mkdir "$generation_dir"
@@ -468,6 +470,33 @@ test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning() {
   assert_contains "$out" "prior routing generation is unavailable" \
     "relaunch did not warn that it stripped unavailable routing provenance"
   pass "fm-control relaunch: unavailable symlinked routing pointers are stripped together with a warning"
+}
+
+test_relaunch_drops_tampered_routing_brief_together_with_a_warning() {
+  local dir out rc receipt brief
+  dir=$(new_case tampered-routing-brief rl45)
+  add_ship_task "$dir" rl45 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl45)
+  brief="$(dirname "$receipt")/brief.md"
+  chmod 0600 "$brief"
+  printf 'tampered brief\n' > "$brief"
+  chmod 0400 "$brief"
+  [ -f "$brief" ] && [ ! -L "$brief" ] \
+    || fail "tampered brief counterexample did not satisfy the legacy regular-file test"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl45.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl45.meta"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continue without tampered provenance"); rc=$?
+  expect_code 0 "$rc" "unchanged relaunch with a tampered prior brief should still relaunch"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl45 routing_decision)" ] \
+    || fail "relaunch republished a receipt whose inherited brief bytes were tampered"
+  [ -z "$(meta_field "$dir" rl45 routing_brief)" ] \
+    || fail "relaunch republished a tampered routing brief"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped tampered routing provenance"
+  assert_grep "/exit" "$dir/fake/literal" \
+    "tampered routing provenance should not prevent the replacement relaunch"
+  pass "fm-control relaunch: tampered inherited brief provenance is stripped with a warning"
 }
 
 test_relaunch_drops_missing_routing_pointers_together_with_a_warning() {
@@ -1730,6 +1759,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_drops_missing_routing_pointers_together_with_a_warning
 test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning
+test_relaunch_drops_tampered_routing_brief_together_with_a_warning
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

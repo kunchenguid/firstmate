@@ -327,7 +327,7 @@ It is not enabled by `config/crew-dispatch.json`, an environment variable, or a 
 The authoritative configuration input is always `<FM_HOME>/config/crew-dispatch.json`, independently of `FM_CONFIG_OVERRIDE`.
 The receipt explicitly attests whether that canonical file is present or absent, so relocating configuration or removing a file changes the attested input and never removes the requirement.
 Fresh secondmate launches retain their separate provisioning, registry, host, and harness contract and do not consume this receipt.
-A flag-free same-route relaunch also stays exempt and preserves an existing non-symlink regular `routing_decision` pointer only when its task-scoped generation name matches the receipt bytes.
+A flag-free same-route relaunch also stays exempt and preserves an existing non-symlink regular `routing_decision` pointer only when its task-scoped generation name matches the receipt bytes, the receipt matches the current routing intent, and that intent matches the inherited brief bytes.
 Supplying any routing-axis flag is a fresh routing decision even when the supplied value equals the recorded value.
 
 Each covered task directory supplies `data/<task-id>/routing-intent.json` and `data/<task-id>/routing-decision.pending.json`.
