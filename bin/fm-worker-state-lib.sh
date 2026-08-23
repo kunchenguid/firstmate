@@ -108,8 +108,18 @@ fm_worker_state_render_line() {  # <record>
 # responses), could consume the response meant for the real capture or mask
 # its error text. The run-step and status-log tiers never touch a live
 # endpoint, so they are unaffected and still answer for free.
-fm_worker_state_project() {  # <id> [skip-live-probe]
-  local _fm_ws_id=$1 _fm_ws_skip_live=${2:-0}
+#
+# Optional third argument <precaptured-tail>: the raw pane text a
+# skip-live-probe=1 caller already captured for its own purposes (e.g.
+# bin/fm-peek.sh's raw stdout tail). When set, the Grok busy-check arm (the
+# ONLY tier that would otherwise need its own live capture) classifies busy
+# vs. idle from this text instead of skipping the check - recovering the true
+# state for a recordless Grok crew with no status log to fall back on, WITHOUT
+# a second live round trip, since it reuses the one capture the caller already
+# made. Absent (the default), that recordless/no-log case still cannot be
+# answered and reports unknown, exactly as when skip-live-probe alone is set.
+fm_worker_state_project() {  # <id> [skip-live-probe] [precaptured-tail]
+  local _fm_ws_id=$1 _fm_ws_skip_live=${2:-0} _fm_ws_tail=${3-}
   (
   # bin/fm-crew-state.sh's original body relies on plain (non-erroring) greps
   # and pipelines returning nonzero as ordinary control flow (no match found,
@@ -279,6 +289,13 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
     if [ "$_fm_ws_skip_live" != 1 ]; then
       case "$HARNESS" in
         grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
+      esac
+    elif [ -n "$_fm_ws_tail" ]; then
+      # The caller already made its own live capture (see this function's
+      # header and fm_worker_state_project's <precaptured-tail> doc above) -
+      # reuse it instead of asking fm_busy_classify to skip the check.
+      case "$HARNESS" in
+        grok*) tail40=$_fm_ws_tail ;;
       esac
     fi
     fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40" "$_fm_ws_skip_live"
@@ -662,7 +679,9 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
   # into fm_busy_classify, which gates its own live paths (grok's isolated
   # tail fallback, and the no-record herdr-native fm_backend_busy_state check)
   # on it, so this tier still answers for free whenever a semantic record
-  # exists and otherwise reports unknown rather than paying for a live probe.
+  # exists and otherwise reports unknown rather than paying for a live probe -
+  # UNLESS the caller also passed a <precaptured-tail>, in which case Grok's
+  # tail check answers from that instead of skipping.
   if [ "$_fm_ws_skip_live" != 1 ]; then
     pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
   fi

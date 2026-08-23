@@ -19,6 +19,14 @@
 #       remote-secondmate state check, and the grok fallback capture - not
 #       just pane_readable - so none of those three live round trips doubles
 #       up with peek's own capture either
+#   (f) a caller that also supplies a precaptured tail alongside skip-live
+#       recovers a recordless, log-less grok worker's real state from that
+#       text instead of leaving it unknown
+#   (g) bin/fm-peek.sh actually wires (f) end to end: its own raw capture is
+#       what the projection annotation reads, so peek and crew-state cannot
+#       structurally disagree even in that recordless/log-less case, and
+#       peek still makes exactly one live call and prints an unchanged raw
+#       capture on stdout
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -279,7 +287,10 @@ test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance() {
   # No busy record, no no-mistakes run, and (unlike
   # test_skip_live_grok_falls_back_to_status_log) no status log either: for a
   # recordless grok worker the live pane tail is the ONLY source of truth, so
-  # this is the case the skip-live/status-log fallback above can never answer.
+  # this is the case the skip-live/status-log fallback above cannot answer
+  # WITHOUT a precaptured tail (see
+  # test_skip_live_grok_precaptured_tail_resolves_no_status_log below for the
+  # case where the caller supplies one, as bin/fm-peek.sh now does).
   capture_log="$d/grok-capture.log"; : > "$capture_log"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
   fm_backend_capture() { printf '%s\n' "$*" >> "$capture_log"; printf 'Ctrl+c:cancel\n'; }
@@ -290,11 +301,11 @@ test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance() {
   assert_contains "$record_live" $'\nstate=working' "sanity: without skip-live, grok's busy tail reports working"
   assert_contains "$record_live" $'\nsource=pane' "sanity: without skip-live, the pane tier answers"
 
-  # With skip-live (fm-peek.sh), the grok arm never makes its own capture and
-  # there is no status log to fall back to, so the projection cannot recover
-  # the true state. It must still report source=pane with a detail naming the
-  # skipped probe - never source=none, which would claim no source existed at
-  # all rather than one that was deliberately not read.
+  # With skip-live and no precaptured tail, the grok arm never makes its own
+  # capture and there is no status log to fall back to, so the projection
+  # cannot recover the true state. It must still report source=pane with a
+  # detail naming the skipped probe - never source=none, which would claim no
+  # source existed at all rather than one that was deliberately not read.
   record_skip=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-groknolog 1)
   assert_contains "$record_skip" $'\nstate=unknown' "skip-live grok with no status log cannot recover the true state"
   assert_contains "$record_skip" $'\nsource=pane' "skip-live grok's unresolved unknown still carries pane provenance, not source=none"
@@ -306,6 +317,83 @@ test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance() {
   pass "skip-live grok with no corroborating status log reports unknown with pane provenance, not source=none"
 }
 
+# --- (f) a precaptured tail lets skip-live recover the case (e) above cannot -
+
+test_skip_live_grok_precaptured_tail_resolves_no_status_log() {
+  local d fb capture_log record_skip
+  d=$(new_case skip-live-grok-precaptured); fb=$(make_fake_tmux "$d")
+  make_repo_on_branch "$d/wt" fm/feat-grokprecap
+  fm_write_meta "$d/state/feat-grokprecap.meta" "window=fm:fm-feat-grokprecap" "worktree=$d/wt" "kind=scout" "harness=grok"
+  # Same unrecoverable setup as the no-precaptured-tail case above (no record,
+  # no run, no status log) - the only difference is the caller (bin/fm-peek.sh)
+  # already made its own live capture and passes it through as the third
+  # argument instead of leaving the grok arm to skip the check.
+  capture_log="$d/grok-capture.log"; : > "$capture_log"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify if this fires, the tail was NOT reused
+  fm_backend_capture() { printf '%s\n' "$*" >> "$capture_log"; printf 'Ctrl+c:cancel\n'; }
+
+  record_skip=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-grokprecap 1 $'thinking...\nCtrl+c:cancel')
+  assert_contains "$record_skip" $'\nstate=working' "a precaptured busy tail resolves the same state a live tail would have"
+  assert_contains "$record_skip" $'\nsource=pane' "the precaptured tail still answers from the pane tier"
+  [ "$(wc -l < "$capture_log" | tr -d ' ')" = 0 ] \
+    || fail "a precaptured tail must not trigger the grok arm's own fallback live capture, got:"$'\n'"$(cat "$capture_log")"
+
+  unset -f fm_backend_capture
+  pass "a precaptured tail lets skip-live recover a recordless grok worker's true state without a second live capture"
+}
+
+# --- (g) end to end: bin/fm-peek.sh actually reuses its own raw capture -----
+
+# A fake tmux whose capture-pane answers with Grok's default busy signature
+# ("Ctrl+c:cancel") rather than make_fake_tmux's generic busy text, so a real
+# fm-peek.sh/fm-crew-state.sh invocation exercises the grok tail-busy check.
+make_fake_tmux_grok() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'thinking...\nCtrl+c:cancel\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+test_peek_reuses_its_own_capture_to_resolve_recordless_grok_worker() {
+  local d fb tmux_log crew_out peek_err peek_out peek_annotation
+  d=$(new_case peek-grok-precaptured); fb=$(make_fake_tmux_grok "$d")
+  make_repo_on_branch "$d/wt" fm/feat-grokpeek
+  fm_write_meta "$d/state/feat-grokpeek.meta" "window=fm:fm-feat-grokpeek" "worktree=$d/wt" "kind=scout" "harness=grok"
+  # No busy record, no no-mistakes run, no status log: the live pane tail is
+  # the only source of truth, exactly the case
+  # test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance
+  # documents as unrecoverable when no precaptured tail is available.
+
+  tmux_log="$d/crew-tmux.log"; : > "$tmux_log"
+  crew_out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_LOG="$tmux_log" "$CREW_STATE" feat-grokpeek)
+  assert_contains "$crew_out" "state: working" "sanity: crew-state's own live tail capture sees the grok busy signature"
+  assert_contains "$crew_out" "source: pane" "sanity: crew-state answers from the pane tier"
+
+  tmux_log="$d/peek-tmux.log"; : > "$tmux_log"
+  peek_out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_LOG="$tmux_log" "$PEEK" feat-grokpeek 5 2>"$d/peek.err")
+  peek_err=$(cat "$d/peek.err")
+  peek_annotation=$(printf '%s\n' "$peek_err" | grep '^state: ')
+
+  [ "$peek_annotation" = "$crew_out" ] \
+    || fail "peek's annotation should reuse its own raw capture to resolve the same state crew-state reports, not report unknown"$'\n'"crew-state: $crew_out"$'\n'"peek:       $peek_annotation"
+  [ "$peek_out" = "$(printf 'thinking...\nCtrl+c:cancel')" ] \
+    || fail "peek's stdout must stay the exact raw pane capture regardless of the projection annotation, got '$peek_out'"
+  [ "$(wc -l < "$tmux_log" | tr -d ' ')" = 1 ] \
+    || fail "peek should make exactly 1 live tmux call (its own raw capture, reused for the projection), got:"$'\n'"$(cat "$tmux_log")"
+
+  pass "fm-peek.sh reuses its own raw capture to resolve a recordless grok worker's state instead of leaving it unknown"
+}
+
 test_record_carries_source_and_computed_at
 test_render_line_matches_documented_shape
 test_render_line_omits_empty_detail
@@ -313,8 +401,10 @@ test_crew_state_and_peek_report_byte_identical_lines
 test_peek_skips_the_live_probe_crew_state_still_makes
 test_skip_live_grok_falls_back_to_status_log
 test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance
+test_skip_live_grok_precaptured_tail_resolves_no_status_log
 test_skip_live_skips_herdr_native_busy_probe
 test_skip_live_skips_remote_secondmate_state_probe
 test_skip_live_skips_grok_fallback_capture
+test_peek_reuses_its_own_capture_to_resolve_recordless_grok_worker
 
 echo "all fm-worker-state-lib tests passed"

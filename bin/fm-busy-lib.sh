@@ -843,7 +843,11 @@ fm_busy_grok_tail_busy() {
 # live-probe-skipped instead) - a caller that is about to make its own live
 # capture moments later (bin/fm-peek.sh) passes this to avoid doubling the
 # live backend round-trip, mirroring bin/fm-worker-state-lib.sh's own
-# skip-live-probe tier.
+# skip-live-probe tier. A caller that PASSES <tail40> even under
+# skip-live-probe=1 (bin/fm-worker-state-lib.sh's crew_busy_verdict does this
+# with its own <precaptured-tail> argument) gets a real busy/idle verdict from
+# that text instead of live-probe-skipped, reusing the one capture the caller
+# already made rather than paying for a second one.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [skip-live-probe]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} skip_live=${7:-0}
   local out rc r_state r_source native log
