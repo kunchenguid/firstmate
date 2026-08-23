@@ -18,9 +18,10 @@
 # legal), and the terminal receives only one short constant self-describing
 # doorbell line plus Enter, best-effort. Exit 0 = the steer is durably sent
 # (recorded); nonzero = a real local failure (unresolvable target, unwritable
-# record, or failed decision-close append). Once the record exists, later
-# bookkeeping trouble is reported as do-not-resend operator recovery, never as
-# a retryable send failure. There is no delivered-unconfirmed
+# record, failed decision-close append, or pending-reply bookkeeping for which
+# neither the commit nor its recovery marker could be written - the error then
+# says the record is already durable and must not be blindly resent). There is
+# no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously by the
 # worker's acknowledgement move into handled/, with the watcher re-ringing an
@@ -576,18 +577,6 @@ else
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
-  # Parser-native local invocations remain on the typed plane. Their / or $
-  # must stay at byte zero; secondmate routing metadata is therefore appended
-  # rather than prepended. The remote leg is deliberately unchanged.
-  LOCAL_PARSER_NATIVE=0
-  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
-    case "$RESOLVE_ANSWER_TEXT" in
-      /*) LOCAL_PARSER_NATIVE=1 ;;
-      \$*)
-        if [ "$TARGET_HARNESS" = codex ]; then LOCAL_PARSER_NATIVE=1; fi
-        ;;
-    esac
-  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -605,11 +594,7 @@ else
         || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
       PENDING_REPLY_CREATED=1
     fi
-    if [ "$LOCAL_PARSER_NATIVE" = 1 ]; then
-      fm_pending_reply_append_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
-    else
-      fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
-    fi
+    fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
     if [ "$PENDING_REPLY_CREATED" != 1 ] \
       && fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
       echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
@@ -633,9 +618,12 @@ else
   # Classification reads the pre-marker text so a marked secondmate request
   # and a plain crewmate steer classify identically.
   INBOX_PLANE=0
-  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ] \
-    && [ "$LOCAL_PARSER_NATIVE" = 0 ]; then
-    INBOX_PLANE=1
+  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
+    case "$RESOLVE_ANSWER_TEXT" in
+      /*) ;;
+      \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+      *) INBOX_PLANE=1 ;;
+    esac
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -683,9 +671,12 @@ else
         if [ "$delivery_commit_status" = 2 ]; then
           echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
         else
-          # The inbox record is already durable, so failure here must never
-          # advertise a retryable send failure (which would duplicate work).
-          echo "warning: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery bookkeeping could not be completed. Do not resend; inspect $STATE manually." >&2
+          # Both the commit and its recovery marker failed: no durable owner
+          # is left to reconcile the expectation, so this is a real local
+          # failure. The record itself stays durable, and the error says so -
+          # a caller must inspect, never blindly resend.
+          echo "error: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+          exit 1
         fi
       fi
     fi

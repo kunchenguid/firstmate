@@ -269,7 +269,10 @@ SH
   chmod +x "$dir/fakebin/mv"
 
   run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"; rc=$?
-  expect_code 0 "$rc" "post-enqueue bookkeeping failure must not invite a duplicate retry"
+  # When the commit AND its recovery marker both fail, no durable owner is left
+  # to reconcile the expectation, so the send is a loud local failure - while
+  # the error names the already-durable record and forbids a blind resend.
+  [ "$rc" -ne 0 ] || fail "a bookkeeping failure with no surviving recovery marker must exit nonzero"
   rec="$dir/home/state/domain.inbox/001.msg"
   [ -f "$rec" ] || fail "bookkeeping failure test did not durably enqueue the steer"
   body=$(record_body _ "$rec")
@@ -279,7 +282,9 @@ SH
   esac
   assert_contains "$(cat "$err")" "Do not resend" \
     "post-enqueue bookkeeping failure should give explicit operator recovery guidance"
-  pass "fm-send inbox: post-enqueue bookkeeping failure cannot signal a duplicate-producing retry"
+  assert_contains "$(cat "$err")" "was recorded at" \
+    "the failure should name the already-durable record so nobody re-enqueues it"
+  pass "fm-send inbox: a total bookkeeping failure is loud, names the durable record, and forbids a blind resend"
 }
 
 test_meta_lock_contention_fails_bounded() {

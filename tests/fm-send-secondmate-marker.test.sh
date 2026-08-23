@@ -16,9 +16,7 @@
 #   3. Explicit endpoints stay unmarked and typed, with or without local meta.
 #   4. The --key path never carries the marker and never enqueues a record.
 #   5. Direct captain text stays unmarked, and already-marked text is idempotent.
-#   6. Parser-native secondmate invocations keep / or $ at byte zero while
-#      retaining the marker and correlation token after the invocation.
-#   7. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
+#   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -158,34 +156,6 @@ test_exact_secondmate_task_id_is_marked() {
   pass "fm-send: an exact kind=secondmate task id is marked with corr exactly once"
 }
 
-test_parser_native_secondmate_invocations_keep_their_prefix() {
-  local dir fb log home rc got skill=\$no-mistakes
-  dir="$TMP_ROOT/sm-parser-native"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_home sm-parser-native)
-
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha claude
-  run_send "$fb" "$home" "$log" domain "/audit the ledger"; rc=$?
-  expect_code 0 "$rc" "slash invocation to a secondmate should succeed"
-  got=$(cat "$log")
-  case "$got" in
-    "/audit the ledger ${FM_FROMFIRST_MARK}"corr=[a-f0-9]*) : ;;
-    *) fail "slash invocation lost its parser prefix or secondmate routing metadata: $got" ;;
-  esac
-  [ ! -d "$home/state/domain.inbox" ] || fail "slash invocation must stay on the typed plane"
-
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha codex
-  run_send "$fb" "$home" "$log" domain "$skill"; rc=$?
-  expect_code 0 "$rc" "Codex skill invocation to a secondmate should succeed"
-  got=$(cat "$log")
-  case "$got" in
-    "$skill ${FM_FROMFIRST_MARK}"corr=[a-f0-9]*) : ;;
-    *) fail "Codex skill invocation lost its parser prefix or secondmate routing metadata: $got" ;;
-  esac
-  [ ! -d "$home/state/domain.inbox" ] || fail "Codex skill invocation must stay on the typed plane"
-  pass "fm-send: parser-native secondmate invocations retain byte-zero prefixes and routing metadata"
-}
-
 test_crewmate_target_is_not_marked() {
   local dir fb log home rc got
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
@@ -300,7 +270,6 @@ test_marked_send_preserves_trailing_newlines() {
 
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
-test_parser_native_secondmate_invocations_keep_their_prefix
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked

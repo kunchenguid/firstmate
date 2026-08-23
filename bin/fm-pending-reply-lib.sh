@@ -231,16 +231,6 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
   printf -v "$result_var" '%s' "${FM_FROMFIRST_MARK}${token} ${body}"
 }
 
-# Add the same owned marker+corr framing after a parser-native invocation.
-# Keeping / or $ as byte zero is required for the harness parser; ordinary
-# secondmate messages continue to use fm_pending_reply_embed_corr above.
-fm_pending_reply_append_corr() {  # <message> <corr_id> <result-var>
-  local message=$1 corr=$2 result_var=$3 token
-  [ -n "$result_var" ] || return 2
-  token=$(fm_pending_reply_corr_token "$corr")
-  printf -v "$result_var" '%s' "${message} ${FM_FROMFIRST_MARK}${token}"
-}
-
 # Create a durable pending-reply expectation. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
 fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
