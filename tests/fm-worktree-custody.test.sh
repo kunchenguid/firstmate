@@ -93,6 +93,34 @@ test_two_homes_configure_distinct_pool_roots() {
   pass "two homes configure distinct roots outside their primary clones"
 }
 
+test_legacy_hash_collision_homes_resolve_distinct_pool_roots() {
+  local parent_a=/private/tmp/fm-home-collision-8782
+  local parent_b=/private/tmp/fm-home-collision-68310
+  local home_a="$parent_a/home" home_b="$parent_b/home"
+  local base="$TMP_ROOT/collision-base" status
+  if [ ! -d /private/tmp ] || [ ! -w /private/tmp ]; then
+    printf 'skip - exact canonical collision paths are unavailable on this platform\n'
+    return 0
+  fi
+
+  (
+    [ ! -e "$parent_a" ] && [ ! -L "$parent_a" ] || exit 2
+    [ ! -e "$parent_b" ] && [ ! -L "$parent_b" ] || exit 2
+    trap 'rmdir "$home_a" "$home_b" "$parent_a" "$parent_b" 2>/dev/null || true' EXIT
+    mkdir "$parent_a" "$parent_b" || exit 3
+    mkdir "$home_a" "$home_b" || exit 3
+    root_a=$(FM_HOME="$home_a" FM_POOL_ROOT_BASE="$base" "$POOL_ROOT_BIN" --print) \
+      || exit 4
+    root_b=$(FM_HOME="$home_b" FM_POOL_ROOT_BASE="$base" "$POOL_ROOT_BIN" --print) \
+      || exit 4
+    [ "$root_a" != "$root_b" ] || exit 5
+  )
+  status=$?
+  expect_code 0 "$status" \
+    "the exact homes sharing legacy prefix 5edc853f must resolve distinct pool roots"
+  pass "full home identities separate the exact legacy hash collision"
+}
+
 test_literal_pool_root_override_is_refused() {
   local case_dir shared out_a out_b status_a status_b
   case_dir=$(make_two_homes_one_project literal-root-refused)
@@ -1289,6 +1317,7 @@ SH
 }
 
 test_two_homes_configure_distinct_pool_roots
+test_legacy_hash_collision_homes_resolve_distinct_pool_roots
 test_literal_pool_root_override_is_refused
 test_pool_root_refuses_to_write_inside_the_primary_clone
 test_relative_pool_root_base_is_refused_before_mutation

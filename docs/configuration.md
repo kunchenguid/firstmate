@@ -212,7 +212,7 @@ Crewmate and scout worktrees come from a treehouse pool, and treehouse keys a po
 Two firstmate homes that clone the same project would therefore draw from one pool while neither can see the other's task records, so each home gives its dispatches a pool of their own instead.
 `bin/fm-pool-root.sh` owns that derivation and creates a generated Git config view under the canonical home's `state/treehouse-config/`; `bin/fm-spawn.sh` runs the unwrapped `treehouse get` from that view before every crewmate or scout worktree is acquired.
 The view points Git at the same backing repository and carries the home-specific Treehouse root, while the captain's primary project checkout, its `treehouse.toml`, and its Git exclusion metadata remain untouched.
-By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<short hash of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
+By default a home's pool root is `$HOME/.treehouse-homes/<home-directory-name>-<full SHA-256 of the home's real path>`, and treehouse places the pool itself under `<root>/.treehouse/`.
 `FM_POOL_ROOT_BASE` moves the directory those per-home roots live in while preserving the mandatory per-home suffix.
 The legacy literal `FM_POOL_ROOT` override is refused because the same inherited value could make multiple homes share a pool.
 The separation applies only to worktrees leased from that point on; reconfiguration never moves, resets, returns, invalidates, or recycles a worktree already leased.

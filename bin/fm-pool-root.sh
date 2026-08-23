@@ -57,6 +57,27 @@ short_hash() {  # <string>
   fi
 }
 
+full_hash() {  # <string>
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$1" | shasum -a 256) || return 1
+    digest=${digest%% *}
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$1" | sha256sum) || return 1
+    digest=${digest%% *}
+  elif command -v node >/dev/null 2>&1; then
+    digest=$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$1") \
+      || return 1
+  else
+    return 1
+  fi
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  printf '%s' "$digest"
+}
+
 # This home's own pool root. Keyed on FM_HOME - the home that owns the
 # state/<id>.meta records naming each leased copy - rather than on the code
 # root, because two homes sharing one code root would still double-claim.
@@ -65,7 +86,7 @@ canonical_home() {
 }
 
 pool_root() {
-  local home base name
+  local home base name namespace
   [ -z "${FM_POOL_ROOT:-}" ] \
     || die "FM_POOL_ROOT cannot preserve per-home isolation; use FM_POOL_ROOT_BASE"
   home=$(canonical_home) \
@@ -81,7 +102,9 @@ pool_root() {
   esac
   name=$(basename "$home")
   [ -n "$name" ] && [ "$name" != / ] || name=home
-  printf '%s/%s-%s' "$base" "$name" "$(short_hash "$home")"
+  namespace=$(full_hash "$home") \
+    || die "cannot derive a collision-resistant namespace for FM_HOME '$home'"
+  printf '%s/%s-%s' "$base" "$name" "$namespace"
 }
 
 canonical_intended_path() {  # <path>
