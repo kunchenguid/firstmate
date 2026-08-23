@@ -25,6 +25,10 @@
 #   (g) a project whose default branch was advanced by some other means, with
 #       no matching provenance record, reads unattributed
 #   (h) a refused (diverged) local-only merge writes no provenance record
+#   (i) the head recorded is the one GitHub actually merged, not a snapshot
+#       read before the merge call that a concurrent push could make stale
+#   (j) a local-only merge stays attributed after later, unrelated commits
+#       land on the default branch - the recorded merge itself never moves
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -227,6 +231,66 @@ test_failed_github_merge_writes_no_provenance() {
   pass "a failed gh-axi merge writes no provenance record"
 }
 
+# add_gh_mock_head_changes_during_merge <case_dir> <old_head> <new_head>: a gh
+# mock that answers headRefOid from a file, and a gh-axi mock whose "pr merge"
+# call flips that file to new_head before returning success - simulating a
+# push landing exactly in the window between fm-pr-merge.sh's merge call and
+# any head read, so a head read taken BEFORE the merge call would record the
+# stale old_head instead of what GitHub actually merged.
+add_gh_mock_head_changes_during_merge() {
+  local case_dir=$1 old_head=$2 new_head=$3
+  printf '%s\n' "$old_head" > "$case_dir/live-head"
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+case "\${1:-} \${2:-}" in
+  "pr merge") printf '%s\n' '$new_head' > '$case_dir/live-head' ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) cat '$case_dir/live-head' ; exit 0 ;;
+      *) printf 'MERGED\n' ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  : > "$case_dir/gh-axi.log"
+}
+
+test_github_merge_records_head_actually_merged_not_a_pre_merge_snapshot() {
+  local case_dir rc out old_head new_head
+  case_dir=$(make_pr_case github-race)
+  old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  new_head=cccccccccccccccccccccccccccccccccccccccc
+  add_gh_mock_head_changes_during_merge "$case_dir" "$old_head" "$new_head"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/merge.out" 2> "$case_dir/merge.err" \
+    || fail "github-race: fm-pr-merge should have succeeded: $(cat "$case_dir/merge.err")"
+
+  assert_present "$case_dir/state/task-x1.merge-provenance" \
+    "github-race: no provenance record was written after a successful merge"
+  grep -q "$old_head" "$case_dir/state/task-x1.merge-provenance" \
+    && fail "github-race: provenance recorded the pre-merge head instead of what was actually merged"
+  grep -q "$new_head" "$case_dir/state/task-x1.merge-provenance" \
+    || fail "github-race: provenance did not record the head actually merged"
+
+  set +e
+  out=$(run_attribution "$case_dir" task-x1 2> "$case_dir/attr.err")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "github-race: attribution check should exit 0"
+  assert_contains "$out" "attributed:" "github-race: verdict was not attributed: $out"
+  pass "fm-pr-merge records the head actually merged, not a stale pre-merge snapshot"
+}
+
 # --- local-only ---------------------------------------------------------
 
 # make_local_case <name>: a real project git repo on its default branch, a
@@ -301,6 +365,33 @@ test_local_only_advance_without_recorded_path_is_unattributed() {
   pass "a local default-branch advance with no recorded-path provenance reads unattributed"
 }
 
+test_local_only_stays_attributed_after_default_branch_advances() {
+  local case_dir rc out proj
+  case_dir=$(make_local_case local-attributed-ages-well)
+  proj="$case_dir/project"
+
+  run_merge_local "$case_dir" task-x1 > "$case_dir/merge.out" 2> "$case_dir/merge.err" \
+    || fail "local-ages-well: fm-merge-local should have succeeded: $(cat "$case_dir/merge.err")"
+
+  # The default branch keeps moving after this task's own merge landed - some
+  # unrelated later commit lands on top, exactly like real fleet activity.
+  # Comparing against the default branch's live tip would make this stale the
+  # instant that later commit lands; the recorded merge itself never changes.
+  printf 'later\n' > "$proj/later.txt"
+  git -C "$proj" add later.txt
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "unrelated later change"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ATTRIBUTION" task-x1 2> "$case_dir/attr.err")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "local-ages-well: attribution check should still exit 0 after later commits land"
+  assert_contains "$out" "attributed:" "local-ages-well: verdict was not attributed: $out"
+  pass "a local-only merge stays attributed after later default-branch commits land"
+}
+
 test_refused_local_only_merge_writes_no_provenance() {
   local case_dir rc proj
   case_dir=$(make_local_case local-diverged)
@@ -326,6 +417,8 @@ test_github_merge_without_provenance_is_unattributed
 test_github_merge_with_stale_provenance_is_unattributed
 test_github_open_pr_is_unmerged_not_unattributed
 test_failed_github_merge_writes_no_provenance
+test_github_merge_records_head_actually_merged_not_a_pre_merge_snapshot
 test_local_only_merge_via_recorded_path_is_attributed
 test_local_only_advance_without_recorded_path_is_unattributed
+test_local_only_stays_attributed_after_default_branch_advances
 test_refused_local_only_merge_writes_no_provenance

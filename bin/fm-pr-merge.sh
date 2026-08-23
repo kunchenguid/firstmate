@@ -258,16 +258,19 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    # Read live, right before merging, exactly like the GitLab head below: the
-    # head this run is about to merge, not whatever fm-pr-check.sh happened to
-    # resolve whenever the poll was last armed. Absent gh, or an unreadable
-    # head, is not a merge failure - it only means this merge cannot be stamped
-    # with provenance and will read as unattributed afterwards.
+    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    # Read live, right after merging, not before: GitHub has no equivalent of
+    # the GitLab path's --sha binding below, so a head read before the merge
+    # call can be stale by the time gh-axi actually merges (a push landing in
+    # that window would be merged under a head this run never recorded).
+    # Reading straight after the merge call returns keeps the recorded head
+    # matched to what GitHub actually merged. Absent gh, or an unreadable
+    # head, is not a merge failure - it only means this merge cannot be
+    # stamped with provenance and will read as unattributed afterwards.
     GH_MERGE_HEAD=
     if command -v gh > /dev/null 2>&1; then
       GH_MERGE_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2> /dev/null) || GH_MERGE_HEAD=
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
     if fm_pr_head_valid "$GH_MERGE_HEAD"; then
       fm_merge_prov_write "$STATE" "$ID" pr-github github "$URL" "$GH_MERGE_HEAD" \
         || echo "warning: merge succeeded but its provenance record could not be written; it will read as unattributed" >&2

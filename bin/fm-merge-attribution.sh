@@ -116,5 +116,10 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$BRANCH" "$DEFAULT" 2> /dev/null; 
   printf 'unmerged: %s is not merged into %s\n' "$BRANCH" "$DEFAULT"
   exit 2
 fi
-LOCAL_HEAD=$(git -C "$PROJ" rev-parse "$DEFAULT")
+# The branch's own tip, not the default branch's live tip: a fast-forward
+# leaves them equal at merge time, but the default branch keeps moving as
+# later work lands while the already-merged branch ref does not, so comparing
+# against its live tip would make an old, genuinely recorded-path merge read
+# unattributed the moment anything else merges after it.
+LOCAL_HEAD=$(git -C "$PROJ" rev-parse "$BRANCH")
 report_attribution local-only "" "" "$LOCAL_HEAD"
