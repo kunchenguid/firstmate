@@ -158,6 +158,13 @@ repair_line() {
   esac
 }
 
+drain_ack_stanza() {
+  # shellcheck disable=SC2016  # Backticked script and token names are literal instruction text.
+  printf '%s\n' '- Drain first with `bin/fm-wake-drain.sh`.'
+  # shellcheck disable=SC2016  # Backticked flag and token names are literal instruction text.
+  printf '%s\n' '  After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.'
+}
+
 ordinary_wake_line() {
   case "$HARNESS" in
     claude)
@@ -209,6 +216,7 @@ if [ "$X_MODE" -eq 1 ]; then
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
+drain_ack_stanza
 ordinary_wake_line
 printf '\n'
 render_snippet
