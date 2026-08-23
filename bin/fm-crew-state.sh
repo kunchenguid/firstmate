@@ -144,6 +144,15 @@ WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 [ -n "$KIND" ] || KIND=ship
+# Bind the no-mistakes run root from the per-task metadata (finding 2) so this
+# observer queries the exact root the worker uses. A task with no nm_home binding
+# predates the per-home isolation rollout and is observed at the legacy shared
+# root ($HOME/.no-mistakes) so its parked run never disappears. The helper lives
+# in bin/fm-nm-run-lib.sh, the one owner of the run-root attribution rule.
+if ! NM_HOME=$(fm_nm_home_for_meta "$META"); then
+  emit unknown metadata "invalid or duplicate nm_home binding"
+fi
+export NM_HOME
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then

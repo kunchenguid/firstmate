@@ -23,6 +23,10 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
+# Pin the repo root to the code under test so an ambient FM_ROOT_OVERRIDE (e.g. an
+# installed firstmate on the host) cannot redirect fm-brief.sh to a different
+# tree and make the scaffolded brief disagree with the worktree's prose.
+export FM_ROOT_OVERRIDE="$ROOT"
 
 test_crewmate_brief_explains_session_lock_scope() {
   local kind id rule

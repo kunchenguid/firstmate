@@ -579,9 +579,10 @@ IFS= read -r -d '' SCOUT_RULES_3_TO_7 <<EOF || true
    When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` using the same key that was opened.
    A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
    \`done\` records work completion and never closes a decision key.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
+   Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
+   default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
+   \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 EOF
 SCOUT_RULES_3_TO_7=${SCOUT_RULES_3_TO_7%$'\n'}
 
@@ -914,9 +915,10 @@ $RULE1
    When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` using the same key that was opened.
    A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
    \`done\` records work completion and never closes a decision key.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
+   Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
+   default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
+   \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 $HEAVY_SUITE_RULE$CHECKS_RULE
 
 # Engineering bar

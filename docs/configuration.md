@@ -222,6 +222,27 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## No-mistakes home (`$FM_HOME/.no-mistakes` / `NM_HOME`)
+
+By default, each firstmate home owns its private `no-mistakes` run root at `$FM_HOME/.no-mistakes`, so a home's parked pipeline runs and reviewer config stay under that home's boundary rather than a single shared root.
+`bin/fm-nm-run-lib.sh` is the one owner of the run-root attribution rule; `fm_nm_home` resolves the effective root and `fm_nm_prepare_home` prepares it.
+
+**Precedence.** An explicit operator `NM_HOME` is authoritative and wins over the home-owned default; when `NM_HOME` is unset, the root is `$FM_HOME/.no-mistakes` (or `$HOME/.no-mistakes` when `FM_HOME` is unset), resolved through the same `FM_HOME` fallback as the rest of the operational home.
+`fm-spawn.sh` resolves the root once at intake for a `no-mistakes` ship, prepares the home-owned default while leaving an explicit operator root caller-managed, and carries the resolved, shell-quoted value across the pane process boundary as a prefix assignment on the literal launch command (the same verified channel that ships `CLAUDE_CONFIG_DIR` and `GIT_CONFIG_COUNT`), so the worker process and every child it spawns - including its own `no-mistakes` calls - inherit the exact root the observer queries.
+The prefix assignment is omitted for the raw-launch escape hatch, where the caller owns the launch command and environment verbatim; secondmates do not create no-mistakes ships or bindings.
+
+**Per-task binding.** `fm-spawn.sh` records `nm_home=<root>` in `state/<id>.meta` for a `no-mistakes` ship at spawn time.
+`fm-crew-state.sh` and `fm-teardown.sh` read that binding through `fm_nm_home_for_meta` and observe the task at its exact bound root, so a pre-rollout or mismatched run can never disappear.
+A task whose metadata predates this rollout has no `nm_home` entry; the helper falls back to the legacy shared root (`$HOME/.no-mistakes`) so its parked run stays visible rather than being hidden by the new private root.
+
+**Permissions and root safety.** The home-owned default root and its `config.yaml` are created and converged owner-only (`0700` / `0600`) under any umask, with the initial config published through a safe temporary file so a permissive umask never leaves it world-readable mid-publication.
+`fm_nm_prepare_home` rejects a symlinked or special-file `$FM_HOME/.no-mistakes` before any write, so the home-owned config can never escape the home boundary through a pre-existing link; the canonical default root always remains a real directory inside canonical `FM_HOME`.
+The `agent:` key in `config.yaml` is converged format-safely to `agent: [codex]` across every syntax the reader accepts - inline and multiline sequences, comments, and duplicate keys - and a malformed `agent:` value is refused rather than silently rewritten.
+
+**Rollout and migration.** This is per-home isolation, not a migration: legacy runs that predate the rollout remain untouched at the legacy shared root and are not automatically migrated, resumed, cancelled, or aborted.
+A pre-rollout task is observed at the legacy root through the `fm_nm_home_for_meta` fallback; a post-rollout task is observed at its bound private root.
+There is no automatic relocation of existing runs between roots.
+
 ## Claude account profiles (config/claude-account-profiles)
 
 `config/claude-account-profiles` maps stable home-local names to isolated native Claude CLI configuration directories.

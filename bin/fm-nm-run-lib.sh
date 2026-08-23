@@ -11,17 +11,135 @@
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# Unless an operator explicitly supplies NM_HOME, a Firstmate home owns the
+# private `$FM_HOME/.no-mistakes` instance used by every call through this owner.
+fm_nm_home() {
+  if [ -n "${NM_HOME:-}" ]; then
+    printf '%s\n' "$NM_HOME"
+  elif [ -n "${FM_HOME:-}" ]; then
+    printf '%s/.no-mistakes\n' "${FM_HOME%/}"
+  else
+    printf '%s/.no-mistakes\n' "${HOME:-}"
+  fi
+}
+
+fm_nm_converge_agent_config() {  # <config-file>  -> stdout, exit 2 on malformed
+  # Format-safe convergence of the `agent:` key to `agent: [codex]`, covering
+  # every syntax the current reader (bin/fm-spawn.sh no_mistakes_configured_reviewers)
+  # accepts: inline flow sequences, multiline `- ` sequences, full-line and
+  # trailing comments, and duplicate keys (collapsed to one). A malformed agent
+  # value (e.g. an unterminated flow sequence) is refused rather than silently
+  # rewritten into a plausible shape.
+  awk '
+    function valid_value(v,    depth, i, ch, n) {
+      if (v !~ /^\[/) return v !~ /[\[\]]/
+      if (v !~ /\][[:space:]]*$/) return 0
+      depth = 0; n = length(v)
+      for (i = 1; i <= n; i++) {
+        ch = substr(v, i, 1)
+        if (ch == "[") depth++
+        else if (ch == "]") { depth--; if (depth < 0) return 0 }
+      }
+      return depth == 0
+    }
+    BEGIN { saw_agent = 0; in_seq = 0 }
+    in_seq {
+      if ($0 ~ /^[[:space:]]*-[[:space:]]*/) {
+        val = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", val); sub(/[[:space:]]+#.*$/, "", val)
+        if (!valid_value(val)) exit 2
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) { print; next }
+      in_seq = 0
+    }
+    !in_seq && /^[[:space:]]*agent[[:space:]]*:/ {
+      val = $0
+      sub(/^[[:space:]]*agent[[:space:]]*:[[:space:]]*/, "", val)
+      sub(/[[:space:]]+#.*$/, "", val)
+      if (val != "") {
+        if (!valid_value(val)) exit 2
+        if (!saw_agent) { print "agent: [codex]"; saw_agent = 1 }
+        next
+      }
+      if (!saw_agent) { print "agent: [codex]"; saw_agent = 1 }
+      in_seq = 1
+      next
+    }
+    { print }
+    END { if (!saw_agent) print "agent: [codex]" }
+  ' "$1"
+}
+
+fm_nm_prepare_home() {
+  [ -n "${NM_HOME:-}" ] && return 0
+  local home config tmp
+  home=$(fm_nm_home) || return 1
+  # The default root must remain a real directory contained by canonical FM_HOME;
+  # reject a symlinked or special-file root before any write so the home-owned
+  # config can never escape the home boundary through a pre-existing link.
+  if [ -e "$home" ] && { [ ! -d "$home" ] || [ -L "$home" ]; }; then
+    return 1
+  fi
+  # The captain-private root is owner-only under any umask (AGENTS.md classifies
+  # .no-mistakes/ as captain-private operational state).
+  mkdir -p "$home"
+  chmod 0700 "$home"
+  config="$home/config.yaml"
+  if [ ! -e "$config" ]; then
+    # Publish the initial config owner-only via a safe temporary file so a
+    # permissive umask never leaves it world-readable mid-publication.
+    tmp=$(mktemp "$config.tmp.XXXXXX") || return 1
+    printf 'agent: [codex]\n' > "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$config"
+    return 0
+  fi
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  chmod 0600 "$config"
+  tmp=$(mktemp "$config.tmp.XXXXXX") || return 1
+  if ! fm_nm_converge_agent_config "$config" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$config"
+}
+
+# Per-task run-root binding read from state/<id>.meta. A post-rollout task
+# records nm_home=<root> at spawn; crew-state and teardown observe that exact
+# root so a pre-rollout or mismatched run can never disappear. A task with no
+# nm_home binding predates the per-home isolation rollout and is observed at
+# the legacy shared default root ($HOME/.no-mistakes), so its parked runs stay
+# visible rather than being hidden by the new private root (a false negative
+# the owner's own contract forbids). The legacy runs are not migrated.
+fm_nm_home_for_meta() {  # <meta-file>
+  local meta=$1 nm_home
+  [ -n "$meta" ] && [ -f "$meta" ] || {
+    printf '%s/.no-mistakes\n' "${HOME:-}"
+    return 0
+  }
+  if ! nm_home=$(fm_meta_optional_exact_value "$meta" nm_home); then
+    return 1
+  fi
+  if [ -n "$nm_home" ]; then
+    printf '%s\n' "$nm_home"
+    return 0
+  fi
+  printf '%s/.no-mistakes\n' "${HOME:-}"
+}
+
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none nm_home
   shift 2
+  nm_home=$(fm_nm_home) || return 1
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
+    timeout)  ( cd "$dir" && NM_HOME="$nm_home" timeout "$timeout_secs" no-mistakes "$@" ) ;;
+    gtimeout) ( cd "$dir" && NM_HOME="$nm_home" gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
+    perl)     ( cd "$dir" && NM_HOME="$nm_home" perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
     *)        return 1 ;;
   esac
 }

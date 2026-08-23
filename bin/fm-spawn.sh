@@ -299,6 +299,12 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+case "$FM_HOME" in
+  *$'\n'*|*$'\r'*)
+    echo "error: FM_HOME must be a single line" >&2
+    exit 1
+    ;;
+esac
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -350,6 +356,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-launch-axis-lib.sh"
 # shellcheck source=bin/fm-claude-account-profile-lib.sh
 . "$SCRIPT_DIR/fm-claude-account-profile-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -736,9 +744,34 @@ if [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 1 ] && { [ "$KIND" != ship 
   exit 1
 fi
 
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  # Resolve once at intake and export the same instance to the launched worker.
+  # An explicit operator NM_HOME remains authoritative; otherwise this home owns
+  # its private root, including the reviewer preflight below.
+  case "${NM_HOME:-}" in
+    *$'\n'*|*$'\r'*)
+      echo "error: NM_HOME must be a single line for state/<id>.meta" >&2
+      exit 1
+      ;;
+  esac
+  RESOLVED_NM_HOME=$(fm_nm_home) || exit 1
+  case "$RESOLVED_NM_HOME" in
+    *$'\n'*|*$'\r'*)
+      echo "error: NM_HOME must be a single line for state/<id>.meta" >&2
+      exit 1
+      ;;
+  esac
+  fm_nm_prepare_home || exit 1
+  NM_HOME=$RESOLVED_NM_HOME
+  export NM_HOME
+  # Bind the resolved root durably per task so crew-state and teardown observe
+  # the exact root this worker uses, never the legacy shared root (finding 2).
+  NM_HOME_BOUND=1
+fi
+
 no_mistakes_configured_reviewers() {
   local config
-  config="${HOME:-}/.no-mistakes/config.yaml"
+  config="$NM_HOME/config.yaml"
   if [ ! -r "$config" ]; then
     printf 'auto\n'
     return 0
@@ -3478,6 +3511,13 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # Per-task no-mistakes run-root binding (finding 2): recorded only for a
+  # no-mistakes ship, so crew-state and teardown observe the exact root this
+  # worker uses. Absent for every other kind/mode, including pre-rollout tasks
+  # whose runs live at the legacy shared root.
+  if [ "${NM_HOME_BOUND:-0}" = 1 ]; then
+    echo "nm_home=$NM_HOME"
+  fi
   # Dispatch attestation record (AGENTS.md section 4): written when the
   # dispatch profiles or cooldowns are active, or when a secondmate relaunch
   # explicitly carries the same selection facts from the automatic quota owner.
@@ -3534,6 +3574,19 @@ if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_CONFIG_DIR" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_CONFIG_DIR") $LAUNCH"
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# A no-mistakes ship resolves its private NM_HOME at intake (finding 1): carry it
+# across the pane process boundary as a shell-quoted prefix assignment on the
+# literal launch command, the same verified channel that ships CLAUDE_CONFIG_DIR
+# and GIT_CONFIG_COUNT. An export in this fm-spawn process alone never reaches a
+# separately-created pane; the prefix assignment puts it in the agent's own
+# environment so every child (including the worker's no-mistakes calls) inherits
+# the exact root the observer queries. Skipped for a raw launch command, which
+# is an escape hatch where the caller owns the full command verbatim (the same
+# gate that skips the co-author sanitizer), and for a secondmate (no no-mistakes
+# run). NM_HOME_BOUND is set only for a no-mistakes ship at intake.
+if [ "${NM_HOME_BOUND:-0}" = 1 ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH="NM_HOME=$(shell_quote "$NM_HOME") $LAUNCH"
 fi
 if [ "$ACCESS" = reader ]; then
   LAUNCH=$(reader_confine_launch "$LAUNCH") || {

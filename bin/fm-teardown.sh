@@ -506,6 +506,17 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+# Bind the no-mistakes run root from the per-task metadata (finding 2) so the
+# pre-teardown parked-run check and abort query the exact root the worker uses,
+# never the legacy shared root a pre-rollout task still lives in. A task with no
+# nm_home binding predates the per-home isolation rollout and is observed at the
+# legacy shared root ($HOME/.no-mistakes) so its parked run is never orphaned by
+# a false-negative lookup. The helper is the one owner in bin/fm-nm-run-lib.sh.
+if ! NM_HOME=$(fm_nm_home_for_meta "$META"); then
+  echo "error: task $ID records invalid or duplicate nm_home metadata; repair $META before teardown" >&2
+  exit 1
+fi
+export NM_HOME
 # Reader/writer access axis (fm-spawn's --access): absent means writer. An
 # unknown value, or a reader marker on any non-scout kind, is record damage,
 # not a cleanup preference - honoring a forged reader marker would silently

@@ -42,9 +42,10 @@ The report is the only thing that survives, so anything worth keeping must be in
    When firstmate replies or a blocker clears and you resume, append `resolved [key=<slug>]: {how it was decided or unblocked}` using the same key that was opened.
    A keyed decision closes only with `resolved` naming that key; a bare `resolved` with only a correlation token does not close it.
    `done` records work completion and never closes a decision key.
-7. Never stop, restart, or update the shared `no-mistakes` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append `blocked: {the daemon error}` and stop; only firstmate manages the daemon.
+7. Never stop, restart, or update a `no-mistakes` daemon. The default instance is private to this
+   Firstmate home, while an explicit operator `NM_HOME` remains authoritative; the legacy shared
+   default root and its parked runs are outside this task. On ANY no-mistakes daemon error, append
+   `blocked: {the daemon error}` and stop; only firstmate manages the daemon.
 8. Start every full frontend or browser test suite with `{{FM_ROOT}}/bin/fm-heavy-suite.sh -- <suite command and arguments>`.
    The wrapper serializes heavy suites across worktrees; if it reports another suite is running, it is waiting by design, not failing, so do not bypass it or start a duplicate.
 

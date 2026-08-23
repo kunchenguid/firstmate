@@ -193,6 +193,12 @@ SH
   # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+# Optional per-invocation NM_HOME recording so a teardown safety test can prove
+# which no-mistakes root the observer queried (finding 2). Additive: only writes
+# when FM_FAKE_NM_HOME_LOG is set.
+if [ -n "${FM_FAKE_NM_HOME_LOG:-}" ]; then
+  printf '%s\t%s\n' "${NM_HOME:-}" "${1:-}" >> "$FM_FAKE_NM_HOME_LOG"
+fi
 case "${1:-}" in
   stats)
     printf '%s\n' "${FM_FAKE_NM_STATS:-}"
@@ -2632,6 +2638,67 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
+# Finding 2: teardown must observe the no-mistakes root bound per task in metadata
+# so a pre-rollout parked run never disappears and a post-rollout run is queried at
+# its own private root. The no-mistakes stub records NM_HOME on every invocation
+# (FM_FAKE_NM_HOME_LOG) so the test proves which root the observer queried.
+test_teardown_observes_legacy_root_for_pre_rollout_task() {
+  local case_dir rc head legacy_home legacy_root
+  case_dir=$(make_case nm-home-legacy-binding)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # A pre-rollout task has no nm_home binding in metadata; its run lives at the
+  # legacy shared root, so teardown must observe it there (not the new private
+  # root) or the parked run would be orphaned by a false-negative lookup.
+  legacy_home="$case_dir/legacy-home"
+  mkdir -p "$legacy_home"
+  legacy_root="$legacy_home/.no-mistakes"
+
+  rc=0
+  HOME="$legacy_home" \
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_HOME_LOG="$case_dir/nm-home.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "legacy-binding: teardown should succeed after aborting the parked run"
+  assert_grep "$legacy_root" "$case_dir/nm-home.log" \
+    "legacy-binding: teardown did not query the legacy shared root for a pre-rollout task"
+  assert_present "$case_dir/nm-abort.log" \
+    "legacy-binding: the pre-rollout parked run was never aborted (false-negative lookup orphaned it)"
+  pass "teardown observes the legacy shared root for a pre-rollout task and aborts its parked run"
+}
+
+test_teardown_observes_bound_private_root_for_post_rollout_task() {
+  local case_dir rc head private_root
+  case_dir=$(make_case nm-home-private-binding)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # A post-rollout task records nm_home=<private> at spawn; teardown must query
+  # that exact private root, not the legacy shared root.
+  private_root="$case_dir/private-nm"
+  mkdir -p "$private_root"
+  printf 'nm_home=%s\n' "$private_root" >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_HOME_LOG="$case_dir/nm-home.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "private-binding: teardown should succeed after aborting the parked run"
+  assert_grep "$private_root" "$case_dir/nm-home.log" \
+    "private-binding: teardown did not query the bound private root for a post-rollout task"
+  case "$(cat "$case_dir/nm-home.log")" in
+    *"$HOME/.no-mistakes"*) fail "private-binding: teardown fell back to the legacy shared root instead of the bound private root" ;;
+  esac
+  assert_present "$case_dir/nm-abort.log" \
+    "private-binding: the post-rollout parked run at the private root was never aborted"
+  pass "teardown observes the bound private root for a post-rollout task and aborts its parked run"
+}
+
 test_mismatched_run_after_abort_refuses_unconfirmed() {
   local case_dir rc head
   case_dir=$(make_case parked-run-replaced)
@@ -4269,6 +4336,8 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_teardown_observes_legacy_root_for_pre_rollout_task
+test_teardown_observes_bound_private_root_for_post_rollout_task
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed

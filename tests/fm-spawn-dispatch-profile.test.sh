@@ -255,6 +255,14 @@ $1
 EOF
 }
 
+# Mirror bin/fm-launch-axis-lib.sh shell_quote so launch assertions can compare
+# the exact single-quoted form fm-spawn writes into the pane.
+shell_quote_value() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
@@ -453,7 +461,7 @@ test_recorded_default_axes_respawn_as_unset() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "recorded default axes did not launch identically to unset axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
 
   ledger="$HOME_DIR/data/routing-outcomes.jsonl"
@@ -477,7 +485,7 @@ test_no_profile_keeps_claude_profile_defaults() {
     "the default writer spawn added an access field to legacy metadata"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults, writer metadata omits access, and the claude launch is canonical"
 }
@@ -1659,6 +1667,9 @@ test_no_mistakes_spawn_requires_one_quota_eligible_reviewer() {
   operator_home="$CASE_DIR/operator-home"
   mkdir -p "$operator_home/.no-mistakes"
   printf '%s\n' 'agent: [claude, codex]' > "$operator_home/.no-mistakes/config.yaml"
+  # This fixture intentionally exercises the supported explicit NM_HOME
+  # override; an unset override now uses the Firstmate home's private Codex root.
+  export NM_HOME="$operator_home/.no-mistakes"
 
   write_reviewer_quota_fixture "$FAKEBIN_DIR" known known 0
   out=$(HOME="$operator_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$exhausted_id" "$PROJ_DIR")
@@ -1681,7 +1692,142 @@ test_no_mistakes_spawn_requires_one_quota_eligible_reviewer() {
   status=$?
   expect_code 0 "$status" "captain-authorized reviewer-quota override should allow the spawn"
   assert_contains "$out" "captain-authorized reviewer-quota override" "override did not disclose the exhausted reviewer results"
+  unset NM_HOME
   pass "no-mistakes spawn requires one quota-eligible reviewer unless explicitly overridden"
+}
+
+# Finding 1: the resolved private NM_HOME must cross the pane process boundary
+# in the literal worker launch command (the verified per-backend environment
+# channel that already ships GOTMPDIR), not only live in the fm-spawn process.
+# Finding 2 (spawn side): the same resolved root is bound durably per task in
+# state/<id>.meta as nm_home=<root> so crew-state/teardown observe the exact root.
+test_no_mistakes_spawn_carries_nm_home_into_launch_and_meta() {
+  local rec id override_id newline_id trailing_newline_id derived_newline_id derived_trailing_newline_id direct_id out status launch meta home_nm override_nm override_home newline_nm trailing_newline_nm derived_home derived_nm derived_trailing_home derived_trailing_nm normalized_trailing_nm
+  id=profile-nm-home-launch-z29
+  override_id=profile-nm-home-override-z30
+  newline_id=profile-nm-home-newline-z30b
+  trailing_newline_id=profile-nm-home-trailing-newline-z30c
+  derived_newline_id=profile-nm-home-derived-newline-z30d
+  derived_trailing_newline_id=profile-nm-home-derived-trailing-newline-z30e
+  direct_id=profile-nm-home-direct-pr-z31
+  rec=$(make_spawn_case profile-nm-home-launch codex "$id" "$override_id" "$newline_id" "$trailing_newline_id" "$derived_newline_id" "$derived_trailing_newline_id" "$direct_id")
+  read_case_record "$rec"
+  home_nm="$HOME_DIR/.no-mistakes"
+
+  trailing_newline_nm="$CASE_DIR/operator-trailing-nm-home"$'\n'
+  mkdir -p "${trailing_newline_nm%$'\n'}"
+  printf '%s\n' 'agent: [codex]' > "${trailing_newline_nm%$'\n'}/config.yaml"
+  : > "$LAUNCH_LOG"
+  out=$(NM_HOME="$trailing_newline_nm" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$trailing_newline_id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit trailing-newline NM_HOME override was accepted"
+  assert_contains "$out" "NM_HOME must be a single line" \
+    "explicit trailing-newline NM_HOME refusal did not name the metadata constraint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "explicit trailing-newline NM_HOME reached launch submission"
+  assert_absent "$HOME_DIR/state/$trailing_newline_id.meta" \
+    "explicit trailing-newline NM_HOME published partial task metadata"
+  assert_absent "$home_nm" \
+    "explicit trailing-newline NM_HOME mutated the Firstmate-owned no-mistakes home"
+
+  derived_home="$CASE_DIR/derived"$'\n'"home"
+  derived_nm="$derived_home/.no-mistakes"
+  : > "$LAUNCH_LOG"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$derived_home" NM_HOME='' \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$derived_newline_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "newline-bearing derived NM_HOME was accepted"
+  assert_contains "$out" "FM_HOME must be a single line" \
+    "newline-bearing FM_HOME refusal did not precede path normalization"
+  [ ! -s "$LAUNCH_LOG" ] || fail "newline-bearing derived NM_HOME reached launch submission"
+  assert_absent "$HOME_DIR/state/$derived_newline_id.meta" \
+    "newline-bearing derived NM_HOME published partial task metadata"
+  assert_absent "$derived_nm" \
+    "newline-bearing derived NM_HOME mutated the selected no-mistakes home"
+
+  derived_trailing_home="$CASE_DIR/derived-trailing-home"$'\n'
+  derived_trailing_nm="$derived_trailing_home/.no-mistakes"
+  normalized_trailing_nm="${derived_trailing_home%$'\n'}/.no-mistakes"
+  : > "$LAUNCH_LOG"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$derived_trailing_home" NM_HOME='' \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    GROK_HOME="$HOME_DIR/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$derived_trailing_newline_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "trailing-newline FM_HOME was accepted"
+  assert_contains "$out" "FM_HOME must be a single line" \
+    "trailing-newline FM_HOME refusal did not precede path normalization"
+  [ ! -s "$LAUNCH_LOG" ] || fail "trailing-newline FM_HOME reached launch submission"
+  assert_absent "$HOME_DIR/state/$derived_trailing_newline_id.meta" \
+    "trailing-newline FM_HOME published partial task metadata"
+  assert_absent "$derived_trailing_nm" \
+    "trailing-newline FM_HOME mutated the selected no-mistakes home"
+  assert_absent "$normalized_trailing_nm" \
+    "trailing-newline FM_HOME mutated the normalized no-mistakes home"
+
+  # Default root: an unset NM_HOME resolves to this home's private root, which
+  # must appear in the literal launch command and in the task metadata.
+  : > "$LAUNCH_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "default no-mistakes spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "NM_HOME=$(shell_quote_value "$home_nm")" \
+    "default no-mistakes launch did not carry the resolved NM_HOME into the worker pane"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "nm_home=$home_nm" "$meta" \
+    "default no-mistakes spawn did not bind nm_home to the home private root in metadata"
+
+  # Explicit operator override: the override root is carried verbatim, not the
+  # home private root.
+  override_home="$CASE_DIR/operator-nm-home"
+  mkdir -p "$override_home"
+  printf '%s\n' 'agent: [codex]' > "$override_home/config.yaml"
+  override_nm="$override_home"
+  : > "$LAUNCH_LOG"
+  out=$(NM_HOME="$override_nm" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$override_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "explicit NM_HOME override spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "NM_HOME=$(shell_quote_value "$override_nm")" \
+    "explicit NM_HOME override was not carried verbatim into the worker pane"
+  assert_grep "nm_home=$override_nm" "$HOME_DIR/state/$override_id.meta" \
+    "explicit NM_HOME override was not bound verbatim in metadata"
+
+  newline_nm="$CASE_DIR/operator"$'\n'"nm-home"
+  mkdir -p "$newline_nm"
+  printf '%s\n' 'agent: [codex]' > "$newline_nm/config.yaml"
+  : > "$LAUNCH_LOG"
+  out=$(NM_HOME="$newline_nm" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$newline_id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit newline NM_HOME override was accepted"
+  assert_contains "$out" "NM_HOME must be a single line" \
+    "explicit newline NM_HOME refusal did not name the metadata constraint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "explicit newline NM_HOME reached launch submission"
+  assert_absent "$HOME_DIR/state/$newline_id.meta" \
+    "explicit newline NM_HOME published partial task metadata"
+
+  # A non-no-mistakes ship (direct-PR) must not receive an NM_HOME export: the
+  # binding is specific to the no-mistakes delivery path.
+  : > "$LAUNCH_LOG"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$direct_id" "$PROJ_DIR" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "direct-PR spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    *"NM_HOME="*) fail "direct-PR launch received an NM_HOME export reserved for no-mistakes ships" ;;
+  esac
+  assert_no_grep "nm_home=" "$HOME_DIR/state/$direct_id.meta" \
+    "direct-PR spawn recorded an nm_home binding reserved for no-mistakes ships"
+
+  pass "no-mistakes spawn carries the resolved NM_HOME into the launch command and binds it per task in metadata"
 }
 
 test_linked_telemetry_identifiers_chain_one_task_root() {
@@ -3324,6 +3470,7 @@ test_secondmate_recovery_records_durable_config_provenance
 test_telemetry_precedes_submission_and_metadata_is_opaque
 test_exploration_requires_an_explicit_rotated_model_and_effort
 test_no_mistakes_spawn_requires_one_quota_eligible_reviewer
+test_no_mistakes_spawn_carries_nm_home_into_launch_and_meta
 test_linked_telemetry_identifiers_chain_one_task_root
 test_reader_scout_spawn_skips_pool_and_builds_scratch
 test_reader_launch_cannot_write_absolute_project_path

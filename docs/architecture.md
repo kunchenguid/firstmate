@@ -166,6 +166,7 @@ The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistak
 Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or child task environment has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
+[`docs/configuration.md`](configuration.md) owns the no-mistakes operational-home, per-task binding, permissions, rollout, and migration-limitation contract.
 
 ## Two task shapes
 
