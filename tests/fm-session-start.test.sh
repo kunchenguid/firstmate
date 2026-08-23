@@ -1361,6 +1361,28 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+test_endpoint_liveness_remote_not_probed() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=remote:sm-far\nkind=secondmate\nremote_host=box\nremote_backend=herdr\n' > "$home/state/sm-far.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: remote (not locally probed; window=remote:sm-far)" "remote endpoint not reported as remote"
+  case "$out" in
+  *"endpoint: dead (backend=tmux window=remote:sm-far)"*)
+    fail "remote endpoint was probed locally and reported dead" ;;
+  esac
+
+  pass "a remote secondmate endpoint is reported as remote, never probed as a local target"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2440,6 +2462,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_liveness_remote_not_probed
 test_composition_invokes_real_scripts
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder

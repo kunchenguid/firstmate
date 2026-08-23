@@ -800,11 +800,18 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+    case "$window" in
+    remote:*)
+      printf 'endpoint: remote (not locally probed; window=%s)\n' "$window"
+      ;;
+    *)
+      if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
+      ;;
+    esac
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi
