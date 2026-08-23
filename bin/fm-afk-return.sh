@@ -7,6 +7,8 @@
 #   fm-afk-return.sh check    MUTATES: re-present an already-open gate and close it once
 #                             every blocker resolves. Refuses to START the return.
 #   fm-afk-return.sh guard    The only read-only command: report and refuse, never mutate.
+#                             Also loudly reports, without refusing, a leaked daemon
+#                             terminal record left behind by an already-ended away mode.
 #
 # `check` is NOT a status probe. It shares begin's stop-and-drain body so an
 # interrupted begin can be completed, so calling it while away mode is still
@@ -37,7 +39,7 @@ GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 
 usage() {
-  sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -161,6 +163,16 @@ return_guard() {
     printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run bin/fm-afk-return.sh check\n' >&2
     print_blockers "$GATE" >&2
     return 3
+  fi
+  # A leaked terminal is a loud, non-blocking report, not a refusal: away mode
+  # already ended by this point (the .afk check above returned), so there is no
+  # live lifecycle for ordinary captain work to wait on - only an orphaned
+  # terminal record fm-afk-launch.sh failed to tear down. Surface it and let
+  # ordinary work proceed; run `fm-afk-launch.sh stop` to reconcile it.
+  if [ -e "$STATE/.afk-daemon-terminal" ]; then
+    printf 'fm-afk-return: leaked away-mode daemon terminal record found with away mode already ended: %s\n' \
+      "$(tr '\t' ' ' < "$STATE/.afk-daemon-terminal" 2>/dev/null)" >&2
+    printf 'fm-afk-return: this does not block ordinary captain work; run bin/fm-afk-launch.sh stop to reconcile the leaked terminal\n' >&2
   fi
   return 0
 }

@@ -317,7 +317,34 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+test_guard_reports_leaked_terminal_without_refusing() {
+  local dir out rc
+  dir="$TMP_ROOT/guard-leaked-terminal"
+  install_runner "$dir"
+  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
+
+  # Away mode already ended (.afk absent, no return gate open) but the
+  # terminal teardown record was left behind - option D from the 2026-08-23
+  # captain ruling: report it loudly, never refuse ordinary captain work over it.
+  set +e
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "guard refused ordinary work over a leaked terminal alone (rc=$rc): $out"
+  assert_contains "$out" 'leaked away-mode daemon terminal record found' "guard did not loudly report the leaked terminal"
+  assert_contains "$out" 'synthetic-workspace' "guard's leaked-terminal report dropped the durable record's detail"
+  [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "guard mutated the leaked terminal record"
+
+  # With no leaked record, guard stays silent and clear.
+  rm -f "$dir/home/state/.afk-daemon-terminal"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1) \
+    || fail "guard should succeed with nothing pending: $out"
+  [ -z "$out" ] || fail "guard printed noise with nothing pending: $out"
+  pass "guard loudly reports a leaked daemon terminal without refusing ordinary captain work"
+}
+
 test_check_refuses_to_start_the_return
+test_guard_reports_leaked_terminal_without_refusing
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
