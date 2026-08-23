@@ -138,8 +138,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Sourced for fm_timing_now_ms, the one owner of a millisecond clock reading, so
-# the lifecycle waits below measure a budget instead of counting their own polls.
+# Sourced for fm_timing_now_ms and fm_timing_step_ms, the one owner of a
+# millisecond clock reading and of the backward-step guard a budget accumulated
+# from that settable clock needs, so the lifecycle waits below measure a budget
+# instead of counting their own polls.
 # Recording stays off: it is inert unless FM_TIMING_LOG names a file.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -333,15 +335,27 @@ control_seconds() {  # <milliseconds>
 # multiple of the budget and then reported the budget itself as the time
 # waited, which described a wait that never happened.
 #
+# The budget is ACCUMULATED from per-poll steps, not taken as the difference
+# between the first and last clock reading. fm_timing_now_ms reads the settable
+# epoch clock, so an ntp correction or a manual clock set during a wait can move
+# it backward; an endpoint difference then goes negative and the loop stops
+# counting down, holding an exit or relaunch open past its own refusal deadline
+# until the clock catches back up. Adding fm_timing_step_ms of the previous
+# reading discards a backward step, so a correction costs at most the one poll
+# interval it landed in and the budget still expires. See fm_timing_step_ms in
+# bin/fm-timing-lib.sh for why no monotonic clock is read instead.
+#
 # Prints the final observed state and the real seconds waited, separated by a
 # space; returns 0 on a match.
 wait_agent_state() {  # <timeout> <wanted>...
-  local timeout=$1 state want started elapsed=0
+  local timeout=$1 state want mark now elapsed=0
   shift
-  started=$(fm_timing_now_ms)
+  mark=$(fm_timing_now_ms)
   while :; do
     state=$(agent_state)
-    elapsed=$(( $(fm_timing_now_ms) - started ))
+    now=$(fm_timing_now_ms)
+    elapsed=$(( elapsed + $(fm_timing_step_ms "$mark" "$now") ))
+    mark=$now
     for want in "$@"; do
       if [ "$state" = "$want" ]; then
         printf '%s %s' "$state" "$(control_seconds "$elapsed")"

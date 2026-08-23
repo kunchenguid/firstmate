@@ -8,7 +8,10 @@
 # The recording helpers below are the deferred stage's alone. A caller that only
 # needs the clock - bin/fm-control.sh, whose lifecycle waits spend a budget of
 # real seconds rather than counting their own polls - sources this file for
-# fm_timing_now_ms and stays inert, since recording needs FM_TIMING_LOG.
+# fm_timing_now_ms plus fm_timing_step_ms and stays inert, since recording needs
+# FM_TIMING_LOG. Those two go together: the clock this file reads is the
+# settable epoch clock, so a budget is accumulated from steps rather than taken
+# as the difference of two endpoints. fm_timing_step_ms states why.
 #
 # WHY THIS EXISTS. The deferred stage (bin/fm-startup-network.sh) publishes one
 # aggregate started/finished pair, so a run that took a minute could not be
@@ -82,6 +85,32 @@ fm_timing_now_ms() {
   sec=$(date +%s 2>/dev/null || printf '0')
   case "$sec" in ''|*[!0-9]*) sec=0 ;; esac
   printf '%s\n' "$(( sec * 1000 ))"
+}
+
+# Milliseconds between an earlier and a later fm_timing_now_ms reading, with a
+# backward step discarded.
+#
+# fm_timing_now_ms reads the SETTABLE epoch clock - EPOCHREALTIME and date(1)
+# both follow it - and bash has no portable monotonic source to read instead. So
+# ntp, a manual clock set, or a suspend/resume correction can move it BACKWARD
+# between two readings, and the difference between two endpoints is then not a
+# duration at all: it is negative. A caller spending a budget of real seconds
+# that way stops counting down and outlives the budget it was given by however
+# far the clock moved, which for a lifecycle wait means an exit or relaunch that
+# hangs on past its own refusal deadline.
+#
+# The fix a caller applies is to accumulate STEPS rather than subtract
+# endpoints: read the clock every poll and add this step of the previous
+# reading. A correction then costs at most the single interval it landed in -
+# that interval's real time is dropped, never the budget already spent - so the
+# accumulated elapsed time never decreases and the budget always expires.
+fm_timing_step_ms() {  # <earlier-reading-ms> <later-reading-ms>
+  local earlier=${1:-0} later=${2:-0} step
+  case "$earlier" in ''|*[!0-9]*) earlier=0 ;; esac
+  case "$later" in ''|*[!0-9]*) later=0 ;; esac
+  step=$(( later - earlier ))
+  [ "$step" -ge 0 ] || step=0
+  printf '%s\n' "$step"
 }
 
 # Ensure FM_TIMING_EPOCH_MS holds the origin every offset is measured from.

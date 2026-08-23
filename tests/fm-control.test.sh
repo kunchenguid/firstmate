@@ -25,6 +25,12 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# The clock and backward-step guard the control plane's lifecycle wait budgets
+# are built from. Sourced here so the budget's clock contract can be driven with
+# explicit readings, which is the only way to reproduce a clock correction
+# without moving the host's clock.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-timing-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -839,6 +845,72 @@ test_exit_wait_budgets_real_time_and_reports_it() {
   pass "fm-control exit: the agent-state wait spends a real-time budget and reports what it really waited"
 }
 
+# The budget above is accumulated from per-poll STEPS, not taken as the
+# difference between the wait's first and last clock reading. fm_timing_now_ms
+# reads the SETTABLE epoch clock - there is no portable monotonic source in bash
+# - so an ntp correction or a manual clock set during an exit or relaunch moves
+# it backward mid-wait. An endpoint difference then goes negative, stays below
+# the timeout no matter how long the wait really runs, and holds the lifecycle
+# operation open past its own refusal deadline until the clock catches back up.
+#
+# Driven with explicit readings rather than a real correction: moving the host's
+# clock is not something a test may do, and the loop's arithmetic is exactly
+# what is under test. Both directions are pinned - a correction must not extend
+# the budget, and the guard must not distort an ordinary wait.
+test_wait_budget_survives_a_backward_clock_correction() {
+  local base=1700000000000 budget_ms=1000 hour_ms=3600000
+  local reading previous elapsed step endpoint
+  local -a readings
+
+  # Four 200ms polls of a 1s budget, with the clock set back an hour between the
+  # third and fourth reading.
+  readings=(
+    "$base"
+    "$(( base + 200 ))"
+    "$(( base + 400 ))"
+    "$(( base + 400 - hour_ms ))"
+    "$(( base + 600 - hour_ms ))"
+    "$(( base + 800 - hour_ms ))"
+    "$(( base + 1000 - hour_ms ))"
+  )
+
+  elapsed=0
+  previous=
+  for reading in "${readings[@]}"; do
+    if [ -n "$previous" ]; then
+      step=$(fm_timing_step_ms "$previous" "$reading")
+      [ "$step" -ge 0 ] \
+        || fail "a clock step must never be negative, got ${step}ms across the correction"
+      elapsed=$(( elapsed + step ))
+    fi
+    previous=$reading
+  done
+
+  # What the defect looked like: the endpoint difference this wait would have
+  # compared against its timeout is negative, so the wait never expired.
+  endpoint=$(( previous - base ))
+  [ "$endpoint" -lt 0 ] \
+    || fail "the fixture no longer moves the clock backward: endpoint difference was ${endpoint}ms"
+  [ "$elapsed" -ge "$budget_ms" ] \
+    || fail "a ${budget_ms}ms budget accumulated only ${elapsed}ms across a backward clock correction, so the wait would never have expired"
+  # The correction costs the single interval it landed in and nothing already spent.
+  [ "$elapsed" -eq "$budget_ms" ] \
+    || fail "the correction should have cost only the one interval it landed in, but ${elapsed}ms was accumulated against a ${budget_ms}ms budget"
+
+  # An undisturbed wait still measures the real time it spent, to the millisecond.
+  readings=("$base" "$(( base + 250 ))" "$(( base + 900 ))")
+  elapsed=0
+  previous=
+  for reading in "${readings[@]}"; do
+    [ -z "$previous" ] || elapsed=$(( elapsed + $(fm_timing_step_ms "$previous" "$reading") ))
+    previous=$reading
+  done
+  [ "$elapsed" -eq 900 ] \
+    || fail "an undisturbed wait should accumulate its real 900ms, got ${elapsed}ms"
+
+  pass "fm-control: an agent-state wait budget still expires across a backward clock correction"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -941,6 +1013,7 @@ test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_exit_wait_budgets_real_time_and_reports_it
+test_wait_budget_survives_a_backward_clock_correction
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
