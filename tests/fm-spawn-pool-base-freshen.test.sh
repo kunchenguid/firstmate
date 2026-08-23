@@ -13,6 +13,9 @@
 # work, which no upstream is needed to detect.
 # A committed leftover reads as clean, so the same path also refuses a worktree
 # whose HEAD has left the local default branch tip, and never resets it away.
+# With no origin that default branch resolves locally, falling back to the
+# branch the repository's own HEAD names, so a custom-named default (no main or
+# master anywhere) still spawns instead of being refused as unverifiable.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -77,7 +80,7 @@ make_case() {
 # A project that lives only on this machine: a real repo, a real pooled
 # worktree, and no origin remote anywhere in its configuration.
 make_remoteless_case() {
-  local name=$1 id=$2 case_dir home project pool fakebin initial
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -89,14 +92,14 @@ make_remoteless_case() {
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
 
-  git init --quiet -b main "$project"
+  git init --quiet -b "$default" "$project"
   printf 'local only\n' > "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
-  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
 read_case_record() {
@@ -283,6 +286,30 @@ test_remoteless_project_spawns_with_a_skip_notice() {
   pass "a project with no origin remote spawns and says the base refresh was skipped"
 }
 
+test_remoteless_custom_default_branch_spawns() {
+  local rec id out status before after
+  id='pool-no-origin-trunk-r10'
+  rec=$(make_remoteless_case no-origin-trunk "$id" trunk)
+  read_case_record "$rec"
+  [ -z "$(git -C "$POOL_DIR" remote)" ] || fail "fixture did not prove the project has no remote configured"
+  git -C "$POOL_DIR" show-ref --verify --quiet refs/heads/main \
+    && fail "fixture must not have a main branch, or it would prove the wrong resolution"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch on a no-origin project whose default branch is not main or master"
+  assert_contains "$out" "spawned $id" "spawn did not report success on a custom-named default branch"
+  assert_contains "$out" "has no origin remote configured" \
+    "spawn skipped the base refresh silently instead of printing a notice"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pooled worktree while skipping the refresh"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed no-origin trunk spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a no-origin project with a custom-named default branch spawns with the skip notice"
+}
+
 test_dirty_remoteless_pool_still_refuses() {
   local rec id out status before
   id='pool-no-origin-dirty-r7'
@@ -379,6 +406,7 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_project_spawns_with_a_skip_notice
+test_remoteless_custom_default_branch_spawns
 test_dirty_remoteless_pool_still_refuses
 test_committed_leftover_in_remoteless_pool_refuses
 test_unreachable_origin_is_not_read_as_a_missing_remote

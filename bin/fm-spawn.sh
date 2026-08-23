@@ -1743,6 +1743,27 @@ spawn_worktree_is_clean() {  # <worktree>
   [ -z "$status" ]
 }
 
+# The local default branch of a repository with no origin remote.
+# origin/HEAD can never exist there, so the shared resolver's main/master
+# fallback is the first attempt, and a custom-named default then falls back to
+# the branch the repository's own HEAD names, read from the shared git dir so a
+# detached pooled worktree still resolves it.
+# Both readings are local; no network call is made.
+spawn_local_default_branch() {  # <worktree>
+  local worktree=$1 common ref
+  if default_branch "$worktree"; then
+    return 0
+  fi
+  common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case $common in
+    /*) ;;
+    *) common="$worktree/$common" ;;
+  esac
+  ref=$(git --git-dir "$common" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$ref" ] || return 1
+  printf '%s\n' "$ref"
+}
+
 # Freshening asks one question: is this worktree's base stale against its
 # upstream? A repository with no origin configured has no upstream, so that
 # question is meaningless rather than failed, and the spawn proceeds from the
@@ -1780,7 +1801,7 @@ freshen_spawn_worktree_base() {  # <worktree>
         return 1
         ;;
     esac
-    default=$(default_branch "$worktree") || {
+    default=$(spawn_local_default_branch "$worktree") || {
       echo "error: could not determine the local default branch for pooled worktree '$worktree'; refusing to launch from an unverifiable base" >&2
       return 1
     }
