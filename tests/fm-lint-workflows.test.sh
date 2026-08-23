@@ -704,6 +704,8 @@ test_required_check_with_paths_filter_fails() {
     "the failure did not name the filter that made the check conditional"
   assert_contains "$out" "main" \
     "the failure did not name the base left only conditionally gated"
+  assert_contains "$out" "touching no file the filter matches" \
+    "the failure did not state the condition under which paths skips the run"
   pass "a paths filter on the required check fails the lint"
 }
 
@@ -742,6 +744,71 @@ test_glob_base_in_required_check_fails_loudly() {
   assert_contains "$out" "main" \
     "the failure did not name the base it could not match"
   pass "a glob base in the required check fails loudly, not silently"
+}
+
+# `paths-ignore:` skips a run under the opposite condition to `paths:`, so the
+# diagnostic has to name its own condition rather than a shared one.
+test_required_check_with_paths_ignore_filter_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-required-paths-ignore)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]' '    paths-ignore: ["docs/**"]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a paths-ignore-filtered required check unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "paths-ignore" \
+    "the failure did not name the filter that made the check conditional"
+  assert_contains "$out" "touching only files the filter ignores" \
+    "the failure did not state the condition under which paths-ignore skips the run"
+  case "$out" in
+    *"touching no file the filter matches"*)
+      fail "paths-ignore reported the inverted paths: skip condition"$'\n'"$out"
+      ;;
+  esac
+  pass "a paths-ignore filter on the required check names its own skip condition"
+}
+
+# An `on:` value spanning lines as a flow sequence is read one physical line at
+# a time, so guessing from the first line would report a workflow that gates
+# every PR base as having no pull_request trigger at all.
+test_multiline_flow_on_value_fails_closed() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-multiline-flow)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on: [push,' '  pull_request]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a multi-line flow on: value unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "multi-line flow sequence" \
+    "the refusal did not name the construct it cannot read"
+  assert_contains "$out" "ci.yml" \
+    "the refusal did not name the unreadable workflow"
+  pass "a multi-line flow on: value fails closed instead of reading as not PR-triggered"
+}
+
+# The refusal above must stay narrow: a flow sequence closed on its own line is
+# still classified, not swept up by the same check.
+test_single_line_flow_on_value_still_classifies() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-single-line-flow)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI 'on: [push, pull_request]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unfiltered flow-sequence CI trigger unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "gates every PR base" \
+    "a single-line flow on: value was not classified as gating every PR base"
+  case "$out" in
+    *"cannot read the pull_request base filter"*)
+      fail "a single-line flow on: value was refused instead of classified"$'\n'"$out"
+      ;;
+  esac
+  pass "a single-line flow on: value still classifies as before"
 }
 
 test_explicit_path_skips_set_level_gating() {
@@ -788,4 +855,7 @@ test_missing_required_check_with_pr_workflow_fails
 test_required_check_with_paths_filter_fails
 test_paths_filter_on_other_workflow_passes
 test_glob_base_in_required_check_fails_loudly
+test_required_check_with_paths_ignore_filter_fails
+test_multiline_flow_on_value_fails_closed
+test_single_line_flow_on_value_still_classifies
 test_explicit_path_skips_set_level_gating

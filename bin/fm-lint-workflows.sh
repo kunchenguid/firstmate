@@ -178,6 +178,8 @@ function pr_verdict() {
   if (mode == 0) {
     if (i == 0 && key == "on") {
       if (substr(val, 1, 1) == "{") emit("unsupported flow-mapping on: value")
+      if (substr(val, 1, 1) == "[" && index(val, "]") == 0) \
+        emit("unsupported multi-line flow sequence for on:")
       if (val != "") emit(events(val))
       mode = 1
       on_indent = -1
@@ -268,7 +270,7 @@ END {
 # workflow set rather than of one explicitly linted file.
 fm_lint_workflows_pr_gating() {
   local file name verdict required_verdict='' required_set='' found_required=0
-  local rc=0 i n base missing paths_filter required_paths='' glob_note=''
+  local rc=0 i n base missing paths_filter required_paths='' glob_note='' skip_when
   local names=() verdicts=()
 
   for file in "${FILES[@]}"; do
@@ -332,17 +334,22 @@ fm_lint_workflows_pr_gating() {
     return 1
   fi
   # A paths filter on any other workflow only makes that workflow conditional;
-  # on the required check it means a PR touching no matching file gets no run
-  # of it at all, which reads exactly like a passing required check.
+  # on the required check it leaves a PR with no run of it at all, which reads
+  # exactly like a passing required check. The two keys skip a run under
+  # opposite conditions, so each names its own.
   if [ -n "$required_paths" ]; then
+    case "$required_paths" in
+      paths-ignore) skip_when='a PR touching only files the filter ignores' ;;
+      *) skip_when='a PR touching no file the filter matches' ;;
+    esac
     if [ "$required_verdict" = all ]; then
-      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so on every PR base it gates a PR touching no matching file produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
-        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "$required_paths" \
-        "$REQUIRED_CHECK_WORKFLOW" >&2
-    else
-      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so PR base(s)%s are only conditionally gated: a PR touching no matching file produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
-        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "${required_verdict#bases}" \
+      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so on every PR base it gates, %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "$skip_when" \
         "$required_paths" "$REQUIRED_CHECK_WORKFLOW" >&2
+    else
+      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so PR base(s)%s are only conditionally gated: %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "${required_verdict#bases}" \
+        "$skip_when" "$required_paths" "$REQUIRED_CHECK_WORKFLOW" >&2
     fi
     return 1
   fi
