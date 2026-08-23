@@ -918,6 +918,34 @@ SH
   pass "an absorbed turn-end still resurfaces after a legacy-key-colliding task spawns"
 }
 
+test_turn_ended_ignores_ambiguous_legacy_hash() {
+  local dir state fakebin out drain_out capture_file window colliding legacy pid
+  dir=$(make_case turn-ended-ambiguous-legacy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="s:a:b"; colliding="s:a_b"
+  : > "$state/safe.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/safe.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$colliding" > "$state/colliding.meta"
+  printf 'stopped after rendering this' > "$capture_file"
+  legacy=$(fm_window_marker_legacy_key "$window")
+  printf '%s' "$(hash_text 'the colliding pane')" > "$state/.hash-$legacy"
+  printf '0\n' > "$state/.count-$legacy"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher trusted a hash shared by colliding legacy endpoints"
+  grep -F "signal: $state/safe.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not surface a turn-end backed only by an ambiguous legacy hash"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the ambiguous legacy turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/safe.turn-ended" >/dev/null \
+    || fail "ambiguous legacy turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "both sides of a legacy marker collision start with independent evidence"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3304,6 +3332,7 @@ test_turn_ended_churning_pane_absorbed
 test_turn_ended_still_pane_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_resurfaces_after_later_colliding_spawn
+test_turn_ended_ignores_ambiguous_legacy_hash
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does

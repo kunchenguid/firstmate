@@ -88,16 +88,21 @@ fm_backend_list_contains() {  # <list> <name>
 # underscore use a disjoint versioned hex encoding, so every supported endpoint
 # has one filename-safe and injective identity.
 fm_window_marker_key() {  # <window>
-  local window=$1 key
+  local window=$1
   case "$window" in
     *[._/]* )
-      key=$(LC_ALL=C printf '%s' "$window" | od -An -tx1 | tr -d ' \n')
-      printf 'v2.%s' "$key"
+      fm_window_marker_versioned_key "$window"
       ;;
     *)
       printf '%s' "${window//:/_}"
       ;;
   esac
+}
+
+fm_window_marker_versioned_key() {  # <window>
+  local key
+  key=$(LC_ALL=C printf '%s' "$1" | od -An -tx1 | tr -d ' \n')
+  printf 'v2.%s' "$key"
 }
 
 fm_window_marker_legacy_key() {  # <window>
@@ -106,15 +111,9 @@ fm_window_marker_legacy_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
-# Move selected marker families to the injective identity when one legacy key
-# belongs to exactly one currently recorded endpoint. Ambiguous legacy state is
-# left untouched and ignored, so each endpoint starts with independent evidence.
-fm_window_markers_migrate() {  # <state-dir> <window> <marker-prefix> ...
-  local state=$1 window=$2 key legacy meta other prefix old new
-  shift 2
-  key=$(fm_window_marker_key "$window")
+fm_window_marker_legacy_ambiguous() {  # <state-dir> <window>
+  local state=$1 window=$2 legacy meta other
   legacy=$(fm_window_marker_legacy_key "$window")
-  [ "$key" != "$legacy" ] || return 0
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     other=$(fm_backend_target_of_meta "$meta" 2>/dev/null || true)
@@ -122,6 +121,30 @@ fm_window_markers_migrate() {  # <state-dir> <window> <marker-prefix> ...
     [ "$other" = "$window" ] && continue
     [ "$(fm_window_marker_legacy_key "$other")" != "$legacy" ] || return 0
   done
+  return 1
+}
+
+fm_window_marker_key_for_state() {  # <state-dir> <window>
+  local state=$1 window=$2 key legacy
+  key=$(fm_window_marker_key "$window")
+  legacy=$(fm_window_marker_legacy_key "$window")
+  if [ "$key" = "$legacy" ] && fm_window_marker_legacy_ambiguous "$state" "$window"; then
+    fm_window_marker_versioned_key "$window"
+  else
+    printf '%s' "$key"
+  fi
+}
+
+# Move selected marker families to the injective identity when one legacy key
+# belongs to exactly one currently recorded endpoint. Ambiguous legacy state is
+# left untouched and ignored, so each endpoint starts with independent evidence.
+fm_window_markers_migrate() {  # <state-dir> <window> <marker-prefix> ...
+  local state=$1 window=$2 key legacy prefix old new
+  shift 2
+  key=$(fm_window_marker_key_for_state "$state" "$window")
+  legacy=$(fm_window_marker_legacy_key "$window")
+  [ "$key" != "$legacy" ] || return 0
+  fm_window_marker_legacy_ambiguous "$state" "$window" && return 0
   for prefix in "$@"; do
     old="$state/$prefix$legacy"
     new="$state/$prefix$key"

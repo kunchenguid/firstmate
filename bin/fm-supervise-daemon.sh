@@ -476,7 +476,7 @@ _watcher_key() {
     .hash- .count- .stale- .stale-since- .wedge-escalations- \
     .paused- .paused-rechecked- .paused-resurfaced- \
     .writing-since- .writing-resurfaced-
-  fm_window_marker_key "$2"
+  fm_window_marker_key_for_state "$1" "$2"
 }
 
 stale_marker_record() {  # <window> <state>  — create if absent

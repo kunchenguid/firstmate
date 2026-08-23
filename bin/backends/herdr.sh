@@ -72,6 +72,11 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+if ! declare -F fm_window_marker_key_for_state >/dev/null; then
+  # shellcheck source=bin/fm-backend.sh
+  . "$FM_BACKEND_HERDR_ROOT/bin/fm-backend.sh"
+fi
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -3214,7 +3219,7 @@ fm_backend_herdr_event_reader_cmd() {
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
   local state=$1 window=$2 key
   fm_window_markers_migrate "$state" "$window" "$FM_BACKEND_HERDR_ESCALATED_PREFIX"
-  key=$(fm_window_marker_key "$window")
+  key=$(fm_window_marker_key_for_state "$state" "$window")
   printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
 }
 

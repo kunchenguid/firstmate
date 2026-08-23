@@ -312,7 +312,7 @@ window_key() {  # <window>
     .hash- .count- .stale- .stale-since- .wedge-escalations- \
     .paused- .paused-rechecked- .paused-resurfaced- \
     .writing-since- .writing-resurfaced-
-  fm_window_marker_key "$1"
+  fm_window_marker_key_for_state "$STATE" "$1"
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
