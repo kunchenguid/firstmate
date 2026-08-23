@@ -332,6 +332,32 @@ test_watcher_quiet_on_healthy_inbox() {
   pass "watcher: a healthy or empty inbox stays completely silent"
 }
 
+test_watcher_surfaces_unwritable_ladder() {
+  local dir state out log pid rec rings wakes
+  dir=$(setup_watch_case unwritable-ladder)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  mkdir "$state/t1.inbox/.ring-state"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher silently retried with unwritable ladder bookkeeping"; }
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "expected one doorbell before the bookkeeping wake, got $rings:"$'\n'"$(cat "$log")"
+  wakes=$(grep -cF 'steering-inbox ladder bookkeeping unwritable' "$state/.wake-queue" || true)
+  [ "$wakes" = 1 ] \
+    || fail "expected exactly one bookkeeping-unwritable stale wake, got $wakes:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF "$state/t1.inbox/.ring-state cannot be written" "$state/.wake-queue" \
+    || fail "the stale wake did not identify the unwritable ladder:"$'\n'"$(cat "$state/.wake-queue")"
+  [ -f "$rec" ] || fail "the unhandled record disappeared during bookkeeping failure"
+  grep -qF 'stale:' "$out" \
+    || fail "the watcher should exit through the ordinary stale wake:"$'\n'"$(cat "$out")"
+  pass "watcher: unwritable ladder bookkeeping surfaces a stale wake after the doorbell"
+}
+
 test_watcher_escalates_once_after_budget() {
   local dir state out log pid rec rings
   dir=$(setup_watch_case escalate)
@@ -364,4 +390,5 @@ test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
+test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
