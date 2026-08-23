@@ -320,6 +320,66 @@ test_remote_receiver_reports_primary_absence() {
   pass "a remote divergence names primary absence"
 }
 
+test_remote_receiver_rejects_unsafe_held_values() {
+  local kind home payload payload_bytes payload_hash linked out status
+  payload="$TMP_ROOT/remote-unsafe-payload"
+  printf 'herdr\n' > "$payload"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  payload_hash=$(fm_inherit_sha256 "$payload")
+
+  for kind in symlink directory hardlink; do
+    home="$TMP_ROOT/remote-unsafe-$kind/home"
+    mkdir -p "$home/config"
+    linked="$TMP_ROOT/remote-unsafe-$kind/linked"
+    case "$kind" in
+      symlink)
+        printf 'tmux\n' > "$linked"
+        ln -s "$linked" "$home/config/backend"
+        ;;
+      directory)
+        mkdir "$home/config/backend"
+        ;;
+      hardlink)
+        printf 'tmux\n' > "$linked"
+        ln "$linked" "$home/config/backend"
+        ;;
+    esac
+    printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+      "$payload_bytes" "$payload_hash" 1 < "$payload") \
+      || fail "remote receiver failed to converge a rejected $kind held value"
+
+    assert_contains "$out" "deviation-rejected: config/backend" \
+      "the remote receiver must report a rejected $kind held value"
+    assert_contains "$out" "held value is" \
+      "the remote rejection must name the unsafe $kind held value"
+    [ -f "$home/config/backend" ] && [ ! -L "$home/config/backend" ] \
+      || fail "remote convergence did not replace the $kind held value with an ordinary file"
+    [ "$(cat "$home/config/backend")" = herdr ] \
+      || fail "remote convergence did not restore the primary value over a $kind held value"
+    if [ "$kind" != directory ]; then
+      [ "$(cat "$linked")" = tmux ] \
+        || fail "remote convergence changed the $kind held value's other path"
+    fi
+  done
+
+  home="$TMP_ROOT/remote-unsafe-without-record/home"
+  mkdir -p "$home/config"
+  linked="$TMP_ROOT/remote-unsafe-without-record/linked"
+  printf 'tmux\n' > "$linked"
+  ln -s "$linked" "$home/config/backend"
+  status=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+    "$payload_bytes" "$payload_hash" 1 < "$payload" 2>&1) || status=$?
+  expect_code 1 "$status" "remote unsafe destination without a deviation record"
+  assert_contains "$out" "inherited destination is a symlink" \
+    "an ordinary unsafe remote destination must retain the receiver's refusal"
+  [ -L "$home/config/backend" ] \
+    || fail "ordinary remote refusal replaced an unsafe destination without a deviation record"
+  pass "remote unsafe held values are rejected, reported, and converged"
+}
+
 test_remote_deviation_relay_survives_later_failure() {
   local out
   out=$(printf '%s\n' \
@@ -378,5 +438,6 @@ test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
 test_remote_receiver_agreement_stays_quiet
 test_remote_receiver_reports_primary_absence
+test_remote_receiver_rejects_unsafe_held_values
 test_remote_deviation_relay_survives_later_failure
 test_remote_receiver_commits_honored_generation
