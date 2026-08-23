@@ -836,9 +836,14 @@ fm_busy_grok_tail_busy() {
 # busy|idle|unknown plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output used only by
 # the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
+# if available, else reports unknown capture-failed. <skip-live-probe>, when
+# "1", also skips the herdr-native fm_backend_busy_state check below (a live
+# `agent get` round trip) - a caller that is about to make its own live
+# capture moments later (bin/fm-peek.sh) passes this to avoid doubling the
+# live backend round-trip, mirroring bin/fm-worker-state-lib.sh's own
+# skip-live-probe tier.
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [skip-live-probe]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-} skip_live=${7:-0}
   local out rc r_state r_source native log
   case "$harness" in
     kimi*)
@@ -894,7 +899,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+  if [ "$skip_live" != 1 ] && [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'

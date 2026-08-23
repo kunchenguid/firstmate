@@ -95,17 +95,19 @@ fm_worker_state_render_line() {  # <record>
 # without exiting the CALLER's process - the caller may be fm-peek.sh, which
 # still has a raw capture to print afterward.
 #
-# Optional second argument <skip-live-probe>: when "1", skip the fallback
-# tier's live pane_readable/busy-state check (the one tier that makes its own
-# fresh backend capture call) and go straight to the file-only status-log
-# fallback. bin/fm-peek.sh passes this because it is ABOUT to make that exact
-# same live capture call itself for the raw tail it prints - without this,
-# every peek of a no-run crew would cost a second live backend round-trip
-# and, for a backend whose mock or transport is call-order-sensitive (proven
-# by tests/fm-backend-orca.test.sh's queued fake responses), could consume
-# the response meant for the real capture or mask its error text. The
-# run-step and status-log tiers never touch a live pane, so they are
-# unaffected and still answer for free.
+# Optional second argument <skip-live-probe>: when "1", skip every tier's own
+# live round trip - the remote-secondmate tier's `fm-remote-secondmate-control.sh
+# state` call, the fallback tier's pane_readable/busy-state check (including
+# the herdr-native fm_backend_busy_state check inside fm_busy_classify when no
+# semantic busy record exists) - and go straight to the file-only status-log
+# fallback instead. bin/fm-peek.sh passes this because it is ABOUT to make
+# that exact same live capture call itself for the raw tail it prints -
+# without this, every peek of a no-run crew or remote secondmate would cost a
+# second live backend round-trip and, for a backend whose mock or transport is
+# call-order-sensitive (proven by tests/fm-backend-orca.test.sh's queued fake
+# responses), could consume the response meant for the real capture or mask
+# its error text. The run-step and status-log tiers never touch a live
+# endpoint, so they are unaffected and still answer for free.
 fm_worker_state_project() {  # <id> [skip-live-probe]
   local _fm_ws_id=$1 _fm_ws_skip_live=${2:-0}
   (
@@ -209,6 +211,20 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
   # down or dead mate; only the remote host's own dead/missing verdict may say
   # the endpoint is actually gone.
   if [ -n "$REMOTE_HOST" ]; then
+    if [ "$_fm_ws_skip_live" = 1 ]; then
+      # The caller (bin/fm-peek.sh) is about to make this exact remote
+      # `capture` round trip itself moments later - skip this tier's own
+      # remote `state` round trip (see fm_worker_state_project's header
+      # comment) rather than asking the remote host twice, and fall back to
+      # the status log the same way an unreachable host would below.
+      if [ -n "$LOG_VERB" ]; then
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        if [ "$LOG_STATE" != unknown ]; then
+          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint probe skipped on $REMOTE_HOST (live capture pending)"
+        fi
+      fi
+      emit unknown remote-endpoint "remote endpoint probe skipped on $REMOTE_HOST (live capture pending)"
+    fi
     if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$_FM_WORKER_STATE_LIB_DIR/fm-on.sh" "$ID" \
       fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
       REMOTE_STATE=
@@ -265,7 +281,7 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
         grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
       esac
     fi
-    fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+    fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40" "$_fm_ws_skip_live"
   }
 
   # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -642,9 +658,11 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
   # make this exact capture itself (see fm_worker_state_project's header
   # comment) - proceed as if reachable rather than paying for it twice. The
   # busy verdict still runs: for a converted adapter it is a pure record-file
-  # read with no live probe at all, and crew_busy_verdict gates its own only
-  # live path (grok's isolated tail fallback) on the same flag, so this tier
-  # still answers for free whenever a semantic record exists.
+  # read with no live probe at all, and crew_busy_verdict passes the same flag
+  # into fm_busy_classify, which gates its own live paths (grok's isolated
+  # tail fallback, and the no-record herdr-native fm_backend_busy_state check)
+  # on it, so this tier still answers for free whenever a semantic record
+  # exists and otherwise reports unknown rather than paying for a live probe.
   if [ "$_fm_ws_skip_live" != 1 ]; then
     pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
   fi
