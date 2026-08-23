@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# fm-preflight-gate.sh - pre-dispatch admission gate for a ship spawn.
+#
+# Fleet engineering plan workstream 2 ("closes A + E", data/fleet-engineering-plan.html):
+# root cause A is that preconditions get validated at the point of failure
+# (push access discovered at push, quota discovered at spawn) instead of before
+# commitment. This gate runs BEFORE fm-spawn.sh ever creates a worktree or
+# launches a worker, and refuses admission unless all four of the following
+# are true, each independently proven rather than assumed:
+#
+#   1. push-path       the resolved push target (a 'fork' remote if one is
+#                       configured, else 'origin') actually accepts a push
+#                       from the authenticated GitHub identity.
+#   2. delivery-path    the requested --mode can complete for THIS repo:
+#                       no-mistakes requires the repo to be no-mistakes
+#                       initialized; direct-PR requires that no committed
+#                       pull_request-triggered workflow demands a
+#                       no-mistakes-produced PR body (the exact way
+#                       kunchenguid/firstmate rejects a hand-opened PR, see
+#                       .github/workflows/no-mistakes-required.yml); local-only
+#                       never pushes, so it always passes.
+#   3. quota-headroom   quota-axi reports a FRESH, non-exhausted measurement
+#                       for the resolved harness's provider. A harness quota-axi
+#                       has no provider for (pi, pi-signed, opencode, muse, or a
+#                       raw launch command) is not gated here - see "Scope" below.
+#   4. concurrency      current host load average and available memory are
+#                       inside a configured safe ceiling, so admission does not
+#                       stack a task onto an already-saturated host.
+#
+# Usage: fm-preflight-gate.sh <project-dir> --mode <no-mistakes|direct-PR|local-only> --harness <name>
+#
+# Exit 0 and one "admitted: ..." line on stdout when all four pass.
+# Exit FM_PREFLIGHT_REFUSE_EXIT (4) and one "refused [<check>]: <reason>" line
+# per FAILED check on stderr otherwise - every check runs regardless of earlier
+# failures, so a multi-precondition failure is reported completely, not
+# one-at-a-time. Exit 2 is a usage error (bad args, project-dir not a git repo).
+#
+# Scope, stated plainly (claim only what is measured):
+#   - Check 1 only verifies push access on a GitHub remote (github.com). A
+#     project hosted elsewhere gets an explicit "cannot verify" refusal rather
+#     than a silent pass, because this check has no other forge's permissions
+#     API wired up yet.
+#   - Check 2's direct-PR detection is a structural grep for the literal marker
+#     no-mistakes itself writes into a PR body ("git push no-mistakes") inside
+#     a pull_request-triggered workflow. It catches the no-mistakes-required
+#     convention (which is what actually blocked direct-PR on firstmate's own
+#     repo); it does not evaluate arbitrary branch-protection rules.
+#   - Check 3 measures quota-axi's own reported state. AGENTS.md section 4
+#     treats missing quota data as "disclosed uncertainty that keeps a
+#     candidate eligible" when CHOOSING among harnesses at intake - a
+#     different moment from this gate, which runs AFTER a harness is already
+#     resolved. Here, a supported provider reporting stale/unmeasured/
+#     exhausted data is exactly the dispatched-blind failure mode workstream 2
+#     exists to catch, so it refuses. A harness quota-axi has no provider
+#     concept for at all is a different situation (the tool does not cover
+#     that axis, full stop) and is skipped rather than refused.
+#   - Check 4 measures current host state only. It does not model a specific
+#     task's marginal memory/CPU cost - there is no existing per-task
+#     footprint data to model it from - so it refuses admission only when the
+#     host is ALREADY at or over the configured ceiling. FM_PREFLIGHT_*_OVERRIDE
+#     env vars exist solely so tests can force each branch deterministically
+#     without actually starving the host; production dispatch never sets them.
+#
+# FM_PREFLIGHT_GATE_BYPASS=1 skips this script's own checks entirely when
+# called through fm-spawn.sh's wiring (not through direct invocation of this
+# script). tests/lib.sh exports it for the existing hermetic fm-spawn suites,
+# which fake tmux/git but not gh-axi/quota-axi/no-mistakes - see that file for
+# the precedent (bin/fm-gate-refuse-lib.sh's FM_GATE_REFUSE_BYPASS). This
+# script's own tests (tests/fm-preflight-gate.test.sh) unset the bypass so the
+# real refusal path stays covered.
+set -u
+
+FM_PREFLIGHT_REFUSE_EXIT=4
+FM_PREFLIGHT_GH_CMD=${FM_PREFLIGHT_GH_CMD:-gh-axi}
+FM_PREFLIGHT_QUOTA_CMD=${FM_PREFLIGHT_QUOTA_CMD:-quota-axi}
+FM_PREFLIGHT_NM_CMD=${FM_PREFLIGHT_NM_CMD:-no-mistakes}
+FM_PREFLIGHT_MIN_QUOTA_PERCENT=${FM_PREFLIGHT_MIN_QUOTA_PERCENT:-5}
+FM_PREFLIGHT_MAX_LOAD_PER_CORE=${FM_PREFLIGHT_MAX_LOAD_PER_CORE:-1.5}
+FM_PREFLIGHT_MIN_FREE_MEMORY_PERCENT=${FM_PREFLIGHT_MIN_FREE_MEMORY_PERCENT:-15}
+
+usage() {
+  echo "usage: fm-preflight-gate.sh <project-dir> --mode <no-mistakes|direct-PR|local-only> --harness <name>" >&2
+}
+
+PROJECT_DIR=
+MODE=
+HARNESS=
+POS=()
+want_value=
+for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$want_value" in
+      mode) MODE=$a ;;
+      harness) HARNESS=$a ;;
+    esac
+    want_value=
+    continue
+  fi
+  case "$a" in
+    --mode) want_value=mode ;;
+    --mode=*) MODE=${a#--mode=} ;;
+    --harness) want_value=harness ;;
+    --harness=*) HARNESS=${a#--harness=} ;;
+    -h|--help) usage; exit 0 ;;
+    *) POS+=("$a") ;;
+  esac
+done
+[ -z "$want_value" ] || { usage; exit 2; }
+PROJECT_DIR=${POS[0]:-}
+
+[ -n "$PROJECT_DIR" ] || { usage; exit 2; }
+case "$MODE" in
+  no-mistakes|direct-PR|local-only) ;;
+  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '${MODE:-}')" >&2; usage; exit 2 ;;
+esac
+[ -n "$HARNESS" ] || { usage; exit 2; }
+[ -d "$PROJECT_DIR" ] || { echo "error: no such directory: $PROJECT_DIR" >&2; exit 2; }
+git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "error: $PROJECT_DIR is not a git repository" >&2
+  exit 2
+}
+
+FM_PREFLIGHT_FAIL_REASON=
+
+# --- check 1: push path -----------------------------------------------------
+
+fm_preflight_github_owner_repo() {  # <remote-url> -> "<owner>/<repo>" on stdout
+  local url=$1 rest
+  case "$url" in
+    git@github.com:*) rest=${url#git@github.com:} ;;
+    ssh://git@github.com/*) rest=${url#ssh://git@github.com/} ;;
+    https://github.com/*) rest=${url#https://github.com/} ;;
+    http://github.com/*) rest=${url#http://github.com/} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%.git}
+  case "$rest" in
+    */*) printf '%s\n' "$rest" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_preflight_check_push_path() {  # <project-dir> <mode>
+  local dir=$1 mode=$2 remote_name target_url owner_repo perm
+  if [ "$mode" = local-only ]; then
+    return 0
+  fi
+  if target_url=$(git -C "$dir" remote get-url fork 2>/dev/null); then
+    remote_name=fork
+  elif target_url=$(git -C "$dir" remote get-url origin 2>/dev/null); then
+    remote_name=origin
+  else
+    FM_PREFLIGHT_FAIL_REASON="no 'origin' or 'fork' git remote is configured in $dir"
+    return 1
+  fi
+  owner_repo=$(fm_preflight_github_owner_repo "$target_url") || {
+    FM_PREFLIGHT_FAIL_REASON="push path unverifiable: remote '$remote_name' ($target_url) is not a github.com URL this check can inspect"
+    return 1
+  }
+  perm=$("$FM_PREFLIGHT_GH_CMD" api "repos/$owner_repo" --jq '.permissions.push' 2>/dev/null) || {
+    FM_PREFLIGHT_FAIL_REASON="could not read push permission for $owner_repo via '$FM_PREFLIGHT_GH_CMD api' (auth failure, network, or repo not found)"
+    return 1
+  }
+  case "$perm" in
+    true) return 0 ;;
+    false)
+      if [ "$remote_name" = origin ]; then
+        FM_PREFLIGHT_FAIL_REASON="no push access to origin ($owner_repo), and no 'fork' remote is configured as an alternate push target"
+      else
+        FM_PREFLIGHT_FAIL_REASON="no push access to the configured fork remote ($owner_repo)"
+      fi
+      return 1
+      ;;
+    *)
+      FM_PREFLIGHT_FAIL_REASON="unexpected push-permission response for $owner_repo: '$perm'"
+      return 1
+      ;;
+  esac
+}
+
+# --- check 2: delivery path --------------------------------------------------
+
+fm_preflight_check_delivery_path() {  # <project-dir> <mode>
+  local dir=$1 mode=$2 out f
+  case "$mode" in
+    local-only)
+      return 0
+      ;;
+    no-mistakes)
+      out=$(cd "$dir" && "$FM_PREFLIGHT_NM_CMD" status 2>&1) || true
+      if printf '%s' "$out" | grep -qi 'not initialized'; then
+        FM_PREFLIGHT_FAIL_REASON="no-mistakes reports $dir is not initialized (run 'no-mistakes init' there first)"
+        return 1
+      fi
+      if ! printf '%s' "$out" | grep -q 'gate:'; then
+        FM_PREFLIGHT_FAIL_REASON="'$FM_PREFLIGHT_NM_CMD status' in $dir did not report a gate; output: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+        return 1
+      fi
+      return 0
+      ;;
+    direct-PR)
+      for f in "$dir"/.github/workflows/*.yml "$dir"/.github/workflows/*.yaml; do
+        [ -f "$f" ] || continue
+        if grep -q 'pull_request' "$f" 2>/dev/null && grep -qF 'git push no-mistakes' "$f" 2>/dev/null; then
+          FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (matches the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
+          return 1
+        fi
+      done
+      return 0
+      ;;
+  esac
+}
+
+# --- check 3: quota headroom -------------------------------------------------
+
+fm_preflight_harness_quota_provider() {  # <harness> -> provider name on stdout
+  case "$1" in
+    claude) echo claude ;;
+    codex) echo codex ;;
+    grok) echo grok ;;
+    kimi) echo kimi ;;
+    cursor) echo cursor ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_preflight_check_quota() {  # <harness>
+  local harness=$1 provider json state_status err percent runway threshold whole
+  provider=$(fm_preflight_harness_quota_provider "$harness") || {
+    # Not a refusal: quota-axi has no provider concept for this harness at
+    # all (pi, pi-signed, opencode, muse, a raw launch command). See "Scope"
+    # in the header comment.
+    return 0
+  }
+  command -v jq >/dev/null 2>&1 || {
+    FM_PREFLIGHT_FAIL_REASON="jq is required to parse '$FM_PREFLIGHT_QUOTA_CMD --json' output"
+    return 1
+  }
+  json=$("$FM_PREFLIGHT_QUOTA_CMD" --json 2>/dev/null) || {
+    FM_PREFLIGHT_FAIL_REASON="'$FM_PREFLIGHT_QUOTA_CMD --json' failed to run"
+    return 1
+  }
+  state_status=$(printf '%s' "$json" | jq -r --arg p "$provider" '(.providers[] | select(.provider==$p) | .state.status) // "missing"')
+  if [ "$state_status" != fresh ]; then
+    err=$(printf '%s' "$json" | jq -r --arg p "$provider" '(.providers[] | select(.provider==$p) | (.state.error // .state.reason // "no measurement available"))')
+    FM_PREFLIGHT_FAIL_REASON="quota headroom for '$provider' is not measured (state: ${state_status:-missing}, $err); this needs the one-time 'quota-axi --allow-keychain-prompt' approval or completed sign-in, not an assumption that it is fine"
+    return 1
+  fi
+  percent=$(printf '%s' "$json" | jq -r --arg p "$provider" '[(.providers[] | select(.provider==$p) | .quotaSemantics.effectiveAvailability[]? | select(.scope=="all_models") | .effectivePercentRemaining)][0] // empty')
+  runway=$(printf '%s' "$json" | jq -r --arg p "$provider" '[(.providers[] | select(.provider==$p) | .quotaSemantics.effectiveAvailability[]? | select(.scope=="all_models") | .runway.status)][0] // empty')
+  if [ -z "$percent" ]; then
+    FM_PREFLIGHT_FAIL_REASON="'$FM_PREFLIGHT_QUOTA_CMD' reports a fresh state for '$provider' but no effective-availability percentage; refusing rather than assuming headroom"
+    return 1
+  fi
+  threshold=$FM_PREFLIGHT_MIN_QUOTA_PERCENT
+  whole=${percent%%.*}
+  if [ "$runway" = exhausted_now ] || { [ -n "$whole" ] && [ "$whole" -le "$threshold" ] 2>/dev/null; }; then
+    FM_PREFLIGHT_FAIL_REASON="quota headroom for '$provider' measured at ${percent}% (runway: ${runway:-unknown}), at or below the ${threshold}% floor"
+    return 1
+  fi
+  return 0
+}
+
+# --- check 4: concurrency / host capacity ------------------------------------
+
+fm_preflight_host_cores() {
+  if [ -n "${FM_PREFLIGHT_CORES_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_PREFLIGHT_CORES_OVERRIDE"
+  elif [ -r /proc/cpuinfo ]; then
+    grep -c ^processor /proc/cpuinfo
+  elif command -v sysctl >/dev/null 2>&1; then
+    sysctl -n hw.ncpu 2>/dev/null || echo 1
+  else
+    echo 1
+  fi
+}
+
+fm_preflight_load1() {
+  if [ -n "${FM_PREFLIGHT_LOAD_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_PREFLIGHT_LOAD_OVERRIDE"
+  elif [ -r /proc/loadavg ]; then
+    awk '{print $1}' /proc/loadavg
+  elif command -v sysctl >/dev/null 2>&1; then
+    sysctl -n vm.loadavg 2>/dev/null | awk '{gsub(/[{}]/, ""); print $1}'
+  else
+    echo 0
+  fi
+}
+
+fm_preflight_mem_free_percent() {
+  if [ -n "${FM_PREFLIGHT_MEM_FREE_PERCENT_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_PREFLIGHT_MEM_FREE_PERCENT_OVERRIDE"
+  elif [ -r /proc/meminfo ]; then
+    awk '/^MemAvailable:/{a=$2} /^MemTotal:/{t=$2} END{if (t>0) printf "%.0f", (a/t)*100}' /proc/meminfo
+  elif command -v vm_stat >/dev/null 2>&1 && command -v sysctl >/dev/null 2>&1; then
+    local total pagesize stats free inactive spec purge
+    total=$(sysctl -n hw.memsize 2>/dev/null) || return 0
+    stats=$(vm_stat 2>/dev/null) || return 0
+    pagesize=$(printf '%s\n' "$stats" | sed -n 's/.*page size of \([0-9][0-9]*\) bytes.*/\1/p')
+    free=$(printf '%s\n' "$stats" | awk '/^Pages free:/{gsub(/[.]/, "", $3); print $3}')
+    inactive=$(printf '%s\n' "$stats" | awk '/^Pages inactive:/{gsub(/[.]/, "", $3); print $3}')
+    spec=$(printf '%s\n' "$stats" | awk '/^Pages speculative:/{gsub(/[.]/, "", $3); print $3}')
+    purge=$(printf '%s\n' "$stats" | awk '/^Pages purgeable:/{gsub(/[.]/, "", $3); print $3}')
+    if [ -n "$total" ] && [ -n "$pagesize" ] && [ -n "$free" ]; then
+      awk -v f="$free" -v i="${inactive:-0}" -v s="${spec:-0}" -v p="${purge:-0}" -v ps="$pagesize" -v t="$total" \
+        'BEGIN { avail=(f+i+s+p)*ps; if (t>0) printf "%.0f", (avail/t)*100 }'
+    fi
+  fi
+}
+
+fm_preflight_check_concurrency() {
+  local cores load1 memfree ceiling_load mem_floor ceiling_abs
+  cores=$(fm_preflight_host_cores)
+  load1=$(fm_preflight_load1)
+  memfree=$(fm_preflight_mem_free_percent)
+  ceiling_load=$FM_PREFLIGHT_MAX_LOAD_PER_CORE
+  mem_floor=$FM_PREFLIGHT_MIN_FREE_MEMORY_PERCENT
+  if [ -z "$memfree" ] || [ -z "$load1" ] || [ -z "$cores" ]; then
+    FM_PREFLIGHT_FAIL_REASON="host load/memory could not be measured; refusing rather than assuming headroom"
+    return 1
+  fi
+  ceiling_abs=$(awk -v c="$cores" -v m="$ceiling_load" 'BEGIN { printf "%.2f", c * m }')
+  if awk -v l="$load1" -v ceiling="$ceiling_abs" 'BEGIN { exit !(l > ceiling) }'; then
+    FM_PREFLIGHT_FAIL_REASON="host 1-minute load average ($load1) exceeds the safe ceiling of $ceiling_abs ($cores cores x ${ceiling_load})"
+    return 1
+  fi
+  if [ "$memfree" -lt "$mem_floor" ] 2>/dev/null; then
+    FM_PREFLIGHT_FAIL_REASON="host available memory (${memfree}%) is below the safe floor of ${mem_floor}%"
+    return 1
+  fi
+  return 0
+}
+
+# --- run all four, report every failure --------------------------------------
+
+FAILED=0
+
+if ! fm_preflight_check_push_path "$PROJECT_DIR" "$MODE"; then
+  echo "error: preflight refused [push-path]: $FM_PREFLIGHT_FAIL_REASON" >&2
+  FAILED=1
+fi
+
+if ! fm_preflight_check_delivery_path "$PROJECT_DIR" "$MODE"; then
+  echo "error: preflight refused [delivery-path]: $FM_PREFLIGHT_FAIL_REASON" >&2
+  FAILED=1
+fi
+
+if ! fm_preflight_check_quota "$HARNESS"; then
+  echo "error: preflight refused [quota-headroom]: $FM_PREFLIGHT_FAIL_REASON" >&2
+  FAILED=1
+fi
+
+if ! fm_preflight_check_concurrency; then
+  echo "error: preflight refused [concurrency]: $FM_PREFLIGHT_FAIL_REASON" >&2
+  FAILED=1
+fi
+
+if [ "$FAILED" -eq 1 ]; then
+  exit "$FM_PREFLIGHT_REFUSE_EXIT"
+fi
+
+echo "admitted: push-path=ok delivery-path=ok quota-headroom=ok concurrency=ok mode=$MODE harness=$HARNESS"
+exit 0
