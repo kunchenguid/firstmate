@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+  # Read-only, and only used to re-read this PR's live body when the event
+  # payload carries a body no-mistakes has already replaced.
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -31,23 +34,35 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+          prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+          suffix=' -->'
+
+          # Classify one body snapshot into `verdict` (ok, no-signature,
+          # no-attestation, incomplete) plus, for incomplete, `incomplete`.
+          verdict=''
+          incomplete=''
+          classify_body() {
+            snapshot=$1
+            verdict=''
+            incomplete=''
+            if ! printf '%s' "$snapshot" | grep -qF -- "$marker"; then
+              verdict=no-signature
+              return 0
+            fi
             if ! command -v jq >/dev/null 2>&1; then
               echo "::error::This check requires jq to parse no-mistakes pipeline step attestation, but jq was not found on the runner." >&2
               exit 1
             fi
-            prefix='<!-- no-mistakes-pipeline-attestation:v1 '
-            suffix=' -->'
-            body="${PR_BODY:-}"
             json=''
             parse_ok=0
-            case "$body" in
+            case "$snapshot" in
               *"$prefix"*)
-                rest="${body#*"$prefix"}"
+                rest="${snapshot#*"$prefix"}"
                 case "$rest" in
                   *"$suffix"*)
                     json="${rest%%"$suffix"*}"
@@ -59,6 +74,57 @@ jobs:
                 ;;
             esac
             if [ "$parse_ok" -ne 1 ]; then
+              verdict=no-attestation
+              return 0
+            fi
+            for required in review test document; do
+              status=$(printf '%s' "$json" | jq -r --arg step "$required" \
+                '([(.steps | arrays | .[]) | select(.step == $step) | .status] | first // empty | select(. != "")) // "missing"')
+              if [ "$status" != "completed" ]; then
+                if [ -n "$incomplete" ]; then
+                  incomplete="${incomplete}, "
+                fi
+                incomplete="${incomplete}${required}=${status}"
+              fi
+            done
+            if [ -n "$incomplete" ]; then
+              verdict=incomplete
+              return 0
+            fi
+            verdict=ok
+          }
+
+          # no-mistakes pushes the branch and opens the PR before it writes the
+          # pipeline body, so an opened/synchronize payload can carry a body
+          # that was already replaced by the time this job starts. Re-read the
+          # live body before failing, so the gate reports the PR's real state
+          # instead of a race it cannot influence. Every event is still
+          # evaluated on its own run against the body that is live for it.
+          body="${PR_BODY:-}"
+          attempt=1
+          attempts=6
+          while :; do
+            classify_body "$body"
+            if [ "$verdict" = ok ] || [ "$attempt" -ge "$attempts" ]; then
+              break
+            fi
+            echo "PR #${PR_NUMBER} body is not compliant yet (${verdict}); re-reading the live body (attempt ${attempt} of $((attempts - 1)))."
+            sleep 10
+            attempt=$((attempt + 1))
+            if live=$(gh api "repos/${PR_REPO}/pulls/${PR_NUMBER}" --jq '.body // ""' 2>/dev/null); then
+              body="$live"
+            else
+              echo "Could not re-read the PR body from the API; keeping the event payload body."
+            fi
+          done
+
+          case "$verdict" in
+            ok)
+              echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+              echo "Pipeline step attestation is valid: review, test, and document are completed."
+              exit 0
+              ;;
+            no-attestation)
               {
                 echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."
                 echo
@@ -77,19 +143,8 @@ jobs:
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
               exit 1
-            fi
-            incomplete=''
-            for required in review test document; do
-              status=$(printf '%s' "$json" | jq -r --arg step "$required" \
-                '([(.steps | arrays | .[]) | select(.step == $step) | .status] | first // empty | select(. != "")) // "missing"')
-              if [ "$status" != "completed" ]; then
-                if [ -n "$incomplete" ]; then
-                  incomplete="${incomplete}, "
-                fi
-                incomplete="${incomplete}${required}=${status}"
-              fi
-            done
-            if [ -n "$incomplete" ]; then
+              ;;
+            incomplete)
               {
                 echo "::error::Required no-mistakes pipeline steps are not completed: ${incomplete}."
                 echo
@@ -103,21 +158,21 @@ jobs:
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
               exit 1
-            fi
-            echo "Pipeline step attestation is valid: review, test, and document are completed."
-            exit 0
-          fi
-          {
-            echo "::error::This PR was not raised through no-mistakes."
-            echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
-            echo
-            echo "    $marker"
-            echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
-            echo
-            echo "PR author: ${PR_AUTHOR}"
-          } >&2
-          exit 1
+              ;;
+            *)
+              {
+                echo "::error::This PR was not raised through no-mistakes."
+                echo
+                echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
+                echo "That pipeline runs the required review/test/lint/CI steps and writes a"
+                echo "deterministic '## Pipeline' section into the PR body containing:"
+                echo
+                echo "    $marker"
+                echo
+                echo "See CONTRIBUTING.md for setup and the full workflow."
+                echo
+                echo "PR author: ${PR_AUTHOR}"
+              } >&2
+              exit 1
+              ;;
+          esac
