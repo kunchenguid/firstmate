@@ -131,6 +131,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 The optional local `config/worktree-pool-sweep` file enables the pre-acquire worktree pool safety sweep.
 When present and non-empty (any value other than `off`), the sweep is activated.
+`config/` resolves the same way as for every other script - `FM_CONFIG_OVERRIDE` when set, otherwise `$FM_HOME/config` - so the enable is per firstmate home, and `bin/fm-spawn.sh` passes its own resolved config dir down to the sweep.
 The sweep inspects pooled worktrees before a spawn uses them and refuses when unsafe state is observed.
 
 The sweep checks two conditions and refuses on either:

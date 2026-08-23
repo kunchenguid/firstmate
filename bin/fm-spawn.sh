@@ -2262,7 +2262,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   if [ -x "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" ]; then
     sweep_rc=0
-    "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" "$WT" || sweep_rc=$?
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" "$WT" || sweep_rc=$?
     if [ "$sweep_rc" -ne 0 ]; then
       echo "error: worktree pool sweep refused worktree $WT (exit $sweep_rc); inspect unsafe state or disable sweep in config/worktree-pool-sweep" >&2
       exit 1

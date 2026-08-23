@@ -56,8 +56,12 @@ Exit codes:
 
 Activation:
   The sweep is disabled by default. To enable, create:
-    $HOME/.firstmate/config/worktree-pool-sweep
+    \$FM_HOME/config/worktree-pool-sweep
   containing "on" (or any non-empty value other than "off").
+  The config dir is \$FM_CONFIG_OVERRIDE when set, otherwise \$FM_HOME/config,
+  and \$FM_HOME defaults to the firstmate repo root - the same resolution every
+  other firstmate script uses, so an enable written for one home applies to
+  that home only.
   A missing file, an empty file, or the value "off" leaves the sweep disabled.
 
 This mitigation is distinct from the upstream Treehouse invariant:
@@ -89,7 +93,10 @@ if [ -z "$WT" ]; then
   exit 64
 fi
 
-CONFIG_DIR="${FM_ROOT:-$HOME/.firstmate}/config"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SWEEP_CONFIG="$CONFIG_DIR/worktree-pool-sweep"
 
 is_sweep_enabled() {
@@ -149,11 +156,21 @@ has_only_remote_refs() {
   [ "$local_count" -eq 0 ] && [ "$remote_count" -gt 0 ]
 }
 
+head_covered_by_remotes() {
+  local wt=$1
+  local unremoted
+  unremoted=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || return 1
+  case "$unremoted" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$unremoted" -eq 0 ]
+}
+
 check_head_reachable() {
   local wt=$1
   local unique_count
   if ! has_durable_refs "$wt"; then
-    if has_only_remote_refs "$wt"; then
+    if has_only_remote_refs "$wt" && head_covered_by_remotes "$wt"; then
       return 3
     fi
     return 2

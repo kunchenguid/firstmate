@@ -60,15 +60,52 @@ test_disabled_by_default() {
 
   fm_create_unsafe_dirty_repo "$tmp/repo"
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "disabled by default: expected exit 0 on an unsafe worktree, got $rc"
 
   fm_config_sweep_on "$config_dir"
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 1 ] || fail "disabled by default: fixture is not actually unsafe (enabled sweep gave $rc)"
   pass "sweep is disabled by default even for an unsafe worktree"
+}
+
+# The sweep runs as a child of fm-spawn.sh, which exports no FM_ROOT. Resolution
+# must follow the repo-wide FM_CONFIG_OVERRIDE / $FM_HOME/config convention, so
+# these fixtures poison both the old knob and $HOME to prove neither is consulted.
+test_fm_home_config_activates_sweep() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-fm-home)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_unsafe_dirty_repo "$tmp/repo"
+
+  HOME="$tmp/decoy-home" FM_ROOT="$tmp/decoy-root" FM_HOME="$tmp" \
+    "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "FM_HOME config: expected exit 1, got $rc"
+  pass "an enable under \$FM_HOME/config activates the sweep"
+}
+
+test_config_override_activates_sweep() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-config-override)
+  config_dir="$tmp/elsewhere"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_unsafe_dirty_repo "$tmp/repo"
+
+  HOME="$tmp/decoy-home" FM_ROOT="$tmp/decoy-root" FM_HOME="$tmp" \
+    FM_CONFIG_OVERRIDE="$config_dir" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "FM_CONFIG_OVERRIDE: expected exit 1, got $rc"
+
+  HOME="$tmp/decoy-home" FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "FM_CONFIG_OVERRIDE: enable leaked outside the override dir (got $rc)"
+  pass "FM_CONFIG_OVERRIDE selects the config dir the sweep reads"
 }
 
 test_off_value_disables_sweep() {
@@ -79,7 +116,7 @@ test_off_value_disables_sweep() {
 
   fm_create_unsafe_dirty_repo "$tmp/repo"
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "off value: expected exit 0 on an unsafe worktree, got $rc"
   pass "config value 'off' disables the sweep"
@@ -98,7 +135,7 @@ test_refuses_dirty_worktree() {
   git commit -m "initial" 2>/dev/null
   echo "modified" > file.txt
 
-  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 1 ] || fail "dirty worktree: expected exit 1, got $rc"
   assert_contains "$err" "unsafe: dirty worktree" "dirty worktree: missing diagnostic on stderr"
@@ -119,7 +156,7 @@ test_refuses_staged_changes() {
   echo "staged" > staged.txt
   git add staged.txt
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 1 ] || fail "staged changes: expected exit 1, got $rc"
   pass "refuses staged changes against a real HEAD"
@@ -143,7 +180,7 @@ test_refuses_staged_change_restored_in_worktree() {
   [ -n "$(git diff --cached --name-only)" ] \
     || fail "staged-then-restored: fixture left no staged delta"
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 1 ] || fail "staged-then-restored: expected exit 1, got $rc"
   pass "refuses an index that differs from HEAD even when the worktree matches HEAD"
@@ -162,7 +199,7 @@ test_refuses_untracked_files() {
   git commit -m "initial" 2>/dev/null
   touch untracked.txt
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 1 ] || fail "untracked files: expected exit 1, got $rc"
   pass "refuses untracked files"
@@ -185,7 +222,7 @@ test_allows_branch_reachable_head() {
   git commit -m "feature work" 2>/dev/null
   git checkout main 2>/dev/null
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "branch reachable: expected exit 0, got $rc"
   pass "allows branch-reachable HEAD"
@@ -204,7 +241,7 @@ test_allows_tag_reachable_head() {
   git commit -m "initial" 2>/dev/null
   git tag v1.0.0 2>/dev/null
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "tag reachable: expected exit 0, got $rc"
   pass "allows tag-reachable HEAD"
@@ -224,7 +261,7 @@ test_allows_detached_head_fully_in_main() {
   main_commit=$(git rev-parse HEAD)
   git checkout "$main_commit" 2>/dev/null
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "detached in main: expected exit 0, got $rc"
   pass "allows detached HEAD fully contained in main"
@@ -249,7 +286,7 @@ test_refuses_reflog_only_reachability() {
   git checkout "$feature_commit" 2>/dev/null
   git branch -D feature 2>/dev/null || true
 
-  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 2 ] || fail "reflog only: expected exit 2, got $rc"
   assert_contains "$err" "not reachable from durable refs" \
@@ -284,7 +321,7 @@ test_historical_reproduction() {
   git checkout "$rebased_commit" 2>/dev/null
   git update-ref -d refs/heads/fm/lane-branch 2>/dev/null || true
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "historical reproduction: expected exit 2, got $rc"
   pass "historical reproduction: refuses orphaned commits after branch deletion"
@@ -309,12 +346,47 @@ test_refuses_remote_only_refs() {
   git branch -D main 2>/dev/null || true
   git remote prune origin 2>/dev/null
 
-  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 3 ] || fail "remote only: expected exit 3, got $rc"
   assert_contains "$err" "covered only by remote-tracking refs" \
     "remote only: missing diagnostic on stderr"
   pass "refuses HEAD covered only by remote-tracking refs with a diagnostic"
+}
+
+# Exit 3 claims the commits survive on a remote-tracking ref. When the only refs
+# are remote but HEAD is not contained in any of them, the honest answer is 2.
+test_refuses_orphan_head_with_unrelated_remote_ref() {
+  local tmp config_dir rc err
+  tmp=$(fm_test_tmproot sweep-orphan-vs-remote)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_bare_repo "$tmp/origin"
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  git remote add origin "$tmp/origin"
+  touch file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  git push -u origin main 2>/dev/null
+  git checkout -b orphan 2>/dev/null
+  touch never-pushed.txt
+  git add never-pushed.txt
+  git commit -m "never pushed" 2>/dev/null
+  orphan_commit=$(git rev-parse HEAD)
+  git checkout "$orphan_commit" 2>/dev/null
+  git branch -D orphan 2>/dev/null
+  git branch -D main 2>/dev/null
+  [ "$(git rev-list --count HEAD --not --remotes)" -gt 0 ] \
+    || fail "orphan vs remote: fixture HEAD is contained in a remote ref"
+
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "orphan vs remote: expected exit 2, got $rc"
+  assert_contains "$err" "not reachable from durable refs" \
+    "orphan vs remote: must not claim remote-tracking coverage it never verified"
+  pass "refuses an orphan HEAD as unreachable, not as remote-covered"
 }
 
 test_allows_with_local_branch() {
@@ -339,7 +411,7 @@ test_allows_with_local_branch() {
   git checkout main 2>/dev/null
   git branch -D feature 2>/dev/null
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "local with remote: expected exit 0, got $rc"
   pass "allows HEAD when local branch exists alongside remote"
@@ -366,7 +438,7 @@ test_refuses_when_reachability_cannot_be_computed() {
   git rev-list --count HEAD --not --branches >/dev/null 2>&1 \
     && fail "broken ref: fixture did not actually break rev-list"
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "broken ref: expected exit 2, got $rc"
   pass "refuses when HEAD reachability cannot be computed"
@@ -378,7 +450,7 @@ test_nonexistent_worktree() {
   config_dir="$tmp/config"
   fm_config_sweep_on "$config_dir"
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/nonexistent" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" "$tmp/nonexistent" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 4 ] || fail "nonexistent: expected exit 4, got $rc"
   pass "exits 4 for nonexistent worktree"
@@ -390,7 +462,7 @@ test_missing_argument_is_a_usage_error() {
   config_dir="$tmp/config"
   fm_config_sweep_on "$config_dir"
 
-  FM_ROOT="$tmp" "$SWEEP" >/dev/null 2>&1
+  FM_HOME="$tmp" "$SWEEP" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 64 ] || fail "missing argument: expected exit 64, got $rc"
   [ "$rc" -ne 4 ] || fail "missing argument must not collide with the nonexistent-worktree code"
@@ -409,6 +481,8 @@ test_help_text() {
 
 test_disabled_by_default
 test_off_value_disables_sweep
+test_fm_home_config_activates_sweep
+test_config_override_activates_sweep
 test_refuses_dirty_worktree
 test_refuses_staged_changes
 test_refuses_staged_change_restored_in_worktree
@@ -419,6 +493,7 @@ test_allows_detached_head_fully_in_main
 test_refuses_reflog_only_reachability
 test_historical_reproduction
 test_refuses_remote_only_refs
+test_refuses_orphan_head_with_unrelated_remote_ref
 test_allows_with_local_branch
 test_refuses_when_reachability_cannot_be_computed
 test_nonexistent_worktree
