@@ -75,6 +75,10 @@ pool_root() {
     [ -n "${HOME:-}" ] || die "cannot derive a pool root: neither FM_POOL_ROOT_BASE nor HOME is set"
     base="$HOME/.treehouse-homes"
   fi
+  case "$base" in
+    /*) ;;
+    *) die "pool root base '$base' must be absolute; set FM_POOL_ROOT_BASE to an absolute path" ;;
+  esac
   name=$(basename "$home")
   [ -n "$name" ] && [ "$name" != / ] || name=home
   printf '%s/%s-%s' "$base" "$name" "$(short_hash "$home")"

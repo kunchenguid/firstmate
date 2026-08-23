@@ -132,6 +132,29 @@ test_pool_root_refuses_to_write_inside_the_primary_clone() {
   pass "a pool root inside the primary clone is rejected before any mutation"
 }
 
+test_relative_pool_root_base_is_refused_before_mutation() {
+  local case_dir clone out_a out_b status_a status_b
+  case_dir=$(make_two_homes_one_project relative-root-refused)
+  clone="$case_dir/homeA/project"
+  mkdir -p "$case_dir/cwd-a" "$case_dir/cwd-b"
+
+  out_a=$(cd "$case_dir/cwd-a" && FM_HOME="$case_dir/homeA" \
+    FM_POOL_ROOT_BASE=relative-pools "$POOL_ROOT_BIN" "$clone" 2>&1)
+  status_a=$?
+  out_b=$(cd "$case_dir/cwd-b" && FM_HOME="$case_dir/homeA" \
+    FM_POOL_ROOT_BASE=relative-pools "$POOL_ROOT_BIN" "$clone" 2>&1)
+  status_b=$?
+  expect_code 1 "$status_a" "a relative pool base must be refused from the first directory"
+  expect_code 1 "$status_b" "a relative pool base must be refused from the second directory"
+  assert_contains "$out_a" "must be absolute" "the first relative-base refusal did not identify the stable-path requirement"
+  assert_contains "$out_b" "must be absolute" "the second relative-base refusal did not identify the stable-path requirement"
+  assert_absent "$case_dir/cwd-a/relative-pools" "the first refusal created a cwd-relative pool"
+  assert_absent "$case_dir/cwd-b/relative-pools" "the second refusal created a cwd-relative pool"
+  assert_absent "$case_dir/homeA/state/treehouse-config" \
+    "the relative-base refusal created a generated config view"
+  pass "relative pool bases cannot split one home's pool by working directory"
+}
+
 test_pool_root_is_idempotent_without_mutating_the_clone() {
   local case_dir clone config before after
   case_dir=$(make_two_homes_one_project idempotent)
@@ -419,6 +442,38 @@ SH
   assert_absent "$case_dir/home/state/$id.meta" \
     "spawn published custody metadata for an unconfirmed endpoint"
   pass "an acquired lease is returned when endpoint confirmation fails"
+}
+
+test_spawn_defers_a_signal_until_acquired_lease_custody_is_armed() {
+  local case_dir id out status wrapper
+  id='custody-acquire-signal-r4'
+  case_dir=$(make_spawn_case spawn-acquire-signal "$id")
+  wrapper="$case_dir/spawn-wrapper"
+  cat > "$wrapper" <<SH
+#!/usr/bin/env bash
+export FM_TEST_SPAWN_PID=\$\$
+exec "$SPAWN" "\$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+if [ "\${1:-}" = get ]; then
+  : > "$case_dir/lease-acquired"
+  kill -TERM "\${FM_TEST_SPAWN_PID:?}"
+  printf '%s\n' "$case_dir/pool"
+fi
+SH
+  chmod +x "$wrapper" "$case_dir/fakebin/treehouse"
+
+  out=$(SPAWN="$wrapper" run_spawn_case "$case_dir" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the acquisition-boundary signal fixture did not stop spawn"
+  assert_present "$case_dir/lease-acquired" "the signal fixture did not acquire a durable lease"
+  assert_grep "return --force $case_dir/pool" "$case_dir/treehouse.log" \
+    "spawn leaked a lease interrupted before its path reached the parent"
+  assert_absent "$case_dir/home/state/$id.meta" \
+    "spawn published custody metadata after an acquisition-boundary signal"
+  pass "an acquisition-boundary signal returns the synchronously acquired lease"
 }
 
 test_spawn_refuses_a_copy_another_task_claims() {
@@ -1236,6 +1291,7 @@ SH
 test_two_homes_configure_distinct_pool_roots
 test_literal_pool_root_override_is_refused
 test_pool_root_refuses_to_write_inside_the_primary_clone
+test_relative_pool_root_base_is_refused_before_mutation
 test_pool_root_is_idempotent_without_mutating_the_clone
 test_pool_root_preserves_a_tracked_primary_config
 test_pool_root_preserves_a_nonregular_primary_config
@@ -1246,6 +1302,7 @@ test_real_treehouse_accepts_encoded_pool_paths
 test_spawn_refuses_a_copy_another_task_claims
 test_spawn_refuses_ambiguous_worktree_metadata
 test_spawn_returns_a_lease_when_endpoint_confirmation_fails
+test_spawn_defers_a_signal_until_acquired_lease_custody_is_armed
 test_spawn_preserves_a_post_acquire_owner_conflict
 test_spawn_does_not_return_a_published_lease_on_signal
 test_fresh_spawn_refuses_an_existing_task_record_before_side_effects

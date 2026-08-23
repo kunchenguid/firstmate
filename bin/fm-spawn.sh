@@ -689,6 +689,7 @@ TREEHOUSE_LEASE_HOLDER=
 TREEHOUSE_ABORT_RETURN_PENDING=0
 TREEHOUSE_ABORT_RETURN_WORKTREE=
 TREEHOUSE_ABORT_RETURN_VIEW=
+TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=
 
 treehouse_abort_lease_is_published() {
   local meta worktree holder
@@ -2381,8 +2382,27 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   release_delivered_pool_copies "$PROJ_ABS"
   validate_worktree_metadata_before_lease "$TREEHOUSE_POOL_ROOT"
   TREEHOUSE_LEASE_HOLDER=$ID
-  if ! WT=$(cd "$TREEHOUSE_CONFIG_VIEW_REAL" \
-    && treehouse get --lease --lease-holder "$TREEHOUSE_LEASE_HOLDER"); then
+  TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-HUP}' HUP
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-INT}' INT
+  trap 'TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL=${TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL:-TERM}' TERM
+  treehouse_acquire_status=0
+  WT=$(trap '' HUP INT TERM
+    cd "$TREEHOUSE_CONFIG_VIEW_REAL" \
+      && treehouse get --lease --lease-holder "$TREEHOUSE_LEASE_HOLDER") \
+    || treehouse_acquire_status=$?
+  if [ "$treehouse_acquire_status" -eq 0 ] && [ -n "$WT" ]; then
+    TREEHOUSE_ABORT_RETURN_WORKTREE=$WT
+    TREEHOUSE_ABORT_RETURN_VIEW=$TREEHOUSE_CONFIG_VIEW_REAL
+    TREEHOUSE_ABORT_RETURN_PENDING=1
+  fi
+  trap - HUP INT TERM
+  case "$TREEHOUSE_ACQUIRE_DEFERRED_SIGNAL" in
+    HUP) exit 129 ;;
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+  esac
+  if [ "$treehouse_acquire_status" -ne 0 ]; then
     echo "error: treehouse could not acquire a durable worktree lease for task $ID" >&2
     exit 1
   fi
@@ -2390,9 +2410,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse returned no path for task $ID's durable worktree lease" >&2
     exit 1
   }
-  TREEHOUSE_ABORT_RETURN_WORKTREE=$WT
-  TREEHOUSE_ABORT_RETURN_VIEW=$TREEHOUSE_CONFIG_VIEW_REAL
-  TREEHOUSE_ABORT_RETURN_PENDING=1
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
 
   # Wait until the pane enters the synchronously acquired worktree.
