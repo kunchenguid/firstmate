@@ -137,7 +137,11 @@ function classifyArmClose(stdout, stderr, code, signal) {
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
-      kind: "failure",
+      // The arm still failed to own wake delivery and follows the ordinary
+      // retry path below. Preserve the distinct readiness verdict so a fast
+      // child close cannot race streamed-output observation and make the
+      // turn-end guard mistake this external watcher for an owned failure.
+      kind: "external",
       message: `watcher: FAILED - OpenCode arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`,
     };
   }
@@ -390,7 +394,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    let finalReadiness = "failed";
+    if (classification.kind === "actionable") finalReadiness = "wake";
+    if (classification.kind === "external") finalReadiness = "external";
+    settleReadiness(finalReadiness);
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;

@@ -104,6 +104,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   fi
 fi
+fm_session_lock_wait_until_publishable "$me"
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

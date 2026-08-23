@@ -343,7 +343,67 @@ test_published_session_pid_requires_the_original_live_harness_generation() {
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
     fail "a replacement Claude process that reused the published pid was trusted"
   fi
+
+  # Whole-second process timestamps cannot distinguish two process generations
+  # inside one second. Equality therefore fails closed; the real acquisition
+  # path below proves an ordinary just-started session publishes after the
+  # ambiguous boundary instead of being rejected.
+  if FM_TEST_LOCK_MTIME=259200 FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a same-second replacement Claude process was trusted"
+  fi
   pass "session-lock: a published session pid requires the original live Claude process generation"
+}
+
+test_lock_acquire_publishes_after_the_session_start_second() {
+  local dir fakebin session_pid out rc started_epoch lock_epoch
+  dir="$TMP_ROOT/pool-publish-boundary"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  sleep 120 &
+  session_pid=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "$FM_TEST_SESSION_PID:comm=") printf '%s\n' claude ;;
+  "$FM_TEST_SESSION_PID:args=") printf '%s\n' 'claude --model opus' ;;
+  "$FM_TEST_SESSION_PID:ppid=") printf '%s\n' 1 ;;
+  "$FM_TEST_SESSION_PID:lstart=") exec /usr/bin/ps -p "$pid" -o lstart= ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' "$FM_TEST_SESSION_PID" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" CLAUDE_PID="$session_pid" \
+    FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>&1) && rc=0 || rc=$?
+  started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+    xargs -I{} date -d "{}" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+      xargs -I{} date -j -f '%a %b %e %T %Y' "{}" +%s 2>/dev/null) \
+    || started_epoch=''
+  lock_epoch=$(stat -f %m "$dir/state/.lock" 2>/dev/null) \
+    || lock_epoch=$(stat -c %Y "$dir/state/.lock" 2>/dev/null) \
+    || lock_epoch=''
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || fail "a just-started Claude session could not acquire its lock (rc=$rc): $out"
+  [ -n "$started_epoch" ] && [ -n "$lock_epoch" ] \
+    || fail "could not read the acquired lock's generation timestamps"
+  [ "$started_epoch" -lt "$lock_epoch" ] \
+    || fail "lock publication did not advance beyond the session start second ($started_epoch >= $lock_epoch)"
+  pass "session-lock: a just-started Claude session publishes after the ambiguous start second"
 }
 
 # The reported failure is reached through bin/fm-lock.sh, which compares the
@@ -549,6 +609,7 @@ test_competing_version_named_session_is_seen_as_live
 test_pool_served_session_owns_the_lock_it_holds
 test_pool_served_session_never_claims_another_session_lock
 test_published_session_pid_requires_the_original_live_harness_generation
+test_lock_acquire_publishes_after_the_session_start_second
 test_lock_acquire_is_not_refused_to_the_session_that_holds_it
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home

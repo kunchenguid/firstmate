@@ -167,10 +167,10 @@ fm_harness_pid_alive() {
 # ancestry-only behavior below unchanged.
 #
 # The pid is trusted only while it is still a live Claude Code process that
-# predates the lock. The lock's existing mtime is process-generation evidence:
-# if an exited session's pid is recycled, the replacement process necessarily
-# starts after the lock the original session published and is rejected even
-# when the replacement is another Claude process.
+# strictly predates the lock. The lock's existing mtime is process-generation
+# evidence: if an exited session's pid is recycled, the replacement process
+# starts at or after the lock the original session published and is rejected
+# even when the replacement is another Claude process.
 #
 # Trust boundary. The variable is inherited by any child, so on its own it says
 # "a Claude session named this pid", never "I am that session". That is why
@@ -200,8 +200,43 @@ fm_harness_session_pid() {  # <lock-path>
   case "$started_epoch:$lock_epoch" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
-  [ "$started_epoch" -le "$lock_epoch" ] || return 1
+  [ "$started_epoch" -lt "$lock_epoch" ] || return 1
   printf '%s\n' "$pid"
+}
+
+# Wait until a new lock for harness pid $1 can carry unambiguous whole-second
+# generation evidence when the verified Claude signals are available. Claude's
+# published session pid is the only identity that uses lock mtime, so every
+# other harness and every unverified environment return immediately. ps exposes
+# process start only to whole-second precision on both supported platforms;
+# publishing during that same second would make a recycled pid indistinguishable
+# from the original process. The bounded wait moves the one initial lock
+# publication past that boundary so the strict comparison above can reject
+# equality without making a normal just-started session read-only.
+fm_session_lock_wait_until_publishable() {  # <harness-pid>
+  local pid=$1 started started_epoch now i=0
+  [ "${CLAUDE_PID:-}" = "$pid" ] || return 0
+  fm_harness_pid_alive "$pid" || return 0
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 0
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 0
+  started=$(printf '%s' "$started" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$started" ] || return 0
+  started_epoch=$(LC_ALL=C date -d "$started" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$started" +%s 2>/dev/null) \
+    || return 0
+  case "$started_epoch" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  while [ "$i" -lt 40 ]; do
+    now=$(date +%s 2>/dev/null) || return 0
+    case "$now" in
+      ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$now" -gt "$started_epoch" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 0
 }
 
 # True when state dir $1 holds a session lock owned by the current session.
