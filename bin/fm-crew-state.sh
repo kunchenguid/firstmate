@@ -383,12 +383,14 @@ nm_ci_checks_state() {
 # no matching row within FM_CREW_STATE_RUNS_LIMIT rows.
 # Selection follows the live-over-terminal rule owned by bin/fm-nm-run-lib.sh: a
 # live row wins over any terminal one, and rows of the same class keep the
-# listing's newest-first order.
-# With $2 = live-only, a terminal row is never selected, so a caller already
-# holding a terminal answer can ask whether a live sibling exists without that
-# question handing back a second terminal one.
+# listing's newest-first order. A status word that rule cannot classify keeps
+# this listing's own newest-first precedence, so it is answered straight away
+# instead of being held for a live row to displace.
+# With $2 = live-only, neither a terminal nor an unclassifiable row is ever
+# selected, so a caller already holding a terminal answer can ask whether a live
+# sibling exists without that question handing back a second non-live one.
 nm_runs_status_for_branch() {  # <branch> [live-only]
-  local branch=$1 live_only=${2:-} out row st rest br sha first_terminal=""
+  local branch=$1 live_only=${2:-} out row st rest br sha class first_terminal=""
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -405,11 +407,16 @@ nm_runs_status_for_branch() {  # <branch> [live-only]
     # Same code-identity rule as axi status: skip a same-branch row whose
     # short-sha does not match this worktree (rewritten or advanced tip).
     nm_coarse_head_matches_worktree "$sha" || continue
-    if [ "$(fm_nm_run_status_class "$st")" = live ]; then
+    class=$(fm_nm_run_status_class "$st")
+    if [ "$class" = live ]; then
       printf '%s' "$st"
       return 0
     fi
-    # Hold the newest non-live row and keep scanning: an older live row for the
+    if [ "$class" = unknown ] && [ "$live_only" != live-only ]; then
+      printf '%s' "$st"
+      return 0
+    fi
+    # Hold the newest terminal row and keep scanning: an older live row for the
     # same worktree outranks it, and only the absence of one makes it the answer.
     [ -n "$first_terminal" ] || first_terminal=$st
   done <<< "$out"

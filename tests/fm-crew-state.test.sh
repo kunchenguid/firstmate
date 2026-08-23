@@ -15,6 +15,7 @@
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (e2) several runs bound to one worktree: the live one outranks the corpse
+#        (an unclassifiable status word keeps the listing's newest-first order)
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -839,6 +840,36 @@ EOF
 # The other half of the no-widening criterion: a terminal `axi status` run with
 # no live sibling on this worktree keeps reporting its own terminal outcome, in
 # full run-step detail rather than degraded to the coarse listing.
+# An unclassifiable status word keeps this listing's own newest-first
+# precedence: the live-over-terminal preference only ever reorders rows whose
+# liveness is known, so an unexpected newest row is answered as-is instead of
+# being displaced by an older running row and reported as working.
+test_unknown_status_row_keeps_newest_first_precedence() {
+  reset_fakes
+  local d base_head live_head short_base short_live out
+  d=$(new_case unknown-status-row)
+  make_repo_on_branch "$d/wt" fm/feat-unknownrow
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'an older run advanced the tip'
+  live_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unknownrow.meta" "window=fm:fm-unknownrow" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-05 11:30
+  quarantined fm/feat-unknownrow ${short_base}  2026-08-05 11:20
+  running    fm/feat-unknownrow ${short_live}  2026-08-05 10:05
+EOF
+)"
+  out=$(run_crew_state "$d" unknownrow)
+  assert_contains "$out" "runs list status: quarantined" "the newest row's unclassifiable status is answered as-is"
+  assert_not_contains "$out" "state: working" "an older live row must not displace an unclassifiable newer row"
+  pass "an unclassifiable status row keeps the listing's newest-first precedence"
+}
+
 test_terminal_run_without_live_sibling_is_unchanged() {
   reset_fakes
   local d base_head other_head short_base short_other out
@@ -1561,6 +1592,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_terminal_corpse_loses_to_live_run_on_same_branch
 test_runs_list_live_row_outranks_newer_terminal_row
 test_only_terminal_rows_keep_newest_first_precedence
+test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
