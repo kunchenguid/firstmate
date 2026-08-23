@@ -439,6 +439,15 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.textContent = text;
     return n;
   }
+  /* The styles above deliberately clamp, ellipsize, or hard-wrap captain-facing
+     text, so any renderer-produced text node CSS can visually cut also carries
+     its exact full text as a native title tooltip - the visible label stays as
+     rendered and the complete value stays reachable on hover. Build every such
+     node with titledEl and keep plain el for text that is already fully shown.
+     The null guard matters because title reflects a DOMString: assigning a
+     missing value would surface the literal "null" as the tooltip.
+     tests/fm-bearings-board.test.sh renders a built board and asserts these
+     exact tooltip values. */
   function titledEl(tag, cls, text) {
     var n = el(tag, cls, text);
     if (text != null) n.title = text;
