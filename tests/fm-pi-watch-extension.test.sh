@@ -1095,24 +1095,31 @@ EOF
 }
 
 test_pi_session_transition_generation_owner() {
-  local repo home plugin child_pid_file arm_log out status
+  local repo home plugin child_pid_file child_marker_file marker_root arm_log out status
   repo="$TMP_ROOT/pi-session-transition-root"
   home="$TMP_ROOT/pi-session-transition-home"
   child_pid_file="$TMP_ROOT/pi-session-transition-child.pid"
+  child_marker_file="$TMP_ROOT/pi-session-transition-child.marker"
+  marker_root="$TMP_ROOT/pi-session-transition-markers"
   arm_log="$TMP_ROOT/pi-session-transition-arm.log"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# The marker identifies this exact process lifetime after its PID is recycled.
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
 printf 'watcher: started pid=%s\n' "$$"
 printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
-printf 'arm pid=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-trap 'exit 0' TERM INT
+printf '%s\n' "$marker" > "${FM_CHILD_MARKER_FILE:?}"
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
 while :; do sleep 0.2; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_ARM_LOG="$arm_log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1150,6 +1157,17 @@ async function waitFor(pred, label, attempts = 250) {
   throw new Error(`timeout waiting for ${label}`);
 }
 
+function currentArm() {
+  try {
+    return {
+      pid: readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim(),
+      marker: readFileSync(process.env.FM_CHILD_MARKER_FILE, "utf8").trim(),
+    };
+  } catch {
+    return { pid: "", marker: "" };
+  }
+}
+
 function liveArmPids() {
   if (!existsSync(process.env.FM_ARM_LOG)) return [];
   return readFileSync(process.env.FM_ARM_LOG, "utf8")
@@ -1157,11 +1175,11 @@ function liveArmPids() {
     .split(/\n/)
     .filter(Boolean)
     .map((line) => {
-      const match = /pid=(\d+)/.exec(line);
-      return match ? match[1] : "";
+      const match = /pid=(\d+) marker=(\S+)/.exec(line);
+      return match ? { pid: match[1], marker: match[2] } : { pid: "", marker: "" };
     })
-    .filter(Boolean)
-    .filter(pidAlive);
+    .filter((arm) => arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid))
+    .map((arm) => arm.pid);
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1174,18 +1192,19 @@ const first = await startup.getTool().execute("startup", {}, undefined, undefine
 if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
   throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
 }
-await waitFor(() => existsSync(process.env.FM_CHILD_PID_FILE), "startup child");
-const startupChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+await waitFor(() => {
+  const arm = currentArm();
+  return arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid);
+}, "startup child");
+const { pid: startupChild, marker: startupMarker } = currentArm();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
 const staleTool = startup.getTool();
 
 async function replaceSession(previous, reason) {
-  const previousChild = existsSync(process.env.FM_CHILD_PID_FILE)
-    ? readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim()
-    : "";
+  const previousArm = currentArm();
   await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason }, {});
-  if (previousChild) {
-    await waitFor(() => !pidAlive(previousChild), `${reason} previous child exit`);
+  if (previousArm.marker) {
+    await waitFor(() => !existsSync(previousArm.marker), `${reason} previous child exit`);
   }
   const next = makePi();
   mod.default(next.pi);
@@ -1202,9 +1221,8 @@ async function replaceSession(previous, reason) {
     throw new Error(`${reason} replacement still refused with shutting-down latch`);
   }
   await waitFor(() => {
-    if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
-    const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-    return child && child !== previousChild && pidAlive(child) && liveArmPids().includes(child);
+    const arm = currentArm();
+    return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
   }, `${reason} replacement child and arm record`);
   const live = liveArmPids();
   if (live.length !== 1) {
@@ -1218,31 +1236,33 @@ current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
 
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
-const sameInstanceChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+const sameInstanceArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceArm = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceArm.details?.ok || String(sameInstanceArm.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceArm.details)}`);
-}
-await waitFor(() => {
-  if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
-  const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-  return child !== sameInstanceChild && pidAlive(child) && liveArmPids().includes(child);
-}, "same-instance replacement child and arm record");
-await waitFor(() => !pidAlive(sameInstanceChild), "same-instance previous child exit");
+const sameInstanceResult = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
+if (!sameInstanceResult.details?.ok || String(sameInstanceResult.details.message).includes("shutting down")) {
+  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceResult.details)}`);
+  }
+  await waitFor(() => {
+    const arm = currentArm();
+    return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
+  }, "same-instance replacement child and arm record");
+  await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
 }
 
 // Stale prior-generation callback must not stop, rearm, or clear the active generation.
-const activeChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+const activeChild = currentArm().pid;
 const stale = await staleTool.execute("stale-prior-generation", {}, undefined, undefined, {});
 if (stale.details?.ok !== false || !String(stale.details.message).includes("shutting down")) {
   throw new Error(`stale prior generation did not refuse: ${JSON.stringify(stale.details)}`);
 }
 if (!pidAlive(activeChild)) throw new Error("active generation child died after stale callback");
-if (pidAlive(startupChild)) throw new Error("startup generation child was resurrected");
+if (existsSync(startupMarker)) throw new Error("startup generation child was resurrected");
+// Model the old generation's PID being recycled for the active child.
+// Its retired lifetime marker must keep the historical row from counting live.
+writeFileSync(process.env.FM_ARM_LOG, `arm pid=${activeChild} marker=${startupMarker}\n`, { flag: "a" });
 if (liveArmPids().length !== 1 || liveArmPids()[0] !== activeChild) {
   throw new Error(`stale callback mutated live arm set: ${liveArmPids().join(",")}`);
 }
@@ -1257,9 +1277,9 @@ for (const reason of ["resume", "fork", "new", "resume"]) {
 }
 
 // Real terminal shutdown still blocks late rearming.
-const finalChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+const finalArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
-await waitFor(() => !pidAlive(finalChild), "terminal shutdown child exit");
+await waitFor(() => !existsSync(finalArm.marker), "terminal shutdown child exit");
 const quitArm = await current.getTool().execute("after-quit", {}, undefined, undefined, {});
 if (quitArm.details?.ok !== false || quitArm.details.message !== "watcher: not armed - Pi session is shutting down") {
   throw new Error(`terminal quit must keep the shutting-down refusal: ${JSON.stringify(quitArm.details)}`);
