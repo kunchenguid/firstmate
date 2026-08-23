@@ -47,6 +47,15 @@ Its banner names the true failing condition, either a missing live watcher proce
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
 
+## Corr booking reconciliation gate
+
+On every allow path, and only there, the guard also runs `bin/fm-corr-abgleich.sh`, the receiving side's own check for received-but-unbooked marked requests.
+A supervision repair keeps its own reason and its own bounded continuation; the reconciliation never competes with it.
+The script reads the parent's pending-reply ledger through the owners in `bin/fm-pending-reply-lib.sh` and names each corr id that has no correlated booking line in the record's own `parent_status` file.
+It blocks once per distinct difference set per session id from the hook payload and stays quiet afterwards, so an unchanged debt can never wedge a session.
+Only homes with a local-route `.fm-secondmate-parent` binding can read the parent ledger; remote-route homes, plain primaries, and child worktrees skip silently, and the parent-side guard still owns their recovery.
+A missing or failing abgleich script is a silent no-op in the guard.
+
 ## Harness integrations
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
@@ -154,6 +163,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, the abandoned auto-arm claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-corr-abgleich.test.sh` covers the corr booking reconciliation gate: the red case naming a missing booking, the silent green case, multi-mark attribution, lifecycle filters, escalation echoes that are not answers, bounded blocking per session and set, non-local scope skips, wrong-surface answers, and both hook-wiring paths.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
