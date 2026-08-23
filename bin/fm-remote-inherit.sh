@@ -171,10 +171,10 @@ case "$COMMAND" in
     [ "$BYTES" -eq "$EXPECTED_BYTES" ] || die "inherited material length does not match its commitment"
     ACTUAL_HASH=$(sha256_file "$TMP") || die "cannot hash inherited material"
     [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || die "inherited material digest does not match its commitment"
+    commit_generation
     if deviation_holds; then
       exit 0
     fi
-    commit_generation
     if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
       printf 'unchanged: %s\n' "$REL"
@@ -194,10 +194,10 @@ case "$COMMAND" in
     EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
+    commit_generation
     if deviation_holds; then
       exit 0
     fi
-    commit_generation
     if [ ! -e "$DEST" ]; then
       printf 'unchanged: %s\n' "$REL"
       exit 0

@@ -204,6 +204,36 @@ test_remote_receiver_honors_the_record() {
   pass "a remote home's deviation record is honored and reported too"
 }
 
+test_remote_receiver_commits_honored_generation() {
+  local home newer older out status
+  home="$TMP_ROOT/remote-generation/home"
+  mkdir -p "$home/config"
+  printf 'tmux\n' > "$home/config/backend"
+  printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+  newer="$TMP_ROOT/remote-generation/newer"
+  older="$TMP_ROOT/remote-generation/older"
+  printf 'herdr\n' > "$newer"
+  printf 'orca\n' > "$older"
+
+  FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+    "$(LC_ALL=C wc -c < "$newer" | tr -d ' ')" \
+    "$(fm_inherit_sha256 "$newer")" 2 < "$newer" >/dev/null \
+    || fail "remote receiver failed on the newer deviated generation"
+
+  rm -f "$home/config/backend.deviation"
+  status=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+    "$(LC_ALL=C wc -c < "$older" | tr -d ' ')" \
+    "$(fm_inherit_sha256 "$older")" 1 < "$older" 2>&1) || status=$?
+
+  expect_code 1 "$status" "a delayed older generation after deviation revocation"
+  assert_contains "$out" "generation is superseded" \
+    "the delayed generation must be rejected by the replay barrier"
+  [ "$(cat "$home/config/backend")" = tmux ] \
+    || fail "a delayed older generation replaced the formerly deviated value"
+  pass "an honored remote deviation still advances the replay barrier"
+}
+
 test_deviation_is_honored_and_surfaced
 test_deviation_reported_every_sync
 test_agreeing_deviation_stays_quiet
@@ -212,3 +242,4 @@ test_record_without_evidence_is_refused
 test_record_for_a_non_deviable_item_is_refused
 test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
+test_remote_receiver_commits_honored_generation
