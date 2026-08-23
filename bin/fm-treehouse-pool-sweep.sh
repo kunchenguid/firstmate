@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/fm-treehouse-pool-sweep.sh - Pre-acquire worktree pool safety sweep.
+# fm-treehouse-pool-sweep.sh - Pre-acquire worktree pool safety sweep
 #
 # This is a MITIGATION (not a fix) for the worktree reuse incident. It inspects
 # pooled worktrees before acquisition and refuses to request one when unsafe pool
@@ -7,78 +7,62 @@
 # whose state is unsafe." This mitigation can only observe and refuse; it cannot
 # enforce the invariant across all consumers.
 #
-# Two structural gaps this mitigation cannot close:
-#   1. A direct `treehouse get` by anything other than firstmate bypasses this sweep.
-#   2. Another firstmate home can race between sweep and acquire.
-#
 # Usage: fm-treehouse-pool-sweep.sh <worktree-path>
+#
+# The sweep checks two conditions and refuses on either:
+#   1. Dirty worktree: tracked modifications, staged changes, or untracked
+#      non-ignored files. A HEAD that cannot be inspected at all counts as a
+#      refusal too, reported separately so the diagnostic is not "dirty".
+#   2. HEAD contains at least one commit not reachable from an approved durable ref:
+#      - refs/heads/* (local branches)
+#      - refs/tags/* (tags)
+#      - refs/firstmate/rescue/* (reserved rescue namespace)
+#
+# Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
+#
+# For refs/remotes/*: they are counted for reachability so an ordinary freshly-
+# checked-out pool worktree is not falsely refused, but the case where HEAD's
+# commits are covered ONLY by remote-tracking refs (and no local head or tag) is
+# classified as unsafe.
+#
 # Exit codes:
 #   0 - Worktree is safe to acquire (or sweep is disabled)
-#   1 - Worktree is unsafe: dirty
+#   1 - Worktree is unsafe: dirty, or HEAD cannot be inspected
 #   2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs
 #   3 - Worktree is unsafe: HEAD covered only by remote-tracking refs (prunable)
 #   4 - Worktree does not exist
 #  64 - Usage error (no worktree path given)
+#
+# Activation:
+#   The sweep is disabled by default. To enable, create:
+#     $FM_HOME/config/worktree-pool-sweep
+#   containing "on" (or any non-empty value other than "off").
+#   The config dir is $FM_CONFIG_OVERRIDE when set, otherwise $FM_HOME/config,
+#   and $FM_HOME defaults to the firstmate repo root - the same resolution every
+#   other firstmate script uses, so an enable written for one home applies to
+#   that home only.
+#   A missing file, an empty file, or the value "off" leaves the sweep disabled.
+#
+# This mitigation is distinct from the upstream Treehouse invariant:
+#   - MITIGATION: "Firstmate refuses to request a worktree when it observes unsafe pool state."
+#   - INVARIANT:  "No consumer can reuse a worktree whose state is unsafe."
+#
+# Structural gaps this mitigation cannot close:
+#   1. A direct treehouse get by anything other than firstmate bypasses the sweep.
+#   2. Another firstmate home can race between sweep and acquire:
+#
+#      T1  Firstmate A sweeps -> safe
+#      T2  Firstmate B acquires/modifies the same pool
+#      T3  Firstmate A calls treehouse get
+#
+#      This race can cause the worktree to be unsafe when Firstmate A uses it.
+#      The eventual Treehouse fix must kill this atomically at allocation time.
 set -euo pipefail
 
 usage() {
-  cat <<EOF
-fm-treehouse-pool-sweep.sh - Pre-acquire worktree pool safety sweep
-
-This is a MITIGATION for the worktree reuse incident (not a fix for the
-underlying invariant). It inspects pooled worktrees before acquisition and
-refuses to request one when unsafe pool state is observed.
-
-Usage: fm-treehouse-pool-sweep.sh <worktree-path>
-
-The sweep checks two conditions and refuses on either:
-  1. Dirty worktree: tracked modifications, staged changes, or untracked
-     non-ignored files.
-  2. HEAD contains at least one commit not reachable from an approved durable ref:
-     - refs/heads/* (local branches)
-     - refs/tags/* (tags)
-     - refs/firstmate/rescue/* (reserved rescue namespace)
-
-Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
-
-For refs/remotes/*: they are counted for reachability so an ordinary freshly-
-checked-out pool worktree is not falsely refused, but the case where HEAD's
-commits are covered ONLY by remote-tracking refs (and no local head or tag) is
-classified as unsafe.
-
-Exit codes:
-  0 - Worktree is safe to acquire (or sweep is disabled)
-  1 - Worktree is unsafe: dirty
-  2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs
-  3 - Worktree is unsafe: HEAD covered only by remote-tracking refs (prunable)
-  4 - Worktree does not exist
- 64 - Usage error (no worktree path given)
-
-Activation:
-  The sweep is disabled by default. To enable, create:
-    \$FM_HOME/config/worktree-pool-sweep
-  containing "on" (or any non-empty value other than "off").
-  The config dir is \$FM_CONFIG_OVERRIDE when set, otherwise \$FM_HOME/config,
-  and \$FM_HOME defaults to the firstmate repo root - the same resolution every
-  other firstmate script uses, so an enable written for one home applies to
-  that home only.
-  A missing file, an empty file, or the value "off" leaves the sweep disabled.
-
-This mitigation is distinct from the upstream Treehouse invariant:
-  - MITIGATION: "Firstmate refuses to request a worktree when it observes unsafe pool state."
-  - INVARIANT:  "No consumer can reuse a worktree whose state is unsafe."
-
-Structural gaps this mitigation cannot close:
-  1. A direct treehouse get by anything other than firstmate bypasses the sweep.
-  2. Another firstmate home can race between sweep and acquire:
-
-     T1  Firstmate A sweeps -> safe
-     T2  Firstmate B acquires/modifies the same pool
-     T3  Firstmate A calls treehouse get
-
-     This race can cause the worktree to be unsafe when Firstmate A uses it.
-     The eventual Treehouse fix must kill this atomically at allocation time.
-EOF
+  # The whole leading comment block, ending at the first line that is not a
+  # comment, so --help cannot drift away from the header above.
+  sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
@@ -95,7 +79,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SWEEP_CONFIG="$CONFIG_DIR/worktree-pool-sweep"
 
@@ -116,6 +100,11 @@ fi
 if [ ! -d "$WT" ]; then
   exit 4
 fi
+
+head_is_inspectable() {
+  local wt=$1
+  git -C "$wt" rev-parse --verify --quiet HEAD >/dev/null 2>&1
+}
 
 is_dirty() {
   local wt=$1
@@ -177,6 +166,11 @@ check_head_reachable() {
   fi
   return 0
 }
+
+if ! head_is_inspectable "$WT"; then
+  echo "unsafe: cannot inspect HEAD at $WT" >&2
+  exit 1
+fi
 
 if is_dirty "$WT"; then
   echo "unsafe: dirty worktree at $WT" >&2

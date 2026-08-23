@@ -216,6 +216,31 @@ test_allows_stat_dirty_but_clean_worktree() {
   pass "allows a stat-dirty worktree whose content matches HEAD"
 }
 
+# A HEAD git cannot resolve (unborn, or a worktree whose repo is unreadable)
+# makes the dirty probe exit 128. That must still refuse, but the operator is
+# told the real condition instead of being sent looking for uncommitted work.
+test_refuses_uninspectable_head_with_its_own_diagnostic() {
+  local tmp config_dir rc err
+  tmp=$(fm_test_tmproot sweep-unborn-head)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  git rev-parse --verify --quiet HEAD >/dev/null 2>&1 \
+    && fail "unborn HEAD: fixture already has a commit"
+
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "unborn HEAD: expected exit 1, got $rc"
+  assert_contains "$err" "cannot inspect HEAD" \
+    "unborn HEAD: missing the cannot-inspect diagnostic"
+  case "$err" in
+    *"dirty worktree"*) fail "unborn HEAD: reported as dirty, which it is not" ;;
+  esac
+  pass "refuses an uninspectable HEAD with its own diagnostic, not 'dirty'"
+}
+
 test_refuses_untracked_files() {
   local tmp config_dir
   tmp=$(fm_test_tmproot sweep-untracked)
@@ -544,6 +569,7 @@ test_refuses_dirty_worktree
 test_refuses_staged_changes
 test_refuses_staged_change_restored_in_worktree
 test_allows_stat_dirty_but_clean_worktree
+test_refuses_uninspectable_head_with_its_own_diagnostic
 test_refuses_untracked_files
 test_allows_branch_reachable_head
 test_allows_tag_reachable_head
