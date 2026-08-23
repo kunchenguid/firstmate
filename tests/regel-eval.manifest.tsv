@@ -1,0 +1,39 @@
+# regel-eval manifest - one row per incident-derived guarantee (plan v3 U1.9).
+# Columns (tab-separated): row-id, anchors, claim, enforcement.
+# enforcement: test:<repo-relative file> | probe:<command> | prose:<where the duty lives>.
+# A new rule enters the rulebook only with a row here whose case is red without
+# the rule and green with it (hardening 14).
+fleet-stop-machine	L30	a captain stop is a machine flag every automation reads before starting anything	test:tests/fm-fleet-stop.test.sh
+fleet-stop-spawn-gate	L30	spawns refuse while a stop flag exists, before argument validation	test:tests/fm-fleet-stop.test.sh
+stop-origin-guard	L30	the day-close lift can never remove a captain-origin stop	test:tests/fm-fleet-stop.test.sh
+order-book	L10 L45	a captain word becomes a typed durable record at the moment of receipt	test:tests/fm-order.test.sh
+order-close-authority	L45	a decision or prohibition closes only with the captain's verbatim words	test:tests/fm-order.test.sh
+resubmission-lock	L71	a decided subject blocks resubmission without a named new fact	test:tests/fm-order.test.sh
+order-pin-recitation	L10 L45	every session start pins active orders and demands recitation before acting	test:tests/fm-session-start.test.sh
+context-diff	L18	unchanged context files compact to one line; changes print in full; re-anchor always prints full	test:tests/fm-session-start.test.sh
+liveness-structural	L11 L28	the dead-man judges liveness from the lock pid and the process tree, never from window labels	test:tests/fm-totmann.test.sh
+revive-leadership-only	L30	revival touches only the leadership window and never wakes workers or officers	test:tests/fm-totmann.test.sh
+dayclose-soft-stop	L10 L18	the day close stops softly, reports honestly, and reboots only armed and undeferred	test:tests/fm-tagesschluss.test.sh
+dayclose-prewarn	L84	from the pre-warning zone on, no new launches start that evening	test:tests/fm-tagesschluss.test.sh
+morning-check-red-holds	L30	a day-close finding keeps the stop and warns the captain instead of lifting	test:tests/fm-tagesschluss.test.sh
+forensik-candidates-only	hardening 2	daily lessons stay hypothesis-stage candidates; the ledger is never auto-written	test:tests/fm-forensik.test.sh
+judge-honesty	hardening 3	judging is marked not decision-capable while no frozen captain gold set exists	test:tests/fm-forensik.test.sh
+drift-guard	L01	deployed state is measured against the repo on cadence, at the target, never from memory	test:tests/fm-gex-drift.test.sh
+rollout-owed	L01	a service-repo merge deposits an owed rollout that only a confirmed deploy clears	test:tests/fm-gex-drift.test.sh
+probe-failure-honest	L13 L39	a failed probe is reported as failed and never read as in sync	test:tests/fm-gex-drift.test.sh
+register-derived	L04 L09 L23	the captain register renders from the backlog, keyed per line, never hand-fed	test:tests/fm-register.test.sh
+ten-cap-mechanical	L19	the ten-per-area cap is enforced by the machine with a disclosed overflow row	test:tests/fm-register.test.sh
+hand-register-protected	HR3	the hand-kept register is never overwritten without explicit takeover plus archive	test:tests/fm-register.test.sh
+wake-ack-one-owner	L15	the wake-acknowledgement wording has exactly one emit/parse owner	test:tests/fm-wake-ack-lib.test.sh
+climb-one-owner	L11	parent-chain climbing has exactly one mechanical owner	test:tests/fm-proctree-lib.test.sh
+wake-durability	L15	queued wakes stay durable until their handling is acknowledged	test:tests/fm-wake-queue.test.sh
+open-decisions-fold	L62	open captain calls resurface from the durable status fold, not from memory	test:tests/fm-wake-drain-open-decisions.test.sh
+unread-status	L56	unread status lines are presented once and never silently dropped	test:tests/fm-wake-drain-unread-status.test.sh
+teardown-unlanded	HR3	teardown refuses while uncommitted or unlanded work exists	test:tests/fm-teardown.test.sh
+merge-recorded	L01	every task merge runs through the recording merge path with its guards	test:tests/fm-pr-merge.test.sh
+send-delivery	L57 L89	steering sends verify delivery; unconfirmed is a distinct verdict, not success	test:tests/fm-send-settle.test.sh
+spawn-isolation	HR1	project work starts in an isolated worktree, never the primary checkout	test:tests/fm-spawn-worktree-settle.test.sh
+number-provenance	L02 L59	every number carries measured/derived/estimated provenance	prose:U5 P1 provenance field - until then a brief and reporting duty
+verbatim-quote-travel	L46	the captain's wording travels verbatim to the lowest level, interpretation marked separately	prose:brief scaffold duty until the typed envelope (E5 interim form)
+reservation-leases	L38 L82	shared environments carry a machine-readable reservation with holder and expiry	prose:U5 P1 reservation register - until then a coordination duty
+paid-run-abort	L94	paid and device runs carry their abort limit in the order	prose:brief scaffold duty until mechanized
