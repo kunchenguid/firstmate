@@ -134,6 +134,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before every fresh Treehouse allocation, the spawn path restores pid-less
+#   durable leases for local worktrees recorded by existing task metadata and
+#   refuses if that guard cannot be established. After allocation it also
+#   refuses any worktree that another local task still records, independently
+#   of Treehouse's lease state. These fresh-allocation checks do not apply to
+#   Orca or secondmate spawns, and metadata marked remote_host belongs to
+#   another filesystem namespace and is excluded from the local scan.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree

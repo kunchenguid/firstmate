@@ -14,6 +14,9 @@ const matches = state.worktrees.filter((entry) => {
 });
 if (matches.length !== 1) throw new Error(`treehouse state has ${matches.length} entries for ${requested}`);
 const entry = matches[0];
+// Promotion supersedes both process ownership and an interrupted destruction
+// reservation. Keeping `destroying` after removing its owner would prevent
+// Treehouse's healing transition from making the guarded slot usable again.
 entry.leased = true;
 entry.lease_id ||= crypto.randomBytes(16).toString('hex');
 entry.lease_holder ||= holder;

@@ -4,10 +4,12 @@
 # A live task's state/<id>.meta worktree= record is the authority for its
 # checkout. Treehouse's normal owner reservation is process-bound, so a reboot
 # can leave that checkout looking available before the task record is retired.
-# These helpers locate its pool-owned state file, lock it with Treehouse's own
-# flock boundary, and register a pid-less durable lease. Bootstrap repairs all
-# recorded worktrees after a reboot; fresh spawns also reject a path recorded by
-# another task as a final collision guard.
+# These helpers locate its pool-owned state file, take Treehouse's advisory-lock
+# boundary, and register a pid-less durable lease. Bootstrap repairs local
+# recorded Treehouse worktrees after a reboot when their owning pool can be
+# identified; remote records belong to another filesystem namespace and are
+# ignored. Fresh spawns also reject a local path recorded by another task as a
+# final collision guard.
 
 FM_TREEHOUSE_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

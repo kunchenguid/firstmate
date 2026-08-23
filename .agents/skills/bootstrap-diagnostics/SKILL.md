@@ -57,7 +57,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Preserve that outbox and rerun `bin/fm-backlog-handoff.sh --resume-pending` after same-host connectivity returns; never re-add or dispatch the items from the main backlog.
   An unsafe-outbox variant requires path and file-type inspection before any retry.
 - `TREEHOUSE_GUARD: could not register durable guards for recorded live worktrees` - do not dispatch a fresh local crewmate or scout, because a post-reboot pool lease could otherwise recycle a recorded task checkout.
-  Preserve the state records, inspect the relevant Treehouse pool state file and its lock permissions, then rerun session start after the guard can be written.
+  Preserve the state records, inspect the preceding error for a missing Node or lock implementation, and inspect the relevant Treehouse pool state and advisory-lock permissions.
+  Rerun session start after every recorded local worktree can be guarded.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - secondmate convergence changed a running home's loaded instructions or inherited config, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
