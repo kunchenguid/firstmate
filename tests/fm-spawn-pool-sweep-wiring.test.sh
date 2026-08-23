@@ -77,11 +77,11 @@ make_case() {
   git -C "$pool" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'abandoned work'
   orphan=$(git -C "$pool" rev-parse HEAD)
 
-  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$orphan"
+  printf '%s\n' "$home|$project|$pool|$fakebin|$orphan"
 }
 
 read_case_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR ORPHAN_SHA <<EOF
+  IFS='|' read -r HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR ORPHAN_SHA <<EOF
 $1
 EOF
 }
