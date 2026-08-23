@@ -300,7 +300,8 @@ assert "0o755 if member.mode & 0o111 else 0o644" in guest
 assert 'for path in root.rglob("*"):' in guest
 assert "launch diagnostics (exit" in guest
 assert "code: recover_custody" in guest
-assert guest.count('cd "$3" && exec "$2" axi status') == 2
+assert guest.count('cd "$3" && exec "$2" axi status') == 3
+assert guest.count('cd "$3" && exec "$2" axi status --run "$4"') == 1
 assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in bridge
 for value in (
     "fm.azure-validation-owner-decision/v1",
@@ -2999,6 +3000,139 @@ EOF
   pass "the exact shipped guest keeps signed gates in one Run Command and fails a missing envelope terminally"
 }
 
+protected_terminal_status_identity_contract() {
+  local work block fakebin run_id peer_id
+  work=$(fm_test_tmproot fm-azure-validation-protected-terminal-status)
+  fakebin=$work/fakebin
+  mkdir -p "$fakebin" "$work/repo" "$work/state"
+  run_id=01HZX7YQ7EJQH8C9G3N4M5P6R7
+  peer_id=01HZX7YQ7EJQH8C9G3N4M5P6R8
+
+  # Execute the shipped post-run status and authority region. A protected run
+  # already established one immutable run id in the same-attempt gate loop;
+  # terminal output may legitimately contain other ULIDs in fix/evidence rows.
+  # The old unscoped query counted every ULID, cleared RUN_ID, skipped authority
+  # creation, and the result builder then crashed opening a missing file.
+  block=$work/status-authority.sh
+  awk '
+    /^# The status read is the sole input to outcome derivation/ { found=1 }
+    found {
+      if (/^# The pipeline daemon owns the branch/) exit
+      print
+    }
+  ' "$GUEST" >"$block"
+  [ -s "$block" ] || fail "the protected terminal status region was not found"
+
+  cat >"$fakebin/runuser" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -u ] && [ "$2" = fmvalidate ] && [ "$3" = -- ] || exit 91
+shift 3
+exec "$@"
+SH
+  chmod 700 "$fakebin/runuser"
+  cat >"$work/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$FIXTURE_NM_CALLS"
+[ "$1" = axi ] && [ "$2" = status ] && [ "$3" = --run ] \
+  && [ "$4" = "$FIXTURE_RUN_ID" ] || exit 92
+if [ "${FIXTURE_INCLUDE_EXACT:-}" = 1 ]; then
+  printf 'run:\n  id: %s\n  evidence_id: %s\n  owner_decision_protected: true\n  owner_decision_head: %s\n' \
+    "$FIXTURE_RUN_ID" "$FIXTURE_PEER_ID" "$FIXTURE_HISTORY_HEAD"
+else
+  printf 'run:\n  id: %s\n  owner_decision_protected: true\n  owner_decision_head: %s\n' \
+    "$FIXTURE_PEER_ID" "$FIXTURE_HISTORY_HEAD"
+fi
+SH
+  chmod 700 "$work/no-mistakes"
+  : >"$work/cell.env"
+  printf '{}\n' >"$work/identity.json"
+
+  python3 - "$work/state.sqlite" "$work/request.json" "$work/history-head" <<'PY'
+import base64,hashlib,json,sqlite3,sys
+database,request_path,head_path=sys.argv[1:]
+public=b"P"*32
+key_id=hashlib.sha256(public).hexdigest()
+repo_id="repo-protected"
+branch="codex/azure-final-requirements"
+initial_head="1"*40
+genesis=hashlib.sha256((
+    "no-mistakes.owner-decision-history/v1\n"
+    "key:{}\nrepo:{}\nbranch:{}\ninitial-head:{}\n".format(
+        key_id,repo_id,branch,initial_head
+    )
+).encode()).hexdigest()
+connection=sqlite3.connect(database)
+connection.execute(
+    "CREATE TABLE owner_decision_authorities ("
+    "run_id TEXT PRIMARY KEY,public_key BLOB NOT NULL,key_id TEXT NOT NULL,"
+    "repo_id TEXT NOT NULL,branch TEXT NOT NULL,initial_head_sha TEXT NOT NULL,"
+    "genesis_head TEXT NOT NULL,created_at INTEGER NOT NULL)"
+)
+connection.execute(
+    "INSERT INTO owner_decision_authorities VALUES (?,?,?,?,?,?,?,?)",
+    ("01HZX7YQ7EJQH8C9G3N4M5P6R7",public,key_id,repo_id,branch,initial_head,genesis,1),
+)
+connection.commit(); connection.close()
+request={
+    "repository":{"branch":branch,"head":initial_head},
+    "owner_decision":{
+        "public_key":base64.b64encode(public).decode(),"key_id":key_id,
+        "source_commit":"2"*40,
+    },
+}
+open(request_path,"w").write(json.dumps(request)+"\n")
+open(head_path,"w").write(genesis+"\n")
+PY
+
+  cat >"$work/drive.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$FM_TEST_FAKEBIN:$PATH"
+STATUS_LOG=$FM_TEST_WORK/status.log
+ENV_FILE=$FM_TEST_WORK/cell.env
+NM_BIN=$FM_TEST_WORK/no-mistakes
+REPO=$FM_TEST_WORK/repo
+RUN_LOG=$FM_TEST_WORK/run.log
+REQUEST=$FM_TEST_WORK/request.json
+STATE=$FM_TEST_WORK/state
+ATTEMPT=1
+IDENTITY=$FM_TEST_WORK/identity.json
+NM_HOME=$FM_TEST_WORK
+protected_run_id=$FIXTURE_RUN_ID
+set +e
+. "$FM_TEST_BLOCK"
+SH
+  chmod 700 "$work/drive.sh"
+
+  export FIXTURE_NM_CALLS=$work/nm-calls FIXTURE_RUN_ID=$run_id FIXTURE_PEER_ID=$peer_id
+  export FIXTURE_HISTORY_HEAD
+  FIXTURE_HISTORY_HEAD=$(cat "$work/history-head")
+  env FIXTURE_INCLUDE_EXACT=1 FM_TEST_WORK="$work" FM_TEST_FAKEBIN="$fakebin" FM_TEST_BLOCK="$block" \
+    bash "$work/drive.sh" || fail "the exact protected terminal status region failed"
+  [ "$(cat "$work/nm-calls")" = "axi status --run $run_id" ] \
+    || fail "terminal status was not bound to the established protected run id"
+  [ "$(jq -r .run_id "$work/identity.json")" = "$run_id" ] \
+    || fail "a peer ULID displaced the protected run identity"
+  [ "$(jq -r .owner_decision_head "$work/state/owner-authority-a1.json")" = "$FIXTURE_HISTORY_HEAD" ] \
+    || fail "the bound terminal status did not produce exact owner authority"
+  [ "$(jq -r .owner_decision_protected "$work/state/owner-authority-a1.json")" = true ] \
+    || fail "the terminal authority lost protected status"
+
+  rm "$work/state/owner-authority-a1.json"
+  printf '{}\n' >"$work/identity.json"
+  : >"$work/nm-calls"
+  env FIXTURE_INCLUDE_EXACT=0 FM_TEST_WORK="$work" FM_TEST_FAKEBIN="$fakebin" FM_TEST_BLOCK="$block" \
+    bash "$work/drive.sh" || fail "the protected missing-identity status region failed"
+  [ "$(jq -r '.run_id // empty' "$work/identity.json")" = "" ] \
+    || fail "a peer ULID replaced a missing protected run identity"
+  [ ! -e "$work/state/owner-authority-a1.json" ] \
+    || fail "terminal authority was created without the exact protected run identity"
+  unset FIXTURE_NM_CALLS FIXTURE_RUN_ID FIXTURE_PEER_ID FIXTURE_HISTORY_HEAD
+  pass "terminal owner authority stays bound to the exact protected run when status contains peer ULIDs"
+}
+
 static_contract
 submit_contract
 security_negative_contract
@@ -3021,3 +3155,4 @@ terminal_classifier_optional_matches_contract
 receipt_chain_close_contract
 owner_decision_protocol_contract
 owner_decision_guest_launcher_contract
+protected_terminal_status_identity_contract
