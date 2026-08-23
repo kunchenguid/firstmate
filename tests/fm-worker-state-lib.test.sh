@@ -151,6 +151,33 @@ test_peek_skips_the_live_probe_crew_state_still_makes() {
   pass "fm-peek.sh's annotation skips the live probe it is about to make itself as its own raw capture"
 }
 
+test_skip_live_grok_falls_back_to_status_log() {
+  local d fb record_live record_skip
+  d=$(new_case skip-live-grok-status); fb=$(make_fake_tmux "$d")
+  make_repo_on_branch "$d/wt" fm/feat-grokstatus
+  fm_write_meta "$d/state/feat-grokstatus.meta" "window=fm:fm-feat-grokstatus" "worktree=$d/wt" "kind=scout" "harness=grok"
+  printf 'working: implementing the fix\n' > "$d/state/feat-grokstatus.status"
+
+  # Without skip-live, grok's own live tail capture runs, finds no busy
+  # signature (make_fake_tmux's default idle text), and the idle verdict
+  # falls through to the status log's working verb.
+  record_live=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-grokstatus 0)
+  assert_contains "$record_live" $'\nstate=working' "sanity: without skip-live, grok's idle tail falls through to the status log"
+  assert_contains "$record_live" $'\nsource=status-log' "sanity: without skip-live, the status log is the answering tier"
+
+  # With skip-live (fm-peek.sh), the grok arm cannot make its own live capture
+  # and fm_busy_classify reports `unknown live-probe-skipped` - a deliberate
+  # non-answer, not a genuine "tried and failed" unknown. It must fall through
+  # to the exact same status-log tier rather than being treated as an
+  # authoritative pane-tier unknown, or peek and crew-state would structurally
+  # disagree about this worker's state.
+  record_skip=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-grokstatus 1)
+  assert_contains "$record_skip" $'\nstate=working' "skip-live grok falls through unknown live-probe-skipped to the status log"
+  assert_contains "$record_skip" $'\nsource=status-log' "skip-live grok's answering tier matches crew-state's, not a premature pane unknown"
+
+  pass "skip-live grok's deliberately-skipped probe falls through to the status-log tier instead of masking it as unknown"
+}
+
 # --- (e) skip-live also gates the herdr-native, remote-secondmate, and grok
 #         fallback live paths, not just pane_readable ------------------------
 
@@ -249,6 +276,7 @@ test_render_line_matches_documented_shape
 test_render_line_omits_empty_detail
 test_crew_state_and_peek_report_byte_identical_lines
 test_peek_skips_the_live_probe_crew_state_still_makes
+test_skip_live_grok_falls_back_to_status_log
 test_skip_live_skips_herdr_native_busy_probe
 test_skip_live_skips_remote_secondmate_state_probe
 test_skip_live_skips_grok_fallback_capture

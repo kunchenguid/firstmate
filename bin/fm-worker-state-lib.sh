@@ -671,12 +671,18 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
   # state is not meaningful for them; read their state from the status log only.
   # Only an exact busy verdict reports working here, and only an exact idle
   # verdict permits the status-log fallback below. Missing, malformed, stale, or
-  # unverified semantic state remains unknown.
+  # unverified semantic state remains unknown - EXCEPT `unknown live-probe-skipped`,
+  # which means fm_busy_classify deliberately declined to try (skip_live is set and
+  # no semantic record existed to answer for free), not that it tried and failed.
+  # Treating that as authoritative unknown would make skip_live callers (fm-peek.sh)
+  # report a different state than skip_live=0 callers (fm-crew-state.sh) for the
+  # exact same worker; fall through to the status-log tier below instead, same as idle.
   if [ "$KIND" != secondmate ]; then
     BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
-    case "${BUSY_VERDICT%% *}" in
-      busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-      idle) ;;
+    case "$BUSY_VERDICT" in
+      busy\ *) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+      idle\ *) ;;
+      "unknown live-probe-skipped") ;;
       *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
     esac
   fi
