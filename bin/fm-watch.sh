@@ -405,7 +405,8 @@ inbox_steer_check() {  # <window> <task>
 # bounding the wake rate, which would have suppressed genuinely stopped workers.
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
-# before: an unresolvable task, a task with no recorded endpoint, no previous
+# before: a secondmate, an unresolvable task, a task with no recorded endpoint,
+# an endpoint whose marker key collides with another recorded window, no previous
 # hash to compare against (nothing has been polled yet), a capture that fails or
 # comes back empty, and of course an unchanged pane. A .status file anywhere in
 # the batch also returns 1: an authored append is content the supervisor may need
@@ -416,7 +417,7 @@ inbox_steer_check() {  # <window> <task>
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  local f base task meta w key prev now seen=""
+  local f base task meta kind w key other prev now seen=""
   [ "$#" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
@@ -429,9 +430,15 @@ signal_turnend_panes_churned() {  # <file> ...
     seen="$seen $task"
     meta="$STATE/$task.meta"
     [ -f "$meta" ] || return 1
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+    [ "$kind" != secondmate ] || return 1
     w=$(fm_backend_target_of_meta "$meta") || return 1
     [ -n "$w" ] || return 1
     key=$(window_key "$w")
+    while IFS= read -r other; do
+      [ "$other" = "$w" ] && continue
+      [ "$(window_key "$other")" != "$key" ] || return 1
+    done < <(recorded_windows)
     prev=$(cat "$STATE/.hash-$key" 2>/dev/null) || return 1
     [ -n "$prev" ] || return 1
     now=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1

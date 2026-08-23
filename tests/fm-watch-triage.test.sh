@@ -837,6 +837,61 @@ test_turn_ended_still_pane_surfaced() {
   pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
 }
 
+test_secondmate_turn_ended_churning_pane_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case secondmate-turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-mate-churning"
+  : > "$state/mate.turn-ended"
+  printf 'window=%s\nkind=secondmate\nharness=pi\n' "$window" > "$state/mate.meta"
+  printf 'working on the next routed item' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'waiting for work')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a churning secondmate turn-end"
+  grep -F "signal: $state/mate.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced churning secondmate turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the churning secondmate turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.turn-ended" >/dev/null \
+    || fail "churning secondmate turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a churning secondmate turn-end surfaces without a stale resurface path"
+}
+
+test_turn_ended_colliding_window_key_surfaced() {
+  local dir state fakebin out drain_out capture_file window colliding key pid
+  dir=$(make_case turn-ended-colliding-key); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-a.b"; colliding="test:fm-a_b"
+  : > "$state/a.b.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/a.b.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$colliding" > "$state/a_b.meta"
+  printf 'rendered after the prior poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the other window pane')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an ambiguous pane marker"
+  grep -F "signal: $state/a.b.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced ambiguous-marker turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the ambiguous-marker turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/a.b.turn-ended" >/dev/null \
+    || fail "ambiguous-marker turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn-end whose endpoint marker key collides with another window surfaces"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3221,6 +3276,8 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_still_pane_surfaced
+test_secondmate_turn_ended_churning_pane_surfaced
+test_turn_ended_colliding_window_key_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
