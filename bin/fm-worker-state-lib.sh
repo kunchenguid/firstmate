@@ -677,12 +677,13 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
   # Treating that as authoritative unknown would make skip_live callers (fm-peek.sh)
   # report a different state than skip_live=0 callers (fm-crew-state.sh) for the
   # exact same worker; fall through to the status-log tier below instead, same as idle.
+  PANE_PROBE_SKIPPED=0
   if [ "$KIND" != secondmate ]; then
     BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
     case "$BUSY_VERDICT" in
       busy\ *) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
       idle\ *) ;;
-      "unknown live-probe-skipped") ;;
+      "unknown live-probe-skipped") PANE_PROBE_SKIPPED=1 ;;
       *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
     esac
   fi
@@ -703,6 +704,14 @@ fm_worker_state_project() {  # <id> [skip-live-probe]
       emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
     fi
   fi
+
+  # A skipped pane probe that the status-log tier above could not corroborate
+  # is NOT the same fact as "no source exists at all" (source=none below): a
+  # live signal exists, skip_live's caller (fm-peek.sh) just deliberately
+  # declined to read it to avoid a second live round trip. Reporting it as
+  # source=none would erase that provenance and read as "every tier was
+  # checked and came up empty", when really one tier was never asked.
+  [ "$PANE_PROBE_SKIPPED" != 1 ] || emit unknown pane "harness state unavailable (live pane probe skipped)"
 
   emit unknown none "no current-state source available"
   )

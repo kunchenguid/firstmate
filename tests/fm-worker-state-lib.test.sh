@@ -271,12 +271,48 @@ test_skip_live_skips_grok_fallback_capture() {
   pass "skip-live also skips fm_busy_classify's grok fallback live capture"
 }
 
+test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance() {
+  local d fb capture_log record_live record_skip
+  d=$(new_case skip-live-grok-nolog); fb=$(make_fake_tmux "$d")
+  make_repo_on_branch "$d/wt" fm/feat-groknolog
+  fm_write_meta "$d/state/feat-groknolog.meta" "window=fm:fm-feat-groknolog" "worktree=$d/wt" "kind=scout" "harness=grok"
+  # No busy record, no no-mistakes run, and (unlike
+  # test_skip_live_grok_falls_back_to_status_log) no status log either: for a
+  # recordless grok worker the live pane tail is the ONLY source of truth, so
+  # this is the case the skip-live/status-log fallback above can never answer.
+  capture_log="$d/grok-capture.log"; : > "$capture_log"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { printf '%s\n' "$*" >> "$capture_log"; printf 'Ctrl+c:cancel\n'; }
+
+  # Sanity: without skip-live, crew-state's own live tail capture sees the
+  # busy signature and reports working from the pane tier.
+  record_live=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-groknolog 0)
+  assert_contains "$record_live" $'\nstate=working' "sanity: without skip-live, grok's busy tail reports working"
+  assert_contains "$record_live" $'\nsource=pane' "sanity: without skip-live, the pane tier answers"
+
+  # With skip-live (fm-peek.sh), the grok arm never makes its own capture and
+  # there is no status log to fall back to, so the projection cannot recover
+  # the true state. It must still report source=pane with a detail naming the
+  # skipped probe - never source=none, which would claim no source existed at
+  # all rather than one that was deliberately not read.
+  record_skip=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-groknolog 1)
+  assert_contains "$record_skip" $'\nstate=unknown' "skip-live grok with no status log cannot recover the true state"
+  assert_contains "$record_skip" $'\nsource=pane' "skip-live grok's unresolved unknown still carries pane provenance, not source=none"
+  assert_contains "$record_skip" "skipped" "skip-live grok's detail names the skipped live probe rather than a generic no-source message"
+  [ "$(wc -l < "$capture_log" | tr -d ' ')" = 1 ] \
+    || fail "skip-live must still make exactly the sanity call above and no more, got:"$'\n'"$(cat "$capture_log")"
+
+  unset -f fm_backend_capture
+  pass "skip-live grok with no corroborating status log reports unknown with pane provenance, not source=none"
+}
+
 test_record_carries_source_and_computed_at
 test_render_line_matches_documented_shape
 test_render_line_omits_empty_detail
 test_crew_state_and_peek_report_byte_identical_lines
 test_peek_skips_the_live_probe_crew_state_still_makes
 test_skip_live_grok_falls_back_to_status_log
+test_skip_live_grok_with_no_status_log_reports_skipped_pane_provenance
 test_skip_live_skips_herdr_native_busy_probe
 test_skip_live_skips_remote_secondmate_state_probe
 test_skip_live_skips_grok_fallback_capture
