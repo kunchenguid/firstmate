@@ -38,7 +38,8 @@ AZURE_PROVIDER = ROOT / "bin" / "fm-azure-worker-provider.py"
 # account home is exactly how a credential stager and its remover once resolved
 # different directories and leaked a credential.
 PI_ACCOUNT_HOME_TOOL = ROOT / "bin" / "fm-pi-account-home.py"
-STATE_SCHEMA = "fm.worker-lifecycle/v1"
+LEGACY_STATE_SCHEMA = "fm.worker-lifecycle/v1"
+STATE_SCHEMA = "fm.worker-lifecycle/v2"
 # The scalar pending_action slot this schema carried is superseded by the
 # per-slot pending_actions map. The sentinel is deliberately a string an OLD
 # binary's verify_state refuses ("pending provider action is malformed"), so a
@@ -52,6 +53,7 @@ EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
 RELEASE_SCHEMA = "fm.worker-release/v2"
 AUTHORITY_SCHEMA = "fm.worker-authority/v1"
 CAPACITY_RESERVATION_SCHEMA = "fm.capacity-reservation/v1"
+CAPACITY_FENCE_RETIREMENT_SCHEMA = "fm.capacity-fence-retirement/v1"
 SPECIALIZED_WORKLOAD_ROLES = ("validation", "review", "browser", "networkless-verifier", "crosscheck")
 PROVIDER_REQUEST_SCHEMA = "fm.worker-provider-request/v1"
 PROVIDER_RESPONSE_SCHEMA = "fm.worker-provider-response/v1"
@@ -504,6 +506,7 @@ def empty_state(env):
         "queue": {},
         "workers": {},
         "capacity_reservations": {},
+        "retired_capacity_fences": {},
         "completed_worker_seconds": 0.0,
         "pending_action": LEGACY_PENDING_SENTINEL,
         "pending_actions": {},
@@ -525,6 +528,7 @@ def verify_state(env, state):
         not isinstance(state.get("queue"), dict)
         or not isinstance(state.get("workers"), dict)
         or not isinstance(state.get("capacity_reservations"), dict)
+        or not isinstance(state.get("retired_capacity_fences"), dict)
         or not isinstance(state.get("executions"), dict)
     ):
         raise LifecycleError("lifecycle queue, worker, or shared capacity inventory is malformed")
@@ -560,6 +564,26 @@ def verify_state(env, state):
         require_binding("capacity reservation fence", reservation.get("fence_binding"))
         if "shape_id" in reservation:
             require_id("capacity shape id", reservation.get("shape_id"))
+    for fence, retirement in state["retired_capacity_fences"].items():
+        if (
+            not isinstance(retirement, dict)
+            or retirement.get("schema") != CAPACITY_FENCE_RETIREMENT_SCHEMA
+            or retirement.get("fence_binding") != fence
+            or not isinstance(retirement.get("reservation_ids"), list)
+            or not retirement.get("reservation_ids")
+            or retirement.get("reservation_ids")
+            != sorted(set(retirement.get("reservation_ids") or []))
+            or len(retirement.get("reservation_ids") or []) > 256
+            or not isinstance(retirement.get("retired_at"), str)
+            or not retirement.get("retired_at")
+        ):
+            raise LifecycleError("durable specialized capacity fence retirement is malformed")
+        require_binding("retired capacity fence", fence)
+        require_binding(
+            "capacity fence retirement receipt", retirement.get("retirement_receipt")
+        )
+        for reservation_id in retirement["reservation_ids"]:
+            require_id("retired capacity reservation id", reservation_id)
     legacy = state.get("pending_action")
     if legacy is not None and legacy != LEGACY_PENDING_SENTINEL:
         # A dict here means load_state's migration did not run; anything else
@@ -599,7 +623,14 @@ def load_state(env):
         if "is absent" not in str(exc):
             raise
         state = empty_state(env)
+    if state.get("schema") == LEGACY_STATE_SCHEMA:
+        # A v1 document has no fence-retirement authority to preserve. Upgrade
+        # it in memory; the next locked save makes the v2 rollback fence
+        # durable, after which a v1 binary refuses instead of reopening a
+        # retired fence it does not understand.
+        state["schema"] = STATE_SCHEMA
     state.setdefault("capacity_reservations", {})
+    state.setdefault("retired_capacity_fences", {})
     state.setdefault("executions", {})
     state.setdefault("pending_actions", {})
     state.setdefault("revision", 0)
@@ -2763,6 +2794,15 @@ def parser():
     capacity_release.add_argument("--cleanup-receipt", required=True)
     capacity_release.add_argument("--confirm-subscription", required=True)
 
+    capacity_retire = sub.add_parser(
+        "capacity-retire-fence",
+        help="permanently close one exact specialized capacity fence after release",
+    )
+    capacity_retire.add_argument("--fence-binding", required=True)
+    capacity_retire.add_argument("--reservation-id", action="append", required=True)
+    capacity_retire.add_argument("--retirement-receipt", required=True)
+    capacity_retire.add_argument("--confirm-subscription", required=True)
+
     execute = sub.add_parser("execute", help="run one exact private task command and collect its bound result")
     execute.add_argument("--task", required=True)
     execute.add_argument("--task-generation", required=True)
@@ -3339,6 +3379,11 @@ def specialized_reservation_from_args(args):
     )
 
 
+def refuse_retired_capacity_fence(state, fence):
+    if fence in state["retired_capacity_fences"]:
+        raise LifecycleError("retired capacity fence cannot admit another reservation")
+
+
 def command_capacity_reserve(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
@@ -3346,6 +3391,7 @@ def command_capacity_reserve(env, args):
     reservation_id = candidate["reservation_id"]
     with controller_lock(env):
         state = load_state(env)
+        refuse_retired_capacity_fence(state, candidate["fence_binding"])
         existing = state["capacity_reservations"].get(reservation_id)
         readmission_id = None
         identity_fields = (
@@ -3477,6 +3523,7 @@ def command_capacity_reserve_shape(env, args):
     )
     with controller_lock(env):
         state = load_state(env)
+        refuse_retired_capacity_fence(state, args.fence_binding)
         entries = []
         for candidate in constituents:
             existing = state["capacity_reservations"].get(candidate["reservation_id"])
@@ -3604,6 +3651,103 @@ def command_capacity_release(env, args):
             del state["capacity_reservations"][stale_key]
         save_state(env, state)
     print("specialized capacity reservation released after exact zero-compute proof")
+
+
+def exact_provider_capacity_identity(reservation, provider):
+    return (
+        isinstance(reservation, dict)
+        and reservation.get("schema") == CAPACITY_RESERVATION_SCHEMA
+        and reservation.get("reservation_id") == provider.get("reservation_id")
+        and reservation.get("role") == provider.get("role")
+        and reservation.get("sku") == provider.get("sku")
+        and str(reservation.get("sku_family", "")).lower()
+        == str(provider.get("sku_family", "")).lower()
+        and reservation.get("vcpus") == provider.get("vcpus")
+        and not isinstance(reservation.get("amount_usd"), bool)
+        and isinstance(reservation.get("amount_usd"), (int, float))
+        and not isinstance(provider.get("amount_usd"), bool)
+        and isinstance(provider.get("amount_usd"), (int, float))
+        and math.isclose(
+            float(reservation["amount_usd"]), float(provider["amount_usd"]),
+            rel_tol=0.0, abs_tol=1e-6,
+        )
+    )
+
+
+def command_capacity_retire_fence(env, args):
+    """Atomically close a released fence against every future admission.
+
+    Provider inventory and the complete same-fence ledger census occur while
+    the shared controller lock excludes both reservation entry points. The v2
+    retirement tombstone is committed before that lock opens, so successful
+    return is the irreversible admission barrier an artifact purge can rely on.
+    """
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    fence = require_binding("capacity reservation fence", args.fence_binding)
+    receipt = require_binding("capacity fence retirement receipt", args.retirement_receipt)
+    reservation_ids = sorted(set(
+        require_id("retired capacity reservation id", value)
+        for value in args.reservation_id
+    ))
+    if len(reservation_ids) != len(args.reservation_id) or len(reservation_ids) > 256:
+        raise LifecycleError("capacity fence retirement reservation ids are not exact and distinct")
+    expected = {
+        "schema": CAPACITY_FENCE_RETIREMENT_SCHEMA,
+        "fence_binding": fence,
+        "reservation_ids": reservation_ids,
+        "retirement_receipt": receipt,
+    }
+    with controller_lock(env):
+        state = load_state(env)
+        prior = state["retired_capacity_fences"].get(fence)
+        if prior is not None and any(prior.get(key) != value for key, value in expected.items()):
+            raise LifecycleError("capacity fence already has a different retirement identity")
+        allowed = set(reservation_ids)
+        same_fence = {
+            reservation_id: reservation
+            for reservation_id, reservation in state["capacity_reservations"].items()
+            if isinstance(reservation, dict) and reservation.get("fence_binding") == fence
+        }
+        outside = sorted(set(same_fence) - allowed)
+        if outside:
+            raise LifecycleError(
+                "capacity fence retirement census found an unplanned reservation: {}".format(
+                    outside[0]
+                )
+            )
+        for reservation_id, reservation in same_fence.items():
+            if (
+                reservation.get("reservation_id") != reservation_id
+                or reservation.get("status") != "released"
+                or not HEX_BINDING.match(str(reservation.get("cleanup_receipt", "")).split(":")[-1])
+            ):
+                raise LifecycleError(
+                    "capacity fence retirement requires every exact reservation released"
+                )
+        inventory = provider_call(env, "inventory")["inventory"]
+        provider_reservations = inventory.get("capacity_reservations")
+        if not isinstance(provider_reservations, list):
+            raise LifecycleError("provider capacity inventory is malformed")
+        for provider in provider_reservations:
+            if not isinstance(provider, dict) or provider.get("active") is not True:
+                continue
+            reservation_id = provider.get("reservation_id")
+            controller = state["capacity_reservations"].get(reservation_id)
+            if not exact_provider_capacity_identity(controller, provider):
+                raise LifecycleError(
+                    "provider-active capacity lacks exact controller identity during fence retirement"
+                )
+            if reservation_id in allowed or controller.get("fence_binding") == fence:
+                raise LifecycleError(
+                    "provider still observes active capacity on the retiring fence"
+                )
+        if prior is None:
+            state["retired_capacity_fences"][fence] = dict(expected, retired_at=iso_utc())
+            save_state(env, state)
+            print("specialized capacity fence retired after exact release census")
+        else:
+            print("specialized capacity fence already retired with exact identity")
 
 
 # What an ORDINARY crewmate payload may contain: the repository as a
@@ -4663,6 +4807,8 @@ def main(argv=None):
         command_capacity_reserve_shape(env, args)
     elif args.command == "capacity-release":
         command_capacity_release(env, args)
+    elif args.command == "capacity-retire-fence":
+        command_capacity_retire_fence(env, args)
     elif args.command == "execute":
         command_execute(env, args)
     elif args.command == "authority-receipt":

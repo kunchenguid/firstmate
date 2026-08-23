@@ -4864,6 +4864,365 @@ test_normal_secondmate_retires_proven_detached_head() {
   pass "normal secondmate retirement proves endpoint absence"
 }
 
+test_secondmate_herdr_absence_uses_primary_meta_without_state_override() {
+  fm_require_host_capability origin-egress "test_secondmate_herdr_absence_uses_primary_meta_without_state_override" || return 0
+  local case_dir herdr_log primary_home rc
+  case_dir=$(make_case secondmate-herdr-primary-meta)
+  prepare_secondmate_home_fixture "$case_dir"
+  primary_home="$case_dir/primary-home"
+  mkdir -p "$primary_home"
+  mv "$case_dir/state" "$case_dir/data" "$case_dir/config" "$primary_home/"
+  fm_write_meta "$primary_home/state/task-x1.meta" \
+    'window=default:w29:p3' \
+    'backend=herdr' \
+    'herdr_workspace_id=w29' \
+    'herdr_tab_id=w29:t3' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  herdr_log="$case_dir/herdr.log"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "$*" in
+  'session list --json')
+    printf '{"sessions":[{"name":"default","running":true}]}\n'
+    ;;
+  'pane list --session default')
+    printf '{"result":{"panes":[]}}\n'
+    ;;
+  'workspace list --session default')
+    printf '{"result":{"workspaces":[]}}\n'
+    ;;
+  *)
+    printf 'unexpected herdr command: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+
+  set +e
+  env -u FM_STATE_OVERRIDE \
+    FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROJECTS_OVERRIDE="$case_dir/source-projects" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+    FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
+    FM_FAKE_HERDR_LOG="$herdr_log" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    HOME="$HOME" \
+    PATH="$case_dir/fakebin:$PATH" \
+      "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "secondmate Herdr teardown should prove an absent endpoint from primary metadata: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt" "absent Herdr endpoint retained the secondmate home"
+  assert_absent "$primary_home/state/task-x1.meta" "absent Herdr endpoint retained primary metadata"
+  assert_no_grep 'pane close' "$herdr_log" \
+    "already-absent Herdr endpoint triggered a destructive close"
+  pass "secondmate Herdr absence proof keeps primary metadata while probing the compartment"
+}
+
+test_secondmate_herdr_kill_uses_primary_meta_without_state_override() {
+  fm_require_host_capability origin-egress "test_secondmate_herdr_kill_uses_primary_meta_without_state_override" || return 0
+  local case_dir close_count herdr_live herdr_log primary_home rc
+  case_dir=$(make_case secondmate-herdr-primary-meta-kill)
+  prepare_secondmate_home_fixture "$case_dir"
+  primary_home="$case_dir/primary-home"
+  mkdir -p "$primary_home"
+  mv "$case_dir/state" "$case_dir/data" "$case_dir/config" "$primary_home/"
+  fm_write_meta "$primary_home/state/task-x1.meta" \
+    'window=default:w29:p3' \
+    'backend=herdr' \
+    'herdr_workspace_id=w29' \
+    'herdr_tab_id=w29:t3' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  herdr_live="$case_dir/herdr-live"
+  herdr_log="$case_dir/herdr.log"
+  : > "$herdr_live"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "$*" in
+  'session list --json')
+    printf '{"sessions":[{"name":"default","running":true}]}\n'
+    ;;
+  'status --json --session default')
+    printf '{"server":{"running":true}}\n'
+    ;;
+  'pane list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"panes":[{"pane_id":"w29:p3","tab_id":"w29:t3"}]}}\n'
+    else
+      printf '{"result":{"panes":[]}}\n'
+    fi
+    ;;
+  'workspace list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"2ndmate-task-x1"},{"workspace_id":"w29","label":"2ndmate-task-x1"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"2ndmate-task-x1"}]}}\n'
+    fi
+    ;;
+  'tab list --workspace w1 --session default')
+    printf '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"fm-decoy"}]}}\n'
+    ;;
+  'tab list --workspace w29 --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w29:t3","workspace_id":"w29","label":"fm-task-x1"}]}}\n'
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
+    ;;
+  'pane get w29:p3 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    printf '{"result":{"pane":{"pane_id":"w29:p3"}}}\n'
+    ;;
+  'pane close w29:p3 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    rm -f "$FM_FAKE_HERDR_LIVE"
+    ;;
+  *)
+    printf 'unexpected herdr command: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+
+  set +e
+  env -u FM_STATE_OVERRIDE \
+    FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROJECTS_OVERRIDE="$case_dir/source-projects" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+    FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
+    FM_FAKE_HERDR_LIVE="$herdr_live" \
+    FM_FAKE_HERDR_LOG="$herdr_log" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    HOME="$HOME" \
+    PATH="$case_dir/fakebin:$PATH" \
+      "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "secondmate Herdr teardown should close the exact endpoint using primary metadata: $(cat "$case_dir/stderr")"
+  close_count=$(grep -c '^pane close w29:p3 --session default$' "$herdr_log" || true)
+  [ "$close_count" = 1 ] || fail "expected exactly one Herdr pane close, saw $close_count: $(cat "$herdr_log")"
+  assert_absent "$herdr_live" "Herdr endpoint remained live after exact pane close"
+  assert_absent "$case_dir/wt" "closed Herdr endpoint retained the secondmate home"
+  assert_absent "$primary_home/state/task-x1.meta" "closed Herdr endpoint retained primary metadata"
+  pass "secondmate Herdr kill and post-kill proof keep primary metadata in compartment context"
+}
+
+test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override() {
+  fm_require_host_capability origin-egress "test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override" || return 0
+  local af_log case_dir close_count herdr_live herdr_log primary_home rc
+  case_dir=$(make_case managed-secondmate-herdr-primary-meta)
+  prepare_secondmate_home_fixture "$case_dir"
+  primary_home="$case_dir/primary-home"
+  mkdir -p "$primary_home"
+  mv "$case_dir/state" "$case_dir/data" "$case_dir/config" "$primary_home/"
+  fm_write_meta "$primary_home/state/task-x1.meta" \
+    'window=default:w29:p3' \
+    'backend=herdr' \
+    'herdr_workspace_id=w29' \
+    'herdr_tab_id=w29:t3' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt" \
+    'account_pool=claude-crew' \
+    'account_profile=claude-2' \
+    'account_task=fm-home-task-x1-attempt-managed' \
+    'account_attempt=attempt-managed' \
+    'provider_session_id=session-managed'
+  af_log="$case_dir/agent-fleet.log"
+  herdr_live="$case_dir/herdr-live"
+  herdr_log="$case_dir/herdr.log"
+  : > "$af_log"
+  : > "$herdr_live"
+  add_fake_agent_fleet "$case_dir"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "$*" in
+  'session list --json')
+    printf '{"sessions":[{"name":"default","running":true}]}\n'
+    ;;
+  'status --json --session default')
+    printf '{"server":{"running":true}}\n'
+    ;;
+  'pane list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"panes":[{"pane_id":"w29:p3","tab_id":"w29:t3"}]}}\n'
+    else
+      printf '{"result":{"panes":[]}}\n'
+    fi
+    ;;
+  'workspace list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"w29","label":"2ndmate-task-x1"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[]}}\n'
+    fi
+    ;;
+  'tab list --workspace w29 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || { printf '{"result":{"tabs":[]}}\n'; exit 0; }
+    printf '{"result":{"tabs":[{"tab_id":"w29:t3","workspace_id":"w29","label":"fm-task-x1"}]}}\n'
+    ;;
+  'pane get w29:p3 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    printf '{"result":{"pane":{"pane_id":"w29:p3"}}}\n'
+    ;;
+  'pane close w29:p3 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    rm -f "$FM_FAKE_HERDR_LIVE"
+    ;;
+  *)
+    printf 'unexpected herdr command: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+
+  set +e
+  env -u FM_STATE_OVERRIDE \
+    FM_HOME="$primary_home" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROJECTS_OVERRIDE="$case_dir/source-projects" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+    FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
+    FM_AGENT_FLEET_BIN="$case_dir/fakebin/agent-fleet" \
+    FM_FAKE_AF_LOG="$af_log" \
+    FM_FAKE_HERDR_LIVE="$herdr_live" \
+    FM_FAKE_HERDR_LOG="$herdr_log" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    HOME="$HOME" \
+    PATH="$case_dir/fakebin:$PATH" \
+      "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "managed secondmate Herdr teardown should release after exact absence proof: $(cat "$case_dir/stderr")"
+  close_count=$(grep -c '^pane close w29:p3 --session default$' "$herdr_log" || true)
+  [ "$close_count" = 1 ] || fail "expected exactly one managed Herdr pane close, saw $close_count: $(cat "$herdr_log")"
+  assert_grep 'lease release --task fm-home-task-x1-attempt-managed --force' "$af_log" \
+    "managed secondmate teardown did not release its Agent Fleet lease"
+  assert_grep 'session remove --task fm-home-task-x1-attempt-managed' "$af_log" \
+    "managed secondmate teardown did not remove its Agent Fleet session mapping"
+  assert_absent "$case_dir/wt" "managed Herdr secondmate retained its home"
+  assert_absent "$primary_home/state/task-x1.meta" "managed Herdr secondmate retained primary metadata"
+  pass "managed secondmate release keeps primary metadata authority in compartment context"
+}
+
+test_forced_nested_secondmate_herdr_uses_owner_meta_state() {
+  fm_require_host_capability origin-egress "test_forced_nested_secondmate_herdr_uses_owner_meta_state" || return 0
+  local case_dir close_count herdr_live herdr_log nested rc
+  case_dir=$(make_case nested-secondmate-herdr-owner-meta)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  nested="$case_dir/nested-home"
+  git clone --quiet "$case_dir/wt" "$nested"
+  mkdir -p "$nested/data" "$nested/state" "$nested/config" "$nested/projects"
+  printf '%s\n' nested > "$nested/.fm-secondmate-home"
+  printf '%s\n' "- nested - nested secondmate (home: $nested; scope: nested; projects: ; added 2026-07-23)" \
+    > "$case_dir/wt/data/secondmates.md"
+  fm_write_meta "$case_dir/wt/state/nested.meta" \
+    'window=default:w31:p4' \
+    'backend=herdr' \
+    'herdr_workspace_id=w31' \
+    'herdr_tab_id=w31:t4' \
+    "worktree=$nested" \
+    "project=$nested" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$nested"
+  herdr_live="$case_dir/herdr-live"
+  herdr_log="$case_dir/herdr.log"
+  : > "$herdr_live"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "$*" in
+  'session list --json')
+    printf '{"sessions":[{"name":"default","running":true}]}\n'
+    ;;
+  'status --json --session default')
+    printf '{"server":{"running":true}}\n'
+    ;;
+  'pane list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"panes":[{"pane_id":"w31:p4","tab_id":"w31:t4"}]}}\n'
+    else
+      printf '{"result":{"panes":[]}}\n'
+    fi
+    ;;
+  'workspace list --session default')
+    if [ -f "${FM_FAKE_HERDR_LIVE:?}" ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"2ndmate-nested"},{"workspace_id":"w31","label":"2ndmate-nested"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"2ndmate-nested"}]}}\n'
+    fi
+    ;;
+  'tab list --workspace w1 --session default')
+    printf '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"fm-decoy"}]}}\n'
+    ;;
+  'tab list --workspace w31 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || { printf '{"result":{"tabs":[]}}\n'; exit 0; }
+    printf '{"result":{"tabs":[{"tab_id":"w31:t4","workspace_id":"w31","label":"fm-nested"}]}}\n'
+    ;;
+  'pane get w31:p4 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    printf '{"result":{"pane":{"pane_id":"w31:p4"}}}\n'
+    ;;
+  'pane close w31:p4 --session default')
+    [ -f "${FM_FAKE_HERDR_LIVE:?}" ] || exit 1
+    rm -f "$FM_FAKE_HERDR_LIVE"
+    ;;
+  *)
+    printf 'unexpected herdr command: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+
+  set +e
+  FM_FAKE_HERDR_LIVE="$herdr_live" \
+    FM_FAKE_HERDR_LOG="$herdr_log" \
+    FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "forced nested Herdr secondmate teardown should use owner metadata: $(cat "$case_dir/stderr")"
+  close_count=$(grep -c '^pane close w31:p4 --session default$' "$herdr_log" || true)
+  [ "$close_count" = 1 ] || fail "expected exactly one nested Herdr pane close, saw $close_count: $(cat "$herdr_log")"
+  assert_absent "$herdr_live" "nested Herdr endpoint remained live"
+  assert_absent "$nested" "forced teardown retained the nested secondmate home"
+  assert_absent "$case_dir/wt" "forced teardown retained the parent secondmate home"
+  assert_absent "$case_dir/state/task-x1.meta" "forced teardown retained parent metadata"
+  pass "forced nested Herdr teardown keeps child owner metadata while probing its home"
+}
+
 test_forced_secondmate_retains_untracked_skill_draft() {
   local case_dir draft rc
   case_dir=$(make_case secondmate-untracked-skill)
@@ -6194,12 +6553,21 @@ test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
 }
 
 test_secondmate_network_fetches_pin_validated_addresses() {
-  local case_dir clone source tip rc count
+  local case_dir clone source firstmate_source firstmate_tip root_default default tip rc count
   case_dir=$(make_case secondmate-pinned-network-authority)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
   clone="$case_dir/wt/projects/test"
   source="$case_dir/source-projects/test"
+  firstmate_source="$case_dir/firstmate-source"
+  root_default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+  default=${root_default#origin/}
+  firstmate_tip=$(git -C "$ROOT" rev-parse --verify "refs/remotes/origin/$default^{commit}" 2>/dev/null) \
+    || firstmate_tip=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
+  git init --quiet "$firstmate_source"
+  git -C "$firstmate_source" fetch --quiet "$ROOT" "$firstmate_tip"
+  git -C "$firstmate_source" checkout --quiet -b "$default" FETCH_HEAD
+  git -C "$case_dir/project" remote set-url origin "$firstmate_source"
   tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
   git -C "$clone" remote set-url origin https://example.com/repository.git
   git -C "$source" remote set-url origin https://example.com/repository.git
@@ -6239,9 +6607,17 @@ esac
 if [ -n "$network_operation" ]; then
   if [ -z "$network_target" ] && [ -n "$repository" ]; then
     remote=$("$FM_REAL_GIT" -C "$repository" remote get-url origin 2>/dev/null || true)
-    [ "$remote" != https://example.com/repository.git ] || network_target=1
+    if [ "$remote" = https://example.com/repository.git ]; then
+      network_target=1
+    else
+      printf '%s\t%s\n' "$network_operation" "$remote" >> "$FM_GIT_UNEXPECTED_NETWORK_LOG"
+      exit 86
+    fi
   fi
-  [ -n "$network_target" ] || exec "$FM_REAL_GIT" "$@"
+  [ -n "$network_target" ] || {
+    printf '%s\t%s\n' "$network_operation" '<unbound>' >> "$FM_GIT_UNEXPECTED_NETWORK_LOG"
+    exit 86
+  }
   printf '%s\t%s\n' "$network_operation" "$pin" >> "$FM_GIT_PIN_LOG"
   [ -n "$pin" ] || exit 88
   if [ "$network_operation" = ls-remote ]; then
@@ -6254,15 +6630,21 @@ exec "$FM_REAL_GIT" "$@"
 SH
   chmod +x "$case_dir/fakebin/git"
   : > "$case_dir/pinned-network.log"
+  : > "$case_dir/unexpected-network.log"
   set +e
+  FM_FAKE_FIRSTMATE_SOURCE="$firstmate_source" \
   FM_REAL_GIT="$(command -v git)" \
   FM_GIT_PIN_LOG="$case_dir/pinned-network.log" \
+  FM_GIT_UNEXPECTED_NETWORK_LOG="$case_dir/unexpected-network.log" \
   FM_PINNED_TIP="$tip" \
   FM_TEARDOWN_TEST_NETWORK_ADDRESSES=203.0.113.10 \
+  FM_TEST_TEARDOWN_ROOT="$firstmate_source" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 1 "$rc" "synthetic pinned authority fetch stops before retirement"
+  [ ! -s "$case_dir/unexpected-network.log" ] || fail \
+    "network authority escaped the hermetic fixture: $(cat "$case_dir/unexpected-network.log"); teardown: $(cat "$case_dir/stderr")"
   count=$(wc -l < "$case_dir/pinned-network.log" | tr -d ' ')
   [ "$count" -ge 1 ] || fail \
     "network authority did not exercise its graph probe: $(cat "$case_dir/pinned-network.log"); teardown: $(cat "$case_dir/stderr")"
@@ -6641,6 +7023,14 @@ if [ "${FM_TEST_FOCUSED:-}" = herdr-marker ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = secondmate-herdr-owner-meta ]; then
+  test_secondmate_herdr_absence_uses_primary_meta_without_state_override
+  test_secondmate_herdr_kill_uses_primary_meta_without_state_override
+  test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override
+  test_forced_nested_secondmate_herdr_uses_owner_meta_state
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = report-lifecycle ]; then
   test_required_report_blocks_then_publishes_before_cleanup
   test_required_report_restores_rollback_generation_before_publish
@@ -6680,6 +7070,10 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-ownership ]; then
   test_teardown_rechecks_treehouse_lease_after_locked_safety
   test_secondmate_rejects_drifted_home_repository_identity
   test_normal_secondmate_retires_proven_detached_head
+  test_secondmate_herdr_absence_uses_primary_meta_without_state_override
+  test_secondmate_herdr_kill_uses_primary_meta_without_state_override
+  test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override
+  test_forced_nested_secondmate_herdr_uses_owner_meta_state
   test_forced_secondmate_retains_untracked_skill_draft
   test_forced_secondmate_retains_unique_detached_head
   test_forced_secondmate_retains_stash
@@ -6923,6 +7317,10 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_teardown_rechecks_treehouse_lease_after_locked_safety
   test_secondmate_rejects_drifted_home_repository_identity
   test_normal_secondmate_retires_proven_detached_head
+  test_secondmate_herdr_absence_uses_primary_meta_without_state_override
+  test_secondmate_herdr_kill_uses_primary_meta_without_state_override
+  test_managed_secondmate_herdr_release_uses_primary_meta_without_state_override
+  test_forced_nested_secondmate_herdr_uses_owner_meta_state
   test_forced_secondmate_retains_untracked_skill_draft
   test_forced_secondmate_retains_unique_detached_head
   test_forced_secondmate_retains_stash

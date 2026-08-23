@@ -527,8 +527,10 @@ import sys
 
 guest = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 start = guest.index("auth_home_pull() {")
-end = guest.index('\nif [ "$MODE" = start ]; then', start)
-pathlib.Path(sys.argv[2]).write_text(guest[start:end] + "\n", encoding="utf-8")
+end = guest.index("\n# BEGIN SEALED INPUT HYDRATION", start)
+functions = guest[start:end]
+assert 'MODE' not in functions
+pathlib.Path(sys.argv[2]).write_text(functions + "\n", encoding="utf-8")
 EXTRACT
 
   cat >"$work/fakebin/python3" <<'PYSHIM'

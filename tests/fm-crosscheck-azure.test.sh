@@ -2157,11 +2157,19 @@ PYIMG
 
 shared_capacity_unit() {
   python3 - "$ROOT/bin/fm-crosscheck-azure.py" <<'PY' || fail "shared model capacity binding failed"
-import importlib.util,json,os,sys,tempfile,types
+import hashlib,importlib.util,json,os,sys,tempfile,types
 spec=importlib.util.spec_from_file_location("azure_adapter",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 stub_dir=tempfile.mkdtemp()
-stub=os.path.join(stub_dir,"lifecycle-stub.sh"); capture=os.path.join(stub_dir,"arguments.txt")
-open(stub,"w").write("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+capture+"\ncat "+os.path.join(stub_dir,"reply.json")+"\n")
+stub=os.path.join(stub_dir,"lifecycle-stub.sh"); capture=os.path.join(stub_dir,"arguments.jsonl")
+open(stub,"w").write(
+    "#!/bin/sh\n"
+    "python3 - \"$@\" <<'PY'\n"
+    "import json,sys\n"
+    "with open("+repr(capture)+",'a') as handle:\n"
+    "    handle.write(json.dumps(sys.argv[1:])+'\\n')\n"
+    "PY\n"
+    "cat "+os.path.join(stub_dir,"reply.json")+"\n"
+)
 os.chmod(stub,0o755)
 os.environ["FM_CROSSCHECK_AZURE_LIFECYCLE"]=stub
 runner=types.SimpleNamespace(
@@ -2178,26 +2186,225 @@ open(os.path.join(stub_dir,"reply.json"),"w").write(json.dumps(reply))
 try: m.reserve_model_capacity(config,identity,runner)
 except m.AzureCrosscheckError as exc: assert "queued the model compartment" in str(exc)
 else: raise AssertionError("queued reservation was treated as reserved")
+calls=[json.loads(line) for line in open(capture)]
+assert [arguments[0] for arguments in calls]==["capacity-reserve","capacity-release"], calls
+reserve_arguments,queued_release_arguments=calls
+assert queued_release_arguments[queued_release_arguments.index("--reservation-id")+1]==reservation_id
+assert queued_release_arguments[queued_release_arguments.index("--fence-binding")+1]==reserve_arguments[reserve_arguments.index("--fence-binding")+1]
+receipt=queued_release_arguments[queued_release_arguments.index("--cleanup-receipt")+1]
+expected_receipt=hashlib.sha256(json.dumps(
+    {"reservation":reservation_id,"evidence":"model-compute-absent"},
+    sort_keys=True,separators=(",",":"),
+).encode()).hexdigest()
+assert receipt==expected_receipt
+open(capture,"w").close()
 reply["status"]="reserved"
 open(os.path.join(stub_dir,"reply.json"),"w").write(json.dumps(reply))
 value=m.reserve_model_capacity(config,identity,runner)
 assert value["reservation_id"]==reservation_id and value["sku"]=="Standard_D4as_v6"
-arguments=open(capture).read().splitlines()
+calls=[json.loads(line) for line in open(capture)]
+assert len(calls)==1, "reserved capacity was released before model cleanup"
+arguments=calls[0]
 assert arguments[0]=="capacity-reserve" and "--role" in arguments
 assert arguments[arguments.index("--role")+1]=="crosscheck"
 assert arguments[arguments.index("--vcpus")+1]=="4"
+open(capture,"w").close()
 reply["reservation_id"]="ccm-000000000000"
 open(os.path.join(stub_dir,"reply.json"),"w").write(json.dumps(reply))
 try: m.reserve_model_capacity(config,identity,runner)
 except m.AzureCrosscheckError as exc: assert "wrong identity" in str(exc)
 else: raise AssertionError("foreign reservation identity accepted")
+calls=[json.loads(line) for line in open(capture)]
+assert len(calls)==1 and calls[0][0]=="capacity-reserve", (
+    "foreign capacity was released without an exact identity proof", calls
+)
+open(capture,"w").close()
+reply["reservation_id"]=reservation_id
+open(os.path.join(stub_dir,"reply.json"),"w").write(json.dumps(reply))
 m.release_model_capacity(config,value)
-release_arguments=open(capture).read().splitlines()
+release_arguments=json.loads(open(capture).readline())
 assert release_arguments[0]=="capacity-release"
 assert release_arguments[release_arguments.index("--reservation-id")+1]==reservation_id
 del os.environ["FM_CROSSCHECK_AZURE_LIFECYCLE"]
 PY
   pass "the model compartment reserves and releases exact shared allocator capacity and honors queued refusals"
+}
+
+queued_capacity_run_failover_unit() {
+  python3 - "$ADAPTER" "$CORE" <<'PY' || fail "queued capacity run-level failover failed"
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+import sys
+import tempfile
+
+adapter_spec=importlib.util.spec_from_file_location("azure_crosscheck_run",sys.argv[1])
+adapter=importlib.util.module_from_spec(adapter_spec); adapter_spec.loader.exec_module(adapter)
+core_spec=importlib.util.spec_from_file_location("fm_crosscheck",sys.argv[2])
+core=importlib.util.module_from_spec(core_spec); sys.modules["fm_crosscheck"]=core
+core_spec.loader.exec_module(core)
+
+root=Path(tempfile.mkdtemp())
+home=root/"home"
+state=home/"state"
+data=home/"data"
+state.mkdir(parents=True)
+data.mkdir(parents=True)
+url="https://github.com/ruby-dlee/firstmate/pull/302"
+head="a"*40
+base="b"*40
+snapshot={
+    "number":302,
+    "base_repo":"ruby-dlee/firstmate",
+    "base_ref":"main",
+    "head_sha":head,
+    "base_sha":base,
+    "claims_sha256":"c"*64,
+}
+candidates=[
+    {"harness":"pi","model":"first-model","effort":"xhigh","account_home":"/reviewer/one"},
+    {"harness":"pi","model":"second-model","effort":"xhigh","account_home":"/reviewer/two"},
+]
+
+core.load_azure_crosscheck_adapter=lambda _root:adapter
+adapter.azure_review_enabled=lambda _home:True
+core.parse_meta=lambda _path:{"model":"author-model"}
+core.github_snapshot=lambda _root,_url:dict(snapshot)
+core.reviewer_candidates=lambda _home,_meta:[dict(item) for item in candidates]
+core.prepare_review_checkout=lambda destination,value,source=None:(destination.mkdir(parents=True),value["base_sha"])[1]
+core.assert_review_checkout_intact=lambda _directory,_head:None
+core.write_neutral_runner_config=lambda _root:None
+core.review_output_schema=lambda _account,_execution:{}
+
+azure={
+    "lanes":1,
+    "queue_wait_seconds":0,
+    "reviewer_sku_fixed":True,
+    "reviewer_sku":"Standard_D4as_v6",
+    "subscription":"test-subscription",
+}
+runner=SimpleNamespace(
+    SKU_FAMILY={"Standard_D4as_v6":"standardDav6Family"},
+    SKU_VCPUS={"Standard_D4as_v6":4},
+    retail_rate=lambda _environment,_sku:0.2,
+    environment=lambda:{},
+)
+adapter.preflight_reviewer_credential=lambda _core,_config:None
+adapter.runtime_config=lambda _home:dict(azure)
+adapter.verify_scope_and_foundation=lambda _config:runner
+adapter.active_review_vms=lambda _config:0
+adapter.require_model_image_attests_harness=lambda _config,_harness:None
+adapter.inspect_reviewer_credential=lambda _core,config:(
+    root/"credential.json","test-source","test-id","account:"+config["model"]
+)
+adapter.review_identity=lambda **_kwargs:{
+    "review_generation":"d"*24,
+    "home_binding":"sha256:"+"2"*64,
+}
+adapter.azure_review_schema=lambda _schema:{}
+adapter.azure_review_prompt=lambda *_args,**_kwargs:"prompt"
+adapter.create_credential_archive=lambda *_args,**_kwargs:("e"*64,"f"*64)
+adapter.require_stable_reviewer_credential=lambda *_args,**_kwargs:None
+adapter.make_input=lambda *_args,**_kwargs:"1"*64
+
+capacity_calls=[]
+def shared_capacity(arguments):
+    capacity_calls.append(list(arguments))
+    if arguments[0]=="capacity-reserve":
+        reservation_id=arguments[arguments.index("--reservation-id")+1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "reservation_id":reservation_id,
+                "status":"queued",
+                "reason":"specialized envelope is saturated",
+            }),
+            stderr="",
+        )
+    assert arguments[0]=="capacity-release", arguments
+    return SimpleNamespace(returncode=0,stdout="released\n",stderr="")
+adapter.shared_capacity_command=shared_capacity
+
+real_run=adapter.run_azure_review
+attempts=[]
+def run_with_second_reviewer(**kwargs):
+    attempts.append(kwargs["config"]["model"])
+    if len(attempts)==1:
+        return real_run(**kwargs)
+    ledger=kwargs["ledger"]
+    value=kwargs["snapshot_value"]
+    config=kwargs["config"]
+    run={
+        "at":core.utc_now(),
+        "head_sha":value["head_sha"],
+        "base_sha":value["base_sha"],
+        "base_branch_sha":value.get("base_branch_sha",value["base_sha"]),
+        "claims_sha256":value["claims_sha256"],
+        "reviewer":dict(config),
+        "state":"clear",
+        "summary":"second reviewer returned a verdict",
+        "citations":[],
+        "updated_findings":[],
+        "new_findings":[],
+        "active_blockers":[],
+        "suspicions":[],
+    }
+    ledger["runs"].append(run)
+    return ledger,run
+adapter.run_azure_review=run_with_second_reviewer
+
+previous={name:os.environ.get(name) for name in ("FM_STATE_OVERRIDE","FM_DATA_OVERRIDE")}
+os.environ["FM_STATE_OVERRIDE"]=str(state)
+os.environ["FM_DATA_OVERRIDE"]=str(data)
+stderr=io.StringIO()
+try:
+    with contextlib.redirect_stderr(stderr):
+        result=core.run_crosscheck(root,home,"task-queued",url)
+finally:
+    for name,value in previous.items():
+        if value is None:
+            os.environ.pop(name,None)
+        else:
+            os.environ[name]=value
+
+assert result==0
+assert attempts==["first-model","second-model"],attempts
+assert [arguments[0] for arguments in capacity_calls]==["capacity-reserve","capacity-release"]
+assert "trying the next policy-screened reviewer" in stderr.getvalue()
+ledger=json.loads((data/"task-queued"/"crosscheck-ledger.json").read_text())
+assert [run["state"] for run in ledger["runs"]]==["tool-failure","clear"],ledger["runs"]
+assert "queued the model compartment" in ledger["runs"][0]["summary"]
+assert ledger["runs"][1]["reviewer"]["model"]=="second-model"
+
+# The shared command can also fail before it returns allocator JSON. That
+# transport fault crosses the same run boundary as a typed allocator refusal.
+def failed_transport(_arguments):
+    raise OSError("allocator transport unavailable")
+adapter.shared_capacity_command=failed_transport
+try:
+    real_run(
+        core=core,
+        root=root,
+        home=home,
+        task_id="task-transport",
+        pr_url=url,
+        review_dir=root/"transport-review",
+        proof_root=root,
+        snapshot_value=dict(snapshot),
+        ledger=core.new_ledger("task-transport",url),
+        config=dict(candidates[0]),
+        author_account_identity="",
+    )
+except core.CrosscheckToolError as exc:
+    assert "allocator transport unavailable" in str(exc),str(exc)
+else:
+    raise AssertionError("allocator transport failure escaped the run-level tool-failure boundary")
+PY
+  pass "a queued model reservation is released, ledgered as a tool failure, and falls through to the next reviewer"
 }
 
 image_and_policy_contract() {
@@ -2575,6 +2782,7 @@ manifest_bounds_unit
 template_expiry_render_unit
 replay_positive_and_failure_unit
 shared_capacity_unit
+queued_capacity_run_failover_unit
 lane_queue_unit
 image_and_policy_contract
 image_attestation_guard_unit

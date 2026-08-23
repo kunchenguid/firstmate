@@ -103,7 +103,7 @@ It does not bypass unreadable cost or quota evidence, identity checks, the sixte
 
 ## Desired capacity and admission
 
-The same durable allocator also owns specialized reservations through `capacity-reserve`, `capacity-reserve-shape`, and `capacity-release`.
+The same durable allocator also owns specialized reservations through `capacity-reserve`, `capacity-reserve-shape`, `capacity-release`, and the cleanup-only `capacity-retire-fence` barrier.
 Every caller uses the canonical Firstmate control home and its one shared state directory; `FM_AZURE_SHARED_CAPACITY_STATE_DIR` may relocate that directory only for an explicitly configured installation and must be identical for all callers.
 A validation, review, browser, networkless-verifier, or Crosscheck caller submits one exact reservation ID and fence binding, a reviewed SKU/family pair, the reviewed four-vCPU worker shape or reviewed eight-vCPU control shape, and finite worst-case cost before creating compute.
 Admission returns `reserved` or leaves the request durably `queued`; callers must not create compute for a queued reservation.
@@ -114,6 +114,7 @@ A shape retry never demotes constituents that are already reserved, and each con
 The complete shape total may never exceed the shared 40-vCPU specialized envelope, and no shape or constituent bypasses cumulative actual/forecast admission in commissioning mode.
 The existing disposable runner invokes this path before its Azure management reservation and VM creation, then releases the shared reservation only after exact VM/NIC/OS-disk absence.
 Restarting either controller is idempotent under the same reservation ID and fence, while a changed identity refuses.
+An exact failed-retained validation purge closes its capacity fence only after every sealed constituent is released and provider-inactive. `capacity-retire-fence` repeats the complete same-fence ledger and provider census while holding the allocator lock, then durably records a permanent retirement tombstone before unlocking. Both single and shape reservation entry points refuse a retired fence before any insertion or re-admission, so retained disks, private storage, and RBAC can be deleted only after no later same-fence capacity can enter. The lifecycle state advances to v2 when this authority is first written, causing an older allocator that does not understand fence retirement to refuse the document rather than reopen it.
 
 The controller computes desired active capacity from all eligible queued and assigned work, current exact assignments, the sixteen-worker software cap, one shared East US regional ceiling, live exact-family quota, actual and forecast spend, and durable per-assignment cost reservations.
 Quota is only capacity and never creates demand.

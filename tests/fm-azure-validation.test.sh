@@ -76,6 +76,8 @@ manifest={
     "schema":"fm.azure-validation-runtime/v1",
     "provider":sys.argv[2],
     "no_mistakes_version":"1.41.2",
+    "no_mistakes_source_commit":"1111111111111111111111111111111111111111",
+    "owner_decision_protocol":"fm.azure-validation-owner-decision/v1",
     "no_mistakes_path":"bin/no-mistakes",
     "provider_path":"bin/"+sys.argv[2],
     "gh_path":"bin/gh",
@@ -92,6 +94,54 @@ manifest={
 (root/"runtime.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
 PY
   COPYFILE_DISABLE=1 tar -czf "$root/runtime.tar.gz" -C "$root/runtime" runtime.json bin gh-axi
+  cat >"$root/owner-signer" <<'PY'
+#!/usr/bin/env python3
+import base64
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+args=sys.argv[1:]
+def value(name):
+    return args[args.index(name)+1]
+if args == ["--version"]:
+    print("no-mistakes version 1.41.2 (1111111111111111111111111111111111111111) fixture")
+    raise SystemExit(0)
+if args[:3] == ["axi","owner-decision","keygen"]:
+    private=pathlib.Path(value("--private-key"))
+    public=pathlib.Path(value("--public-key"))
+    private.write_text(base64.b64encode(b"K"*64).decode()+"\n")
+    public.write_text(base64.b64encode(b"P"*32).decode()+"\n")
+    os.chmod(private,0o600); os.chmod(public,0o644)
+    print("private_key: {}\npublic_key: {}".format(private,public))
+    raise SystemExit(0)
+if args[:3] == ["axi","owner-decision","sign"]:
+    challenge=json.loads(pathlib.Path(value("--challenge-file")).read_text())
+    response={"action":value("--action")}
+    if "--findings" in args:
+        response["finding_ids"]=[item for item in value("--findings").split(",") if item]
+    if "--instructions" in args:
+        response["instructions"]={item:"fixture guidance" for item in response.get("finding_ids",[])}
+    if "--add-finding" in args:
+        response["added_findings"]=[json.loads(value("--add-finding"))]
+    envelope={
+        "schema":"no-mistakes.owner-decision-envelope/v1",
+        "challenge":challenge,
+        "response":response,
+        "signature":base64.b64encode(b"S"*64).decode(),
+    }
+    output=pathlib.Path(value("--out"))
+    output.write_text(json.dumps(envelope,indent=2)+"\n")
+    os.chmod(output,0o644)
+    digest=hashlib.sha256(json.dumps(envelope,separators=(",", ":")).encode()).hexdigest()
+    next_head=hashlib.sha256((challenge["previous_head"]+"\n"+digest+"\n").encode()).hexdigest()
+    print("decision: {}\nnext_head: {}".format(output,next_head))
+    raise SystemExit(0)
+raise SystemExit(2)
+PY
+  chmod 755 "$root/owner-signer"
 }
 
 make_credentials() {
@@ -110,6 +160,9 @@ JSON
 validation() {
   local home=$1
   shift
+  if [ "${1:-}" = submit ]; then
+    set -- "$@" --owner-decision-signer "$(dirname "$home")/owner-signer"
+  fi
   FM_HOME="$home" FM_AZURE_DEPLOYMENT_GENERATION=gen-one \
     FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_NAMING_PREFIX=fmtest "$VALIDATION" "$@"
 }
@@ -220,7 +273,7 @@ assert "container and auth-share grants" in host
 assert '"imageId": {"value": os.environ.get("FM_AZURE_VM_IMAGE_ID", "")}' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
     assert value in guest
-for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','GITHUB_TOKEN_VALUE=${github_token:-}','AUTH_SHARE=${auth_share:-fm-auth-home}','unset input_url output_url response github_token'):
+for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','GITHUB_TOKEN_VALUE=${github_token:-}','AUTH_SHARE=${auth_share:-fm-auth-home}','unset input_url output_url github_token'):
     assert value in guest
 # Plain ext4 worktree: format only a fresh start-mode disk, mount everything
 # else, refuse foreign filesystems. No encryption layer remains.
@@ -246,10 +299,29 @@ assert "launch diagnostics (exit" in guest
 assert "code: recover_custody" in guest
 assert guest.count('cd "$3" && exec "$2" axi status') == 2
 assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in bridge
-assert "awaiting[_ -]approval" in guest
-assert "status:[[:space:]]*awaiting[_ -](approval|user)" in guest
-assert 'tail -n +"$((last_awaiting + 1))" "$RUN_LOG"' in guest
-assert guest.index("status:[[:space:]]*awaiting[_ -](approval|user)") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
+for value in (
+    "fm.azure-validation-owner-decision/v1",
+    "no-mistakes.owner-decision-challenge/v1",
+    "--owner-decision-public-key",
+    "adjudicate_protected_gates() {",
+    "publish_gate_challenge() {",
+    "fetch_gate_decision() {",
+    "control/owner-decision/a",
+    '"$NM_BIN" axi respond --decision-file "$decision"',
+    "protected owner decision expired without a signed controller envelope",
+    'chmod 0444 "$OWNER_PUBLIC_KEY"',
+):
+    assert value in guest
+assert '"$GITHUB_TOKEN_FILE" "$OWNER_PUBLIC_KEY"' not in guest
+for absent in (
+    "control/gate-response-a",
+    "adjudicate_gates() {",
+    "fetch_gate_response() {",
+    '"$NM_BIN" axi respond "$@"',
+    "last_awaiting=",
+    "gate_parked=",
+):
+    assert absent not in guest
 assert "cell worktree is detached and no declared branch identity is present" in bridge
 assert "refusing to move it" not in bridge
 assert "does not fast-forward to the snapshot HEAD" in bridge
@@ -261,26 +333,18 @@ assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"reattaching", "collected")' in host
 assert "retain-failure owns only failed outcomes" in host
-assert '"$NM_BIN" axi respond <"$RESPONSE_FILE"' not in guest
-assert '"$NM_BIN" axi respond "$@"' in guest
-respond_block=guest[guest.index("    respond)"):guest.index('*) exit 125 ;;')]
-assert respond_block.index('"$NM_BIN" axi run') < respond_block.index('axi respond "$@"')
-assert '|| true' in respond_block
-assert "adjudicate_gates() {" in guest
-assert "fetch_gate_response() {" in guest
-assert "control/gate-response-a" in guest
-assert guest.index("esac") < guest.index("  adjudicate_gates")
-assert '"$gates" -gt "$responded"' in guest
 assert "FM_AZURE_VALIDATION_GATE_WAIT_SECONDS" in guest
-assert 'while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do' in guest
-assert guest.index("set --") < guest.index('"$NM_BIN" axi respond "$@"')
+assert guest.index("esac") < guest.index("  adjudicate_protected_gates")
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
+assert "no-mistakes runtime version/source identity mismatch" in guest
+assert '[sys.argv[3], "--version"]' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.name' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.email' in guest
 assert '"$LAUNCH" "$GIT_HELPER"' in guest
-assert 'install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"' in guest
+assert 'TRUSTED_ROOT=/opt/fm-azure-validation' in guest
+assert 'install -d -m 0755 -o root -g root "$TRUSTED_ROOT" "$RUNTIME"' in guest
 assert guest.index("--no-same-permissions") < guest.index("0o755 if member.mode & 0o111")
 for value in ("fm.azure-validation-shard/v1","storage_token","vm_instance_id","boot_id","trusted_verify_manifests"):
     assert value in bridge
@@ -289,6 +353,15 @@ assert '"$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint' in nm
 assert "no-mistakes daemon start" not in host
 assert "no-mistakes daemon stop" not in host
 assert "no-mistakes daemon restart" not in host
+for value in (
+    "def provision_owner_decision",
+    "def validate_owner_challenge",
+    "def sign_owner_decision",
+    "def exact_live_run_command",
+    "owner-decision signer bytes changed",
+    "protected owner-decision runs cannot cross a VM/daemon replacement boundary",
+):
+    assert value in host
 PY
   pass "cell template and trusted bridge preserve private per-run compute, plain-disk isolation, auth-home sync, and cgroup limits"
 }
@@ -490,11 +563,11 @@ token_path=os.path.join(token_dir,"github-token")
 open(token_path,"w").write("fixture-injected-token\n")
 os.environ["FM_AZURE_GITHUB_TOKEN_FILE"]=token_path
 m.az_command=lambda *_args,**_kwargs:(None,0,"")
-m.read_resource=lambda _env,rid,_kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}})
+m.read_resource=lambda _env,rid,_kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64,"attempt":"1"},"properties":captured["properties"]})
 m.save_state=lambda *_args:None
 m.expected_tags=lambda *_args:{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}
 state={"cell":"azv-aaaaaaaaaaaa","attempt":1,"input_digest":"sha256:"+"i"*64,"request_digest":"sha256:"+"r"*64,"allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},"request":{"fence":"sha256:"+"f"*64,"protocol":{"guest_digest":m.sha256_file(m.GUEST)},"limits":{"wall_seconds":60},"credentials":{"provider":"codex","github_token_file":"/nonexistent-descriptor-path","bundle_digest":"sha256:"+"c"*64}},"resources":{"vm_id":"/vm","vm_instance_id":"vm-instance","worktree_disk_id":"/work","identity_client_id":"client","run_commands":[]},"staging":{"container":"container"}}
-m.create_run_command({"storage":"storage","owner":"owner"},state,"start")
+m.create_run_command({"storage":"storage","owner":"owner"},state,"start",input_url="https://input",output_url="https://output")
 protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
 # Boot-time injection: the env-file override wins and the token value flows
 # only through the run-command parameter list.
@@ -505,9 +578,23 @@ del os.environ["FM_AZURE_GITHUB_TOKEN_FILE"]
 # The descriptor's recorded token path is the default source.
 state["request"]["credentials"]["github_token_file"]=token_path
 captured.clear()
-m.create_run_command({"storage":"storage","owner":"owner"},state,"reattach")
+m.create_run_command({"storage":"storage","owner":"owner"},state,"reattach",output_url="https://output")
 protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
 assert protected["github_token"]=="fixture-injected-token"
+m.run_command_status_resource_for_id=lambda _env,rid:(
+    "Running",{},m.read_resource(_env,rid,"run-command")[1]
+)
+m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+original_source=captured["properties"]["source"]["script"]
+captured["properties"]["source"]["script"]="foreign source"
+try: m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+except m.ValidationError as exc: assert "source/parameter binding changed" in str(exc)
+else: raise AssertionError("a same-id/tag Running command with foreign source was accepted")
+captured["properties"]["source"]["script"]=original_source
+captured["properties"]["parameters"][0]["value"]="foreign-mode"
+try: m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+except m.ValidationError as exc: assert "source/parameter binding changed" in str(exc)
+else: raise AssertionError("a same-id/tag Running command with foreign parameters was accepted")
 # Replacement mode selection is run-id driven only.
 assert m.replacement_run_mode({"phase":"failed-retained"})=="start"
 assert m.replacement_run_mode({"phase":"running","run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA"})=="reattach"
@@ -519,6 +606,340 @@ allowed,reason=m.replacement_allowed({"phase":"closed"},"absent-proven")
 assert not allowed and "recoverable work" in reason
 PY2
   pass "controller injects the boot-time GitHub token and fences replacement on VM absence plus recoverable phase"
+}
+
+
+replacement_runtime_hydration_contract() {
+  python3 - "$HOST" <<'PY' || fail "replacement runtime hydration contract failed"
+import contextlib
+import base64
+import copy
+import hashlib
+import importlib.util
+import os
+import pathlib
+import sys
+import tempfile
+import types
+
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+cell="azv-aaaaaaaaaaaa"
+fence="sha256:"+"f"*64
+input_digest="sha256:"+"1"*64
+request_digest="sha256:"+"2"*64
+runtime_digest="sha256:"+"3"*64
+bridge_digest="sha256:"+"4"*64
+env={
+  "subscription":"sub","resource_group":"rg","storage":"storage","owner":"owner",
+  "prefix":"fmtest","deployment_generation":"gen",
+}
+
+def seed():
+    return {
+      "cell":cell,"phase":"failed-retained","attempt":3,
+      "run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA",
+      "input_digest":input_digest,"request_digest":request_digest,
+      "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},
+      "request":{
+        "fence":fence,"runtime_digest":runtime_digest,
+        "protocol":{
+          "guest_digest":m.sha256_file(m.GUEST),
+          "shard_bridge_digest":bridge_digest,
+        },
+        "limits":{"wall_seconds":60},
+      },
+      "resources":{
+        "vm_id":"/old/vm","vm_instance_id":"old-instance",
+        "worktree_disk_id":"/work","worktree_disk_name":"work",
+        "identity_name":"identity","identity_id":"/identity",
+        "identity_client_id":"client","identity_principal_id":"principal",
+        "identities":{"worktree":{"id":"/work"},"identity":{"id":"/identity"}},
+        "run_commands":[],
+      },
+      "staging":{
+        "container":"private-cell","input_blob":"control/input.tar.gz",
+        "result_blob":"control/result.tar.gz",
+      },
+      "events":[],
+    }
+
+# Admit-red regression: drive the real replacement operation with a retained
+# run id. The pre-fix controller calls reattach directly, so this exact test is
+# red there; the fixed controller must prove hydration completed first and must
+# never route the retained run through start.
+state=seed()
+calls=[]
+real_hydrate=getattr(m,"create_runtime_hydration_command",None)
+m.lock=lambda *_a,**_k:contextlib.nullcontext()
+m.require_cell=lambda value:value
+m.load_state=lambda *_a:state
+m.read_resource=lambda _env,rid,kind:(False,{}) if kind=="vm" else (True,{"id":rid})
+m.cleanup_compute=lambda *_a:None
+m.wait_exact_disk_detached=lambda *_a:{"id":"/work","etag":"work-etag"}
+m.resource_names=lambda *_a:{
+  "vm_id":"/new/vm","vm_instance_id":"new-instance","worktree_disk_id":"/new/work",
+  "worktree_disk_name":"new-work","identity_name":"new-identity","identity_id":"/new/identity",
+  "identity_client_id":"new-client","identity_principal_id":"new-principal",
+  "identities":{},"run_commands":[],
+}
+def create_cell(_env,value,_selected,replacement=False):
+    assert replacement is True
+    value["resources"]["vm_instance_id"]="new-instance"
+    calls.append(("create-cell",value["attempt"]))
+m.create_cell=create_cell
+m.blob_sas=lambda _env,blob,permission,**_kw:"https://exact.example/"+blob+"?"+permission
+m.create_runtime_hydration_command=lambda _env,_state,url:calls.append(("hydrate",url))
+m.create_run_command=lambda _env,_state,mode,**kwargs:calls.append((mode,kwargs))
+def transition(_env,value,phase,note,**_kw):
+    value["phase"]=phase
+    calls.append(("phase",phase,note))
+m.transition=transition
+args=types.SimpleNamespace(confirm_replace=True,confirm_subscription="sub",cell=cell)
+m.replace(env,args)
+hydrate_index=next(i for i,item in enumerate(calls) if item[0]=="hydrate")
+reattach_index=next(i for i,item in enumerate(calls) if item[0]=="reattach")
+assert hydrate_index < reattach_index, calls
+assert not any(item[0]=="start" for item in calls), calls
+assert calls[hydrate_index][1]=="https://exact.example/control/input.tar.gz?r"
+assert calls[reattach_index][1]=={
+  "output_url":"https://exact.example/control/result.tar.gz?cw"
+}
+assert real_hydrate is not None
+m.create_runtime_hydration_command=real_hydrate
+
+# The real hydration command is separately current-controller trusted, carries
+# only an exact-object read capability, records the one-read source digest, and
+# refuses to authorize reattach unless its digest-complete marker is unique.
+state=seed()
+state["attempt"]=4
+state["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+captured={}
+def write_private_json(_env,_prefix,value):
+    captured.clear(); captured.update(copy.deepcopy(value))
+    handle,name=tempfile.mkstemp(); os.close(handle); pathlib.Path(name).write_text("{}\n"); return pathlib.Path(name)
+m.write_private_json=write_private_json
+m.az_command=lambda *_a,**_k:({},0,"")
+m.read_resource=lambda _env,rid,_kind:(True,{
+  "id":rid,"etag":"etag","tags":{"validation-cell":cell,"fence":fence},
+  "properties":copy.deepcopy(captured["properties"]),
+})
+m.immutable_identity=lambda resource,_kind:{"id":resource["id"],"etag":resource["etag"]}
+m.expected_tags=lambda *_a:{"validation-cell":cell,"fence":fence}
+m.save_state=lambda *_a:None
+text,hydrator_digest=m.trusted_hydrator_text()
+m.wait_run_command_terminal=lambda *_a:(
+  "Succeeded",{"output":m.hydration_marker(state,hydrator_digest)+"\n"}
+)
+m.create_runtime_hydration_command(env,state,"https://exact.example/input?sig=secret")
+properties=captured["properties"]
+arguments={item["name"]:item["value"] for item in properties["parameters"]}
+protected={item["name"]:item["value"] for item in properties["protectedParameters"]}
+assert properties["source"]["script"]==text
+assert arguments["mode"]=="hydrate" and arguments["hydrator_digest"]==hydrator_digest
+assert arguments["input_digest"]==input_digest
+assert arguments["request_digest"]==request_digest
+assert arguments["vm_resource_id"]=="/new/vm"
+assert arguments["vm_instance_id"]=="new-instance"
+assert arguments["worktree_disk_id"]=="/work"
+assert protected=={"input_url":"https://exact.example/input?sig=secret"}
+assert "github_token" not in protected and "output_url" not in protected
+assert state["runtime_hydrations"][-1]["runtime_digest"]==runtime_digest
+assert state["runtime_hydrations"][-1]["shard_bridge_digest"]==bridge_digest
+assert state["runtime_hydrations"][-1]["hydrator_digest"]==hydrator_digest
+
+missing=seed()
+missing["attempt"]=4
+missing["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+m.wait_run_command_terminal=lambda *_a:("Succeeded",{"output":"hydration claimed success\n"})
+try:
+    m.create_runtime_hydration_command(env,missing,"https://exact.example/input?sig=secret")
+except m.ValidationError as exc:
+    assert "no unique exact digest marker" in str(exc), str(exc)
+else:
+    raise AssertionError("reattach was authorized without an exact hydration marker")
+assert "runtime_hydrations" not in missing
+
+changed=seed()
+changed["attempt"]=4
+changed["resources"].update({
+  "vm_id":"/new/vm","vm_instance_id":"new-instance",
+  "identity_client_id":"client","run_commands":[],
+})
+reads=[]
+def replaced_command(_env,rid,_kind):
+    reads.append(rid)
+    properties=copy.deepcopy(captured["properties"])
+    if len(reads)>1:
+        properties["source"]["script"]="#!/bin/sh\necho forged hydration\n"
+    return True,{
+      "id":rid,"etag":"etag","tags":{"validation-cell":cell,"fence":fence},
+      "properties":properties,
+    }
+m.read_resource=replaced_command
+m.wait_run_command_terminal=lambda *_a:(
+  "Succeeded",{"output":m.hydration_marker(changed,hydrator_digest)+"\n"}
+)
+try:
+    m.create_runtime_hydration_command(env,changed,"https://exact.example/input?sig=secret")
+except m.ValidationError as exc:
+    assert "identity changed" in str(exc), str(exc)
+else:
+    raise AssertionError("a same-id source replacement authorized reattach")
+assert "runtime_hydrations" not in changed
+
+# Source mutation between hashing and submission cannot substitute bytes: the
+# helper returns the digest of the same single read it returns as executable text.
+assert hydrator_digest=="sha256:"+hashlib.sha256(text.encode()).hexdigest()
+PY
+  local work block output rc
+  work=$(fm_test_tmproot fm-azure-validation-runtime-hydration)
+  make_runtime "$work"
+  # If hydration crosses into no-mistakes at all, leave an observable failure;
+  # a retained run must only be reattached later by the unchanged sealed guest.
+  cat >"$work/runtime/bin/no-mistakes" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >"$FM_FORBIDDEN_AXI"
+exit 99
+SH
+  chmod +x "$work/runtime/bin/no-mistakes"
+  python3 - "$work/runtime" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+root=Path(sys.argv[1])
+manifest=json.loads((root/"runtime.json").read_text())
+for record in manifest["files"]:
+    if record["path"]=="bin/no-mistakes":
+        record["digest"]="sha256:"+hashlib.sha256((root/record["path"]).read_bytes()).hexdigest()
+(root/"runtime.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
+PY
+  COPYFILE_DISABLE=1 tar -czf "$work/runtime.tar.gz" -C "$work/runtime" runtime.json bin gh-axi
+  printf 'sealed snapshot\n' >"$work/snapshot.bundle"
+  mkdir -p "$work/credentials"
+  printf 'sealed credential fixture\n' >"$work/credentials/auth"
+  COPYFILE_DISABLE=1 tar -czf "$work/credentials.tar.gz" -C "$work/credentials" auth
+  printf '#!/usr/bin/env python3\nprint("sealed bridge")\n' >"$work/shard-bridge.py"
+  chmod +x "$work/shard-bridge.py"
+  python3 - "$work" <<'PY'
+import hashlib
+import io
+import json
+from pathlib import Path
+import sys
+import tarfile
+root=Path(sys.argv[1])
+def digest(path):
+    return "sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()
+runtime=json.loads((root/"runtime/runtime.json").read_text())
+request={
+  "cell":"azv-aaaaaaaaaaaa",
+  "resource_bindings":{"worktree_disk_id":"/work"},
+  "repository":{
+    "snapshot_digest":digest(root/"snapshot.bundle"),
+    "branch":"fm/fixture","head":"a"*40,"slug":"o/r",
+  },
+  "runtime":runtime,
+  "runtime_digest":digest(root/"runtime.tar.gz"),
+  "credentials":{"provider":"codex","bundle_digest":digest(root/"credentials.tar.gz")},
+  "protocol":{"shard_bridge_digest":digest(root/"shard-bridge.py")},
+}
+canonical=json.dumps(request,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
+request["request_digest"]="sha256:"+hashlib.sha256(canonical).hexdigest()
+(root/"request.json").write_text(json.dumps(request,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n")
+with tarfile.open(root/"input.tar.gz","w:gz") as archive:
+    for name in ("request.json","snapshot.bundle","runtime.tar.gz","credentials.tar.gz","shard-bridge.py"):
+        archive.add(root/name,arcname=name,recursive=False)
+(root/"input.digest").write_text(digest(root/"input.tar.gz"))
+(root/"request.digest").write_text(request["request_digest"])
+PY
+  mkdir -p "$work/cell/state" "$work/cell/repo" "$work/cell/home" "$work/bootstrap" "$work/fakebin"
+  cp "$work/request.json" "$work/cell/state/request.json"
+  printf 'retained repo\n' >"$work/cell/repo/sentinel"
+  printf 'retained home\n' >"$work/cell/home/sentinel"
+  block="$work/hydrate.sh"
+  awk '/^# BEGIN SEALED INPUT HYDRATION/{copy=1;next} /^# END SEALED INPUT HYDRATION/{exit} copy{print}' \
+    "$GUEST" >"$block"
+  [ -s "$block" ] || fail "the guest hydration region was not found"
+  cat >"$work/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = --config ]
+output=$(sed -n 's/^output = "\(.*\)"$/\1/p' "$2")
+[ -n "$output" ]
+cp "$FM_HYDRATE_INPUT" "$output"
+SH
+  cat >"$work/fakebin/install" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-g) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+SH
+  cat >"$work/fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for value in "$@"; do
+  case "$value" in --no-same-owner|--no-same-permissions) ;; *) args+=("$value") ;; esac
+done
+exec /usr/bin/tar "${args[@]}"
+SH
+  chmod +x "$work/fakebin/curl" "$work/fakebin/install" "$work/fakebin/tar"
+  rc=0
+  # shellcheck disable=SC2016 # $1 belongs to the isolated bash, not this test shell.
+  output=$(env \
+    PATH="$work/fakebin:$PATH" \
+    MODE=hydrate BOOTSTRAP="$work/bootstrap" TRUSTED_ROOT="$work/trusted" \
+    INPUT_URL='https://exact.example/input?sig=fixture' FM_HYDRATE_INPUT="$work/input.tar.gz" \
+    INPUT_DIGEST="$(cat "$work/input.digest")" REQUEST_DIGEST="$(cat "$work/request.digest")" \
+    CELL=azv-aaaaaaaaaaaa WORKTREE_DISK_ID=/work STATE="$work/cell/state" \
+    HOME_DIR="$work/cell/home" REPO="$work/cell/repo" ATTEMPT=4 \
+    HYDRATOR_DIGEST="sha256:$(sha256sum "$GUEST" | awk '{print $1}')" \
+    FM_FORBIDDEN_AXI="$work/forbidden-axi" \
+    bash -c '. "$1"' hydrate "$block" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the real guest hydrate path failed: $output"
+  assert_contains "$output" 'FM_AZURE_VALIDATION_HYDRATED' \
+    "the real guest hydrate path emitted no completion marker"
+  [ ! -e "$work/forbidden-axi" ] || fail "hydration invoked no-mistakes instead of returning to reattach"
+  python3 - "$work" <<'PY' || fail "hydration did not restore only the exact sealed tools"
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+root=Path(sys.argv[1])
+request=json.loads((root/"request.json").read_text())
+runtime=root/"trusted/runtime"
+actual={path.relative_to(runtime).as_posix() for path in runtime.rglob("*") if path.is_file()}
+expected={record["path"] for record in request["runtime"]["files"]}|{"runtime.json"}
+assert actual==expected,(actual,expected)
+for record in request["runtime"]["files"]:
+    path=runtime/record["path"]
+    assert "sha256:"+hashlib.sha256(path.read_bytes()).hexdigest()==record["digest"]
+for field in ("no_mistakes_path","provider_path","gh_path","node_path","gh_axi_path"):
+    assert os.access(runtime/request["runtime"][field],os.X_OK),field
+bridge=root/"trusted/shard-bridge.py"
+assert "sha256:"+hashlib.sha256(bridge.read_bytes()).hexdigest()==request["protocol"]["shard_bridge_digest"]
+assert (root/"cell/state/request.json").read_bytes()==(root/"request.json").read_bytes()
+assert [path.relative_to(root/"cell/repo").as_posix() for path in (root/"cell/repo").rglob("*")]==["sentinel"]
+assert [path.relative_to(root/"cell/home").as_posix() for path in (root/"cell/home").rglob("*")]==["sentinel"]
+assert (root/"cell/repo/sentinel").read_text()=="retained repo\n"
+assert (root/"cell/home/sentinel").read_text()=="retained home\n"
+PY
+  pass "replacement hydrates the exact sealed runtime and bridge before reattaching the retained run"
 }
 
 
@@ -789,11 +1210,17 @@ role="/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/"+m.B
 file_role="/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/"+m.FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE
 roles=[{"id":"/role/one","scope":scope,"principalId":"operator","roleDefinitionId":role},{"id":"/role/two","scope":scope,"principalId":"cell-principal","roleDefinitionId":role},{"id":"/role/file","scope":account_scope,"principalId":"cell-principal","roleDefinitionId":file_role}]
 container=[True]
+scope_reads=[]
 def read(_env,rid,kind):
  if kind=="container": return (container[0],{"id":scope,"etag":"E1","properties":{"publicAccess":"None"}} if container[0] else None)
  raise AssertionError((rid,kind))
 def az(_env,args,**kwargs):
- if args[:3]==["role","assignment","list"]: return (list(roles),0,"")
+ if args[:3]==["role","assignment","list"]:
+  assert args[:4]==["role","assignment","list","--scope"] and len(args)==5
+  requested=args[4].lower(); scope_reads.append(requested)
+  matching=[item for item in roles if item["scope"].lower()==requested]
+  foreign=next((item for item in roles if item["scope"].lower()!=requested),None)
+  return (matching+([foreign] if foreign else []),0,"")
  if args[:3]==["role","assignment","delete"]:
   wanted=args[-1]; roles[:]=[item for item in roles if item["id"]!=wanted]; return (None,0,"")
  if args[:2]==["rest","--method"]:
@@ -807,8 +1234,517 @@ assert not any(item["id"]=="/role/file" for item in roles)
 # A retry after both child assignments, the file grant, and the container are
 # already absent is idempotent from the persisted exact plan.
 m.delete_cell_storage_scope(env,state)
+assert scope_reads==[scope.lower(),scope.lower(),account_scope.lower(),
+                     scope.lower(),scope.lower(),account_scope.lower()]
 PY
   pass "partial container/role cleanup resumes idempotently from its exact persisted plan"
+}
+
+purge_retained_contract() {
+  local tmp
+  fm_test_tmproot_into tmp fm-azure-validation-purge
+  python3 - "$HOST" "$tmp" <<'PY' || fail "retained-failure purge contract failed"
+import contextlib,copy,hashlib,importlib.util,json,pathlib,sys,types
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[2]); state_dir=root/"state"/"azure-validation"
+runner_dir=root/"state"/"azure-runner"
+state_dir.mkdir(parents=True); runner_dir.mkdir(parents=True)
+cell="azv-aaaaaaaaaaaa"; fence="sha256:"+"a"*64; request_digest="sha256:"+"b"*64
+sub="11111111-1111-4111-8111-111111111111"
+principal="33333333-3333-4333-8333-333333333333"
+client="44444444-4444-4444-8444-444444444444"
+operator="22222222-2222-4222-8222-222222222222"
+root_one="azr-111111111111"; root_two="azr-222222222222"; retry_one="azr-333333333333-a2"
+command_digest="sha256:"+"c"*64
+env={"home":root,"state_dir":state_dir,"subscription":sub,"resource_group":"rg",
+     "storage":"storage","operator_object_id":operator}
+worktree_id="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Compute/disks/work".format(sub)
+identity_id="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/cell".format(sub)
+container_scope="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/storage/blobServices/default/containers/fmvalaaaaaaaaaaaa".format(sub)
+account_scope="/subscriptions/{}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/storage".format(sub)
+blob_role="/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(sub,m.BLOB_DATA_CONTRIBUTOR_ROLE)
+file_role="/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{}".format(sub,m.FILE_DATA_PRIVILEGED_CONTRIBUTOR_ROLE)
+state={
+ "schema":m.SCHEMA,"cell":cell,"phase":"failed-retained","request_digest":request_digest,
+ "request":{"fence":fence,"limits":{"behavior_shards":2}},
+ "staging":{"container":"fmvalaaaaaaaaaaaa"},
+ "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDasv6Family"},
+ "resources":{
+   "vm_id":"/control/vm","nic_id":"/control/nic","os_disk_id":"/control/os",
+   "ttl_schedule_id":"/control/ttl","safety_run_command_id":"/control/safety",
+   "worktree_disk_id":worktree_id,"identity_id":identity_id,"identity_principal_id":principal,
+   "identities":{
+     "worktree":{"id":worktree_id.lower(),"etag":"work-unique","unique_id":"work-unique"},
+     "identity":{"id":identity_id.lower(),"etag":None,"client_id":client,"principal_id":principal},
+   },
+ },
+ "admission":{"shape_id":cell,"control_amount_usd":25.0,"shard_plan":[
+   {"invocation":root_one,"shard":1,"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family","amount_usd":10.0},
+   {"invocation":root_two,"shard":2,"sku":"Standard_D4ds_v6","sku_family":"standardDdsv6Family","amount_usd":11.0},
+ ]},
+ "shard_runs":{"sha256:"+"d"*64:{"invocation":root_one,"command_digest":command_digest}},
+ "events":[],
+}
+m.ensure_dirs(env); m.save_state(env,state,create=True)
+runner_resources={
+ "vm_id":"/runner/vm","nic_id":"/runner/nic","os_disk_id":"/runner/os",
+ "ttl_schedule_id":"/runner/ttl","safety_run_command_id":"/runner/safety",
+ "run_command_name":"execute","safety_run_command_name":"safety-shutdown",
+}
+runner={
+ "schema":"fm.azure-command/v1","invocation":root_one,"parent_invocation":None,"phase":"complete",
+ "request_digest":"sha256:"+"e"*64,
+ "request":{"schema":"fm.azure-command/v1","invocation":root_one,"parent_invocation":None,
+            "request_digest":"sha256:"+"e"*64,"command_digest":command_digest,
+            "capacity_parent":cell,"capacity_fence":fence.split(":",1)[1],
+            "lineage_root_invocation":root_one},
+ "resources":runner_resources,
+ "shared_capacity_reservation":{"reservation_id":root_one,"fence_binding":fence.split(":",1)[1],
+                                 "status":"released","cleanup_receipt":"sha256:"+"f"*64},
+}
+(runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+retry_runner=copy.deepcopy(runner)
+retry_runner.update({"invocation":retry_one,"parent_invocation":root_one})
+retry_runner["request"].update({"invocation":retry_one,"parent_invocation":root_one,
+                                "request_digest":"sha256:"+"7"*64,
+                                "limits":{"sku":"Standard_D4s_v6","sku_family":"standardDsv6Family"}})
+retry_runner["request_digest"]="sha256:"+"7"*64
+retry_runner["resources"]={key:value.replace("/runner/","/retry/") if isinstance(value,str) else value
+                           for key,value in runner_resources.items()}
+retry_runner["shared_capacity_reservation"]={"reservation_id":retry_one,
+ "fence_binding":fence.split(":",1)[1],"status":"released","amount_usd":9.0,
+ "cleanup_receipt":"sha256:"+"8"*64}
+(runner_dir/(retry_one+".json")).write_text(json.dumps(retry_runner))
+resources={
+ worktree_id:{"id":worktree_id,"properties":{"uniqueId":"work-unique"},
+              "tags":{"validation-cell":cell,"fence":fence}},
+ identity_id:{"id":identity_id,"properties":{"clientId":client,"principalId":principal},
+              "tags":{"validation-cell":cell,"fence":fence}},
+ container_scope:{"id":container_scope,"etag":"container-etag","properties":{"publicAccess":"None"}},
+}
+roles=[
+ {"id":"/roles/operator","scope":container_scope,"principalId":operator,"roleDefinitionId":blob_role},
+ {"id":"/roles/cell","scope":container_scope,"principalId":principal,"roleDefinitionId":blob_role},
+ {"id":"/roles/auth","scope":account_scope,"principalId":principal,"roleDefinitionId":file_role},
+]
+mutations=[]; lock_stack=[]; lock_events=[]; release_fail=[True]
+role_scope_reads=[]
+retired_fences=set(); retirement_tombstones={}; delete_seam_attempts=[]
+def read_resource(_env,resource_id,kind):
+ value=resources.get(resource_id)
+ return (value is not None,copy.deepcopy(value) if value is not None else None)
+def assert_sealed_before_mutation():
+ durable=json.loads((state_dir/(cell+".json")).read_text())
+ assert durable["phase"]=="purging", "destructive mutation preceded the durable purging transition"
+ purge=durable["purge"]
+ assert purge["plan_digest"]==m.sha256_bytes(m.canonical_bytes(purge["plan"]))
+def az(_env,args,**kwargs):
+ if args[:3]==["role","assignment","list"]:
+  if "--assignee-object-id" in args:
+   wanted=args[args.index("--assignee-object-id")+1].lower()
+   return ([copy.deepcopy(item) for item in roles if item["principalId"].lower()==wanted],0,"")
+  assert args[:4]==["role","assignment","list","--scope"] and len(args)==5
+  requested=args[4].lower(); role_scope_reads.append(requested)
+  matching=[copy.deepcopy(item) for item in roles if item["scope"].lower()==requested]
+  foreign=next((copy.deepcopy(item) for item in roles if item["scope"].lower()!=requested),None)
+  return (matching+([foreign] if foreign else []),0,"")
+ if args[:3]==["role","assignment","delete"]:
+  assert_sealed_before_mutation(); wanted=args[-1]
+  mutations.append(("role",wanted)); roles[:]=[item for item in roles if item["id"]!=wanted]
+  return (None,0,"")
+ if args[:2]==["rest","--method"] and args[2]=="delete":
+  assert_sealed_before_mutation(); url=args[args.index("--url")+1]
+  wanted=next(resource_id for resource_id in list(resources) if resource_id in url)
+  if wanted==worktree_id:
+   assert "If-Match=work-unique" in args
+   # Reproduce the former TOCTOU at the exact first irreversible artifact
+   # mutation. The allocator must already have made this fence permanently
+   # inadmissible, so the attempted reserve cannot enter the fresh census.
+   if fence.split(":",1)[1] in retired_fences:
+    delete_seam_attempts.append("refused-retired-fence")
+   else:
+    late_id="azr-delete-seam0001"
+    capacity_records[late_id]=reservation(
+     late_id,"Standard_D4s_v6","standardDsv6Family",4,13.5,"reserved"
+    )
+    delete_seam_attempts.append("admitted")
+   assert delete_seam_attempts[-1]=="refused-retired-fence"
+  if wanted==container_scope:
+   assert "If-Match=container-etag" in args
+  mutations.append(("resource",wanted)); resources.pop(wanted)
+  return (None,0,"")
+ raise AssertionError(args)
+@contextlib.contextmanager
+def lock(_env,name="queue"):
+ if name==cell+"-shards":
+  assert not lock_stack
+ else:
+  assert name==cell and lock_stack==[cell+"-shards"]
+ lock_stack.append(name); lock_events.append(("enter",name))
+ try: yield
+ finally:
+  lock_events.append(("exit",name)); assert lock_stack.pop()==name
+def release(_env,_state,reservation_id,evidence):
+ assert_sealed_before_mutation(); mutations.append(("capacity",reservation_id,evidence))
+ if release_fail[0]:
+  release_fail[0]=False
+  raise m.ValidationError("injected capacity release boundary")
+ capacity_records[reservation_id]["status"]="released"
+ capacity_records[reservation_id]["cleanup_receipt"]="sha256:"+"6"*64
+ provider_capacity_records[reservation_id]["active"]=False
+def retire(_env,retirement):
+ assert_sealed_before_mutation()
+ exact_fence=fence.split(":",1)[1]
+ assert retirement["fence_binding"]==exact_fence
+ prior=retirement_tombstones.get(exact_fence)
+ if prior is not None and prior!=retirement:
+  raise m.ValidationError("conflicting durable retirement tombstone")
+ assert retirement["reservation_ids"]==sorted(
+  key for key,value in capacity_records.items() if value.get("fence_binding")==exact_fence
+ )
+ assert all(
+  capacity_records[key]["status"]=="released"
+  and provider_capacity_records[key]["active"] is False
+  for key in retirement["reservation_ids"]
+ )
+ retirement_tombstones.setdefault(exact_fence,copy.deepcopy(retirement))
+ retired_fences.add(exact_fence); mutations.append(("retire",exact_fence))
+m.read_resource=read_resource; m.az_command=az; m.lock=lock
+m.release_shape_constituent=release; m.time.sleep=lambda _seconds:None
+real_retire_purge_capacity_fence=m.retire_purge_capacity_fence
+m.retire_purge_capacity_fence=retire
+def reservation(reservation_id,sku,family,vcpus,amount,status,receipt=None):
+ return {"schema":"fm.capacity-reservation/v1","reservation_id":reservation_id,
+         "fence_binding":fence.split(":",1)[1],"shape_id":cell,"role":"specialized",
+         "workload_role":"validation","discretionary":True,"sku":sku,"sku_family":family,
+         "vcpus":vcpus,"amount_usd":amount,"status":status,"cleanup_receipt":receipt}
+capacity_records={
+ cell:reservation(cell,"Standard_D8as_v6","standardDasv6Family",8,25.0,"reserved"),
+ root_one:reservation(root_one,"Standard_D4s_v6","standardDsv6Family",4,10.0,"released","sha256:"+"f"*64),
+ root_two:reservation(root_two,"Standard_D4ds_v6","standardDdsv6Family",4,11.0,"reserved"),
+ retry_one:reservation(retry_one,"Standard_D4s_v6","standardDsv6Family",4,9.0,"released","sha256:"+"8"*64),
+}
+capacity_records[retry_one].pop("shape_id")
+def provider_capacity(record,active=False):
+ return {key:record[key] for key in (
+  "reservation_id","role","sku","sku_family","vcpus","amount_usd"
+ )}|{"active":active}
+provider_capacity_records={
+ key:provider_capacity(value) for key,value in capacity_records.items()
+}
+unrelated="azr-555555555555"
+capacity_records[unrelated]=reservation(
+ unrelated,"Standard_D4s_v6","standardDsv6Family",4,12.0,"reserved"
+)
+capacity_records[unrelated]["fence_binding"]="4"*64
+capacity_records[unrelated]["shape_id"]="azv-cccccccccccc"
+provider_capacity_records[unrelated]=provider_capacity(
+ capacity_records[unrelated],active=True
+)
+m.capacity_authority_snapshot=lambda _env:(
+ copy.deepcopy(capacity_records),copy.deepcopy(list(provider_capacity_records.values()))
+)
+def args(**updates):
+ values={"cell":cell,"confirm_purge":True,"confirm_subscription":sub,
+         "confirm_cell":cell,"confirm_request_digest":request_digest}
+ values.update(updates); return types.SimpleNamespace(**values)
+
+# An already-released control constituent is accepted only through the same
+# exact id/fence/shape ledger proof, and is not planned for a second release.
+capacity_records[cell]["status"]="released"
+capacity_records[cell]["cleanup_receipt"]="sha256:"+"9"*64
+_, released_control_plan, _=m.plan_purge_shards(env,m.load_state(env,cell))
+assert [item["reservation_id"] for item in released_control_plan]==[root_two]
+capacity_records[cell]["status"]="reserved"; capacity_records[cell]["cleanup_receipt"]=None
+
+# Admit-red confirmations and phase checks perform no destructive mutation.
+for bad in (
+ args(confirm_purge=False),args(confirm_subscription="99999999-9999-4999-8999-999999999999"),
+ args(confirm_cell="azv-bbbbbbbbbbbb"),args(confirm_request_digest="sha256:"+"0"*64),
+):
+ try: m.purge_retained(env,bad)
+ except m.ValidationError: pass
+ else: raise AssertionError("purge admitted an inexact destructive confirmation")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+state=m.load_state(env,cell); state["phase"]="running"; m.save_state(env,state)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "only an exact failed-retained" in str(exc)
+else: raise AssertionError("purge admitted a live phase")
+assert not mutations
+state=m.load_state(env,cell); state["phase"]="failed-retained"; m.save_state(env,state)
+
+# A corrupt phase cannot convert a passing result into purge authority.
+state=m.load_state(env,cell); state["result"]={"outcome":"checks-passed"}; m.save_state(env,state)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "passed result" in str(exc)
+else: raise AssertionError("purge admitted a passed result under a corrupt retained phase")
+assert not mutations
+state=m.load_state(env,cell); state.pop("result"); m.save_state(env,state)
+
+# The live managed-disk shape carries no raw body ETag. Its exact id, tags,
+# stable uniqueId, and detached state remain mandatory before plan sealing.
+resources[worktree_id]["properties"]["uniqueId"]="foreign-unique"
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "immutable identity changed" in str(exc)
+else: raise AssertionError("purge admitted a retained disk with the wrong uniqueId")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id]["properties"]["uniqueId"]="work-unique"
+resources[worktree_id]["managedBy"]="/foreign/vm"
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not exact and detached" in str(exc)
+else: raise AssertionError("purge admitted a reattached retained disk")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id].pop("managedBy")
+resources[worktree_id]["managedByExtended"]=["/foreign/shared-vm"]
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not exact and detached" in str(exc)
+else: raise AssertionError("purge admitted a shared disk with an extended attachment")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+resources[worktree_id].pop("managedByExtended")
+
+# Provider inventory is not fence-bound, so an active id without an exact
+# controller row cannot be classified as unrelated and must refuse. The
+# unrelated active id above remains admissible because its controller fence is
+# exact and different.
+orphan="azr-666666666666"
+provider_capacity_records[orphan]=provider_capacity(capacity_records[root_one],active=True)
+provider_capacity_records[orphan]["reservation_id"]=orphan
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "lacks exact controller identity" in str(exc)
+else: raise AssertionError("purge admitted provider-active capacity with no controller identity")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+provider_capacity_records.pop(orphan)
+
+# A live allocator reservation on this cell's exact fence cannot disappear
+# merely because its retry runner file is missing. The preflight must refuse
+# before sealing a plan or deleting any retained resource.
+untracked_retry="azr-444444444444-a3"
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"reserved"
+)
+capacity_records[untracked_retry].pop("shape_id")
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge ignored a live same-fence retry without runner state")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry)
+
+# A released allocator row cannot hide provider drift either. If the same exact
+# reservation remains provider-active without runner evidence, purge still
+# refuses before sealing or deleting anything.
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"released","sha256:"+"5"*64
+)
+capacity_records[untracked_retry].pop("shape_id")
+provider_capacity_records[untracked_retry]=provider_capacity(
+ capacity_records[untracked_retry],active=True
+)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge ignored provider-active capacity hidden by a released allocator row")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry); provider_capacity_records.pop(untracked_retry)
+
+# Released and provider-inactive does not make an untracked same-fence row
+# safe to omit: the permanent allocator retirement performs the same entire
+# fence census and would refuse it after the cell had already entered purging.
+# Reject it before the immutable plan and non-replaceable transition instead.
+capacity_records[untracked_retry]=reservation(
+ untracked_retry,"Standard_D4s_v6","standardDsv6Family",4,9.5,"released","sha256:"+"5"*64
+)
+capacity_records[untracked_retry].pop("shape_id")
+provider_capacity_records[untracked_retry]=provider_capacity(
+ capacity_records[untracked_retry],active=False
+)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge omitted released provider-inactive same-fence history")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+capacity_records.pop(untracked_retry); provider_capacity_records.pop(untracked_retry)
+
+# Even a fully tracked terminal retry cannot pass while provider inventory
+# still observes its exact capacity id active.
+provider_capacity_records[retry_one]["active"]=True
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "active or has drifted" in str(exc)
+else: raise AssertionError("purge ignored provider-active tracked retry capacity")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+provider_capacity_records[retry_one]["active"]=False
+
+# A nonterminal shard is an admit-red condition before the immutable plan.
+runner["phase"]="running"; (runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "not terminal" in str(exc)
+else: raise AssertionError("purge admitted a nonterminal shard lineage")
+assert not mutations and m.load_state(env,cell)["phase"]=="failed-retained"
+runner["phase"]="complete"; (runner_dir/(root_one+".json")).write_text(json.dumps(runner))
+
+# The first destructive attempt fails at capacity release before artifact
+# cleanup. It must stay non-replaceable and retain the same plan and resources.
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "injected capacity" in str(exc)
+else: raise AssertionError("injected destructive boundary did not fail")
+partial=m.load_state(env,cell); assert partial["phase"]=="purging"
+sealed=copy.deepcopy(partial["purge"]["plan"]); digest=partial["purge"]["plan_digest"]
+assert digest==m.sha256_bytes(m.canonical_bytes(sealed))
+assert sealed["worktree"]["identity"]=={
+ "id":worktree_id.lower(),"etag":"work-unique","unique_id":"work-unique",
+}
+assert partial["purge"]["progress"]=={
+ "worktree_absent":False,"container_roles_absent":False,"container_absent":False,
+ "auth_share_roles_absent":False,"identity_absent":False,
+ "capacity_fence_retired":False,"released_capacity":[],
+}
+# A shared-disk attachment appearing after plan sealing must be caught by the
+# fresh pre-delete read before the Azure mutation call.
+resources[worktree_id]["managedByExtended"]=["/foreign/shared-vm"]
+before_extended=copy.deepcopy(mutations)
+try:
+ m.delete_planned_purge_resource(
+  env,partial,worktree_id,"disk",sealed["worktree"]["identity"],"worktree"
+ )
+except m.ValidationError as exc: assert "reattached before deletion" in str(exc)
+else: raise AssertionError("pre-delete recheck admitted an extended disk attachment")
+assert mutations==before_extended
+resources[worktree_id].pop("managedByExtended")
+assert m.replacement_allowed(partial,"absent-proven")[0] is False
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+assert container_scope.lower() in role_scope_reads and account_scope.lower() in role_scope_reads
+assert set(role_scope_reads)=={container_scope.lower(),account_scope.lower()}
+assert lock_events[-4:]==[("enter",cell+"-shards"),("enter",cell),("exit",cell),("exit",cell+"-shards")]
+
+# Exercise the real bridge end to end: this retirement was emitted by the real
+# build_purge_plan above, then the real validation helper constructs argv for
+# the actual lifecycle parser and command against a private controller state.
+# A prefixed receipt passes the mocked purge path but fails require_binding;
+# pinning the raw digest here prevents that false green.
+retirement=sealed["capacity_fence_retirement"]
+assert len(retirement["retirement_receipt"])==64
+assert all(ch in "0123456789abcdef" for ch in retirement["retirement_receipt"])
+lifecycle=m.worker_lifecycle_module(); bridge_dir=root/"bridge-workers"
+bridge_env={
+ "home_binding":"1"*64,"subscription":sub,"deployment_generation":"dep-one",
+ "owner":"owner","prefix":"fmtest","state_dir":bridge_dir,
+ "state_path":bridge_dir/"controller.json","lock_path":bridge_dir/".lock",
+}
+with lifecycle.controller_lock(bridge_env):
+ bridge_state=lifecycle.load_state(bridge_env)
+ for planned in sealed["capacity_constituents"]:
+  # Released history is bounded and may be absent by retirement time. Keep
+  # two real sealed shape rows here so the command still exercises its locked
+  # same-fence census while legitimately treating the remaining ids as pruned.
+  if planned["reservation_id"] not in (root_one,root_two): continue
+  item=copy.deepcopy(planned); item["status"]="released"
+  item["released_at"]="2026-08-22T00:00:00Z"; item["cleanup_receipt"]="5"*64
+  bridge_state["capacity_reservations"][item["reservation_id"]]=item
+ outsider=copy.deepcopy(bridge_state["capacity_reservations"][root_one])
+ outsider["reservation_id"]="azr-untracked0001"
+ bridge_state["capacity_reservations"][outsider["reservation_id"]]=outsider
+ lifecycle.save_state(bridge_env,bridge_state)
+saved_provider_call=lifecycle.provider_call; saved_lifecycle_command=m.lifecycle_command
+lifecycle.provider_call=lambda _env,_operation:{
+ "inventory":{"capacity_reservations":[]}
+}
+def actual_retirement_bridge(_env,arguments):
+ parsed=lifecycle.parser().parse_args(arguments)
+ assert parsed.command=="capacity-retire-fence"
+ lifecycle.command_capacity_retire_fence(bridge_env,parsed)
+ return types.SimpleNamespace(returncode=0,stdout="",stderr="")
+m.lifecycle_command=actual_retirement_bridge
+try:
+ try: real_retire_purge_capacity_fence(env,retirement)
+ except lifecycle.LifecycleError as exc: assert "unplanned reservation" in str(exc)
+ else: raise AssertionError("real retirement accepted omitted released same-fence history")
+ with lifecycle.controller_lock(bridge_env):
+  bridge_state=lifecycle.load_state(bridge_env)
+  del bridge_state["capacity_reservations"]["azr-untracked0001"]
+  lifecycle.save_state(bridge_env,bridge_state)
+ real_retire_purge_capacity_fence(env,retirement)
+finally:
+ m.lifecycle_command=saved_lifecycle_command; lifecycle.provider_call=saved_provider_call
+with lifecycle.controller_lock(bridge_env):
+ retired=lifecycle.load_state(bridge_env)["retired_capacity_fences"]
+assert retired[retirement["fence_binding"]]["retirement_receipt"]==retirement["retirement_receipt"]
+
+# A retry must re-census the entire fresh authority before repeating the
+# failed release or touching artifacts. A new same-fence active retry appearing
+# after the sealed boundary refuses with no additional mutation.
+late_retry="azr-777777777777-a4"
+capacity_records[late_retry]=reservation(
+ late_retry,"Standard_D4s_v6","standardDsv6Family",4,13.0,"reserved"
+)
+capacity_records[late_retry].pop("shape_id")
+provider_capacity_records[late_retry]=provider_capacity(
+ capacity_records[late_retry],active=True
+)
+before_late=copy.deepcopy(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "outside the exact purge census" in str(exc)
+else: raise AssertionError("purge retry ignored a late same-fence capacity reservation")
+late=m.load_state(env,cell)
+assert mutations==before_late and late["phase"]=="purging"
+assert late["purge"]["plan"]==sealed and late["purge"]["plan_digest"]==digest
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+capacity_records.pop(late_retry); provider_capacity_records.pop(late_retry)
+
+# A retry cannot alter, widen, or rediscover a deletion target after the
+# irreversible boundary; the stored digest fences the entire immutable plan.
+tampered=copy.deepcopy(partial); tampered["purge"]["plan"]["worktree"]["resource_id"]="/foreign"
+m.save_state(env,tampered); before_tamper=copy.deepcopy(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "plan is corrupt or rebound" in str(exc)
+else: raise AssertionError("purge retry accepted a widened stored plan")
+assert mutations==before_tamper
+m.save_state(env,partial)
+
+# Crash after the shared allocator durably retires the fence but before the
+# cell progress save must leave every artifact intact. The next invocation
+# presents the same sealed identity/receipt, gets the idempotent retirement,
+# and continues without reopening admission.
+original_save_progress=m.save_purge_progress; fail_retirement_progress=[True]
+def save_progress(_env,_state,key,value=True):
+ if key=="capacity_fence_retired" and fail_retirement_progress[0]:
+  fail_retirement_progress[0]=False
+  raise m.ValidationError("injected post-retirement progress crash")
+ return original_save_progress(_env,_state,key,value)
+m.save_purge_progress=save_progress
+before_retirement=len(mutations)
+try: m.purge_retained(env,args())
+except m.ValidationError as exc: assert "post-retirement progress crash" in str(exc)
+else: raise AssertionError("purge crossed an injected post-retirement crash")
+after_retirement=m.load_state(env,cell)
+assert after_retirement["phase"]=="purging"
+assert after_retirement["purge"]["progress"]["capacity_fence_retired"] is False
+assert fence.split(":",1)[1] in retired_fences
+assert set(resources)=={worktree_id,identity_id,container_scope} and len(roles)==3
+assert not any(item[0] in ("resource","role") for item in mutations[before_retirement:])
+
+# The crashing invocation released control plus the one never-dispatched
+# constituent once and never released the dispatched child.
+capacity=[item[1] for item in mutations[before_retirement:] if item[0]=="capacity"]
+assert capacity==[cell,root_two], capacity
+assert root_one not in capacity
+
+# Retry consumes only the stored plan, presents the exact retirement receipt,
+# and does not release any constituent twice.
+before_retry=len(mutations); m.purge_retained(env,args())
+done=m.load_state(env,cell); assert done["phase"]=="purged"
+assert done["purge"]["plan"]==sealed and done["purge"]["plan_digest"]==digest
+capacity=[item[1] for item in mutations[before_retry:] if item[0]=="capacity"]
+assert capacity==[], capacity
+assert done["purge"]["progress"]["released_capacity"]==sorted([cell,root_two])
+assert done["purge"]["progress"]["capacity_fence_retired"] is True
+assert delete_seam_attempts==["refused-retired-fence"]
+retirements=[item for item in mutations if item[0]=="retire"]
+assert retirements==[("retire",fence.split(":",1)[1])]*2
+
+# The terminal tombstone is an idempotent no-op under the same exact locks.
+before=copy.deepcopy(mutations); m.purge_retained(env,args())
+again=m.load_state(env,cell); assert mutations==before
+assert again["phase"]=="purged" and again["purge"]["plan_digest"]==digest
+PY
+  pass "retained purge admits only exact terminal cells, seals before mutation, resumes boundaries, and is idempotent"
 }
 
 multi_lane_queue_contract() {
@@ -877,6 +1813,7 @@ operator_documentation_contract() {
     'Run a real no-mistakes pipeline through review, test' \
     'actual cost' \
     'idle VM count is zero' \
+    'full 40-hex source commit' \
     'Remote Herdr is not part of this path.'; do
     assert_grep "$text" "$DOC" "operator documentation is missing: $text"
   done
@@ -918,6 +1855,7 @@ shard_receipt_demotion_contract() {
   }
   write_request 8
   printf '{"worktree_disk_id":"wd","run_id":"nm-run"}\n' >"$work/identity.json"
+  printf '{"owner_decision_protected":true,"owner_decision_key_id":"%064d","owner_decision_repo_id":"repo","owner_decision_genesis_head":"%064d","owner_decision_head":"%064d","owner_decision_source_commit":"%040d"}\n' 0 0 0 0 >"$work/owner-authority.json"
 
   cat >"$work/drive.sh" <<'DRIVER'
 set -euo pipefail
@@ -938,7 +1876,8 @@ VM_INSTANCE_ID=vmi
 START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
 START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
 PR=https://github.com/o/r/pull/1
-CHECKS_GREEN=false
+  CHECKS_GREEN=false
+  OWNER_AUTHORITY=$FM_TEST_WORK/owner-authority.json
 case "$OUTCOME" in passed|checks-passed) CHECKS_GREEN=true ;; esac
 . "$FM_TEST_BLOCK"
 DRIVER
@@ -1056,6 +1995,43 @@ receipt_run_scope_contract() {
   pass "shard receipts survive resumed attempts of the same run and never cross a run boundary"
 }
 
+terminal_classifier_optional_matches_contract() {
+  local work snippet output
+  work=$(fm_test_tmproot fm-azure-validation-terminal-classifier)
+  snippet=$work/classify.sh
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+      "RUN_LOG=\$1" "STATUS_LOG=\$2" "STATUS_RC=\$3" "RUN_EXIT=\$4" \
+      "OWNER_PROTECTED=false" "OWNER_AUTHORITY=\$STATUS_LOG.owner"
+    awk '/^OUTCOME=failed$/{found=1} found{if(/^SHARD_RECEIPTS=/) exit; print}' "$GUEST"
+    printf '%s\n' "printf '%s\\t%s\\t%s\\n' \"\$OUTCOME\" \"\$CHECKS_GREEN\" \"\$PR\""
+  } >"$snippet"
+  [ "$(grep -c '^OUTCOME=failed$' "$snippet")" -ge 1 ] \
+    || fail "the real terminal classifier region was not extracted"
+
+  printf '%s\n' 'outcome: failed' >"$work/status.log"
+  printf '%s\n' 'review,completed,0' >"$work/no-outcome.log"
+  output=$(bash "$snippet" "$work/no-outcome.log" "$work/status.log" 0 1) \
+    || fail "a failed status with no rendered run outcome aborted before result assembly"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "a failed status with no rendered run outcome was misclassified: $output"
+
+  printf '%s\n' 'outcome: failed' >"$work/no-gate.log"
+  output=$(bash "$snippet" "$work/no-gate.log" "$work/status.log" 0 1) \
+    || fail "a terminal run with no awaiting gate aborted before result assembly"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "a terminal run with no awaiting gate invented a decision: $output"
+
+  printf '%s\n' 'status: awaiting_approval' >"$work/gate.log"
+  output=$(bash "$snippet" "$work/gate.log" "$work/status.log" 0 1) \
+    || fail "the terminal classifier aborted on an actual awaiting gate"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "the terminal classifier exposed a dead protected gate as respondable: $output"
+
+  pass "terminal result classification tolerates optional no-match fields and fails a dead protected gate closed"
+}
+
 receipt_chain_close_contract() {
   local tmp work exchange head tree block
   fm_test_tmproot_into tmp fm-azure-validation-receipt-chain
@@ -1130,6 +2106,7 @@ request={
 open(sys.argv[1],"w").write(json.dumps(request)+"\n")
 PY
   printf '{"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7"}\n' >"$work/identity.json"
+  printf '{"owner_decision_protected":true,"owner_decision_key_id":"%064d","owner_decision_repo_id":"repo","owner_decision_genesis_head":"%064d","owner_decision_head":"%064d","owner_decision_source_commit":"%040d"}\n' 0 0 0 0 >"$work/owner-authority.json"
   cat >"$work/drive.sh" <<'DRIVER'
 set -euo pipefail
 SHARD_EXCHANGE=$FM_TEST_WORK/exchange
@@ -1150,6 +2127,7 @@ START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
 START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
 PR=https://github.com/o/r/pull/7
 CHECKS_GREEN=true
+OWNER_AUTHORITY=$FM_TEST_WORK/owner-authority.json
 . "$FM_TEST_BLOCK"
 DRIVER
   env FM_TEST_BLOCK="$block" FM_TEST_WORK="$work" FM_TEST_HEAD="$head" FM_TEST_TREE="$tree" \
@@ -1252,461 +2230,421 @@ PY
   pass "the real bridge emits the receipt set, the guest carries it, and the real collect and close gates accept it end to end, bound to this cell's own shard round"
 }
 
-gate_answer_binding_contract() {
-  local tmp work head tree block marker_block
-  fm_test_tmproot_into tmp fm-azure-validation-gate-answer
-  work=$tmp/work
-  mkdir -p "$work/exchange" "$work/state" "$work/evidence/attempt-1" "$work/evidence/attempt-2" "$tmp/home"
-  make_repo "$tmp/project"
-  head=$(git -C "$tmp/project/repo" rev-parse HEAD)
-  tree=$(git -C "$tmp/project/repo" rev-parse 'HEAD^{tree}')
-  printf '[]\n' >"$work/exchange/receipts.json"
+owner_decision_protocol_contract() {
+  local tmp
+  fm_test_tmproot_into tmp fm-azure-validation-owner-decision
+  make_runtime "$tmp"
+  python3 - "$HOST" "$tmp" <<'PY' || fail "protected owner-decision controller protocol failed"
+import base64
+import copy
+import hashlib
+import importlib.util
+import json
+import pathlib
+import sys
+import time
+import types
 
-  # 1. The REAL guest result-assembly region must stamp the attempt that
-  # produced the result, and the REAL marker line must name it too. Without
-  # both, nothing a control-plane read can see separates one attempt of a
-  # resumed run from another: same VM, same boot id, same run id.
-  block=$work/emit.sh
-  awk '/^SHARD_RECEIPTS=\$SHARD_EXCHANGE/,/^RESULT_ARCHIVE=/' "$GUEST" \
-    | grep -v '^install -d\|^cp \|^RESULT_ARCHIVE=' >"$block"
-  [ -s "$block" ] || fail "the guest result-emission region was not found"
-  # shellcheck disable=SC2016  # The pattern is literal guest text, not an expansion.
-  sed -i.bak 's#\$(cat /proc/sys/kernel/random/boot_id)#44444444-4444-4444-8444-444444444444#' "$block" && rm -f "$block.bak"
-  marker_block=$work/marker.sh
-  grep '^printf .FM_AZURE_VALIDATION_RESULT' "$GUEST" >"$marker_block"
-  [ -s "$marker_block" ] || fail "the guest result marker line was not found"
-
-  python3 - "$work/request.json" "$head" <<'PY'
-import json,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[2]); home=root/"home"
+env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub","storage":"stor"}
+m.ensure_dirs(env)
+cell="azv-aaaaaaaaaaaa"; commit="1"*40
+provisioned=m.provision_owner_decision(env,cell,root/"owner-signer",commit,"1.41.2")
+foreign=root/"foreign-signer"
+foreign.write_text((root/"owner-signer").read_text().replace(
+    "(1111111111111111111111111111111111111111)",
+    "(2222222222222222222222222222222222222222)"
+))
+foreign.chmod(0o755)
+try: m.provision_owner_decision(env,"azv-bbbbbbbbbbbb",foreign,commit,"1.41.2")
+except m.ValidationError as exc: assert "version/source identity mismatch" in str(exc)
+else: raise AssertionError("a signer from a foreign source identity was accepted")
+assert not m.owner_decision_directory(env,"azv-bbbbbbbbbbbb").exists()
+short=root/"short-signer"
+short.write_text((root/"owner-signer").read_text().replace(
+    "(1111111111111111111111111111111111111111)", "(1111111)"
+))
+short.chmod(0o755)
+try: m.provision_owner_decision(env,"azv-cccccccccccc",short,commit,"1.41.2")
+except m.ValidationError as exc: assert "version/source identity mismatch" in str(exc)
+else: raise AssertionError("a short artifact revision was accepted as exact source identity")
+assert not m.owner_decision_directory(env,"azv-cccccccccccc").exists()
+request_owner={key:provisioned[key] for key in (
+    "schema","public_key","key_id","source_commit","challenge_schema","envelope_schema"
+)}
+head="a"*40; tree="b"*40; run_id="01HZX7YQ7EJQH8C9G3N4M5P6R7"; repo_id="repo-1"
 request={
-  "limits":{"behavior_shards":0},
-  "protocol":{"result_schema":"fm.azure-validation-result/v1"},
-  "request_digest":"sha256:"+"1"*64,"cell":"azv-aaaaaaaaaaaa",
-  "home_binding":"sha256:"+"2"*64,"task":"task","task_generation":"gen",
-  "validation_generation":"val","fence":"sha256:"+"3"*64,
-  "repository":{"branch":"fm/fixture","head":sys.argv[2],"slug":"o/r"},
-}
-open(sys.argv[1],"w").write(json.dumps(request)+"\n")
-PY
-  printf '{"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7"}\n' >"$work/identity.json"
-  cat >"$work/drive.sh" <<'DRIVER'
-set -euo pipefail
-SHARD_EXCHANGE=$FM_TEST_WORK/exchange
-REQUEST=$FM_TEST_WORK/request.json
-IDENTITY=$FM_TEST_WORK/identity.json
-STATE=$FM_TEST_WORK/state
-EVIDENCE=$FM_TEST_WORK/evidence
-ATTEMPT=$FM_TEST_ATTEMPT
-CELL=azv-aaaaaaaaaaaa
-OUTCOME=needs-decision
-CURRENT_HEAD=$FM_TEST_HEAD
-CURRENT_TREE=$FM_TEST_TREE
-REMOTE_HEAD=$FM_TEST_HEAD
-RUN_ID=01HZX7YQ7EJQH8C9G3N4M5P6R7
-VM_RESOURCE_ID=/vm
-VM_INSTANCE_ID=vm-instance
-START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
-START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
-PR=
-CHECKS_GREEN=false
-. "$FM_TEST_BLOCK"
-RESULT_DIGEST=sha256:$(printf '%064d' "$FM_TEST_DIGEST_SEED")
-BOOT_ID=44444444-4444-4444-8444-444444444444
-. "$FM_TEST_MARKER" >"$STATE/marker-a$ATTEMPT.txt"
-DRIVER
-  for attempt in 1 2; do
-    env FM_TEST_BLOCK="$block" FM_TEST_MARKER="$marker_block" FM_TEST_WORK="$work" \
-      FM_TEST_HEAD="$head" FM_TEST_TREE="$tree" FM_TEST_ATTEMPT="$attempt" FM_TEST_DIGEST_SEED=7 \
-      bash "$work/drive.sh" >/dev/null 2>&1 \
-      || fail "guest result assembly failed for attempt $attempt"
-  done
-
-  # The two attempts differ ONLY in the attempt field, which is exactly the
-  # live shape: same run id, same outcome, same gate, same heads.
-  python3 - "$work/state/result-a1.json" "$work/state/result-a2.json" \
-    "$work/state/marker-a1.txt" "$work/state/marker-a2.txt" "$HOST" <<'PY' \
-    || fail "the guest does not bind its published result and marker to the attempt"
-import importlib.util,json,pathlib,sys
-one=json.load(open(sys.argv[1])); two=json.load(open(sys.argv[2]))
-assert one.get("attempt")==1, "result.json does not carry its attempt: "+repr(one.get("attempt"))
-assert two.get("attempt")==2, "result.json does not carry its attempt: "+repr(two.get("attempt"))
-stripped_one=dict(one); stripped_one.pop("attempt")
-stripped_two=dict(two); stripped_two.pop("attempt")
-assert stripped_one==stripped_two, "the fixture must differ only by attempt to prove the binding is load-bearing"
-spec=importlib.util.spec_from_file_location("validation",sys.argv[5])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-for index,expected in ((3,1),(4,2)):
-    line=pathlib.Path(sys.argv[index]).read_text()
-    found=m.MARKER.search(line)
-    assert found, "the guest marker is not accepted by the controller reader: "+line
-    assert int(found.group(4))==expected, "the marker names attempt "+found.group(4)
-PY
-
-  # 2. The REAL observe gate against the exact live shapes.
-  python3 - "$HOST" "$tmp/home" "$work/state/result-a1.json" "$work/state/result-a2.json" <<'PY' \
-    || fail "observe did not bind the control view to the attempt it is observing"
-import importlib.util,json,pathlib,sys,types
-spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-home=pathlib.Path(sys.argv[2])
-env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub"}
-m.ensure_dirs(env)
-args=types.SimpleNamespace(cell="azv-aaaaaaaaaaaa")
-digest_one="sha256:"+"a"*64
-digest_two="sha256:"+"b"*64
-boot="44444444-4444-4444-8444-444444444444"
-
-def marker(digest,attempt,outcome="needs-decision"):
-    return "FM_AZURE_VALIDATION_RESULT {} boot={} outcome={} attempt={}\n".format(digest,boot,outcome,attempt)
-
-def seed(phase="responding",attempt=2,**extra):
-    state={
-      "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":phase,"attempt":attempt,
-      "request_digest":"sha256:"+"1"*64,
-      "request":{"repository":{"head":"0"*40,"branch":"fm/fixture","slug":"o/r"},
-                 "task":"task","task_generation":"gen","validation_generation":"val",
-                 "limits":{"behavior_shards":0}},
-      "resources":{"run_command_id":"/vm/runCommands/respond-a2"},
-      "guest_stamps_attempt":True,
-      "events":[],
-    }
-    state.update(extra)
-    if state.get("guest_stamps_attempt") is None:
-        state.pop("guest_stamps_attempt",None)
-    (env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(state))
-    return state
-
-def view(output="",error="",execution="Failed"):
-    m.run_command_status=lambda _env,_state:(execution,{"output":output,"error":error})
-
-def phase():
-    return json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())["phase"]
-
-# 2a. Terminal control state with NO marker: the live azv-36b2 shape, read
-# nine seconds after the respond Run Command was created while the attempt
-# was still executing. It must not strand the cell on the first read.
-seed()
-view(error="validation guest: auth-home push failed\n")
-m.observe(env,args)
-assert phase()=="responding", "an unbound terminal view stranded the cell on its first read: "+phase()
-
-# The same ambiguity, persisted past the settling window, IS believed: the
-# guard delays a destructive decision, it never abandons it.
-import os
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed()
-view(error="validation guest: auth-home push failed\n")
-try:
-    m.observe(env,args)
-except m.ValidationError as exc:
-    assert "authenticated result" in str(exc), str(exc)
-else:
-    raise AssertionError("a settled unbound terminal view was never believed")
-assert phase()=="failed-retained", phase()
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2b. The previous attempt's own marker is not this attempt's answer. Every
-# other field it carries (digest, boot, outcome) is legitimate.
-seed()
-view(output=marker(digest_one,1))
-m.observe(env,args)
-assert phase()=="responding", "attempt 1's marker was accepted as attempt 2's answer"
-
-# 2c. This attempt's marker republishing the previous attempt's exact bytes
-# is a NON-ANSWER and must say so, not surface as a generic failure.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_one,2))
-try:
-    m.observe(env,args)
-except m.ValidationError as exc:
-    assert "non-answer" in str(exc) and "byte-identical" in str(exc), str(exc)
-else:
-    raise AssertionError("an unchanged republished result was accepted as a verdict")
-assert phase()=="failed-retained", phase()
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert "republished" in recorded["events"][-1]["note"], recorded["events"][-1]["note"]
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2d. A genuinely new attempt result is accepted and recorded per attempt.
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_two,2))
-m.observe(env,args)
-assert phase()=="needs-decision", phase()
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert recorded["attempt_result_digests"]=={"1":digest_one,"2":digest_two}, recorded["attempt_result_digests"]
-assert recorded["expected_result_digest"]==digest_two
-# The NORMAL path must record the strict binding. Pinning only the legacy case
-# leaves "every observation binds legacy" green while disabling the attempt
-# check for every modern cell.
-assert recorded["result_binding"]=="attempt", recorded.get("result_binding")
-observed_binding=recorded["result_binding"]
-
-# 2e. TWO markers in one output: the current attempt's is accepted wherever it
-# sits, and the FIRST marker no longer wins.
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_one,1)+"noise\n"+marker(digest_two,2))
-m.observe(env,args)
-assert phase()=="needs-decision", "a later marker naming this attempt was not accepted: "+phase()
-assert json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())["expected_result_digest"]==digest_two
-
-# 2f. Two DIFFERENT results claiming one attempt is not an answer.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed()
-view(output=marker(digest_one,2)+marker(digest_two,2))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("two conflicting results for one attempt were accepted")
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2g. LEGACY: a cell whose sealed guest predates the attempt stamp publishes an
-# UNSTAMPED marker. The request is digest-sealed so that guest can never be
-# changed; refusing to read it would retain a cell on a fully published result
-# and leave expected_result_digest unset, making the result unreachable.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed(guest_stamps_attempt=False)
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision\n".format(digest_two,boot))
-m.observe(env,args)
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert phase()=="needs-decision", "a legacy cell was stranded by the attempt binding: "+phase()
-assert recorded["expected_result_digest"]==digest_two, "legacy result is unreachable"
-assert recorded["result_binding"]=="legacy", recorded.get("result_binding")
-# A STAMPED marker naming another attempt must NOT take the legacy path.
-seed()
-view(output=marker(digest_two,1))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("a stamped marker for another attempt fell through to the legacy path")
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2h. A guest that CAN stamp never buys the pre-stamp contract with a malformed
-# marker. LEGACY_MARKER is MARKER minus the attempt group, so every one of these
-# satisfies "no stamped marker matched"; the binding must come from the sealed
-# guest instead. The marker is the guest's LAST line by design, which is exactly
-# where an output cap lands, so this is a live shape rather than a theoretical one.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-malformed={
-  "truncated inside the attempt word":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attem".format(digest_two,boot),
-  "truncated right after attempt=":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=".format(digest_two,boot),
-  "empty attempt value":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=\n".format(digest_two,boot),
-  "non-numeric attempt value":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=two\n".format(digest_two,boot),
-}
-for label,output in malformed.items():
-    seed()
-    view(output=output)
-    try:
-        m.observe(env,args)
-    except m.ValidationError:
-        pass
-    else:
-        raise AssertionError("a stamping guest fell back to the legacy contract on "+label)
-    after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-    assert after.get("expected_result_digest") is None, \
-        "a malformed marker still published a digest on "+label
-    assert after.get("result_binding")!="legacy", \
-        "a stamping guest was bound legacy on "+label
-
-# 2h-bis. A state that cannot answer "can this guest stamp" - no recorded flag,
-# no staged payload to derive it from - takes the STRICT contract. Falling back
-# to the weaker one would let exactly the states we know least about skip the
-# attempt check.
-seed(guest_stamps_attempt=None)
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision\n".format(digest_two,boot))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("an underivable stamping answer bought the weaker legacy contract")
-after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert after.get("result_binding")!="legacy", after.get("result_binding")
-
-# 2i. The composed shape, which is the silent false verdict this PR exists to
-# close, re-entered through the parse-failure path: observing attempt 2, the
-# output carries attempt 1's own marker truncated inside its attempt field. If
-# legacy bound here, the expected digest would become attempt 1's, the blob
-# still holds attempt 1's archive so the digest check passes, and the attempt
-# check is skipped.
-seed(attempt_result_digests={"1":digest_one})
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=".format(digest_one,boot))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("a truncated stale attempt-1 marker was accepted as attempt 2's answer")
-after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert after.get("expected_result_digest")!=digest_one, \
-    "attempt 1's digest became attempt 2's expected result"
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 3. The REAL result-identity gate refuses a result from another attempt and
-# refuses one that does not declare its attempt at all.
-result=json.load(open(sys.argv[4]))
-state={
-  "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":"needs-decision","attempt":2,
-  "request_digest":result["request_digest"],
-  "request":{
-    "home_binding":result["home_binding"],"task":"task","task_generation":"gen",
-    "validation_generation":"val","fence":result["fence"],
-    "repository":{"slug":"o/r","branch":"fm/fixture","head":result["submitted_head"]},
+    "owner_decision":request_owner,
+    "repository":{"slug":"o/r","branch":"fm/fixture","head":head},
+    "home_binding":"sha256:"+"2"*64,"task":"task","task_generation":"gen",
+    "validation_generation":"val","fence":"sha256:"+"3"*64,
     "limits":{"behavior_shards":0},
-  },
-  "resources":{"worktree_disk_id":"/work","vm_id":"/vm","vm_instance_id":"vm-instance"},
-  "expected_boot_id":boot,
-  # Taken from what observe RECORDED, not asserted by hand: producer and
-  # consumer of this binding have to be pinned together or neither is pinned.
-  "result_binding":observed_binding,
 }
-assert state["result_binding"]=="attempt"
-m.verify_result_identity(state,result)
-older=json.load(open(sys.argv[3]))
-try:
-    m.verify_result_identity(state,older)
-except m.ValidationError as exc:
-    assert "produced by attempt 1" in str(exc), str(exc)
-else:
-    raise AssertionError("attempt 1's result passed the identity gate for attempt 2")
-undeclared=dict(result); undeclared.pop("attempt")
-try:
-    m.verify_result_identity(state,undeclared)
-except m.ValidationError as exc:
-    assert "does not declare the attempt" in str(exc), str(exc)
-else:
-    raise AssertionError("a result that declares no attempt was assumed to be the current one")
-# ...but a LEGACY-bound observation holds that same result to the pre-stamp
-# contract instead of refusing it, or the sealed cell can never collect.
-legacy_state=dict(state); legacy_state["result_binding"]="legacy"
-m.verify_result_identity(legacy_state,undeclared)
+state={
+    "schema":m.SCHEMA,"cell":cell,"phase":"running","attempt":1,
+    "request_digest":"sha256:"+"1"*64,"request":request,
+    "staging":{"container":"private"},"resources":{},"events":[],
+    "owner_decision":{
+        "schema":m.OWNER_DECISION_SCHEMA,"key_id":provisioned["key_id"],
+        "source_commit":commit,"signer_digest":provisioned["signer_digest"],
+        "signer_version":provisioned["signer_version"],
+        "history_head":None,"repo_id":None,"responded_gates":[],
+    },
+}
+genesis=m.owner_genesis_head(state,repo_id)
+now=int(time.time())
+challenge={
+    "schema":m.OWNER_CHALLENGE_SCHEMA,"purpose":"respond","run_id":run_id,
+    "repo_id":repo_id,"branch":"fm/fixture","head_sha":head,"gate_head_sha":head,
+    "step":"review","step_result_id":"step-1","round_id":"round-1",
+    "findings_digest":"4"*64,"previous_head":genesis,
+    "nonce":"respond:round-1:"+genesis,"issued_at":now-1,"expires_at":now+600,
+}
+identity=m.validate_owner_challenge(state,challenge)
+assert identity=={"run_id":run_id,"repo_id":repo_id,"genesis_head":genesis}
+for label,mutate in {
+    "foreign branch":lambda c:c.__setitem__("branch","peer"),
+    "foreign submitted head":lambda c:c.__setitem__("head_sha","f"*40),
+    "history rollback":lambda c:c.__setitem__("previous_head","9"*64),
+    "copyable nonce":lambda c:c.__setitem__("nonce","respond:peer:"+genesis),
+    "boolean timestamp":lambda c:c.__setitem__("issued_at",True),
+    "oversized lifetime":lambda c:c.__setitem__("expires_at",c["issued_at"]+901),
+}.items():
+    hostile=copy.deepcopy(challenge); mutate(hostile)
+    try: m.validate_owner_challenge(state,hostile)
+    except m.ValidationError: pass
+    else: raise AssertionError(label+" challenge passed")
+
+response=root/"response.txt"; response.write_text("--action\napprove\n"); response.chmod(0o600)
+lines,parsed=m.parse_owner_response(response)
+assert lines==["--action","approve"] and parsed=={"action":"approve"}
+response.chmod(0o644)
+try: m.parse_owner_response(response)
+except m.ValidationError as exc: assert "mode 0600" in str(exc)
+else: raise AssertionError("a non-owner-only response file was accepted")
+response.chmod(0o600)
+link=root/"response-link"; link.symlink_to(response)
+try: m.parse_owner_response(link)
+except m.ValidationError: pass
+else: raise AssertionError("a symlinked response file was accepted")
+for content in (
+    "--yes\ntrue\n", "--step\nreview\n--action\napprove\n",
+    "--action\napprove\n--action\nskip\n", "--action\nskip\n--findings\nF1\n",
+):
+    response.write_text(content)
+    try: m.parse_owner_response(response)
+    except m.ValidationError: pass
+    else: raise AssertionError("forbidden response argv passed: "+repr(content))
+
+challenge_blob="control/owner-decision/a1/gate-1.challenge.json"
+decision_blob="control/owner-decision/a1/gate-1.decision.json"
+blobs={challenge_blob:m.go_json_bytes(challenge)+b"\n"}
+crash={"before_upload":False}
+def names(_env,_state,prefix="shards/"):
+    return sorted(name for name in blobs if name.startswith(prefix))
+def download(_env,name,path,container=None):
+    pathlib.Path(path).write_bytes(blobs[name])
+def upload(_env,path,name,overwrite=False,container=None):
+    if crash["before_upload"]:
+        crash["before_upload"]=False
+        raise RuntimeError("simulated controller crash before envelope upload")
+    if name in blobs and not overwrite:
+        raise m.ValidationError("exists")
+    blobs[name]=pathlib.Path(path).read_bytes()
+m.list_cell_blobs=names; m.storage_download=download; m.storage_upload=upload
+(env["state_dir"]/(cell+".json")).write_text(json.dumps(state))
+loaded=m.load_state(env,cell)
+gate=m.discover_owner_gate(env,loaded)
+assert gate["gate_index"]==1 and loaded["phase"]=="needs-decision"
+assert loaded["run_id"]==run_id and loaded["owner_decision"]["history_head"]==genesis
+m.exact_live_run_command=lambda _env,_state: ({}, {})
+response.write_text("--action\napprove\n")
+crash["before_upload"]=True
+try: m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+except RuntimeError as exc: assert "simulated controller crash" in str(exc)
+else: raise AssertionError("the controller upload seam did not crash")
+pending=m.load_state(env,cell)
+assert pending["phase"]=="needs-decision"
+assert pending["owner_decision"]["history_head"]!=genesis
+assert pending["owner_decision"]["pending_decision"]["next_head"]==pending["owner_decision"]["history_head"]
+response.write_text("--action\nskip\n")
+try: m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+except m.ValidationError as exc: assert "recovery identity changed" in str(exc)
+else: raise AssertionError("a different response replaced the retained controller decision")
+response.write_text("--action\napprove\n")
+m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+after=m.load_state(env,cell)
+assert after["phase"]=="running" and after["attempt"]==1
+assert len(after["owner_decision"]["responded_gates"])==0
+assert after["owner_decision"]["pending_decision"]["next_head"]==after["owner_decision"]["history_head"]
+assert after["owner_decision"]["history_head"]!=genesis
+assert decision_blob in blobs
+decision=json.loads(blobs[decision_blob])
+assert decision["challenge"]==challenge and decision["response"]=={"action":"approve"}
+serialized=json.dumps(after)
+assert "owner.key" not in serialized and "K"*32 not in serialized
+# A second daemon challenge carrying the signed next head acknowledges that
+# gate 1 was appended, then becomes the only gate the controller may answer.
+challenge2=copy.deepcopy(challenge)
+challenge2.update({
+    "step":"document","step_result_id":"step-2","round_id":"round-2",
+    "findings_digest":"5"*64,"previous_head":after["owner_decision"]["history_head"],
+    "nonce":"respond:round-2:"+after["owner_decision"]["history_head"],
+    "issued_at":int(time.time())-1,"expires_at":int(time.time())+600,
+})
+challenge2_blob="control/owner-decision/a1/gate-2.challenge.json"
+blobs[challenge2_blob]=m.go_json_bytes(challenge2)+b"\n"
+advanced_state=copy.deepcopy(after)
+next_gate=m.discover_owner_gate(env,advanced_state)
+assert next_gate["gate_index"]==2 and next_gate["challenge"]==challenge2
+assert len(advanced_state["owner_decision"]["responded_gates"])==1
+assert advanced_state["owner_decision"]["responded_gates"][0]["next_head"]==after["owner_decision"]["history_head"]
+
+# A cell-created response cannot be adopted as controller authority, and a
+# challenge identity mutation is rejected before signing or upload.
+fresh=copy.deepcopy(state); fresh["owner_decision"]["responded_gates"]=[]
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"; blobs[decision_blob]=b"{}\n"
+try: m.discover_owner_gate(env,fresh)
+except m.ValidationError as exc: assert "without controller authority" in str(exc)
+else: raise AssertionError("precreated decision blob was accepted")
+blobs.clear(); hostile=copy.deepcopy(challenge); hostile["branch"]="peer"
+blobs[challenge_blob]=m.go_json_bytes(hostile)+b"\n"
+try: m.discover_owner_gate(env,fresh)
+except m.ValidationError: pass
+else: raise AssertionError("foreign challenge reached signing")
+
+# Final result identity binds the daemon-verified journal and exact run. A
+# no-gate run is valid only at the recomputed public-key/run genesis.
+result={
+    "schema":m.RESULT_SCHEMA,"request_digest":state["request_digest"],"cell":cell,
+    "home_binding":request["home_binding"],"task":"task","task_generation":"gen",
+    "validation_generation":"val","fence":request["fence"],"branch":"fm/fixture",
+    "submitted_head":head,"current_head":head,"current_tree":tree,"remote_head":head,
+    "worktree_disk_id":"/work","run_id":run_id,"vm_resource_id":"/vm",
+    "vm_instance_id":"vm-instance","boot_id":"44444444-4444-4444-8444-444444444444",
+    "attempt":1,"outcome":"failed","checks_green":False,"pr_url":None,"behavior_shards":[],
+    "owner_decision_protected":True,"owner_decision_key_id":request_owner["key_id"],
+    "owner_decision_repo_id":repo_id,"owner_decision_genesis_head":genesis,
+    "owner_decision_head":genesis,"owner_decision_source_commit":commit,
+}
+result_state=copy.deepcopy(state)
+result_state["resources"]={"worktree_disk_id":"/work","vm_id":"/vm","vm_instance_id":"vm-instance"}
+result_state["expected_boot_id"]=result["boot_id"]
+m.verify_result_identity(result_state,result)
+pending_result_state=copy.deepcopy(pending)
+pending_result_state["resources"]=copy.deepcopy(result_state["resources"])
+pending_result_state["expected_boot_id"]=result["boot_id"]
+pending_result=copy.deepcopy(result)
+pending_result["owner_decision_head"]=pending["owner_decision"]["history_head"]
+for label,mutate in (
+    ("foreign retained previous head", lambda record: record.__setitem__("previous_head","8"*64)),
+    ("extra retained field", lambda record: record.__setitem__("foreign",True)),
+):
+    hostile_state=copy.deepcopy(pending_result_state)
+    mutate(hostile_state["owner_decision"]["pending_decision"])
+    try: m.verify_result_identity(hostile_state,copy.deepcopy(pending_result))
+    except m.ValidationError: pass
+    else: raise AssertionError(label+" passed pending result recovery")
+hostile_state=copy.deepcopy(pending_result_state)
+record=hostile_state["owner_decision"]["pending_decision"]
+hostile_envelope=json.loads(base64.b64decode(record["decision_base64"]))
+hostile_envelope["response"]={"action":"skip"}
+hostile_bytes=m.go_json_bytes(hostile_envelope)
+record["decision_base64"]=base64.b64encode(hostile_bytes).decode("ascii")
+record["decision_digest"]=m.sha256_bytes(hostile_bytes)
+try: m.verify_result_identity(hostile_state,copy.deepcopy(pending_result))
+except m.ValidationError: pass
+else: raise AssertionError("a rehashed foreign envelope passed pending result recovery")
+m.verify_result_identity(pending_result_state,pending_result)
+assert "pending_decision" not in pending_result_state["owner_decision"]
+assert len(pending_result_state["owner_decision"]["responded_gates"])==1
+# If the original Run Command terminates after a controller crash or after the
+# blob upload but before daemon append, its exact protected result proves the
+# old head. That failed result is collectible, and the unused envelope is
+# durably abandoned instead of stranding paid evidence or authorizing reuse.
+unconsumed_state=copy.deepcopy(after)
+unconsumed_state["resources"]=copy.deepcopy(result_state["resources"])
+unconsumed_state["expected_boot_id"]=result["boot_id"]
+unconsumed_result=copy.deepcopy(result)
+original_time=m.time.time
+m.time.time=lambda: challenge["expires_at"]+1
+try: m.verify_result_identity(unconsumed_state,unconsumed_result)
+finally: m.time.time=original_time
+assert unconsumed_state["owner_decision"]["history_head"]==genesis
+assert "pending_decision" not in unconsumed_state["owner_decision"]
+assert len(unconsumed_state["owner_decision"]["abandoned_decisions"])==1
+assert unconsumed_state["owner_decision"]["abandoned_decisions"][0]["unconsumed_head"]==after["owner_decision"]["history_head"]
+false_success=copy.deepcopy(unconsumed_result)
+false_success["outcome"]="passed"; false_success["checks_green"]=True
+false_success["pr_url"]="https://github.com/o/r/pull/1"; false_success["behavior_shards"]=[]
+try: m.verify_result_identity(copy.deepcopy(after) | {
+    "resources":copy.deepcopy(result_state["resources"]),
+    "expected_boot_id":result["boot_id"],
+},false_success)
+except m.ValidationError: pass
+else: raise AssertionError("an unconsumed old-head envelope produced a successful result")
+for field,value in (
+    ("owner_decision_key_id","9"*64),("owner_decision_head","8"*64),
+    ("owner_decision_repo_id","peer"),("owner_decision_source_commit","2"*40),
+    ("run_id","01AAAAAAAAAAAAAAAAAAAAAAAA"),
+):
+    bad=copy.deepcopy(result); bad[field]=value
+    try: m.verify_result_identity(copy.deepcopy(result_state),bad)
+    except m.ValidationError: pass
+    else: raise AssertionError("foreign result field passed: "+field)
+
+protected=copy.deepcopy(state)
+allowed,reason=m.replacement_allowed(protected,"absent-proven")
+assert not allowed and "cannot cross" in reason
+m.destroy_owner_decision_material(env,cell)
+assert not m.owner_decision_directory(env,cell).exists()
 PY
+  pass "host-only keys, exact live challenges, signed same-attempt responses, final history, and replacement fences bind owner authority"
+}
 
-  # 4. The REAL create_run_command: a guest edit must never brick a cell that is
-  # already in flight, and every new attempt must re-arm its own settle window.
-  python3 - "$HOST" "$tmp/home2" <<'PY' \
-    || fail "create_run_command did not preserve resume across a guest edit and re-arm the window"
-import hashlib,importlib.util,json,pathlib,sys,types
-spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-home=pathlib.Path(sys.argv[2])
-env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub",
-     "storage":"stor","resource_group":"rg","owner":"owner","deployment_generation":"gen-1"}
-m.ensure_dirs(env)
+owner_decision_guest_launcher_contract() {
+  local tmp launcher repo fakebin nm env_file intent run_log public_key
+  fm_test_tmproot_into tmp fm-azure-validation-owner-guest
+  launcher="$tmp/launch.sh"
+  awk '
+    /^cat >"\$LAUNCH" <<'"'"'SH'"'"'$/ { capture=1; next }
+    capture && /^SH$/ { exit }
+    capture { print }
+  ' "$GUEST" >"$launcher"
+  chmod 700 "$launcher"
+  assert_contains "$(head -n 1 "$launcher")" "#!/usr/bin/env bash" \
+    "the exact owner-decision launcher heredoc was not extracted"
 
-# The sealed guest is the one staged beside the request at submit. Its bytes
-# deliberately DIFFER from the working tree, which is the shape this PR creates:
-# the tree's guest is edited while cells sealed on the old one are still live.
-sealed_text="#!/usr/bin/env bash\n# sealed guest for this cell\nexit 0\n"
-sealed_digest="sha256:"+hashlib.sha256(sealed_text.encode()).hexdigest()
-assert sealed_digest != m.sha256_file(m.GUEST), "fixture must differ from the working tree"
-payload=env["state_dir"]/"payloads"/"azv-aaaaaaaaaaaa"
-payload.mkdir(parents=True,exist_ok=True)
-(payload/"guest.sh").write_text(sealed_text)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo" "$fakebin" "$tmp/nm-state" "$tmp/transport"
+  nm="$tmp/no-mistakes"
+  cat >"$nm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$FIXTURE_NM_CALLS"
+case "$*" in
+  init) exit 0 ;;
+  "axi run "*)
+    [[ "$*" == *"--owner-decision-public-key $FIXTURE_PUBLIC_KEY"* ]] || exit 81
+    exit 0
+    ;;
+  axi\ status*)
+    if [ -e "$FIXTURE_RESPONDED" ]; then
+      count=0
+      [ ! -f "$FIXTURE_STATUS_COUNT" ] || count=$(cat "$FIXTURE_STATUS_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$FIXTURE_STATUS_COUNT"
+      if [ "$count" -ge 3 ]; then
+        printf 'run:\n  id: %s\n  status: completed\noutcome: passed\n' '01HZX7YQ7EJQH8C9G3N4M5P6R7'
+        exit 0
+      fi
+    fi
+    printf 'run:\n  id: %s\n  status: running\n' '01HZX7YQ7EJQH8C9G3N4M5P6R7'
+    exit 0
+    ;;
+  "axi owner-decision challenge "*)
+    [ ! -e "$FIXTURE_RESPONDED" ] || exit 1
+    args=("$@")
+    for ((index=0; index<${#args[@]}; index++)); do
+      if [ "${args[$index]}" = --out ]; then
+        cp "$FIXTURE_CHALLENGE" "${args[$((index+1))]}"
+        exit 0
+      fi
+    done
+    exit 82
+    ;;
+  "axi respond --decision-file "*)
+    cmp -s "$FIXTURE_DECISION" "$4" || exit 83
+    touch "$FIXTURE_RESPONDED"
+    exit 0
+    ;;
+  *) exit 84 ;;
+esac
+SH
+  chmod 700 "$nm"
+  cat >"$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >>"$FIXTURE_CURL_CALLS"
+printf '\n' >>"$FIXTURE_CURL_CALLS"
+upload="" output="" method="" url=""
+args=("$@")
+for ((index=0; index<${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --upload-file) upload=${args[$((index+1))]} ;;
+    --output) output=${args[$((index+1))]} ;;
+    --request) method=${args[$((index+1))]} ;;
+    http://*|https://*) url=${args[$index]} ;;
+  esac
+done
+if [[ "$url" == http://169.254.169.254/* ]]; then
+  printf '{"access_token":"fixture-token"}\n'
+elif [ "$method" = PUT ]; then
+  cp "$upload" "$FIXTURE_PUBLISHED_CHALLENGE"
+elif [ -n "$output" ]; then
+  [ "${FIXTURE_DECISION_MODE:-present}" = present ] || exit 22
+  cp "$FIXTURE_DECISION" "$output"
+else
+  exit 85
+fi
+SH
+  chmod 700 "$fakebin/curl"
 
-fence="sha256:"+"3"*64
-def seed(**extra):
-    state={
-      "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":"needs-decision","attempt":2,
-      "input_digest":"sha256:"+"4"*64,"request_digest":"sha256:"+"5"*64,
-      "staging":{"container":"c","result_blob":"control/result.tar.gz"},
-      "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},
-      "request":{
-        "protocol":{"guest_digest":sealed_digest},
-        "deployment_generation":"gen-1","home_binding":"sha256:"+"2"*64,
-        "task":"task","task_generation":"tg","validation_generation":"vg","fence":fence,
-        "resource_class":"validation-standard",
-        "repository":{"branch":"fm/fixture","head":"a"*40,"slug":"o/r"},
-        "limits":{"behavior_shards":4,"wall_seconds":10800,"reserved_vcpus":24},
-      },
-      "resources":{"vm_id":"/subs/x/vm","vm_instance_id":"vm-i","worktree_disk_id":"/disk",
-                   "identity_client_id":"cid"},
-      "events":[],
-    }
-    state.update(extra)
-    (env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(state))
-    return state
+  public_key="$tmp/owner.pub"
+  intent="$tmp/intent.txt"
+  env_file="$tmp/cell.env"
+  printf 'fixture public key\n' >"$public_key"
+  printf 'validate protected run\n' >"$intent"
+  cat >"$tmp/challenge.json" <<'JSON'
+{"schema":"no-mistakes.owner-decision-challenge/v1","purpose":"respond","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7","repo_id":"repo-1","branch":"fm/fixture","head_sha":"1111111111111111111111111111111111111111","gate_head_sha":"1111111111111111111111111111111111111111","step":"review","step_result_id":"step-1","round_id":"round-1","findings_digest":"4444444444444444444444444444444444444444444444444444444444444444","previous_head":"5555555555555555555555555555555555555555555555555555555555555555","nonce":"respond:round-1:5555555555555555555555555555555555555555555555555555555555555555","issued_at":1,"expires_at":2}
+JSON
+  printf '{"schema":"no-mistakes.owner-decision-envelope/v1","challenge":{},"response":{"action":"approve"},"signature":"fixture"}\n' \
+    >"$tmp/decision.json"
+  printf 'fixture-token\n' >"$tmp/github-token"
+  cat >"$env_file" <<EOF
+FM_AZURE_VALIDATION_RUNTIME_PATH=$fakebin
+GH_TOKEN_FILE=$tmp/github-token
+FM_AZURE_VALIDATION_IDENTITY_CLIENT_ID=identity
+FM_AZURE_VALIDATION_STORAGE_ACCOUNT=storage
+FM_AZURE_VALIDATION_STORAGE_CONTAINER=container
+FM_AZURE_VALIDATION_ATTEMPT=1
+EOF
+  export FIXTURE_NM_CALLS="$tmp/nm-calls" FIXTURE_CURL_CALLS="$tmp/curl-calls"
+  export FIXTURE_PUBLIC_KEY="$public_key" FIXTURE_CHALLENGE="$tmp/challenge.json"
+  export FIXTURE_DECISION="$tmp/decision.json" FIXTURE_RESPONDED="$tmp/responded"
+  export FIXTURE_STATUS_COUNT="$tmp/status-count"
+  export FIXTURE_PUBLISHED_CHALLENGE="$tmp/published-challenge.json"
+  export FIXTURE_DECISION_MODE=present
+  run_log="$tmp/run.log"
+  TMPDIR="$tmp/transport" "$launcher" "$env_file" "$repo" "$nm" start \
+    "$intent" "$run_log" "$public_key"
+  [ "$(cat "$run_log.exit")" = 0 ] || fail "the signed same-attempt guest loop did not finish"
+  [ "$(grep -c '^axi run ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the guest started more than one run"
+  [ "$(grep -c '^axi respond --decision-file ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the guest did not apply exactly one signed decision"
+  [ "$(cat "$FIXTURE_STATUS_COUNT")" = 3 ] || fail "the guest did not keep the original Run Command alive through protected completion"
+  cmp -s "$FIXTURE_CHALLENGE" "$FIXTURE_PUBLISHED_CHALLENGE" || fail "the guest changed the daemon challenge"
+  assert_contains "$(cat "$FIXTURE_CURL_CALLS")" "If-None-Match:" \
+    "the guest challenge upload was not create-only"
+  assert_not_contains "$(cat "$FIXTURE_NM_CALLS")" "--yes" \
+    "the protected guest invoked an unsigned auto-response"
 
-sent={}
-def fake_az(env_,argv,**kw):
-    for index,item in enumerate(argv):
-        if item=="--body":
-            sent["body"]=json.loads(pathlib.Path(argv[index+1][1:]).read_text())
-    return {}
-m.az_command=fake_az
-m.read_github_token=lambda state:"gh-token"
-m.read_resource=lambda env_,rid,kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":fence}})
-m.immutable_identity=lambda resource,kind:{"id":resource.get("id","")}
-
-# F1: the sealed cell resumes, and it runs the SEALED bytes, not the tree's.
-state=seed(unbound_view_since="2020-01-01T00:00:00Z")
-m.create_run_command(env,state,"respond",output_url="https://o",response="--action\napprove")
-assert sent["body"]["properties"]["source"]["script"]==sealed_text, \
-    "a resumed attempt did not run the guest its request was sealed with"
-
-# F3: the settle window is re-armed per attempt. Without this the window is
-# keyed per CELL: a stamp written on attempt 1 makes attempt 2 look ancient the
-# moment it is observed, and a one-second-old attempt is retained.
-saved=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert "unbound_view_since" not in saved, \
-    "a new attempt inherited the previous attempt's settle stamp"
-
-# N-2: the bytes VERIFIED must be the bytes RETURNED. Digesting one read and
-# returning a second read is a TOCTOU: a writer landing between them passes the
-# check while different content is handed back, and that content is uploaded as
-# the Run Command script and executes as root on the cell. A race cannot be
-# observed by waiting for it, so the second read is instrumented to differ - if
-# the implementation reads twice, it returns the instrumented bytes.
-saved_read_text=m.Path.read_text
-m.Path.read_text=lambda self,*a,**k:"#!/bin/sh\nEVIL\n"
-try:
-    returned=m.sealed_guest_text(env,seed())
-finally:
-    m.Path.read_text=saved_read_text
-assert returned==sealed_text, \
-    "sealed_guest_text returned bytes it never verified: "+repr(returned)
-
-# The recorded stamping flag comes from the bytes that are about to run.
-assert saved["guest_stamps_attempt"] is False, saved.get("guest_stamps_attempt")
-stamping=sealed_text+"printf 'FM_AZURE_VALIDATION_RESULT %s boot=%s outcome=%s attempt=%s\\n'\n"
-assert m.guest_text_stamps_attempt(stamping) is True
-assert m.guest_text_stamps_attempt(sealed_text) is False
-
-# A symlinked payload copy is refused even when it points at correct bytes:
-# the guest is uploaded and executed as root, so its supply path is held to the
-# same standard as credential material.
-real=payload/"real-guest.sh"; real.write_text(sealed_text)
-(payload/"guest.sh").unlink()
-(payload/"guest.sh").symlink_to(real)
-state=seed()
-try:
-    m.create_run_command(env,state,"respond",output_url="https://o",response="x")
-except m.ValidationError as exc:
-    assert "sealed request digest" in str(exc), str(exc)
-else:
-    raise AssertionError("a symlinked guest supply path was accepted")
-(payload/"guest.sh").unlink()
-
-# The seal itself still binds: no source carrying the sealed digest refuses.
-(payload/"guest.sh").write_text("#!/usr/bin/env bash\ntampered\n")
-state=seed()
-try:
-    m.create_run_command(env,state,"respond",output_url="https://o",response="x")
-except m.ValidationError as exc:
-    assert "sealed request digest" in str(exc), str(exc)
-else:
-    raise AssertionError("a guest that matches no sealed digest was executed")
-PY
-
-  pass "an attempt's published result is bound to that attempt, a guest edit never bricks a sealed in-flight cell, an unbound control view never strands a running cell, and an unchanged republished result is refused as a non-answer"
+  rm -f "$FIXTURE_RESPONDED" "$FIXTURE_NM_CALLS" "$FIXTURE_CURL_CALLS" "$FIXTURE_STATUS_COUNT"
+  export FIXTURE_DECISION_MODE=absent FM_AZURE_VALIDATION_GATE_WAIT_SECONDS=0
+  run_log="$tmp/timeout.log"
+  TMPDIR="$tmp/transport" "$launcher" "$env_file" "$repo" "$nm" start \
+    "$intent" "$run_log" "$public_key"
+  [ "$(cat "$run_log.exit")" = 125 ] || fail "a protected decision timeout was not terminal"
+  assert_contains "$(cat "$run_log")" "expired without a signed controller envelope" \
+    "the protected timeout was not explicit"
+  [ "$(grep -c '^axi run ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the timeout retried the run"
+  ! grep -q '^axi respond ' "$FIXTURE_NM_CALLS" || fail "the timeout applied a response"
+  unset FIXTURE_NM_CALLS FIXTURE_CURL_CALLS FIXTURE_PUBLIC_KEY FIXTURE_CHALLENGE
+  unset FIXTURE_DECISION FIXTURE_RESPONDED FIXTURE_PUBLISHED_CHALLENGE
+  unset FIXTURE_STATUS_COUNT FIXTURE_DECISION_MODE FM_AZURE_VALIDATION_GATE_WAIT_SECONDS
+  pass "the exact shipped guest keeps signed gates in one Run Command and fails a missing envelope terminally"
 }
 
 static_contract
@@ -1715,15 +2653,19 @@ security_negative_contract
 resource_identity_contract
 storage_network_access_contract
 controller_recovery_contract
+replacement_runtime_hydration_contract
 retail_price_transport_contract
 admission_contract
 identity_and_recovery_contract
 trusted_manifest_verifier_contract
 shard_runner_integration_contract
 cleanup_recovery_contract
+purge_retained_contract
 multi_lane_queue_contract
 operator_documentation_contract
 shard_receipt_demotion_contract
 receipt_run_scope_contract
+terminal_classifier_optional_matches_contract
 receipt_chain_close_contract
-gate_answer_binding_contract
+owner_decision_protocol_contract
+owner_decision_guest_launcher_contract

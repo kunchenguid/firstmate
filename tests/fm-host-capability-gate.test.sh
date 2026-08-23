@@ -25,7 +25,7 @@ RUN_SH="$ROOT/tests/run.sh"
 # The exact number of host-coupled units in the sealed suite. Adding or removing
 # one is a deliberate act that must move this literal in the same diff, where a
 # reviewer sees it.
-EXPECTED_GATED_UNITS=48
+EXPECTED_GATED_UNITS=52
 
 # Static scan of every real call site: file, capability, label, and the tail
 # that decides what happens on a skip.

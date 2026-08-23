@@ -3453,6 +3453,84 @@ test_retention_cutoff_is_authoritative_before_cleanup() {
   pass "retention atomically retires due cohorts without interrupting fresh reports"
 }
 
+test_large_retention_cutover_recovers_before_publish() {
+  local STACK="$TMP_ROOT/large-retention-cutover-stack"
+  local id=report-large-retention-cutover-k2qa marker tombstone old_identity replacement_identity bytes entry
+  marker="$STACK/.retention-cutover.json"
+  tombstone="$STACK/.retention-tombstones/tombstone-11111111-1111-1111-1111-111111111111"
+  run_stack render >/dev/null || fail "large retention cutover stack initialization failed"
+  mkdir "$tombstone"
+  old_identity=$(if [ "$(uname)" = Darwin ]; then stat -f '%d:%i' "$tombstone"; else stat -c '%d:%i' "$tombstone"; fi)
+  replacement_identity=$(if [ "$(uname)" = Darwin ]; then stat -f '%d:%i' "$STACK/entries"; else stat -c '%d:%i' "$STACK/entries"; fi)
+  python3 - "$marker" "$old_identity" "$replacement_identity" <<'PY'
+import json
+import os
+import sys
+
+marker, old_identity, replacement_identity = sys.argv[1:]
+record = {
+    "schemaVersion": 1,
+    "retiredName": ".entries.retention.22222222-2222-2222-2222-222222222222",
+    "tombstoneName": "tombstone-11111111-1111-1111-1111-111111111111",
+    "oldIdentity": old_identity,
+    "replacementIdentity": replacement_identity,
+    "dueBefore": 4102444800000,
+    "policyGeneration": "33333333-3333-3333-3333-333333333333",
+    "cutoffMs": 0,
+    "freshCohorts": [
+        {"name": f"cohort-{4102444800000 + index}", "identity": "1234567890:1234567890"}
+        for index in range(1204)
+    ],
+}
+with open(marker, "x", encoding="utf-8") as destination:
+    json.dump(record, destination, separators=(",", ":"))
+    destination.write("\n")
+os.chmod(marker, 0o600)
+PY
+  bytes=$(wc -c < "$marker" | tr -d ' ')
+  [ "$bytes" -gt 65536 ] || fail "large retention cutover fixture did not exceed the ordinary control bound"
+  write_task "$id" ship
+  write_required_report "$HOME_DIR/data/$id/completion.md" "Large retention recovery publication."
+  run_stack publish "$id" >/dev/null || fail "a valid ${bytes}-byte retention cutover did not recover before publication"
+  assert_absent "$marker" "large recovered retention cutover marker remained after publication"
+  entry=$(run_stack path "$id") || fail "publication after large retention recovery was not discoverable"
+  assert_present "$entry" "publication after large retention recovery is missing"
+  pass "report stack recovers a valid retention cutover above 64 KiB before publishing"
+}
+
+test_stack_control_bounds_fail_descriptively() {
+  local STACK="$TMP_ROOT/report-stack-control-bounds" output status
+  run_stack render >/dev/null || fail "control-bound stack initialization failed"
+  python3 - "$STACK/.retention-cutover.json" <<'PY'
+import sys
+
+with open(sys.argv[1], "xb") as destination:
+    destination.write(b"x" * (1024 * 1024 + 1))
+PY
+  output=$(run_stack render 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized retention cutover control was accepted"
+  assert_contains "$output" ".retention-cutover.json is 1048577 bytes and exceeds the 1048576-byte limit" \
+    "oversized retention cutover refusal omitted its dedicated byte ceiling"
+  assert_not_contains "$output" "Unexpected end of JSON input" \
+    "oversized retention cutover was parsed as an empty control"
+  rm "$STACK/.retention-cutover.json"
+  python3 - "$STACK/.legacy-cutover.json" <<'PY'
+import sys
+
+with open(sys.argv[1], "xb") as destination:
+    destination.write(b"x" * (64 * 1024 + 1))
+PY
+  output=$(run_stack render 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized ordinary stack control was accepted"
+  assert_contains "$output" ".legacy-cutover.json is 65537 bytes and exceeds the 65536-byte limit" \
+    "oversized ordinary stack-control refusal omitted its byte ceiling"
+  assert_not_contains "$output" "Unexpected end of JSON input" \
+    "oversized ordinary stack control was parsed as an empty control"
+  pass "report stack controls reject oversized files with their exact byte ceilings"
+}
+
 test_retention_cohort_tombstone_is_noreplace_owned() {
   local id=report-retention-cohort-race-k2s entry source retired retired_name tombstone ready proceed output pid status
   id=report-retention-cohort-race-k2s
@@ -4323,6 +4401,12 @@ if [ "${FM_TEST_FOCUSED:-}" = retention-cohort-fixtures ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = report-stack-control-bounds ]; then
+  test_large_retention_cutover_recovers_before_publish
+  test_stack_control_bounds_fail_descriptively
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = retention-cohort-width ]; then
   test_manifest_cohort_must_match_completion_time
   test_manifest_cohort_deadline_cannot_precede_expiry
@@ -4447,6 +4531,8 @@ run_partitioned_test test_manifest_validation_is_cohort_width_independent
 run_partitioned_test test_retention_cohort_never_precedes_exact_expiry
 run_partitioned_test test_retention_cohort_and_sweep_share_drift_budget
 run_partitioned_test test_retention_cutoff_is_authoritative_before_cleanup
+run_partitioned_test test_large_retention_cutover_recovers_before_publish
+run_partitioned_test test_stack_control_bounds_fail_descriptively
 run_partitioned_test test_retention_cohort_tombstone_is_noreplace_owned
 run_partitioned_test test_retention_cohort_source_swap_restores_replacement
 run_partitioned_test test_retention_handoff_persists_and_retries_old_owner_fencing

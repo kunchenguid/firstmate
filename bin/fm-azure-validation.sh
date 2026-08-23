@@ -31,11 +31,13 @@
 #     [--provider-extra <linux-x86-64-path>]... --gh <linux-x86-64-path> \
 #     --node <linux-x86-64-path> --gh-axi-package <directory> \
 #     --no-mistakes-version <exact-version> \
+#     --no-mistakes-source-commit <exact-40-hex-source-commit> \
 #     --output <runtime.tar.gz>
 #   The Codex provider requires a provider-extra named codex-code-mode-host.
 #   fm-azure-validation.sh submit --task <id> --task-generation <id> \
 #     --validation-generation <id> --intent-file <path> \
 #     --credential-lease <credentials.json> --runtime-bundle <runtime.tar.gz> \
+#     --owner-decision-signer <host-native-no-mistakes> \
 #     [--resource-class validation-heavy|validation-standard] [--repo <path>]
 #   fm-azure-validation.sh dispatch --confirm-dispatch \
 #     --confirm-subscription <exact-id>
@@ -48,6 +50,9 @@
 #     --confirm-subscription <exact-id> --confirm-head <exact-sha>
 #   fm-azure-validation.sh retain-failure --cell <azv-id> --confirm-retain \
 #     --confirm-subscription <exact-id>
+#   fm-azure-validation.sh purge-retained --cell <azv-id> --confirm-purge \
+#     --confirm-subscription <exact-id> --confirm-cell <azv-id> \
+#     --confirm-request-digest <sha256:digest>
 #   fm-azure-validation.sh queue
 #   fm-azure-validation.sh auth-seed [--codex <profile>] [--claude <profile>]
 #     [--apply --confirm-seed --confirm-subscription <exact-id>]
@@ -63,14 +68,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 usage() {
-  sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
   help|-h|--help|"")
     usage
     ;;
-  build-runtime-bundle|submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue|auth-seed)
+  build-runtime-bundle|submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|purge-retained|queue|auth-seed)
     exec python3 "$SCRIPT_DIR/fm-azure-validation.py" "$@"
     ;;
   *)

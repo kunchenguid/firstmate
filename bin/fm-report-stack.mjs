@@ -47,6 +47,7 @@ const completionReportLimit = 16 * 1024 * 1024;
 const metadataLimit = 1024 * 1024;
 const manifestLimit = 1024 * 1024;
 const transactionLimit = 64 * 1024;
+const retentionCutoverLimit = 1024 * 1024;
 const lockControlLimit = 4 * 1024;
 const configuredReportLockWaitMs = Number.parseInt(process.env.FM_REPORT_LOCK_WAIT_MS || "60000", 10);
 const reportLockWaitMs = Number.isSafeInteger(configuredReportLockWaitMs)
@@ -1259,12 +1260,21 @@ function findReportEntry(reportId) {
 function readStackControl(name, maximum = transactionLimit) {
   const framed = runContainedHelper(["read-fd", name, String(maximum), "strict"], [stackRootDescriptor], maximum + 1024 * 1024);
   const item = framedItems(framed).get("source");
-  return !item || item.missing ? undefined : item.content.toString("utf8");
+  if (!item || item.missing) return undefined;
+  if (item.oversized) {
+    throw new Error(`report stack control ${name} is ${item.size} bytes and exceeds the ${maximum}-byte limit`);
+  }
+  return item.content.toString("utf8");
 }
 
-function publishStackControl(name, value) {
+function publishStackControl(name, value, maximum = transactionLimit) {
   const tempName = `.${name}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(path.join(entriesDir, tempName), `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
+  const serialized = `${JSON.stringify(value)}\n`;
+  const bytes = Buffer.byteLength(serialized);
+  if (bytes > maximum) {
+    throw new Error(`report stack control ${name} is ${bytes} bytes and exceeds the ${maximum}-byte limit`);
+  }
+  fs.writeFileSync(path.join(entriesDir, tempName), serialized, { flag: "wx", mode: 0o600 });
   try {
     runContainedHelper(["replace-file-fd", tempName, name], [entriesDescriptor, stackRootDescriptor], 1024 * 1024);
   } finally {
@@ -1621,7 +1631,7 @@ function nextRetentionPolicy() {
 const retentionCutoverName = ".retention-cutover.json";
 
 function recoverRetentionCutover() {
-  const raw = readStackControl(retentionCutoverName);
+  const raw = readStackControl(retentionCutoverName, retentionCutoverLimit);
   if (raw === undefined) return;
   const record = JSON.parse(raw);
   if (record.schemaVersion !== 1 || !/^\.entries\.retention\.[0-9a-f-]+$/.test(record.retiredName)
@@ -1759,7 +1769,7 @@ function expireDueCohorts(policy) {
     policyGeneration: policy.generation,
     cutoffMs: policy.cutoffMs,
     freshCohorts,
-  });
+  }, retentionCutoverLimit);
   fs.closeSync(replacement.descriptor);
   recoverRetentionCutover();
 }

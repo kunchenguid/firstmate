@@ -1196,18 +1196,30 @@ def reserve_model_capacity(config: dict[str, Any], identity: dict[str, Any], run
         or reservation.get("status") not in ("reserved", "queued")
     ):
         raise AzureCrosscheckError("shared allocator returned a model reservation with the wrong identity")
-    if reservation["status"] != "reserved":
-        raise AzureCrosscheckError(
-            "shared allocator queued the model compartment: "
-            + str(reservation.get("reason") or "capacity unavailable")[:300]
-        )
-    return {
+    capacity = {
         "reservation_id": reservation_id,
         "fence": fence,
         "sku": sku,
         "sku_family": family,
         "amount_usd": amount,
     }
+    if reservation["status"] != "reserved":
+        reason = str(reservation.get("reason") or "capacity unavailable")[:300]
+        try:
+            # capacity-reserve persists even refused candidates as queued. No
+            # model compute can exist yet, but capacity-release still asks the
+            # shared allocator for provider-observed zero-compute proof under
+            # this exact identity and fence before retiring that durable row.
+            release_model_capacity(config, capacity)
+        except Exception as exc:
+            raise AzureCrosscheckError(
+                "shared allocator queued the model compartment and its exact "
+                "zero-compute release failed: " + reason + "; " + str(exc)
+            ) from exc
+        raise AzureCrosscheckError(
+            "shared allocator queued the model compartment: " + reason
+        )
+    return capacity
 
 
 def release_model_capacity(config: dict[str, Any], reservation: dict[str, Any]) -> None:
@@ -2081,8 +2093,17 @@ def _run_azure_review_in_lane(
         resources: dict[str, Any] | None = None
         cleanup_error: Exception | None = None
         ledger_identity: dict[str, Any] | None = None
-        with measured_phase(phase_timer, "create"):
-            model_capacity = reserve_model_capacity(azure, identity, runner)
+        try:
+            with measured_phase(phase_timer, "create"):
+                model_capacity = reserve_model_capacity(azure, identity, runner)
+        except core.CrosscheckToolError:
+            raise
+        except Exception as exc:
+            # Reservation refusal happens before the model-resource cleanup
+            # window below exists. Normalize both allocator refusals and local
+            # subprocess failures here so the core records this exact reviewer
+            # as a tool failure and can advance to the next screened account.
+            raise core.CrosscheckToolError(str(exc)) from exc
         try:
             with measured_phase(phase_timer, "stage"):
                 upload_blob(azure, input_path, staged["input_blob"])

@@ -11,6 +11,8 @@ set -u
 VALIDATION="$ROOT/bin/fm-azure-validation.sh"
 GUEST="$ROOT/bin/fm-azure-validation-guest.sh"
 SUB=11111111-1111-4111-8111-111111111111
+SOURCE_COMMIT=1111111111111111111111111111111111111111
+OWNER_DECISION_SIGNER=
 
 make_elf() {
   local path=$1 machine=${2:-62}
@@ -39,6 +41,32 @@ make_inputs() {
   make_elf "$root/artifacts/codex-code-mode-host"
   make_elf "$root/artifacts/gh"
   make_elf "$root/artifacts/node"
+  cat >"$root/owner-signer" <<'PY'
+#!/usr/bin/env python3
+import base64
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+
+def value(name):
+    return args[args.index(name) + 1]
+
+if args == ["--version"]:
+    print("no-mistakes version 1.48.0 (1111111111111111111111111111111111111111) fixture")
+    raise SystemExit(0)
+if args[:3] == ["axi", "owner-decision", "keygen"]:
+    private = pathlib.Path(value("--private-key"))
+    public = pathlib.Path(value("--public-key"))
+    private.write_text(base64.b64encode(b"K" * 64).decode() + "\n")
+    public.write_text(base64.b64encode(b"P" * 32).decode() + "\n")
+    os.chmod(private, 0o600)
+    os.chmod(public, 0o644)
+    raise SystemExit(0)
+raise SystemExit(2)
+PY
+  chmod 755 "$root/owner-signer"
   printf '%s\n' \
     '{"name":"gh-axi","version":"1.0.0","type":"module","bin":{"gh-axi":"./dist/bin/gh-axi.js"},"dependencies":{"fixture-dependency":"1.0.0"}}' \
     >"$root/gh-axi/package.json"
@@ -83,6 +111,7 @@ build_bundle() {
     --node "$node" \
     --gh-axi-package "$root/gh-axi" \
     --no-mistakes-version "$version" \
+    --no-mistakes-source-commit "$SOURCE_COMMIT" \
     --output "$output"
 }
 
@@ -115,10 +144,14 @@ make_credentials() {
 
 validation() {
   local home=$1
+  local -a signer=()
   shift
+  if [ "${1:-}" = submit ] && [ -n "$OWNER_DECISION_SIGNER" ]; then
+    signer=(--owner-decision-signer "$OWNER_DECISION_SIGNER")
+  fi
   FM_HOME="$home" FM_AZURE_DEPLOYMENT_GENERATION=gen-one \
     FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_NAMING_PREFIX=fmtest \
-    "$VALIDATION" "$@"
+    "$VALIDATION" "$@" "${signer[@]}"
 }
 
 cell_from() {
@@ -462,12 +495,15 @@ with tarfile.open(path, "r:gz") as archive:
     manifest = json.load(archive.extractfile("runtime.json"))
     assert set(manifest) == {
         "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+        "no_mistakes_source_commit", "owner_decision_protocol",
         "provider_path", "gh_path", "node_path", "gh_axi_path",
         "gh_axi_entrypoint", "gh_axi_closure", "files",
     }
     assert manifest["schema"] == "fm.azure-validation-runtime/v1"
     assert manifest["provider"] == "codex"
     assert manifest["no_mistakes_version"] == "1.48.0"
+    assert manifest["no_mistakes_source_commit"] == "1" * 40
+    assert manifest["owner_decision_protocol"] == "fm.azure-validation-owner-decision/v1"
     assert manifest["no_mistakes_path"] == "bin/no-mistakes"
     assert manifest["provider_path"] == "bin/codex"
     assert manifest["gh_path"] == "bin/gh"
@@ -509,6 +545,7 @@ real_submit_and_mutation_contract() {
   local tmp bundle home repo out cell marker real_git rc
   fm_test_tmproot_into tmp fm-azure-runtime-submit
   make_inputs "$tmp"
+  OWNER_DECISION_SIGNER=$tmp/owner-signer
   bundle=$tmp/runtime.tar.gz
   build_bundle "$tmp" "$bundle" >/dev/null || fail "runtime build for submit failed"
   make_repo "$tmp/project"
@@ -556,9 +593,12 @@ assert state["request"]["runtime"]["schema"] == "fm.azure-validation-runtime/v1"
 assert state["request"]["runtime"]["no_mistakes_version"] == "1.48.0"
 assert set(state["request"]["runtime"]) == {
     "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+    "no_mistakes_source_commit", "owner_decision_protocol",
     "provider_path", "gh_path", "node_path", "gh_axi_path",
     "gh_axi_entrypoint", "gh_axi_closure", "files",
 }
+assert state["request"]["runtime"]["no_mistakes_source_commit"] == "1" * 40
+assert state["request"]["runtime"]["owner_decision_protocol"] == "fm.azure-validation-owner-decision/v1"
 assert all(set(record) == {"path", "digest"} for record in state["request"]["runtime"]["files"])
 assert state["request"]["runtime_digest"] == "sha256:" + hashlib.sha256(bundle).hexdigest()
 PY
@@ -837,6 +877,7 @@ input_refusal_and_atomic_output_contract() {
     --node "$tmp/artifacts/node" \
     --gh-axi-package "$tmp/gh-axi" \
     --no-mistakes-version 1.48.0 \
+    --no-mistakes-source-commit "$SOURCE_COMMIT" \
     --output "$tmp/missing-code-mode-host.tar.gz" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a Codex runtime without codex-code-mode-host was accepted"
   assert_contains "$out" "Codex runtime requires bin/codex-code-mode-host" \
@@ -960,6 +1001,7 @@ input_refusal_and_atomic_output_contract() {
     --node "$tmp/artifacts/node" \
     --gh-axi-package "$tmp/gh-axi-credential-alias" \
     --no-mistakes-version 1.48.0 \
+    --no-mistakes-source-commit "$SOURCE_COMMIT" \
     --output "$tmp/credential-package-alias.tar.gz" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a credential-directory alias gh-axi root was accepted"
   assert_contains "$out" "source has a credential-like path" \
@@ -978,6 +1020,7 @@ input_refusal_and_atomic_output_contract() {
     --node "$tmp/artifacts/node" \
     --gh-axi-package "$tmp/gh-axi-safe-alias" \
     --no-mistakes-version 1.48.0 \
+    --no-mistakes-source-commit "$SOURCE_COMMIT" \
     --output "$tmp/package-parent-symlink.tar.gz" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a symlinked gh-axi root was accepted"
   assert_contains "$out" "symlink-free directory" \

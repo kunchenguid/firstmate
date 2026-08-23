@@ -62,7 +62,8 @@ for marker in (
     "revision moved from", "FencedState", "slot_lease", "LOCK_NB", "provider_mutate",
     "drain_pending", "claim_pending", "apply_pending", "command_abandon_claim",
     "ProviderIdentityRefused", "fm.worker-execution-terminal/v1",
-    "capacity-reserve", "capacity-reserve-shape", "capacity-release", "merged_specialized_reservations",
+    "capacity-reserve", "capacity-reserve-shape", "capacity-release", "capacity-retire-fence",
+    "retired_capacity_fences", "merged_specialized_reservations",
     "command_withdraw", "command_surrender", "WORKER AUTHORITY REFUSED",
     "--confirm-discard-unlanded",
     "REVIEWED_CONTROL_SKU_FAMILY", "command_capacity_reserve_shape",
@@ -2288,7 +2289,7 @@ PY
 }
 
 shared_specialized_cli() {
-  local tmp provider fixture home fence receipt out state_file
+  local tmp provider fixture home fence receipt retirement out state_file
   fm_test_tmproot_into tmp fm-shared-specialized
   provider="$tmp/provider.py"
   fixture="$tmp/provider-state.json"
@@ -2297,6 +2298,7 @@ shared_specialized_cli() {
   write_fixture_provider "$provider"
   fence=$(printf reservation-fence | shasum -a 256 | awk '{print $1}')
   receipt=$(printf cleanup-proof | shasum -a 256 | awk '{print $1}')
+  retirement=$(printf fence-retirement | shasum -a 256 | awk '{print $1}')
   out=$(env \
     FM_HOME="$home" \
     FM_AZURE_SUBSCRIPTION_ID="$SUB" \
@@ -2425,6 +2427,110 @@ state = json.load(open(sys.argv[1]))
 assert state["capacity_reservations"]["azr-123456789abc"]["status"] == "released"
 assert state["capacity_reservations"]["azr-abcdef123456"]["status"] == "reserved"
 assert state["capacity_reservations"]["azr-fedcba654321"]["status"] == "queued"
+PY
+  # The first retirement may encounter the released controller's v1 document.
+  # Migration must preserve every reservation and become rollback-safe at the
+  # same save that lands the retirement tombstone.
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+state["schema"] = "fm.worker-lifecycle/v1"
+state.pop("retired_capacity_fences", None)
+path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+PY
+  env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    "$WRAPPER" capacity-retire-fence \
+      --fence-binding "$fence" \
+      --reservation-id azr-123456789abc \
+      --retirement-receipt "$retirement" \
+      --confirm-subscription "$SUB" >/dev/null
+  if env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    "$WRAPPER" capacity-retire-fence \
+      --fence-binding "$fence" \
+      --reservation-id azr-123456789abc \
+      --retirement-receipt "$(printf conflicting-retirement | shasum -a 256 | awk '{print $1}')" \
+      --confirm-subscription "$SUB" >/dev/null 2>&1; then
+    fail "conflicting capacity fence retirement identity was accepted"
+  fi
+  # The durable retirement is idempotent, but neither reserve entry point may
+  # insert or re-admit on that fence after the shared lock opens.
+  env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    "$WRAPPER" capacity-retire-fence \
+      --fence-binding "$fence" \
+      --reservation-id azr-123456789abc \
+      --retirement-receipt "$retirement" \
+      --confirm-subscription "$SUB" >/dev/null
+  if env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    "$WRAPPER" capacity-reserve \
+      --reservation-id azr-retired000001 \
+      --fence-binding "$fence" \
+      --role validation \
+      --sku Standard_D4as_v7 \
+      --sku-family StandardDasv7Family \
+      --vcpus 4 \
+      --amount-usd 25 \
+      --confirm-subscription "$SUB" >/dev/null 2>&1; then
+    fail "single reservation entered a retired capacity fence"
+  fi
+  if env \
+    FM_HOME="$home" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" \
+    FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner \
+    FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_WORKER_PROVIDER_COMMAND="python3 $provider" \
+    FIXTURE_STATE="$fixture" \
+    "$WRAPPER" capacity-reserve-shape \
+      --shape-id shape-retired \
+      --fence-binding "$fence" \
+      --constituent "reservation-id=azr-retired000002,role=validation,sku=Standard_D4as_v7,sku-family=StandardDasv7Family,vcpus=4,amount-usd=25" \
+      --confirm-subscription "$SUB" >/dev/null 2>&1; then
+    fail "shape reservation entered a retired capacity fence"
+  fi
+  python3 - "$state_file" "$fence" "$retirement" <<'PY' \
+    || fail "capacity fence retirement was not durable and exact"
+import json
+import sys
+state = json.load(open(sys.argv[1]))
+retirement = state["retired_capacity_fences"][sys.argv[2]]
+assert state["schema"] == "fm.worker-lifecycle/v2"
+assert retirement["reservation_ids"] == ["azr-123456789abc"]
+assert retirement["retirement_receipt"] == sys.argv[3]
+assert state["capacity_reservations"]["azr-abcdef123456"]["status"] == "reserved"
+assert state["capacity_reservations"]["azr-fedcba654321"]["status"] == "queued"
+assert "azr-retired000001" not in state["capacity_reservations"]
+assert "azr-retired000002" not in state["capacity_reservations"]
 PY
   pass "specialized CLI durably reserves, queues exact-family excess, and releases only exact fenced capacity"
 }
