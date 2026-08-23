@@ -16,6 +16,7 @@ POST_SNAPSHOT_CONFIG_FILTER=
 POST_PENDING_DIRECTORY=0
 POST_PENDING_RECREATE=0
 POST_CONFIG_SYMLINK=0
+POST_SNAPSHOT_DIRECTORY_RECREATE=0
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -53,7 +54,7 @@ jq() {
 }
 
 perl() {
-  local operation=${2:-} status result
+  local operation=${2:-} status result snapshot_name snapshot_path
   if [ "$operation" = snapshot ] && [ "$POST_CONFIG_SYMLINK" -eq 1 ]; then
     mv "$HOME_DIR/config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.original.json" || return 1
     ln -s "$LAB/relocated-config/crew-dispatch.json" "$HOME_DIR/config/crew-dispatch.json" || return 1
@@ -76,6 +77,16 @@ perl() {
   fi
   result=$("$REAL_PERL" "$@" 2>&1)
   status=$?
+  if [ "$operation" = snapshot ] \
+    && [ "$status" -eq 0 ] \
+    && [ "$POST_SNAPSHOT_DIRECTORY_RECREATE" -eq 1 ]; then
+    snapshot_name=${result%%$'\t'*}
+    snapshot_path="$3/$snapshot_name"
+    mv "$snapshot_path" "$snapshot_path.original" || return 1
+    mkdir "$snapshot_path" || return 1
+    cp -R "$snapshot_path.original/." "$snapshot_path/" || return 1
+    POST_SNAPSHOT_DIRECTORY_RECREATE=0
+  fi
   printf '%s\n' "$result"
   return "$status"
 }
@@ -101,7 +112,9 @@ RUN_MODEL_FRAGMENT="--model 'opus' "
 RUN_EFFORT_FRAGMENT="--effort 'high' "
 negative_count=0
 counterexample_count=0
+raw_guard_counterexample_count=0
 PREEXISTING_FINAL=0
+PREEXISTING_META=0
 RUN_CWD=
 RELAUNCH_COUNTEREXAMPLE_ROOT="$TMP_ROOT/relaunch-counterexample-root"
 RELAUNCH_PROJECT=
@@ -385,12 +398,14 @@ write_fixture() {
   RUN_MODEL_FRAGMENT="--model 'opus' "
   RUN_EFFORT_FRAGMENT="--effort 'high' "
   PREEXISTING_FINAL=0
+  PREEXISTING_META=0
   POST_BINDING_RECEIPT_FILTER=
   POST_SNAPSHOT_SOURCE_FILTER=
   POST_SNAPSHOT_CONFIG_FILTER=
   POST_PENDING_DIRECTORY=0
   POST_PENDING_RECREATE=0
   POST_CONFIG_SYMLINK=0
+  POST_SNAPSHOT_DIRECTORY_RECREATE=0
   RUN_CWD=
 }
 
@@ -450,7 +465,12 @@ run_validator_then_effects() {
 assert_no_effects() {
   assert_absent "$LAB/worktree.lease" "routing refusal leased a worktree"
   assert_absent "$LAB/endpoint" "routing refusal created an endpoint"
-  assert_absent "$HOME_DIR/state/t1.meta" "routing refusal published task metadata"
+  if [ "$PREEXISTING_META" -eq 0 ]; then
+    assert_absent "$HOME_DIR/state/t1.meta" "routing refusal published task metadata"
+  else
+    cmp -s "$LAB/meta.before" "$HOME_DIR/state/t1.meta" \
+      || fail "routing refusal changed pre-existing task metadata"
+  fi
   if [ "$PREEXISTING_FINAL" -eq 0 ]; then
     if fm_test_existing_routing_decision_path "$HOME_DIR" t1 >/dev/null; then
       fail "invalid receipt was persisted"
@@ -490,6 +510,64 @@ exercise_negative() { # <name> <predicate> <setup-function> [exact-detail] [post
   pass "$name integration call-site counterexample"
 }
 
+neuter_raw_guard() { # <literal-words|trailing-environment>
+  case "$1" in
+    literal-words)
+      # shellcheck disable=SC2329 # Invoked indirectly by fm_routing_parse_command_axes.
+      fm_routing_literal_words() {
+        # shellcheck disable=SC2016 # The mutation must retain the unresolved variable literally.
+        FM_ROUTING_WORDS=(claude --model opus --effort high '$EXTRA')
+        return 0
+      }
+      ;;
+    trailing-environment)
+      # shellcheck disable=SC2329 # Invoked indirectly by fm_routing_parse_command_axes.
+      fm_routing_raw_environment_assignment() { return 1; }
+      ;;
+    *) fail "unknown raw guard mutation $1" ;;
+  esac
+}
+
+assert_raw_guard_refusal() { # <name> <setup-function> <detail>
+  local name=$1 setup=$2 detail=$3 out status
+  write_fixture
+  "$setup"
+  out=$(run_validator_then_effects 2>&1)
+  status=$?
+  expect_code 1 "$status" "$name should refuse"
+  assert_contains "$out" "ROUTING_DECISION RAW_LAUNCH_NOT_VERIFIABLE" \
+    "$name named the wrong predicate"
+  assert_contains "$out" "$detail" "$name named the wrong refusal detail"
+  assert_no_effects
+}
+
+exercise_firing_raw_guard() { # <name> <setup-function> <detail> <mutation>
+  local name=$1 setup=$2 detail=$3 mutation=$4
+  assert_raw_guard_refusal "$name" "$setup" "$detail"
+  negative_count=$((negative_count + 1))
+  pass "$name refuses before lease, endpoint, and metadata"
+
+  if (
+    neuter_raw_guard "$mutation"
+    assert_raw_guard_refusal "$name mutation" "$setup" "$detail"
+  ) >/dev/null 2>&1; then
+    fail "$name stayed green when its exact guard was neutered"
+  fi
+
+  (
+    neuter_raw_guard "$mutation"
+    write_fixture
+    "$setup"
+    run_validator_then_effects >/dev/null 2>&1
+    assert_present "$LAB/worktree.lease" "$name mutation did not reach a worktree lease"
+    assert_present "$LAB/endpoint" "$name mutation did not reach an endpoint"
+    assert_present "$HOME_DIR/state/t1.meta" "$name mutation did not publish metadata"
+  ) || fail "$name mutation did not prove the exact guard was load-bearing"
+  counterexample_count=$((counterexample_count + 1))
+  raw_guard_counterexample_count=$((raw_guard_counterexample_count + 1))
+  pass "$name exact-guard firing counterexample"
+}
+
 setup_missing_receipt() { rm "$TASK_DIR/routing-decision.pending.json"; }
 setup_missing_intent() { rm "$TASK_DIR/routing-intent.json"; }
 setup_empty_receipt() { : > "$TASK_DIR/routing-decision.pending.json"; }
@@ -509,6 +587,10 @@ setup_dynamic_raw() {
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
+setup_trailing_dynamic_raw() {
+  # shellcheck disable=SC2016 # the command must retain the unresolved variable literally
+  setup_raw_literal 'claude --model opus --effort high $EXTRA'
+}
 setup_env_raw() {
   RUN_RAW=1
   RUN_LAUNCH='MODEL=opus claude --model opus --effort high'
@@ -516,6 +598,9 @@ setup_env_raw() {
     | .launch_binding.kind = "raw_launch"'
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
+}
+setup_trailing_env_raw() {
+  setup_raw_literal 'claude MODEL=opus --model opus --effort high'
 }
 setup_nonstandard_raw() {
   RUN_RAW=1
@@ -643,6 +728,22 @@ setup_pending_mutated_in_place_after_compare() {
 }
 setup_pending_recreated_after_relocation() {
   POST_PENDING_RECREATE=1
+}
+setup_snapshot_identity_substitution() {
+  POST_SNAPSHOT_DIRECTORY_RECREATE=1
+}
+setup_malformed_consumed_ledger() {
+  printf 'not-a-generation\n' > "$TASK_DIR/routing-generations.consumed"
+  chmod 0600 "$TASK_DIR/routing-generations.consumed"
+}
+setup_ambiguous_routing_pointer() {
+  mkdir -p "$HOME_DIR/state"
+  {
+    printf 'routing_decision=%s\n' "$TASK_DIR/first.json"
+    printf 'routing_decision=%s\n' "$TASK_DIR/second.json"
+  } > "$HOME_DIR/state/t1.meta"
+  cp "$HOME_DIR/state/t1.meta" "$LAB/meta.before"
+  PREEXISTING_META=1
 }
 setup_config_symlink_before_snapshot() {
   mkdir -p "$LAB/relocated-config"
@@ -922,7 +1023,8 @@ write_relaunch_tmux_stub
 exercise_relaunch_negative "route-changing relaunch missing receipt" missing setup_missing_receipt
 exercise_relaunch_negative "route-changing relaunch mismatched receipt" LAUNCH_BINDING_MISMATCH setup_model_binding_mismatch
 exercise_relaunch_negative "route-changing relaunch stale receipt" STALE setup_stale
-exercise_relaunch_negative "route-changing relaunch unobserved receipt" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw
+exercise_relaunch_negative "route-changing relaunch unobserved receipt" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
 
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
@@ -934,10 +1036,18 @@ exercise_negative "07 future receipt" STALE setup_future
 exercise_negative "08 emitted model mismatch" LAUNCH_BINDING_MISMATCH setup_model_binding_mismatch
 exercise_negative "09 emitted effort mismatch" LAUNCH_BINDING_MISMATCH setup_effort_binding_mismatch
 exercise_negative "10 canonical config removed" DISPATCH_CONFIG_MISMATCH setup_config_absent_after_receipt
-exercise_negative "11 raw shell expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw
-exercise_negative "12 raw environment prefix" RAW_LAUNCH_NOT_VERIFIABLE setup_env_raw
-exercise_negative "13 raw non-standard model flag" RAW_LAUNCH_NOT_VERIFIABLE setup_nonstandard_raw
-exercise_negative "14 raw missing effort" RAW_LAUNCH_UNRESOLVED setup_unresolved_raw
+exercise_negative "11 raw shell expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_firing_raw_guard "11a raw trailing shell expansion" setup_trailing_dynamic_raw \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting" literal-words
+exercise_negative "12 raw environment prefix" RAW_LAUNCH_NOT_VERIFIABLE setup_env_raw \
+  "raw launch environment assignments can select an unobserved runtime"
+exercise_firing_raw_guard "12a raw trailing environment assignment" setup_trailing_env_raw \
+  "raw launch environment assignments can select an unobserved runtime" trailing-environment
+exercise_negative "13 raw non-standard model flag" RAW_LAUNCH_NOT_VERIFIABLE setup_nonstandard_raw \
+  "raw launch uses a non-standard model flag spelling"
+exercise_negative "14 raw missing effort" RAW_LAUNCH_UNRESOLVED setup_unresolved_raw \
+  "raw launches must expose fixed literal model and effort selections"
 exercise_negative "15 intent hash mismatch" INTENT_HASH_MISMATCH setup_intent_hash_mismatch
 exercise_negative "16 swapped brief" BRIEF_HASH_MISMATCH setup_brief_swap
 exercise_negative "17 required gate mismatch" GATE_MISMATCH setup_gate_mismatch
@@ -964,20 +1074,33 @@ exercise_negative "36 wrong quota schema" 'NOT_VERIFIABLE(QUOTA)' setup_wrong_qu
 PLAIN_FORBIDDEN_PUNCT='!#$&()*;<>?[\]^`{|}~'
 for ((punct_index = 0; punct_index < ${#PLAIN_FORBIDDEN_PUNCT}; punct_index++)); do
   RAW_PUNCTUATION=${PLAIN_FORBIDDEN_PUNCT:punct_index:1}
-  exercise_negative "P$((punct_index + 1)) raw plain-state punctuation" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_punctuation
+  exercise_negative "P$((punct_index + 1)) raw plain-state punctuation" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_punctuation \
+    "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
 done
-exercise_negative "P21 raw embedded newline" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_newline
-exercise_negative "P22 raw embedded carriage return" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_carriage_return
-exercise_negative "D1 raw double-quoted history expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_history
-exercise_negative "D2 raw double-quoted backslash" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_backslash
-exercise_negative "A1 raw leading equals" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_leading_equals
-exercise_negative "C1 raw single-quoted control byte" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_control
-exercise_negative "C2 raw plain-state tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_tab
-exercise_negative "C3 raw single-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_tab
-exercise_negative "C4 raw double-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_tab
-exercise_negative "N1 raw plain non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_nonascii
-exercise_negative "N2 raw single-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_nonascii
-exercise_negative "N3 raw double-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_nonascii
+exercise_negative "P21 raw embedded newline" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_newline \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "P22 raw embedded carriage return" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_carriage_return \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "D1 raw double-quoted history expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_history \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "D2 raw double-quoted backslash" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_backslash \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "A1 raw leading equals" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_leading_equals \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "C1 raw single-quoted control byte" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_control \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "C2 raw plain-state tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_tab \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "C3 raw single-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_tab \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "C4 raw double-quoted tab" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_tab \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "N1 raw plain non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_plain_nonascii \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "N2 raw single-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_single_nonascii \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+exercise_negative "N3 raw double-quoted non-ASCII" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_double_nonascii \
+  "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
 
 while IFS='|' read -r shape_label RAW_SHAPE_COMMAND shape_detail; do
   [ -n "$shape_label" ] || continue
@@ -1100,6 +1223,12 @@ exercise_negative "69 hard-linked generation artifact" PERSISTENCE_REFUSED \
   setup_preexisting_hardlinked_brief "COLLISION:brief.md:ownership"
 exercise_negative "70 canonical config symlink before snapshot" 'NOT_VERIFIABLE(CONFIG)' \
   setup_config_symlink_before_snapshot "OPEN_REGULAR:crew-dispatch.json" assert_config_symlink_not_followed
+exercise_negative "71 snapshot identity substitution" PERSISTENCE_REFUSED \
+  setup_snapshot_identity_substitution "SNAPSHOT_IDENTITY"
+exercise_negative "72 malformed consumed-generation ledger" PERSISTENCE_REFUSED \
+  setup_malformed_consumed_ledger "LEDGER_FORMAT:routing-generations.consumed"
+exercise_negative "73 ambiguous routing receipt pointer" PERSISTENCE_REFUSED \
+  setup_ambiguous_routing_pointer "current routing receipt pointer is ambiguous"
 
 write_fixture
 symlinked_task_target="$LAB/symlinked-task-target"
@@ -1296,9 +1425,12 @@ else
 fi
 pass "consumed ledger rejects restored generation A after generation B"
 
-expected_count=$((128 + ${#PLAIN_FORBIDDEN_PUNCT}))
+expected_count=$((133 + ${#PLAIN_FORBIDDEN_PUNCT}))
 [ "$negative_count" -eq "$expected_count" ] \
   || fail "negative battery counted $negative_count refusals instead of $expected_count"
 [ "$counterexample_count" -eq "$expected_count" ] \
   || fail "negative battery counted $counterexample_count counterexamples instead of $expected_count"
+[ "$raw_guard_counterexample_count" -eq 2 ] \
+  || fail "negative battery counted $raw_guard_counterexample_count exact raw-guard counterexamples instead of 2"
 echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count integration call-site counterexamples"
+echo "# both 2/2 load-bearing raw-launch assertions went red when their exact guards were neutered"

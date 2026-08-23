@@ -447,35 +447,47 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
-test_relaunch_drops_a_symlinked_routing_receipt_pointer() {
-  local dir out rc receipt linked
+test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning() {
+  local dir out rc receipt brief linked
   dir=$(new_case symlinked-routing-receipt rl43)
   add_ship_task "$dir" rl43 claude
   receipt=$(write_committed_routing_receipt "$dir" rl43)
+  brief="$(dirname "$receipt")/brief.md"
   linked="$dir/home/data/rl43/routing-decision.link.json"
   ln -s "$receipt" "$linked"
   [ -f "$linked" ] || fail "symlinked receipt counterexample did not satisfy the legacy regular-file test"
   printf 'routing_decision=%s\n' "$linked" >> "$dir/home/state/rl43.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl43.meta"
 
   out=$(run_control "$dir" rl43 relaunch --note "continue without symlinked provenance"); rc=$?
   expect_code 0 "$rc" "unchanged relaunch with a symlinked prior receipt should still relaunch"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl43 routing_decision)" ] \
     || fail "relaunch republished a symlinked routing receipt pointer"
-  pass "fm-control relaunch: a symlinked routing receipt is not inherited"
+  [ -z "$(meta_field "$dir" rl43 routing_brief)" ] \
+    || fail "relaunch left a routing brief without an inherited receipt"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped unavailable routing provenance"
+  pass "fm-control relaunch: unavailable symlinked routing pointers are stripped together with a warning"
 }
 
-test_relaunch_drops_a_missing_routing_receipt_pointer() {
-  local dir out rc receipt
+test_relaunch_drops_missing_routing_pointers_together_with_a_warning() {
+  local dir out rc receipt brief
   dir=$(new_case missing-routing-receipt rl36)
   add_ship_task "$dir" rl36 claude
   receipt="$dir/home/data/rl36/routing-decision.json"
+  brief="$dir/home/data/rl36/routing-brief.md"
   printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl36.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl36.meta"
 
   out=$(run_control "$dir" rl36 relaunch --note "continue without stale provenance"); rc=$?
   expect_code 0 "$rc" "unchanged relaunch with a missing prior receipt should still relaunch"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl36 routing_decision)" ] \
     || fail "relaunch must not republish a pointer whose receipt is missing"
-  pass "fm-control relaunch: a missing routing receipt is not advertised after replacement"
+  [ -z "$(meta_field "$dir" rl36 routing_brief)" ] \
+    || fail "relaunch left a dangling routing brief after its receipt disappeared"
+  assert_contains "$out" "prior routing generation is unavailable" \
+    "relaunch did not warn that it stripped unavailable routing provenance"
+  pass "fm-control relaunch: unavailable routing pointers are stripped together with a warning"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1716,8 +1728,8 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
-test_relaunch_drops_a_missing_routing_receipt_pointer
-test_relaunch_drops_a_symlinked_routing_receipt_pointer
+test_relaunch_drops_missing_routing_pointers_together_with_a_warning
+test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

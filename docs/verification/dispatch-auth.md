@@ -218,7 +218,10 @@ Final receipt freshness is read from the immutable prepared snapshot rather than
 Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
 The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it uses `snapshot` to resnapshot and validate the receipt semantics, derives the generation paths, and uses `verify-committed-generation` to verify the published artifacts plus latest ledger row without re-aging the preflight acceptance.
 This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
-The negative battery's shared-validator mutations prove only that the dispatch integration call site is load-bearing; guard-specific mutation coverage remains owned by the separate external 64-site mutation sweep and is not claimed here.
+The negative battery's shared-validator mutations prove that the dispatch integration call site is load-bearing, and its two raw-launch guard mutations separately prove that shell-expansion and trailing-environment-assignment assertions go red when their exact guards are neutered.
+The committed [`routing-receipt-guard-sites.tsv`](routing-receipt-guard-sites.tsv) inventory enumerates all 158 refusal-capable sites: 100 `fm_routing_refuse` calls in `bin/fm-routing-decision-lib.sh` and 58 `fail(` calls in `bin/fm-routing-fs-boundary.pl`.
+Run `bin/fm-routing-guard-inventory.sh --write` to regenerate that inventory and `bin/fm-routing-guard-inventory.sh --check` to compare it with the current sources.
+The committed inventory defines the population reproducibly; it does not claim that every site has an independent firing mutation test.
 
 The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
 There are no surviving routing-lifecycle removal call sites.

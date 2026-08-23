@@ -1062,6 +1062,7 @@ RELAUNCH_PRIOR_HARNESS=
 RELAUNCH_PRIOR_MODEL=
 RELAUNCH_PRIOR_EFFORT=
 RELAUNCH_PRIOR_ROUTING_DECISION=
+RELAUNCH_PRIOR_ROUTING_BRIEF=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1097,6 +1098,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
   [ -n "$RELAUNCH_PRIOR_EFFORT" ] || RELAUNCH_PRIOR_EFFORT=default
   RELAUNCH_PRIOR_ROUTING_DECISION=$(fm_meta_get "$RELAUNCH_META" routing_decision)
+  RELAUNCH_PRIOR_ROUTING_BRIEF=$(fm_meta_get "$RELAUNCH_META" routing_brief)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1540,9 +1542,12 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
   && [ "$RELAUNCH" -eq 1 ] \
   && [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
   && [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
-  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ] \
-  && fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
-  :
+  && [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+  if fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+    :
+  elif [ -n "$RELAUNCH_PRIOR_ROUTING_DECISION" ] || [ -n "$RELAUNCH_PRIOR_ROUTING_BRIEF" ]; then
+    echo "warning: task $ID's prior routing generation is unavailable; relaunching without routing_decision or routing_brief metadata" >&2
+  fi
 fi
 
 # Routing-receipt enforcement is a source-code invariant for every fresh
@@ -2819,11 +2824,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
-  awk -F= -v replace_routing_brief="$([ -n "$FM_ROUTING_BRIEF_FINAL" ] && printf 1 || printf 0)" '
+  awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort routing_decision busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort routing_decision routing_brief busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
-      if (replace_routing_brief == 1) owned["routing_brief"] = 1
     }
     !($1 in owned)
   ' "$RELAUNCH_META"

@@ -92,7 +92,7 @@ fm_routing_fs_boundary() {
 }
 
 fm_routing_decision_resolve_inherited() {
-  local receipt=$1 task_dir=$2 generation_dir generation expected
+  local receipt=$1 task_dir=$2 generation_dir generation expected brief
   [ "$(dirname "$(dirname "$receipt")")" = "$task_dir" ] || return 1
   [ "$(basename "$receipt")" = receipt.json ] || return 1
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
@@ -102,10 +102,17 @@ fm_routing_decision_resolve_inherited() {
   [[ "$generation" =~ ^[0-9a-f]{64}$ ]] || return 1
   expected=$(fm_routing_fs_boundary hash "$(dirname "$receipt")" receipt.json 2>/dev/null) || return 1
   [ "$expected" = "$generation" ] || return 1
+  brief="$(dirname "$receipt")/brief.md"
+  [ -f "$brief" ] && [ ! -L "$brief" ] || return 1
   FM_ROUTING_DECISION_FINAL=$receipt
+  FM_ROUTING_BRIEF_FINAL=$brief
 }
 
 FM_ROUTING_WORDS=()
+
+fm_routing_raw_environment_assignment() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
 
 fm_routing_raw_ascii_text() { # <command>
   local LC_ALL=C input=$1 ch i
@@ -296,7 +303,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
   for ((i = 0; i < ${#FM_ROUTING_WORDS[@]}; i++)); do
     word=${FM_ROUTING_WORDS[$i]}
     if [ "$executable_seen" -eq 0 ]; then
-      if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      if fm_routing_raw_environment_assignment "$word"; then
         [ "$raw" -eq 0 ] || {
           fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch environment assignments can select an unobserved runtime"
           return 1
@@ -313,7 +320,7 @@ fm_routing_parse_command_axes() { # <command> <raw:0|1>
       executable_seen=1
       continue
     fi
-    if [ "$raw" -eq 1 ] && [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+    if [ "$raw" -eq 1 ] && fm_routing_raw_environment_assignment "$word"; then
       fm_routing_refuse "RAW_LAUNCH_NOT_VERIFIABLE" "raw launch environment assignments can select an unobserved runtime"
       return 1
     fi
