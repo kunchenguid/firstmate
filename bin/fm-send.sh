@@ -622,13 +622,33 @@ else
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    fm_lock_acquire_wait "$INBOX_META_LOCK" || exit 1
+    CURRENT_INBOX_TARGET=
+    CURRENT_INBOX_BACKEND=
+    if [ -f "$TARGET_META" ]; then
+      CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+      CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+    fi
+    if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
+      || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
+      || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+      exit 1
+    fi
     if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE"); then
+      fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
       exit 1
     fi
+    fm_lock_release "$INBOX_META_LOCK"
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

@@ -327,11 +327,13 @@ inbox_steer_check() {  # <window> <task>
   fi
   case "$verb" in
     ring)
+      [ -f "$rec" ] || return 0
       fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || true
       fm_task_inbox_record_ring "$STATE" "$task" "$rec"
       triage_log "steer-inbox re-ring: $task ${rec##*/}"
       ;;
     escalate)
+      [ -f "$rec" ] || return 0
       reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell re-rings with an idle pane; inspect the worker)"
       fm_wake_append stale "$w" "$reason" || exit 1
       fm_task_inbox_record_escalated "$STATE" "$task" "$rec"

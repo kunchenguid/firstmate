@@ -63,6 +63,7 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
+FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -106,6 +107,23 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
   printf '%03d' "$((max + 1))"
 }
 
+fm_task_inbox_lock_acquire() {  # <lock-path>
+  local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
+  local deadline probe
+  case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
+  probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
+  rm -f "$probe" || return 1
+  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+    fm_lock_try_create "$lock" && return 0
+    [ -e "$lock" ] || [ -L "$lock" ] || return 1
+  fi
+  deadline=$(( $(date +%s) + wait ))
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 0.1
+  done
+}
+
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
 fm_task_inbox_write() {  # <state-dir> <task-id> <text>
@@ -113,7 +131,7 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_task_inbox_lock_acquire "$lock" || return 1
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   if tmp=$(mktemp "$dir/.staging.XXXXXX"); then
