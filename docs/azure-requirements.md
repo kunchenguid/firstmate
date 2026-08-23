@@ -472,7 +472,7 @@ The two remedies were owner-owned: put a payment method on the subscription (the
 on file is charged instead of credits), or reach the model without Azure Marketplace. The owner
 took the second. This section exists so nobody re-litigates the Azure partner lane in three weeks.
 
-### The lane is a named registry, now serving GLM-5.2 direct from Fireworks (2026-08-20)
+### The lane is a named registry, now selecting GLM 5.2 Fast direct from Fireworks
 
 The owner opened a direct Fireworks account, which bypasses Azure Marketplace entirely, so GLM-5.2
 is the reviewer again on its merits rather than on what Azure would serve.
@@ -490,22 +490,23 @@ The registered lane:
 | field | value |
 |---|---|
 | provider slot | `fireworks-glm` |
-| model | `accounts/fireworks/models/glm-5p2` |
+| model selector | `accounts/fireworks/routers/glm-5p2-fast` |
 | endpoint | `https://api.fireworks.ai/inference/v1` (chat completions only) |
 | api | `openai-completions` |
 | pinned model-level compat | none |
-| declared cost | input 1.45, output 4.69 per MILLION tokens |
-| live check 2026-08-20 | HTTP 200, `finish_reason: stop`, streaming 1.56s with usage |
+| declared cost | input 2.10, cached input 0.21, output 6.60 per MILLION tokens |
+| provider serving contract | same GLM 5.2 model and quality, Fast path targeting more than 100 generated tokens/second |
 
-The PINNED model id, not the `accounts/fireworks/routers/glm-5p2-fast` router. The router is
-faster, but a router may re-point to a different serving variant, and the reviewer identity this
-gate records has to name an exact model. An unattributable reviewer is worth more than a few
-seconds. Latency is not the constraint on a multi-minute review.
+The selector is Fireworks' documented GLM 5.2 Fast serving path, not a generic model router chosen by policy at run time.
+Fireworks states that Fast is not a different model and that model quality remains the same: https://docs.fireworks.ai/serverless/serving-paths.
+The exact Fast selector is code-pinned and is therefore the reviewer identity the gate records.
+The final Pi terminal event must read back the same `fireworks-glm` provider and Fast selector before a verdict is accepted.
+The former Standard selector `accounts/fireworks/models/glm-5p2` remains readable only for durable records produced before this C1 change and is refused for every new roster entry.
 
-Reviewer identity binds the provider slot, the pinned host, and the model
-(`fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2`), and the recorded credential
-identifier is a digest of host + model + endpoint. Neither contains nor is derived from the api
-key: two credentials differing only in `apiKey` produce byte-identical identifiers.
+Reviewer identity binds the provider slot, the pinned host, and the Fast selector
+(`fireworks-glm:api.fireworks.ai/accounts/fireworks/routers/glm-5p2-fast`), and the recorded credential
+identifier is a digest of host + model + endpoint.
+Neither contains nor is derived from the api key: two credentials differing only in `apiKey` produce byte-identical identifiers.
 
 The Azure `azure-glm` slot, the `FW-GLM-5.2` deployment, and the two Azure R6 attempt deployments
 (`Kimi-K2.7-Code`, `DeepSeek-V4-Pro`) are retired. Nothing in the code or config points at them.
@@ -539,10 +540,10 @@ then parse as JSON against the review schema, which truncated output cannot. Bot
 tests, including an end-to-end case that emits a COMPLETE, schema-valid clear verdict with only the
 stop reason set to `length` and requires the run to record `tool-failure` with no citations.
 
-**The USD budget control is inert, and R10 must stop claiming it.** The declared cost is now real
-(1.45 / 4.69 per million; pi's unit convention is per million, confirmed in its own source at
-`@earendil-works/pi-ai/dist/models.js`, `usage.cost.input = (rates.input / 1000000) * usage.input`,
-so the owner-set values are correct as written). But `bin/fm-crosscheck.py` records no token usage
+**The USD budget control is inert, and R10 must stop claiming it.** The Fast selector's declared cost is
+2.10 input, 0.21 cached input, and 6.60 output per million tokens; pi's unit convention is per million, confirmed in its own source at
+`@earendil-works/pi-ai/dist/models.js`, `usage.cost.input = (rates.input / 1000000) * usage.input`.
+But `bin/fm-crosscheck.py` records no token usage
 at all: there is no `prompt_tokens`/`completion_tokens` handling anywhere in it, and the ledger
 reviewer record carries no usage or cost field. A `daily_budget_usd` control therefore has nothing
 to meter regardless of what the cost field says. Fixing that is not in this change; C3's daily
@@ -815,8 +816,8 @@ the end of a long session.
   per-review context cap actually SIZED to the serving model, does not exist:
   `MAX_LEDGER_PROMPT_BYTES` (64,000) and `MAX_PROJECTED_FINDINGS` (512) are fixed constants, and
   nothing reads the lane's declared `contextWindow`. This change does not re-size them.
-- A per-review spend meter. The provider slot declares real per-million costs (input 1.45, output
-  4.69) instead of the old slot's zeros, but that number lives in pi's own config and this change
+- A per-review spend meter. The provider slot declares the Fast selector's real per-million costs (input 2.10, cached input 0.21, output
+  6.60) instead of the old slot's zeros, but that number lives in pi's own config and this change
   does NOT make the crosscheck ledger's cost non-zero, because the ledger records no token usage at
   all. R10's `daily_budget_usd` therefore still has nothing to bind to.
 
@@ -862,7 +863,7 @@ Still owed, and honestly so:
   today is the local pi reviewer. The reason recorded here previously, that the `fm-ccm` image
   carries no `pi` binary and needs a rebake, is stale and is corrected below.
 - A spend signal for the primary reviewer, HALF closed and honestly so. The cost declaration is no
-  longer fake: the Fireworks lane declares input 1.45 and output 4.69 per million, and pi's unit
+  longer fake: the Fireworks Fast lane declares input 2.10, cached input 0.21, and output 6.60 per million, and pi's unit
   convention is per million (`@earendil-works/pi-ai/dist/models.js`:
   `usage.cost.input = (rates.input / 1000000) * usage.input`), so those values are correct as
   written. What is still missing is the meter. `bin/fm-crosscheck.py` records no token usage at
@@ -1073,120 +1074,51 @@ message.
 
 ## C1. Crosscheck completes in 20 to 30 minutes
 
-Status: INSTRUMENTED 2026-08-20; NOT MET.
-The instrumented local-lane readings are 35m33s and 44m25s, which sit ABOVE the 20-to-30-minute
-band rather than inside it. Accepted Azure review `azure-r4-respond-285` proves the compartment can
-complete, but this section does not record that run's compartment phase breakdown.
+Status: REMEDIATION IMPLEMENTED; LIVE ACCEPTANCE PENDING; NOT MET.
+C1 remains NOT MET until a fresh post-merge adversarial review from clean public `main` completes in 20 to 30 minutes and retains its phase breakdown.
+The two accepted baseline measurements remain misses: 35m33s and 44m25s total, with 99.7 percent and 99.6 percent respectively inside `reviewer`.
 
-What was measured, and what is inference.
+### Measured critical path
 
-**The 75 minutes has never been broken down.**
-That figure is the owner's stated premise of 2026-08-18 (see the requirement at the top of this
-document), not a measurement recorded anywhere in this repository; nothing in the repo records its
-provenance. Treat the 75 minutes as the target this requirement was written against, not as
-evidence.
-An earlier version of this paragraph also argued the figure could not have come from a compartment
-run on or after 2026-08-16, on the grounds that `docs/azure-crosscheck.md` recorded the lane as
-non-executable for want of a `pi` binary. That premise was false and has been corrected in that
-document: the current `fm-ccm` image does carry `pi`, and the lane is off because
-`$FM_HOME/config/crosscheck-azure.json` carries `"enabled": false`. The date argument is therefore
-withdrawn rather than restated. An accepted compartment run now exists, but its timing breakdown is
-not supplied in this section.
+The original 75-minute premise has no retained phase breakdown and is historical context only.
+The instrumented 35m33s and 44m25s local-lane runs are the relevant baseline because both carry `durations_ms`.
+They put effectively the whole clock inside the synchronous model reviewer rather than snapshot, proof execution, or ledger work.
+Warm Azure VMs, a faster Azure SKU, and additional lanes do not shorten that measured critical path: they affect compartment startup or concurrency, not one local reviewer's model turns.
+The family that produced those two historical readings was not retained, so this document does not manufacture an attribution for them.
 
-Inference, clearly labeled as such: the compartment lane is the only plausible owner of a duration
-that large, because it is the only lane that creates a model VM, stages a credential archive and
-request into blob storage, boots a Managed Run Command, and collects a digest-bound result. That
-reasoning is from the shape of the code, not from a timing. It is not proof. An explicit Azure run
-has now completed, but its phase breakdown is not supplied here; settling the 75-minute premise
-requires an accepted timing record rather than another inference from lane shape. Four parallel
-lanes
-(`FM_AZURE_CROSSCHECK_LANES`, default 4) always bounded concurrency, never one review's clock.
+At the exact code revision this remediation started from, the registered primary selector was `accounts/fireworks/models/glm-5p2` on the `fireworks-glm` custom Pi provider.
+The globally enabled Pi Fast Mode did not accelerate that reviewer.
+Crosscheck disables extensions, and the installed `pi-openai-fast-mode` package targets only OpenAI providers by injecting `service_tier: priority`.
+Fireworks documents Priority as peak-load reliability and Fast as a separate high-speed serving path, so an enabled generic toggle was configuration without effect on the exact serving reviewer.
 
-What is fact rather than inference is that the configured route changed: R6 registered GLM-5.2 as
-the primary reviewer through the LOCAL pi lane, whose execution path performs no create, boot,
-stage, or collect, while the compartment lane is disabled by default in the operator home. That
-routing fact alone did not establish that GLM completed; `azure-r4-respond-285` now does through the
-separate compartment path, without identifying the reviewer behind either local timing below.
-The compartment lane is disabled by `"enabled": false` in
-`$FM_HOME/config/crosscheck-azure.json`, which does exist and also names a current
-`model_image_id`; it is neither absent nor waiting on an image. Whether the route change is what
-moved the duration is again inference; none of the three candidate levers this requirement listed
-(warm reviewer VMs, a faster SKU, more lanes) was tried, so none of them was ruled out by
-measurement either.
+### Remediation
 
-Two local-lane runs have since been measured through this instrumentation, and they sit ABOVE the
-band rather than below it.
-Two runs recorded totals of 35m33s and 44m25s, with 99.7% and 99.6% of those totals respectively
-inside the `reviewer` phase, as recorded by the owner on 2026-08-21.
-That puts those two recorded reviews in the 35-to-45-minute range, with effectively their whole
-duration inside the reviewer call itself rather than in snapshot, proofs, or ledger work.
+New reviews now admit only Fireworks' documented GLM 5.2 Fast selector `accounts/fireworks/routers/glm-5p2-fast` at the same direct Fireworks chat-completions endpoint.
+Fireworks states that Fast is not a different model, keeps model quality unchanged, and targets more than 100 generated tokens per second: https://docs.fireworks.ai/serverless/serving-paths.
+The reasoning level remains `xhigh`, the complete exact-base/exact-head review stays intact, and every reproduction, mutation, ledger, family, fallback, and refusal contract is unchanged.
+The final Pi terminal event must report the exact `fireworks-glm` provider and Fast selector requested by the roster before its verdict is accepted.
+A terminal event reporting the former Standard selector, another provider, or no model identity becomes a tool failure.
+The same readback check runs in both the local Pi lane and the Azure model guest.
 
-An earlier reading of this section said the opposite, and it must not be relied on.
-It rested on one local-lane observation of 6m13s on 2026-08-20, pi-codex fallback family, PR #220,
-verdict clear, and concluded that the lane was faster than the band.
-That observation was an external wall-clock reading of the invocation taken before this
-instrumentation landed, so it carried no phase breakdown of its own, and it was one run rather than
-a distribution.
-The instrumented totals above supersede it.
+The former Standard selector remains readable only as historical provenance, including accepted local and Azure ledgers written before this change.
+It is not in the new-review allowlist and cannot silently continue serving from an old roster.
+The status read names the exact selector at roster entry one, so rollout can distinguish the Fast path from both the former Standard path and the Codex fallback before spending on acceptance.
 
-One operational consequence, because it bites on the first long review rather than later: the
-default reviewer timeout is 1800 seconds (`FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS`, defaulted in
-`bin/fm-crosscheck.py` and in `bin/fm-crosscheck-azure.py`), which is shorter than either measured
-review and would kill such a review outright.
-Operators run these reviews with `FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS=5400`, which is inside the
-30-to-7200-second range the setting accepts.
+The Fast selector is priced at 2.10 dollars per million input tokens, 0.21 dollars per million cached input tokens, and 6.60 dollars per million output tokens in Fireworks' current serverless pricing: https://docs.fireworks.ai/serverless/pricing.
+That is higher than Standard but remains bounded by the completion program's spend authority for one acceptance run and does not use `FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE`.
+Crosscheck still lacks a per-review token meter, so C3's existing guard and its recorded-spend caveat remain unchanged.
 
-What is now instrumented.
+### Instrumentation and acceptance still owed
 
-Every crosscheck run record carries `durations_ms`, integer milliseconds on `time.monotonic()`,
-covering `snapshot`, `reviewer`, `proofs`, `ledger`, and `total` for the local lane, plus `create`,
-`stage`, `boot`, and `collect` recorded only when the compartment lane performed them. A phase is
-present only if the run entered it, so an absent phase means the lane did not do that work rather
-than that the work was free. Phases never nest, named phases round down and `total` rounds up, so
-`total >= sum(named phases)` holds exactly and the difference is real unattributed time. The
-readable report and the run's own output name the total and the largest phases on one line, and
-`bin/fm-crosscheck.sh timings <task-id>` prints the full per-run table read-only, taking no lock.
-The field is additive: a run recorded before it existed still validates and renders, showing `-`
-rather than a fabricated zero. Contracts live in `docs/crosscheck.md` and `docs/azure-crosscheck.md`.
+Every run record retains integer-millisecond `durations_ms` measured with `time.monotonic()`.
+The local lane records `snapshot`, `reviewer`, `proofs`, `ledger`, and `total`.
+The compartment lane additionally records `create`, `stage`, `boot`, and `collect` only when that lane performed them.
+A missing phase means the work did not run rather than that it took zero time, and `bin/fm-crosscheck.sh timings <task-id>` remains the read-only table.
 
-Acceptance: a measured review completes in 20 to 30 minutes, with the breakdown recorded.
-
-Honest reading against that acceptance.
-The acceptance is not met, and the miss runs in the opposite direction to the one this section used
-to record: 35m33s and 44m25s are ABOVE the band, not below it.
-The breakdown side is met, because both readings carry their own `durations_ms` split and they
-attribute 99.7% and 99.6% of their totals to `reviewer`.
-Read as the outcome the band was standing in for, a review that is not about 75 minutes, the
-duration side is arguable rather than satisfied, since 44m25s is well under the owner's stated
-premise but is not the 20-to-30-minute result the requirement asks for.
-Closing the remaining gap means attacking the reviewer phase itself, because that is where
-essentially all of these two runs' time sits; the three levers this requirement originally listed
-(warm reviewer VMs, a faster SKU, more lanes) act on create, boot, and concurrency, none of which
-was on their measured critical path.
-
-The accepted compartment run's create, boot, stage, and collect numbers are not recorded in this
-section; they are not unmeasurable, and the earlier claim that they were, pending an image rebake,
-rested on a premise that has since been refuted. If the compartment lane becomes the serving
-default, C1 has to be measured against it, and the three original candidate levers become live
-again at that point.
-
-The contradiction this section previously flagged is resolved at the R6 acceptance boundary:
-R6 now reads DONE.
-Note the correction that comes with it, since this section discusses R6's reviewer routing.
-GLM-5.2 is the primary reviewer on the registered Fireworks lane, and at the point this section
-describes, the 6m13s reading of 2026-08-20, it had not produced an accepted cross-family review.
-The verdict behind that superseded reading came from the pi-codex fallback (2026-08-20, PR #220).
-The later accepted Azure GLM verdict `azure-r4-respond-285` completes R6's codex-model leg but does
-not identify the reviewer behind either instrumented timing above.
-That fallback is not a general serving lane: `config/crosscheck-same-model` is off, so it is
-eligible only for authors outside the codex family, and a codex-authored PR whose primary is
-unavailable fails closed rather than being reviewed by it. Eligibility does not establish that the
-fallback serves reviews today or that it served either instrumented reading above.
-Which lane and which family served the two instrumented readings above, 35m33s and 44m25s, is not
-established by anything R6 records, and this section does not assert it.
-The later `azure-r6-claude-acceptance` verdict satisfies the non-codex-model declaration leg and
-closes R6. Nothing in either accepted run identifies the reviewer behind the two instrumented C1
-timings, so R6 completion does not change this section's timing attribution or C1's NOT MET status.
+After this implementation lands on public `main`, the acceptance owner must update the operator roster and the dedicated `models.json` to the exact Fast selector and its current declared costs, then read `bin/fm-crosscheck.sh status` back before launch.
+The owner must run one real fresh adversarial review of a current exact PR head, retain the complete phase breakdown, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, and cross-family primary identity.
+Only a genuine 20-to-30-minute completion closes C1.
+A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NOT MET; the implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, reuses a verdict, or weakens a gate.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 

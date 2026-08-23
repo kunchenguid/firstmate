@@ -592,13 +592,18 @@ CROSS_FAMILY_LANE_API = "openai-completions"
 CROSS_FAMILY_LANES = {
     "fireworks-glm": {
         "slot": "fireworks-glm",
-        "model": "accounts/fireworks/models/glm-5p2",
+        "model": "accounts/fireworks/routers/glm-5p2-fast",
         "api": CROSS_FAMILY_LANE_API,
         "compat": {},
         "host": "api.fireworks.ai",
         "base_url": "https://api.fireworks.ai/inference/v1",
-        "family_aliases": frozenset({"glm5p2", "glm52", "glm5point2"}),
+        "family_aliases": frozenset(
+            {"glm5p2", "glm52", "glm5point2", "glm5p2fast"}
+        ),
     },
+}
+LEGACY_CROSS_FAMILY_MODELS = {
+    "accounts/fireworks/models/glm-5p2": "fireworks-glm",
 }
 
 HARNESS_PROVIDER_HOSTS = {
@@ -623,6 +628,26 @@ def cross_family_lane_for_model(reviewer_model: Any) -> dict[str, str] | None:
     for lane in CROSS_FAMILY_LANES.values():
         if candidate in (lane["model"], lane["slot"] + "/" + lane["model"]):
             return lane
+    return None
+
+
+def recorded_cross_family_lane_for_model(
+    reviewer_model: Any,
+) -> dict[str, str] | None:
+    """Resolve active plus historical models for durable ledger validation.
+
+    Live routing uses `cross_family_lane_for_model` and therefore admits only
+    the current Fast selector. The former Standard selector stays readable so
+    accepted Azure identity records do not become invalid after the C1 move.
+    """
+
+    lane = cross_family_lane_for_model(reviewer_model)
+    if lane is not None or not isinstance(reviewer_model, str):
+        return lane
+    candidate = reviewer_model.strip()
+    for legacy_model, slot in LEGACY_CROSS_FAMILY_MODELS.items():
+        if candidate in (legacy_model, slot + "/" + legacy_model):
+            return CROSS_FAMILY_LANES[slot]
     return None
 
 
@@ -2320,7 +2345,7 @@ def validate_azure_reviewer_record(
     if not re.fullmatch(r"[0-9a-f]{64}", identity["claims_sha256"]):
         raise RuntimeError(f"{label}.reviewer Azure claims digest is malformed")
     recorded_lane = (
-        cross_family_lane_for_model(identity["reviewer_model"])
+        recorded_cross_family_lane_for_model(identity["reviewer_model"])
         if identity["reviewer_harness"] == "pi"
         else None
     )

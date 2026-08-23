@@ -422,6 +422,7 @@ temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-pi.XXXXXX") || exit 70
 python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 71
 python3 - "$temporary" "${FM_TEST_PI_STOP_REASON:-stop}" <<'PY'
 import json
+import os
 import sys
 structured = json.load(open(sys.argv[1]))
 print(json.dumps({"type": "session", "version": 3, "id": "test-pi-session"}))
@@ -431,6 +432,8 @@ print(json.dumps({
     "type": "turn_end",
     "message": {
         "role": "assistant",
+        "provider": os.environ.get("FM_TEST_PI_EXPECT_PROVIDER", "openai-codex"),
+        "model": os.environ.get("FM_TEST_PI_EXPECT_MODEL", "gpt-5.6-sol"),
         "content": [{"type": "text", "text": json.dumps(structured)}],
         "stopReason": sys.argv[2],
     },
@@ -1039,12 +1042,12 @@ EOF
 write_cross_family_models_json() {
   local destination=$1 slot=$2 model=$3 api_key=${4:-test-lane-key}
   cat > "$destination" <<EOF
-{"providers":{"$slot":{"baseUrl":"https://api.fireworks.ai/inference/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"$model","name":"cross-family reviewer","reasoning":true,"input":["text"],"cost":{"input":1.45,"output":4.69,"cacheRead":0.0,"cacheWrite":0.0},"contextWindow":1000000,"maxTokens":32000}]}}}
+{"providers":{"$slot":{"baseUrl":"https://api.fireworks.ai/inference/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"$model","name":"cross-family reviewer","reasoning":true,"input":["text"],"cost":{"input":2.10,"output":6.60,"cacheRead":0.21,"cacheWrite":0.0},"contextWindow":1000000,"maxTokens":32000}]}}}
 EOF
 }
 
 select_cross_family_reviewer() {
-  local case_dir=$1 slot=${2:-fireworks-glm} model=${3:-accounts/fireworks/models/glm-5p2}
+  local case_dir=$1 slot=${2:-fireworks-glm} model=${3:-accounts/fireworks/routers/glm-5p2-fast}
   rm -f "$case_dir/pi-home/auth.json"
   write_cross_family_models_json "$case_dir/pi-home/models.json" "$slot" "$model"
   cat > "$case_dir/reviewer.json" <<EOF
@@ -1105,7 +1108,7 @@ cross_family_prompt = module.make_prompt(
     ledger,
     {
         "account_selector": "PI_CODING_AGENT_DIR",
-        "model": "accounts/fireworks/models/glm-5p2",
+        "model": "accounts/fireworks/routers/glm-5p2-fast",
     },
 )
 assert cross_family_prompt == pi_codex_prompt + addendum
@@ -1200,21 +1203,21 @@ test_status_reports_serving_family_relaxation_and_latest_run() {
     "$fallback/codex-home" "$fallback/data/task-fallback"
   cat > "$primary/home/config/crosscheck-reviewer.json" <<EOF
 {"reviewers":[
-  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$primary/lane-home"},
+  {"harness":"pi","model":"accounts/fireworks/routers/glm-5p2-fast","effort":"xhigh","account_home":"$primary/lane-home"},
   {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$primary/codex-home"}
 ]}
 EOF
   cat > "$fallback/home/config/crosscheck-reviewer.json" <<EOF
 {"reviewers":[
   {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$fallback/codex-home"},
-  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$fallback/lane-home"}
+  {"harness":"pi","model":"accounts/fireworks/routers/glm-5p2-fast","effort":"xhigh","account_home":"$fallback/lane-home"}
 ]}
 EOF
   printf 'off\n' > "$primary/home/config/crosscheck-same-model"
   printf 'on\n' > "$fallback/home/config/crosscheck-same-model"
   "$CROSSCHECK_PYTHON" - \
     "$primary/data/historical-directory-name/crosscheck-ledger.json" task-primary \
-    2026-08-21T10:00:00Z accounts/fireworks/models/glm-5p2 cross-family-primary \
+    2026-08-21T10:00:00Z accounts/fireworks/routers/glm-5p2-fast cross-family-primary \
     "$fallback/data/task-fallback/crosscheck-ledger.json" task-fallback \
     2026-08-21T11:00:00Z gpt-5.6-sol codex-fallback <<'PY'
 import json
@@ -1253,7 +1256,7 @@ PY
     FM_STATE_OVERRIDE="$state_path" \
     "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
     || fail "status refused the cross-family-serving fixture"
-  [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/models/glm-5p2, roster entry 1)
+  [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/routers/glm-5p2-fast, roster entry 1)
 crosscheck same-model relaxation: off
 crosscheck last review family: cross-family-primary (task-primary at 2026-08-21T10:00:00Z)" ] \
     || fail "cross-family-serving status was unexpected: $primary_out"
@@ -1307,7 +1310,7 @@ config_path = root / "reviewer.json"
 os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
 
 profiles = [
-    ("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home"),
+    ("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home"),
     ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
     ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
 ]
@@ -1342,7 +1345,7 @@ validation_author = {
     "account_home": str(homes["author-home"]),
 }
 expected_family = {
-    "accounts/fireworks/models/glm-5p2": "cross-family-primary",
+    "accounts/fireworks/routers/glm-5p2-fast": "cross-family-primary",
     "gpt-5.6-sol": "codex-fallback",
 }
 for harness, model, effort, home_name in profiles:
@@ -1368,7 +1371,7 @@ write_config(
 unlisted = expect_refused(validation_author, "must be")
 for accepted in (
     "codex gpt-5.6-sol xhigh",
-    "pi accounts/fireworks/models/glm-5p2 xhigh",
+    "pi accounts/fireworks/routers/glm-5p2-fast xhigh",
     "pi gpt-5.6-sol xhigh",
 ):
     assert accepted in unlisted, unlisted
@@ -1390,9 +1393,27 @@ write_config(
 )
 retired = expect_refused(
     validation_author,
-    "must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/models/glm-5p2 xhigh or pi gpt-5.6-sol xhigh",
+    "must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/routers/glm-5p2-fast xhigh or pi gpt-5.6-sol xhigh",
 )
 print(f"REFUSED retired claude profile: {retired}")
+
+# C1 changes the serving path, not the model family. The former Standard
+# selector remains readable in durable ledgers but must not launch a new run;
+# otherwise an operator roster left behind during rollout silently misses the
+# latency remediation while still claiming the primary family.
+write_config(
+    [
+        reviewer(
+            "pi",
+            "accounts/fireworks/models/glm-5p2",
+            "xhigh",
+            "lane-home",
+        )
+    ]
+)
+standard_path = expect_refused(validation_author, "must be")
+assert "accounts/fireworks/routers/glm-5p2-fast" in standard_path, standard_path
+print(f"REFUSED retired Standard serving path: {standard_path}")
 
 claude_author = {
     "harness": "claude",
@@ -1418,10 +1439,10 @@ for lane in module.CROSS_FAMILY_LANES.values():
 # family screen, and the provider-slot prefix pi records does not hide it.
 lane_author = {
     "harness": "pi",
-    "model": "fireworks-glm/accounts/fireworks/models/glm-5p2",
+    "model": "fireworks-glm/accounts/fireworks/routers/glm-5p2-fast",
     "account_home": str(homes["author-home"]),
 }
-write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
+write_config([reviewer("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home")])
 lane_same_model = expect_refused(lane_author, "outside the model family")
 print(f"REFUSED same-family cross-family reviewer: {lane_same_model}")
 
@@ -1437,7 +1458,7 @@ write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
 codex_family = expect_refused(older_codex_author, "outside the model family")
 print(f"REFUSED codex-family reviewer for a differently versioned codex author: {codex_family}")
 # The same author is admitted the cross-family lane, with no same-model mark.
-write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
+write_config([reviewer("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home")])
 selected = module.reviewer_candidates(root, older_codex_author)[0]
 assert "model_independence" not in selected, selected
 assert selected["review_family_mode"] == "cross-family-primary", selected
@@ -1802,6 +1823,48 @@ verdict, turn_count = module.pi_review_result(
 )
 assert verdict == {"verdict": "clear"}
 assert turn_count == 1
+
+# A launch flag is configuration, not serving evidence. The production call
+# requires Pi's terminal event to read back the exact provider and model; this
+# is what makes the Fast router visible on the review that actually completed.
+route_turn = assistant_turn(verdict_text, "stop")
+route_turn["message"].update(
+    {
+        "provider": "fireworks-glm",
+        "model": "accounts/fireworks/routers/glm-5p2-fast",
+    }
+)
+module.pi_review_result(
+    event_stream([route_turn]),
+    expected_provider="fireworks-glm",
+    expected_model="accounts/fireworks/routers/glm-5p2-fast",
+)
+for field, observed, expected, diagnostic in (
+    ("provider", "openai-codex", "fireworks-glm", "reported provider"),
+    (
+        "model",
+        "accounts/fireworks/models/glm-5p2",
+        "accounts/fireworks/routers/glm-5p2-fast",
+        "reported model",
+    ),
+):
+    wrong = assistant_turn(verdict_text, "stop")
+    wrong["message"].update(route_turn["message"])
+    wrong["message"][field] = observed
+    try:
+        module.pi_review_result(
+            event_stream([wrong]),
+            expected_provider=(expected if field == "provider" else "fireworks-glm"),
+            expected_model=(
+                expected
+                if field == "model"
+                else "accounts/fireworks/routers/glm-5p2-fast"
+            ),
+        )
+    except module.CrosscheckToolError as exc:
+        assert diagnostic in str(exc), (field, str(exc))
+    else:
+        raise AssertionError(f"Pi accepted a mismatched terminal {field}")
 
 expect_tool_failure(
     "stale final error",
@@ -2250,7 +2313,7 @@ test_missing_author_identity_reaches_normal_verdict() {
   IFS=$'\t' read -r case_dir base head <<< "$record"
   sed -i.bak \
     -e 's/harness=claude/harness=pi/' \
-    -e 's#model=claude-opus-5#model=fireworks-glm/accounts/fireworks/models/glm-5p2#' \
+    -e 's#model=claude-opus-5#model=fireworks-glm/accounts/fireworks/routers/glm-5p2-fast#' \
     -e '/^account_home=/d' \
     "$case_dir/state/task-x1.meta"
   rm "$case_dir/state/task-x1.meta.bak"
@@ -2289,7 +2352,7 @@ EOF
   expect_code 1 "$rc" "retired claude reviewer profile"
   assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed' \
     "$case_dir/err" "the retired claude profile was not refused at reviewer preflight"
-  assert_grep 'must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/models/glm-5p2 xhigh or pi gpt-5.6-sol xhigh' \
+  assert_grep 'must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/routers/glm-5p2-fast xhigh or pi gpt-5.6-sol xhigh' \
     "$case_dir/err" "the retired claude profile was not refused with the exact profile message"
   assert_absent "$case_dir/fakebin/claude" "Claude reviewer machinery was installed by the fixture"
   assert_absent "$case_dir/pi.log" "a reviewer launched despite the retired profile"
@@ -2377,7 +2440,7 @@ test_truncated_cross_family_verdict_is_never_a_verdict() {
   set +e
   FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
     FM_TEST_PI_EXPECT_PROVIDER=fireworks-glm \
-    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/models/glm-5p2 \
+    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/routers/glm-5p2-fast \
     FM_TEST_PI_STOP_REASON=length \
     run_case "$case_dir" "$base" "$head" clear run \
     > "$case_dir/out" 2> "$case_dir/err"
@@ -2483,9 +2546,17 @@ assert module.cross_family_lane_for_model("openai-codex-2/gpt-5.6-sol") is None
 assert module.cross_family_lane_for_model("glm-5p2") is None
 assert module.cross_family_lane_for_model("evil/models/glm-5p2") is None
 assert module.cross_family_lane_for_model(None) is None
+# Historical Standard-path records remain attributable to this family without
+# making their model selectable for a new review.
+legacy_model = "accounts/fireworks/models/glm-5p2"
+assert module.cross_family_lane_for_model(legacy_model) is None
+assert module.recorded_cross_family_lane_for_model(legacy_model) is LANE
+assert module.recorded_cross_family_lane_for_model(SLOT + "/" + legacy_model) is LANE
+assert module.model_family(legacy_model) == "cross-family:" + SLOT
+assert module.model_family(MODEL) == "cross-family:" + SLOT
 
 # Two credentials differing ONLY in api key must expose the identical
-# non-secret identifier: the binding is resource+deployment+endpoint and is
+# non-secret identifier: the binding is provider+model+endpoint and is
 # never derived from the key.
 first_key, second_key = "key-one-material", "key-two-material"
 source_one, identifier_one = module.inspect_pi_cross_family_credential(
@@ -2855,6 +2926,10 @@ def ledger_with(model, family):
 # Honest pairings load; the field also remains optional for older ledgers,
 # and the legacy glm-primary value stays readable for durable records.
 for model, family in (
+    ("accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
+    ("fireworks-glm/accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
+    # Accepted reviews from before C1 selected Fireworks' Standard path. They
+    # stay readable even though the roster can no longer launch that selector.
     ("accounts/fireworks/models/glm-5p2", "cross-family-primary"),
     ("fireworks-glm/accounts/fireworks/models/glm-5p2", "cross-family-primary"),
     ("FW-GLM-5.2", "glm-primary"),
@@ -2869,6 +2944,8 @@ for model, family in (
 for model, family in (
     ("gpt-5.6-sol", "cross-family-primary"),
     ("gpt-5.6-sol", "glm-primary"),
+    ("accounts/fireworks/routers/glm-5p2-fast", "codex-fallback"),
+    ("accounts/fireworks/routers/glm-5p2-fast", "glm-primary"),
     ("accounts/fireworks/models/glm-5p2", "codex-fallback"),
     ("accounts/fireworks/models/glm-5p2", "glm-primary"),
     ("FW-GLM-5.2", "cross-family-primary"),

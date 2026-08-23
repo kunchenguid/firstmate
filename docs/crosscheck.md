@@ -21,7 +21,7 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
   "reviewers": [
     {
       "harness": "pi",
-      "model": "accounts/fireworks/models/glm-5p2",
+      "model": "accounts/fireworks/routers/glm-5p2-fast",
       "effort": "xhigh",
       "account_home": "/absolute/path/to/the/cross-family/pi/agent/home"
     },
@@ -36,7 +36,14 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 ```
 
 Crosscheck resolves configured reviewer homes in order and keeps entries that satisfy its reviewer-profile and model policies.
-A registered cross-family lane is the primary review family (R6, docs/azure-requirements.md). `bin/fm-crosscheck.py` carries `CROSS_FAMILY_LANES`, a code-side registry of vetted reviewer lanes; each entry pins a model id, a Pi provider slot, the chat-completions api surface, the endpoint host, the one accepted base URL, and the exact model-level `compat` the credential may carry. Today's registry is the single lane `fireworks-glm` (`accounts/fireworks/models/glm-5p2`, GLM-5.2 direct from Fireworks). The roster picks the serving lane by naming the model, so substituting among registered lanes is a config change; admitting a new endpoint is a reviewed code change, because the allowlist is the control.
+A registered cross-family lane is the primary review family (R6, docs/azure-requirements.md).
+`bin/fm-crosscheck.py` carries `CROSS_FAMILY_LANES`, a code-side registry of vetted reviewer lanes.
+Each entry pins a model selector, a Pi provider slot, the chat-completions api surface, the endpoint host, the one accepted base URL, and the exact model-level `compat` the credential may carry.
+Today's registry is the single lane `fireworks-glm` using Fireworks' GLM 5.2 Fast selector `accounts/fireworks/routers/glm-5p2-fast`.
+Fireworks documents Fast as the same model at the same quality on a high-speed path targeting more than 100 generated tokens per second: https://docs.fireworks.ai/serverless/serving-paths.
+The roster picks the serving lane by naming the exact Fast selector, so substituting among registered lanes is a config change.
+Admitting a new endpoint stays a reviewed code change because the allowlist is the control.
+The former Standard selector `accounts/fireworks/models/glm-5p2` remains readable only in historical ledgers and is refused for every new roster entry.
 Each lane's credential is an api-key `models.json` in a dedicated Pi agent dir declaring exactly that lane's provider slot - never a codex `auth.json`, and never a second provider.
 Each lane's endpoint is an allowlist of exactly its registered base URL, today `https://api.fireworks.ai/inference/v1` (chat completions only; any other baseUrl, including a Responses API surface, is refused by name), and the recorded reviewer identity binds the provider slot + host + model - never the api key or anything derived from it.
 `compat` is the other model-level object pi honors, and some of its keys weaken this gate's own defenses (`supportsFinishReason: false` would blunt the truncated-verdict refusal), so the lane owns it exactly: the registered lane declares no compat, and a credential carrying any is refused.
@@ -59,6 +66,8 @@ Missing or failed Pi author-account capture therefore has no effect on reviewer 
 The former `config/crosscheck-legacy-author-admissions.json` path existed only to work around the removed author-identity refusal and is no longer read.
 
 Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
+For Pi, the terminal event must also report the exact provider slot and model selector that the roster requested.
+A run that reports the Standard GLM selector, another provider, or no model identity is a tool failure rather than a Fast-path verdict.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
 Pi is launched through the resolved installed executable at `xhigh` with JSON event output, an ephemeral session, and only the read and Bash-capable review tools; the model decides the provider slot through an explicit mapping derived from the lane registry (each registered model on its own slot, `gpt-5.6-sol` on `openai-codex`) that refuses an unmapped model rather than guessing.
@@ -80,7 +89,7 @@ Every candidate passed the configured reviewer-profile and model policy.
 Reviewer credential inspection still proves that the selected reviewer home can execute its configured client, but it makes no claim about the author.
 Model identity compares the model itself, not the recorded string: Pi records `<provider-slot>/<model>`, so `openai-codex-2/gpt-5.6-sol` is the same model as a Codex reviewer's plain `gpt-5.6-sol`.
 That canonical identity is screened out by default and is what marks a selected review as same-model when the explicit relaxation is on.
-The accepted profiles are Pi at xhigh on every registered cross-family model (today `accounts/fireworks/models/glm-5p2`) as the primary family, plus Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh as the loud degraded fallback family.
+The accepted profiles are Pi at xhigh on every registered cross-family model selector (today `accounts/fireworks/routers/glm-5p2-fast`) as the primary family, plus Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh as the loud degraded fallback family.
 Reviewer independence is compared on the model FAMILY, not the exact id, so a `gpt-5.5` author is not admitted a `gpt-5.6-sol` reviewer (finding cc-4dcd7873f71a); an unrecognized model remains its own family.
 Absent reviewer configuration, unavailable reviewer credentials, or model-policy mismatch produces `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
@@ -313,6 +322,9 @@ Later reviewers receive only a bounded projection of finding IDs, lifecycle stat
 Finding prose, reproduction output, test output, and lifecycle notes remain durable in the ledger but are never reinjected into a later reviewer prompt.
 The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, the same account-bound `HOME`, and the exact review checkout.
 The Pi path pins the roster model on its mapped provider (each registered cross-family model on its own slot, `gpt-5.6-sol` on `openai-codex`), xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
+The globally installed Pi Fast Mode toggle is not this lane's accelerator.
+Crosscheck disables extensions, and `pi-openai-fast-mode` targets only OpenAI providers by injecting `service_tier: priority`; it does not select Fireworks Fast and cannot affect the `fireworks-glm` custom provider.
+Fireworks documents Priority as peak-load reliability and Fast as the separate high-speed model selector, so a globally enabled toggle is configuration evidence for neither this reviewer nor C1.
 An unavailable reviewer binary, sandbox, reviewer credential binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
 A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A reviewer that never reached its provider is also a `tool-failure` rather than an `unreviewed` attempt, and is the case that fails over.

@@ -103,10 +103,10 @@ if "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != identity["cred
 # bin/fm-crosscheck.py: model -> (provider slot, pinned chat-completions
 # base URL, non-secret executing identity, pinned model-level compat).
 CROSS_FAMILY_LANES = {
-    "accounts/fireworks/models/glm-5p2": (
+    "accounts/fireworks/routers/glm-5p2-fast": (
         "fireworks-glm",
         "https://api.fireworks.ai/inference/v1",
-        "fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2",
+        "fireworks-glm:api.fireworks.ai/accounts/fireworks/routers/glm-5p2-fast",
         {},
     ),
 }
@@ -227,7 +227,7 @@ case "$HARNESS" in
     # runs on its own provider slot, the gpt fallback family stays on
     # openai-codex, and an unmapped model refuses rather than guessing.
     case "$MODEL" in
-      accounts/fireworks/models/glm-5p2) PI_PROVIDER=fireworks-glm ;;
+      accounts/fireworks/routers/glm-5p2-fast) PI_PROVIDER=fireworks-glm ;;
       gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
       *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;
     esac
@@ -335,12 +335,16 @@ def pi_verdict_body(final_text: str) -> str:
 # END PI_VERDICT_BODY_CONTRACT
 
 
+expected_provider = sys.argv[4] if len(sys.argv) == 6 else None
+expected_model = sys.argv[5] if len(sys.argv) == 6 else None
 turn_count = 0
 attempt_turn_count = 0
 agent_ended = False
 final_text = None
 final_stop_reason = None
 final_error = None
+final_provider = None
+final_model = None
 for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
     if not line.strip():
         continue
@@ -363,8 +367,16 @@ for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines
         final_text = None
         final_stop_reason = None
         final_error = None
+        final_provider = None
+        final_model = None
         message = event.get("message")
         if isinstance(message, dict) and message.get("role") == "assistant":
+            provider = message.get("provider")
+            if isinstance(provider, str):
+                final_provider = provider
+            model = message.get("model")
+            if isinstance(model, str):
+                final_model = model
             stop_reason = message.get("stopReason")
             if isinstance(stop_reason, str):
                 final_stop_reason = stop_reason
@@ -406,6 +418,8 @@ for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines
         final_text = None
         final_stop_reason = None
         final_error = None
+        final_provider = None
+        final_model = None
 if turn_count == 0:
     fail("model guest: Pi completed without executing a turn")
 if not agent_ended:
@@ -417,6 +431,16 @@ if final_stop_reason != "stop":
         "model guest: Pi final assistant turn did not stop successfully: "
         f"stopReason={final_stop_reason!r}"
         + (f": {final_error[:500]!r}" if final_error else "")
+    )
+if expected_provider is not None and final_provider != expected_provider:
+    fail(
+        "model guest: Pi final assistant turn reported provider "
+        f"{final_provider!r}, expected {expected_provider!r}"
+    )
+if expected_model is not None and final_model != expected_model:
+    fail(
+        "model guest: Pi final assistant turn reported model "
+        f"{final_model!r}, expected {expected_model!r}"
     )
 if final_text is None or not final_text.strip():
     fail(
@@ -472,7 +496,8 @@ PY
       exit "$PI_FIRST_COMMAND_STATUS"
     fi
     PI_PARSE_STATUS=0
-    parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" || PI_PARSE_STATUS=$?
+    parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" \
+      "$PI_PROVIDER" "$MODEL" || PI_PARSE_STATUS=$?
     if [ "$PI_PARSE_STATUS" -eq 0 ]; then
       rm -f "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
     elif [ "$PI_PARSE_STATUS" -ne "$PI_RETRYABLE_ARTIFACT_STATUS" ]; then
@@ -511,7 +536,8 @@ Return exactly one JSON object satisfying the complete outer schema at the end o
         exit 125
       fi
       PI_PARSE_STATUS=0
-      parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" || PI_PARSE_STATUS=$?
+      parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" \
+        "$PI_PROVIDER" "$MODEL" || PI_PARSE_STATUS=$?
       if [ "$PI_PARSE_STATUS" -ne 0 ]; then
         PI_SECOND_DIAGNOSTIC=$(head -c 1024 "$PI_DIAGNOSTIC")
         rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"

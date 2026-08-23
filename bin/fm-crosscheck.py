@@ -53,21 +53,21 @@ SEVERITIES = {"blocking", "high", "medium", "low"}
 LEGACY_AUTHOR_ADMISSION_MODE = "legacy-author-admission"
 
 # R6 (docs/azure-requirements.md): the primary Crosscheck reviewer family is a
-# NAMED cross-family lane served from the fleet's own Azure AI Foundry resource
-# and driven by Pi through a custom provider. Authors run on the OpenAI family,
+# NAMED cross-family lane served by the direct Fireworks endpoint and driven by
+# Pi through a custom provider. Authors run on the OpenAI family,
 # so any lane below is outside it, which is what R6 actually requires; no
 # single partner model is baked into the gate.
 #
 # Every registered lane is a complete, code-reviewed ENDPOINT ALLOWLIST entry:
-# the deployment name, the Pi provider slot, the chat-completions api surface,
-# the Foundry resource, and the ONE accepted base URL. Substituting the serving
+# the model selector, the Pi provider slot, the chat-completions api surface,
+# the provider host, and the ONE accepted base URL. Substituting the serving
 # lane among registered lanes is a config change (the roster names the model);
 # admitting a NEW endpoint stays a reviewed code change on purpose, because the
 # allowlist is the security control - a credential file must never be able to
 # introduce an endpoint the policy never named.
 #
-# The reviewer identity binds the Foundry resource + deployment, never the api
-# key or anything derived from it.
+# The reviewer identity binds the provider slot + endpoint + exact model
+# selector, never the api key or anything derived from it.
 CROSS_FAMILY_LANE_API = "openai-completions"
 # pi's OpenAI-completions client honors two MODEL-LEVEL knobs that outrank the
 # provider level: `baseUrl`/`api` (dist/api provider composer) and the per-model
@@ -84,13 +84,15 @@ CROSS_FAMILY_LANES = {
     # direct bypasses Azure Marketplace. The evidence and citation are in
     # docs/azure-requirements.md R6.
     #
-    # The pinned model id, not the `accounts/fireworks/routers/glm-5p2-fast`
-    # router: a router may re-point to a different serving variant, and the
-    # reviewer identity this gate records has to name an exact model. Router
-    # latency is not worth an unattributable reviewer.
+    # Fireworks' documented GLM 5.2 Fast serving path. The provider states
+    # that this is the same GLM 5.2 model at the same quality, served through
+    # a high-speed path targeting 100+ generated tokens/second. The gate pins
+    # the exact Fast selector, rather than treating an ambient Pi `--fast`
+    # toggle as evidence: pi-openai-fast-mode targets only OpenAI providers
+    # and cannot affect this custom Fireworks provider.
     "fireworks-glm": {
         "slot": "fireworks-glm",
-        "model": "accounts/fireworks/models/glm-5p2",
+        "model": "accounts/fireworks/routers/glm-5p2-fast",
         "api": CROSS_FAMILY_LANE_API,
         "compat": {},
         "host": "api.fireworks.ai",
@@ -110,8 +112,17 @@ CROSS_FAMILY_LANES = {
         # because `allowed_profiles` accepts only registered models, so the
         # gap costs a refusal rather than a same-family review. Extend the set
         # when a lane's model gains a spelling the fleet actually authors on.
-        "family_aliases": frozenset({"glm5p2", "glm52", "glm5point2"}),
+        "family_aliases": frozenset(
+            {"glm5p2", "glm52", "glm5point2", "glm5p2fast"}
+        ),
     },
+}
+# Durable records made before the C1 Fast serving-path change remain readable,
+# but these selectors are never admitted for a new review. Keeping that split
+# explicit prevents a timing migration from bricking an exact-head ledger or
+# silently leaving the former Standard path eligible.
+LEGACY_CROSS_FAMILY_MODELS = {
+    "accounts/fireworks/models/glm-5p2": "fireworks-glm",
 }
 # The model decides the Pi provider slot. An unmapped model is refused rather
 # than guessed, so a roster typo can never route a review to a provider the
@@ -504,7 +515,7 @@ def account_identity(harness: str, account_home: Path) -> str:
 
     The returned string never carries token material: Codex and Pi expose
     explicit upstream account ids. The api-key cross-family lanes never reach
-    this reader - their identity is the non-secret Foundry resource/deployment
+    this reader - their identity is the non-secret provider/endpoint/model
     binding (`cross_family_account_identity`), because an api key names no
     upstream account.
     """
@@ -676,7 +687,7 @@ def cross_family_lane_for_model(model: Any) -> dict[str, str] | None:
     Matching is EXACT against the lane's model id, or against the
     `<provider-slot>/<model>` form pi records. It is deliberately not a suffix
     or `model_identity` comparison: a lane model id can itself contain slashes
-    (`accounts/fireworks/models/glm-5p2`), so a loose rule would either miss
+    (`accounts/fireworks/routers/glm-5p2-fast`), so a loose rule would either miss
     the lane or admit an unrelated model that happens to end the same way.
 
     A model outside CROSS_FAMILY_LANES is not a cross-family reviewer: it is
@@ -691,6 +702,25 @@ def cross_family_lane_for_model(model: Any) -> dict[str, str] | None:
     for lane in CROSS_FAMILY_LANES.values():
         if candidate in (lane["model"], lane["slot"] + "/" + lane["model"]):
             return lane
+    return None
+
+
+def recorded_cross_family_lane_for_model(model: Any) -> dict[str, str] | None:
+    """Return the active or historical lane for durable provenance reads.
+
+    New reviewer selection must use `cross_family_lane_for_model`, which
+    recognizes only the current Fast selector. This compatibility reader is
+    deliberately limited to model-family and ledger validation so an accepted
+    Standard-path record stays readable without making that path launchable.
+    """
+
+    lane = cross_family_lane_for_model(model)
+    if lane is not None or not isinstance(model, str):
+        return lane
+    candidate = model.strip()
+    for legacy_model, slot in LEGACY_CROSS_FAMILY_MODELS.items():
+        if candidate in (legacy_model, slot + "/" + legacy_model):
+            return CROSS_FAMILY_LANES[slot]
     return None
 
 
@@ -709,7 +739,7 @@ def model_family(model: Any) -> str:
     `<provider-slot>/<model>`, so the SAME lane model reached through some
     other author-side slot must not read as a different family. Matching only
     the registry's own slot let exactly that through - a
-    `some-slot/accounts/fireworks/models/glm-5p2` author was admitted the
+    `some-slot/accounts/fireworks/routers/glm-5p2-fast` author was admitted the
     `fireworks-glm` reviewer with no relaxation and no degraded marker
     (cc-5ec330d3c74d). Any model whose final segment matches a lane's final
     segment is now that lane's family. An unrelated model that happens to end
@@ -717,7 +747,7 @@ def model_family(model: Any) -> str:
     the direction that fails closed.
     """
 
-    exact = cross_family_lane_for_model(model)
+    exact = recorded_cross_family_lane_for_model(model)
     if exact is not None:
         return "cross-family:" + exact["slot"]
     identity = model_identity(model if isinstance(model, str) else "")
@@ -770,7 +800,7 @@ def inspect_pi_cross_family_credential(
     The endpoint is an allowlist of exactly the lane's registered base URL
     (chat completions only; any configuration reaching for a Responses API
     surface is refused). The returned credential identifier is a non-secret
-    binding of the Foundry resource + deployment + pinned endpoint; it neither
+    binding of the provider slot + model selector + pinned endpoint; it neither
     contains nor is derived from the api key.
 
     The lane comes from the code-side registry, never from the credential
@@ -3112,7 +3142,7 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 #                            no new run can claim it
                 #   codex-fallback        -> neither of the above
                 reviewer_model = reviewer.get("model")
-                lane = cross_family_lane_for_model(reviewer_model)
+                lane = recorded_cross_family_lane_for_model(reviewer_model)
                 is_legacy_glm = (
                     isinstance(reviewer_model, str)
                     and model_identity(reviewer_model)
@@ -3336,7 +3366,7 @@ def reviewer_roster(home: Path) -> list[dict[str, str]]:
         isinstance(reviewers, list) and reviewers,
         "reviewer configuration.reviewers must be a nonempty array",
     )
-    # R6: a registered cross-family lane on the fleet's own Foundry resource is
+    # R6: a registered cross-family lane on the direct Fireworks endpoint is
     # the PRIMARY review family. The pi-codex/codex profiles remain only as the
     # dormant fallback lane; selecting one is recorded as a degraded mode in
     # the ledger and announced loudly at run time. The interim claude reviewer
@@ -3841,13 +3871,20 @@ def pi_verdict_body(final_text: str) -> str:
 # END PI_VERDICT_BODY_CONTRACT
 
 
-def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
+def pi_review_result(
+    output: str,
+    *,
+    expected_provider: str | None = None,
+    expected_model: str | None = None,
+) -> tuple[dict[str, Any], int]:
     turn_count = 0
     attempt_turn_count = 0
     agent_ended = False
     final_text: str | None = None
     final_stop_reason: str | None = None
     final_error: str | None = None
+    final_provider: str | None = None
+    final_model: str | None = None
     for line_number, line in enumerate(output.splitlines(), start=1):
         if not line.strip():
             continue
@@ -3876,8 +3913,16 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             final_text = None
             final_stop_reason = None
             final_error = None
+            final_provider = None
+            final_model = None
             message = event.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
+                provider = message.get("provider")
+                if isinstance(provider, str):
+                    final_provider = provider
+                model = message.get("model")
+                if isinstance(model, str):
+                    final_model = model
                 stop_reason = message.get("stopReason")
                 if isinstance(stop_reason, str):
                     final_stop_reason = stop_reason
@@ -3921,6 +3966,8 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             final_text = None
             final_stop_reason = None
             final_error = None
+            final_provider = None
+            final_model = None
     if turn_count == 0:
         tool_fail("Pi reviewer completed without executing a turn")
     if not agent_ended:
@@ -3932,6 +3979,16 @@ def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
             "Pi reviewer final assistant turn did not stop successfully: "
             f"stopReason={final_stop_reason!r}"
             + (f": {final_error[:500]}" if final_error else "")
+        )
+    if expected_provider is not None and final_provider != expected_provider:
+        tool_fail(
+            "Pi reviewer final assistant turn reported provider "
+            f"{final_provider!r}, expected {expected_provider!r}"
+        )
+    if expected_model is not None and final_model != expected_model:
+        tool_fail(
+            "Pi reviewer final assistant turn reported model "
+            f"{final_model!r}, expected {expected_model!r}"
         )
     if final_text is None or not final_text.strip():
         tool_fail("Pi reviewer completed without a verdict artifact")
@@ -4155,7 +4212,11 @@ def run_reviewer(
                 f"Pi reviewer exited {result.returncode} without an earned verdict: "
                 f"{detail[:500] or 'no diagnostic'}"
             )
-        verdict, turn_count = pi_review_result(result.stdout)
+        verdict, turn_count = pi_review_result(
+            result.stdout,
+            expected_provider=pi_provider_for_model(config["model"]),
+            expected_model=config["model"],
+        )
         config["reviewer_turn_count"] = str(turn_count)
         return verdict
 
