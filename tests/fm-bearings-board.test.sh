@@ -13,6 +13,14 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+find_chrome() {
+  local candidate
+  for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+    command -v "$candidate" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
@@ -226,6 +234,63 @@ test_build_injects_binds_then_arms() {
   pass "build injects the payload, binds any-origin, then arms the source"
 }
 
+test_rendered_truncated_text_has_full_native_tooltips() {
+  local home data board chrome dom marker escaped
+  chrome=$(find_chrome) || { printf '%s\n' "skip: Chrome or Chromium not found for rendered tooltip assertions"; return; }
+  home=$(make_home tooltips)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  marker='Long & exact "captain-facing" value <must stay text> '
+  write_valid_payload "$data"
+  jq --arg marker "$marker" '
+    .captains_call[0].repo = ($marker + "decision repo") |
+    .captains_call[1].pr_url = "https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" |
+    .underway = [{
+      "id": ($marker + "underway id"),
+      "repo": "",
+      "kind": "ship",
+      "state": ($marker + "working badge"),
+      "doing": ($marker + "underway title")
+    }] |
+    .landed = [{
+      "id": ($marker + "landed id"),
+      "repo": "",
+      "what": ($marker + "landed title"),
+      "owner": ($marker + "landed owner"),
+      "pr_url": "https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review"
+    }] |
+    .charted[0].repo = "" |
+    .charted[0].id = ($marker + "charted id") |
+    .charted[0].title = ($marker + "charted title") |
+    .charted[0].reason = ($marker + "charted reason")
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null || fail "the long-text tooltip board did not build"
+  "$chrome" --headless --disable-gpu --no-sandbox --dump-dom "file://$board" > "$home/dom.html" 2>/dev/null \
+    || fail "Chrome could not render the long-text tooltip board"
+  dom="$home/dom.html"
+
+  for escaped in \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; decision repo' \
+    'https://github.com/example/sample/pull/12345678901234567890?view=full&amp;mode=review' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; working badge' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; underway title' \
+    'ship · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; underway id' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed title' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed id · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed owner' \
+    'https://github.com/example/sample/pull/98765432109876543210?view=full&amp;mode=review' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted title' \
+    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted reason · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted id'; do
+    grep -Fq "title=\"$escaped\"" "$dom" \
+      || fail "the rendered board omitted or altered a full native tooltip: $escaped"
+  done
+  grep -Fq '&lt;must stay text&gt;' "$dom" \
+    || fail "the tooltip payload was not HTML-escaped in the rendered board"
+  ! grep -Fq '<must stay text>' "$dom" \
+    || fail "the tooltip payload became live markup in the rendered board"
+  pass "rendered truncation-prone text exposes exact escaped native tooltips"
+}
+
 test_registration_cannot_consume_before_any_origin_binding() {
   local home data runtime origin key hold board sid show
   home=$(make_home order-proof)
@@ -373,6 +438,7 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
+test_rendered_truncated_text_has_full_native_tooltips
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm

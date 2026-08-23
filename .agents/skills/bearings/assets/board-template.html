@@ -434,7 +434,12 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.textContent = text;
     return n;
   }
-  function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  function titledEl(tag, cls, text) {
+    var n = el(tag, cls, text);
+    n.title = text;
+    return n;
+  }
+  function badge(tone, text) { return titledEl("span", "fm-badge fm-badge--" + tone, text); }
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
@@ -477,7 +482,7 @@ __FM_BEARINGS_BOARD_DATA__
       top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
     } else {
       top.appendChild(badge("solid", "decision"));
-      top.appendChild(el("span", "bb-decision__repo", item.repo));
+      top.appendChild(titledEl("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
 
@@ -486,7 +491,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
       if (item.pr_url) {
-        var pr = el("a", "bb-decision__link", item.pr_url);
+        var pr = titledEl("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
         pad.appendChild(pr);
       }
@@ -607,10 +612,10 @@ __FM_BEARINGS_BOARD_DATA__
     var row = el("div", "bb-row");
     row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.doing));
+    main.appendChild(titledEl("div", "bb-row__title", t.doing));
     /* captain-facing rows name the repo; the internal task id shows only when
        no repo is known */
-    main.appendChild(el("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
+    main.appendChild(titledEl("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
   });
@@ -624,8 +629,8 @@ __FM_BEARINGS_BOARD_DATA__
     chk.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
     row.appendChild(chk);
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.what));
-    main.appendChild(el("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
+    main.appendChild(titledEl("div", "bb-row__title", t.what));
+    main.appendChild(titledEl("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
     row.appendChild(main);
     if (t.pr_url) {
       var a = el("a", "bb-row__pr", "#" + t.pr_url.split("/").pop());
@@ -672,10 +677,10 @@ __FM_BEARINGS_BOARD_DATA__
       row.appendChild(el("span", "bb-pick-spacer"));
     }
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.title));
+    main.appendChild(titledEl("div", "bb-row__title", t.title));
     /* second line keeps the title uncrowded in the half-width column */
     var chSub = t.repo || t.id;
-    main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
+    main.appendChild(titledEl("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
     row.appendChild(main);
     if (t.reason) row.appendChild(badge("warn", "waiting"));
     ch.appendChild(row);
