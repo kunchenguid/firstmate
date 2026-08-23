@@ -99,7 +99,8 @@
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
-#                                   the watcher is mid-cycle (default 15)
+#                                   the watcher is mid-cycle, and the idle sleep
+#                                   after a non-wake watcher line (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
 #          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
@@ -1560,7 +1561,7 @@ fm_super_main() {
       start_watcher || continue
     fi
 
-    # --- one housekeeping tick (gated to HOUSEKEEPING_TICK), then poll -------
+    # --- one housekeeping tick (gated to FM_HOUSEKEEPING_TICK), then poll ----
     # The watcher child runs on its own FM_POLL cadence internally; we only need
     # to detect its exit (the kill -0 above) promptly and run housekeeping often
     # enough that batch flushes, stale rechecks, and the catch-all scan fire on
