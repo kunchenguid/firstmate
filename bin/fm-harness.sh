@@ -50,6 +50,15 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # Pi (oh-my-pi) engine binary is `omp`. It appears only in Pi sessions, so an
+  # omp process anywhere in the ancestry is authoritative Pi and must outrank any
+  # foreign CLAUDECODE marker leaked into the pane (the precedence hazard above).
+  omp_pid=$$
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    [ "$(ps -o comm= -p "$omp_pid" 2>/dev/null)" = "omp" ] && { echo pi; return; }
+    omp_pid=$(ps -o ppid= -p "$omp_pid" 2>/dev/null | tr -d ' ')
+    [ -n "$omp_pid" ] && [ "$omp_pid" -gt 1 ] || break
+  done
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -94,7 +103,7 @@ detect_own() {
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
+      pi|omp) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
