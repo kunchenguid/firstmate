@@ -4,8 +4,9 @@
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
 # is absorbed only when the crew shows it is still working through an actively
-# running no-mistakes step or a backend busy signal. A bare turn-end may also use
-# pane churn since the previous poll. Every other no-verb wake surfaces, so a crew
+# running no-mistakes step or a backend busy signal. A home that opts in with
+# config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
+# since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
@@ -92,6 +93,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -171,6 +173,9 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
+                                      # bare turn-ends may be deferred on pane-churn
+                                      # evidence alone (signal_turnend_panes_churned)
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -181,8 +186,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
 # running no-mistakes step or a busy pane via crew_is_provably_working over
-# fm-crew-state.sh; a bare turn-end alone may also use pane churn since the previous
-# poll. Every other crew that stopped its turn is SURFACED, so a finish reported
+# fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
+# may also use bounded pane churn since the previous poll.
+# Every other crew that stopped its turn is SURFACED, so a finish reported
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
@@ -383,8 +389,14 @@ inbox_steer_check() {  # <window> <task>
 
 # 0 (benign/absorb) if EVERY file in a "signal:" wake is a BARE turn-end marker
 # whose task's pane content CHANGED since the previous poll; 1 otherwise. This is
-# the third form of positive work evidence behind the signal-block triage, after
-# an actively-running pipeline step and an affirmatively busy pane.
+# an OPT-IN third form of positive work evidence behind the signal-block triage,
+# after an actively-running pipeline step and an affirmatively busy pane.
+#
+# OFF unless the home creates config/turnend-churn-absorb. The first two proofs
+# read a verdict the harness itself vouches for; this one infers execution from
+# rendered bytes, which is weaker, so widening the absorb is a home's choice to
+# make rather than a default every fleet inherits. With the flag absent this
+# returns 1 immediately and triage behaves exactly as it did before.
 #
 # It exists because the first two are unreachable for a harness whose semantic
 # busy state has no verified source: bin/fm-crew-state.sh can only answer unknown
@@ -398,19 +410,30 @@ inbox_steer_check() {  # <window> <task>
 # liveness: this compares a fresh capture against the .hash- marker that backbone
 # recorded on the previous poll, which is why the derivation lives here with the
 # marker format rather than in the shared classifier. Absorbing here DEFERS a wake
-# rather than swallowing it - a crew that stopped renders nothing more, so its pane
-# hash stops moving and the same backbone surfaces it within a couple of polls,
-# while any captain-relevant status verb still surfaces immediately through
-# signal_reason_is_actionable. That is also why this widens the proof instead of
+# rather than swallowing it, and the deferral is BOUNDED: a task's turn-ends may
+# ride churn evidence for at most FM_TURNEND_CHURN_ABSORB_SECS, tracked per window
+# in .churn-since-, after which the wake surfaces and the window restarts. The
+# bound is what keeps churn from muting supervision outright. A pane that renders
+# continuously - a clock, a spinner, a shell heartbeat, a harness that leaves a
+# background renderer alive after its agent yields - never presents the two
+# identical consecutive hashes the staleness backbone needs either, so without the
+# bound a worker that had genuinely stopped behind such a renderer would be
+# deferred here forever with no fallback path left to surface it. Churn and
+# staleness read the same pane, so neither can be the other's only backstop.
+# Within the bound, an ordinary crew that stops renders nothing more, its pane
+# hash stops moving, and the staleness backbone surfaces it within a couple of
+# polls; any captain-relevant status verb still surfaces immediately through
+# signal_reason_is_actionable. That is why this widens the proof instead of
 # bounding the wake rate, which would have suppressed genuinely stopped workers.
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
-# before: a secondmate, an unresolvable task, a task with no recorded endpoint,
-# an ambiguous marker key, no previous hash to compare against (nothing has
-# been polled yet), a capture that fails or comes back empty, and of course an
-# unchanged pane. A .status file anywhere in the batch also returns 1: an authored
-# append is content the supervisor may need to read, so only the mechanical
-# turn-end marker gets this fallback.
+# before: the flag being absent, a secondmate, an unresolvable task, a task with
+# no recorded endpoint, an ambiguous marker key, no previous hash to compare
+# against (nothing has been polled yet), a capture that fails or comes back empty,
+# an exhausted deferral bound, and of course an unchanged pane. A .status file
+# anywhere in the batch also returns 1: an authored append is content the
+# supervisor may need to read, so only the mechanical turn-end marker gets this
+# fallback.
 #
 # NOT a pure read: one bounded pane capture per referenced task. Once EVERY task
 # passes, its prior .stale- classification is cleared because churn begins a new
@@ -420,8 +443,9 @@ inbox_steer_check() {  # <window> <task>
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  local f base task meta kind w key other matches prev now seen=""
+  local f base task meta kind w key other matches prev now since now_s seen=""
   local -a churned_keys=()
+  [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   [ "$#" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
@@ -453,6 +477,21 @@ signal_turnend_panes_churned() {  # <file> ...
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
+  done
+  # Enforce the deferral bound BEFORE any .stale- state is touched, so a wake that
+  # surfaces here leaves the staleness backbone's own classification alone.
+  now_s=$(date +%s)
+  for key in "${churned_keys[@]}"; do
+    since=$(cat "$STATE/.churn-since-$key" 2>/dev/null || true)
+    case "$since" in
+      ''|*[!0-9]*) printf '%s' "$now_s" > "$STATE/.churn-since-$key" ;;
+      *)
+        if [ "$((now_s - since))" -ge "$TURNEND_CHURN_ABSORB_SECS" ]; then
+          rm -f "$STATE/.churn-since-$key"
+          return 1
+        fi
+        ;;
+    esac
   done
   for key in "${churned_keys[@]}"; do
     rm -f "$STATE/.stale-$key" || return 1
@@ -1515,11 +1554,13 @@ EOF
     #     (even via an interactive menu that wrote no done: status), waiting on a
     #     decision, or wedged. Absorbing such a turn-end is exactly the
     #     swallowed-finish this change guards against.
-    # Positive evidence is either an authoritative provably-working verdict or, for
-    # a BARE turn-end alone, a pane that rendered something since the previous poll
+    # Positive evidence is either an authoritative provably-working verdict or, in a
+    # home that opts in with config/turnend-churn-absorb and for a BARE turn-end
+    # alone, a pane that rendered something since the previous poll
     # (signal_turnend_panes_churned) - the only proof available to a harness whose
-    # busy state has no verified semantic source. Absorb stays evidence-driven: with
-    # neither proof the wake surfaces exactly as before.
+    # busy state has no verified semantic source, bounded so it cannot defer that
+    # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
+    # wake surfaces exactly as before.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew is still executing) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. Both evidence

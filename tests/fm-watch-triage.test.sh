@@ -759,6 +759,17 @@ test_turn_ended_not_working_surfaced() {
 # churning pane is benign. The pane going quiet afterwards is still caught by that
 # backbone, which is why this widens the proof rather than bounding the wake rate.
 
+# The pane-churn turn-end absorb is opt-in per home, so every case that exercises
+# it (whether it expects an absorb or one of the guards that must still surface)
+# points the watcher at a case-local config dir holding the flag. A case that must
+# NOT have it points at an empty one, so no developer's real config can leak in.
+churn_config() {  # <dir> [off]
+  local cfg="$1/config"
+  mkdir -p "$cfg"
+  [ "${2:-}" = off ] || : > "$cfg/turnend-churn-absorb"
+  printf '%s\n' "$cfg"
+}
+
 # Wait until the watcher records an absorbed wake matching <needle> in its triage
 # log. 1 if the watcher exits first (i.e. it surfaced the wake instead), which is
 # exactly the unfixed behavior this case exists to catch. Polls the log rather
@@ -794,6 +805,7 @@ test_turn_ended_churning_pane_absorbed() {
   # A slow poll leaves the first cycle's absorb assertion many ticks clear of the
   # stale backbone, which this static fixture pane would otherwise reach.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -801,6 +813,8 @@ test_turn_ended_churning_pane_absorbed() {
     || { reap "$pid"; fail "a bare turn-end from a churning pane was not absorbed: $(cat "$out")"; }
   [ ! -s "$out" ] || fail "an absorbed churning-pane turn-end printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "an absorbed churning-pane turn-end enqueued a durable wake record"
+  [ -s "$state/.churn-since-$key" ] \
+    || { reap "$pid"; fail "an absorbed churning-pane turn-end did not open a bounded deferral window"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
@@ -823,6 +837,7 @@ test_turn_ended_churn_resets_prior_stale_classification() {
   date +%s > "$state/.stale-since-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -869,6 +884,7 @@ test_turn_ended_still_pane_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -895,6 +911,7 @@ test_turn_ended_malformed_prior_hash_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -922,6 +939,7 @@ test_secondmate_turn_ended_churning_pane_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -950,6 +968,7 @@ test_turn_ended_colliding_window_key_surfaced() {
   printf '0\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -962,6 +981,79 @@ test_turn_ended_colliding_window_key_surfaced() {
     || fail "ambiguous-marker turn-end was not queued"
   unset FM_FAKE_CREW_STATE
   pass "a turn-end whose marker key matches another recorded endpoint surfaces"
+}
+
+# The opt-in half. Pane churn infers execution from rendered bytes rather than
+# from a verdict the harness vouches for, so a home that has not asked for it must
+# see exactly the pre-change triage: the same churning fixture that absorbs above
+# surfaces here purely because the flag is absent.
+test_turn_ended_churn_absorb_off_by_default() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-churn-default-off); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexdefault"
+  : > "$state/codexdefault.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexdefault.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir" off)" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without the opt-in flag"
+  grep -F "signal: $state/codexdefault.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced default-off churning turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the default-off churning turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexdefault.turn-ended" >/dev/null \
+    || fail "default-off churning turn-end was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "the default-off path opened a bounded deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "pane-churn turn-end absorb is off until a home opts in"
+}
+
+# The bound. Churn and pane staleness read the same pane, so a pane that renders
+# continuously (a clock, a spinner, a harness that leaves a background renderer
+# alive after its agent yields) never reaches the staleness backbone's two
+# identical hashes either. Without a bound on the churn absorb a worker that had
+# genuinely stopped behind such a renderer would have no path left to surface at
+# all, so an exhausted deferral window must surface and restart.
+test_turn_ended_churn_absorb_bounded() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-churn-bounded); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexclock"
+  : > "$state/codexclock.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexclock.meta"
+  printf 'a background renderer that never stops' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous frame')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  # This endpoint has already been riding churn evidence longer than the bound.
+  printf '%s' "$(( $(date +%s) - 600 ))" > "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_TURNEND_CHURN_ABSORB_SECS=60 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a perpetually churning pane deferred its turn-end past the absorb bound"
+  grep -F "signal: $state/codexclock.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end surfaced by the exhausted absorb bound"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the bounded churn turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexclock.turn-ended" >/dev/null \
+    || fail "the turn-end surfaced by the exhausted absorb bound was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "an exhausted deferral window was not restarted after surfacing"
+  unset FM_FAKE_CREW_STATE
+  pass "a perpetually churning pane surfaces once its bounded deferral window is spent"
 }
 
 test_working_note_not_working_surfaced() {
@@ -3352,6 +3444,8 @@ test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
+test_turn_ended_churn_absorb_off_by_default
+test_turn_ended_churn_absorb_bounded
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
