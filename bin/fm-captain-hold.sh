@@ -644,11 +644,12 @@ command_retire_duplicate() {
   surviving_show=$(task_show "$surviving" 2>/dev/null) \
     || fail "surviving task $surviving does not exist in $FM_HOME/data/backlog.md; name the real surviving call"
   # tasks-axi keeps hold_kind through a close, so this is the same surviving
-  # proof `answer`'s repair path already trusts for the real captain call.
+  # proof `answer`'s repair path already trusts for the real captain call; a
+  # released answer clears hold_kind, so a recorded resolution also counts.
   surviving_hold_kind=$(show_field_value "$surviving_show" hold_kind)
-  [ "$surviving_hold_kind" = captain ] \
-    || fail "surviving task $surviving was never a captain call; name the real surviving call"
   surviving_body=$(show_field "$surviving_show" body)
+  [ "$surviving_hold_kind" = captain ] || body_has_resolution_record "$surviving_body" \
+    || fail "surviving task $surviving was never a captain call; name the real surviving call"
   if body_has_duplicate_retirement_record "$surviving_body"; then
     fail "surviving task $surviving was itself retired as a duplicate of $(recorded_surviving_task "$surviving_body" || echo unknown); name that task as the real surviving call instead"
   fi
