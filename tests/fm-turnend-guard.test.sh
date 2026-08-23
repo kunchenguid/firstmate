@@ -219,6 +219,15 @@ record_watcher_lock() {
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
+# Simulates bin/fm-supervise-daemon.sh's own lock, the away-mode sub-supervisor
+# that tears the watcher down and relaunches it on every actionable wake.
+record_daemon_lock() {
+  local dir=$1 pid=$2 identity=$3
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$dir/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$dir/state/.supervise-daemon.lock/pid-identity"
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -1608,6 +1617,99 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
   pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
 }
 
+# Regression for the 2026-08-22 false positive (data/learnings.md): the daemon
+# tears its watcher down and relaunches it on every actionable wake and after a
+# bounded crash-loop backoff, so state/.watch.lock is routinely and briefly
+# dead or genuinely unheld between watcher generations even while the daemon
+# and its beacon are perfectly healthy. A live identity-matched daemon lock
+# with a fresh beacon must satisfy the guard exactly like a live watcher lock.
+test_hook_claude_mode_allows_when_afk_daemon_owns_recovery() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-afk-daemon-owns")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  record_daemon_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # state/.watch.lock itself stays absent: the watcher is genuinely between
+  # generations, the exact benign gap the daemon is actively closing.
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude must allow when a live afk daemon owns recovery, even with no watcher lock"
+  [ -z "$out" ] || fail "--claude produced output despite a live daemon-owned recovery: $out"
+  pass "fm-turnend-guard --claude: a live afk daemon with a fresh beacon satisfies the guard with no watcher lock"
+}
+
+test_hook_default_mode_allows_when_afk_daemon_owns_recovery() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-default-afk-daemon-owns")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  record_daemon_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "default mode must allow when a live afk daemon owns recovery, even with no watcher lock"
+  [ -z "$out" ] || fail "default mode produced output despite a live daemon-owned recovery: $out"
+  pass "fm-turnend-guard: a live afk daemon with a fresh beacon satisfies the default-mode guard too"
+}
+
+# Daemon-ownership tolerance must not paper over a genuine outage: a dead
+# daemon lock (the daemon itself crashed, not merely mid-restart) still blocks.
+test_hook_claude_mode_blocks_when_afk_daemon_is_dead() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-afk-daemon-dead")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  dead=$(nonexistent_pid)
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "--claude must still block when the afk daemon lock is dead despite a fresh beacon"
+  assert_contains "$out" 'Away mode owns watcher supervision' "afk block reason lost its daemon ownership guidance"
+  pass "fm-turnend-guard --claude: a dead afk daemon lock does not satisfy the guard"
+}
+
+# Nor may it paper over a genuine wedge: a live daemon with an ancient beacon
+# (the daemon itself is up but supervision has not ticked in a long time)
+# still blocks.
+test_hook_claude_mode_blocks_when_afk_daemon_beacon_is_stale() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-afk-daemon-stale")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  record_daemon_lock "$dir" "$pid" "$identity"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "--claude must still block when a live afk daemon has an ancient beacon"
+  assert_contains "$out" 'Away mode owns watcher supervision' "afk block reason lost its daemon ownership guidance"
+  pass "fm-turnend-guard --claude: a live afk daemon with an ancient beacon does not satisfy the guard"
+}
+
 test_hook_claude_mode_allow_resets_budget() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset")
@@ -1742,6 +1844,10 @@ test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
+test_hook_claude_mode_allows_when_afk_daemon_owns_recovery
+test_hook_default_mode_allows_when_afk_daemon_owns_recovery
+test_hook_claude_mode_blocks_when_afk_daemon_is_dead
+test_hook_claude_mode_blocks_when_afk_daemon_beacon_is_stale
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

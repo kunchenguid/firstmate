@@ -171,6 +171,20 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
+# Away mode tears the watcher down and relaunches it on every actionable wake
+# and after a bounded crash-loop backoff (bin/fm-supervise-daemon.sh), so
+# state/.watch.lock is routinely and briefly unheld or stale between watcher
+# generations even while the daemon and its beacon are healthy. The strict
+# fm_watcher_healthy check above cannot tell that benign hand-off apart from a
+# genuinely abandoned watcher, so a live identity-matched daemon with a fresh
+# beacon is accepted here as an alternate liveness proof, mirroring the Pi
+# extension model's own hand-off tolerance (fm_pi_extension_owns_supervision).
+if fm_afk_daemon_owns_supervision "$STATE" "$GRACE"; then
+  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  fm_failure_episode_reset "$STATE" && exit 0
+  exit 2
+fi
+
 block_stop() {
   local afk x_mode reason rule
   afk=0
