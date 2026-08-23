@@ -118,6 +118,37 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
   rm -rf "$root"
 }
 
+unit_usage_prints_complete_header() {
+  local st help declared name
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-usage.XXXXXX")
+  mkdir -p "$st/state"
+  help=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" --help 2>&1)
+  # Every subcommand the header's Usage block declares must survive in the
+  # printed help, so a hard-coded line range that truncates the header is caught
+  # the moment the last declared entry is cut off.
+  declared=$(grep -oE '^#   fm-afk-launch.sh [a-z-]+' "$LAUNCH" | awk '{print $3}')
+  [ -n "$declared" ] || fail "usage: no declared subcommands parsed from header"
+  for name in $declared; do
+    if printf '%s\n' "$help" | grep -Fq "fm-afk-launch.sh $name"; then
+      pass "usage: declared subcommand '$name' present in --help"
+    else
+      fail "usage: declared subcommand '$name' missing from --help (truncated header)"
+    fi
+  done
+  # The concrete regression: the stop entry ends whole and reconcile is present.
+  if printf '%s\n' "$help" | grep -Fq 'id, then clear state/.afk last.'; then
+    pass "usage: stop entry complete"
+  else
+    fail "usage: stop entry truncated"
+  fi
+  if printf '%s\n' "$help" | grep -Fq 'fm-afk-launch.sh reconcile'; then
+    pass "usage: reconcile entry present"
+  else
+    fail "usage: reconcile entry missing"
+  fi
+  rm -rf "$st"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 2: a FRESH entry clears; a REFRESH (daemon already alive) preserves the
 # current session's buffered escalations.
@@ -925,6 +956,7 @@ e2e_tmux() {
 
 unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
+unit_usage_prints_complete_header
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid

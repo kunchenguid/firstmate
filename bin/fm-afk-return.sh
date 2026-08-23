@@ -29,7 +29,11 @@ GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 
 usage() {
-  sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "${BASH_SOURCE[0]}"
 }
 
 clean_field() {

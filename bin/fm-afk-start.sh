@@ -43,7 +43,11 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "${BASH_SOURCE[0]}"
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
