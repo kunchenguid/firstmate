@@ -1396,7 +1396,7 @@ def provision_owner_decision(env, cell, signer_source, source_commit, expected_v
         bounded_regular_file(paths["tool"], "owner-decision signer", 0o500, 512 * 1024**2)
         isolated = {
             "HOME": str(paths["root"]),
-            "NO_MISTAKES_HOME": str(paths["root"] / "no-mistakes-home"),
+            "NM_HOME": str(paths["root"] / "no-mistakes-home"),
             "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
         }
         version = run([str(paths["tool"]), "--version"], timeout=30, env=isolated).stdout.strip()
@@ -4297,7 +4297,7 @@ def go_json_bytes(value):
 def owner_signer_environment(root):
     return {
         "HOME": str(root),
-        "NO_MISTAKES_HOME": str(root / "no-mistakes-home"),
+        "NM_HOME": str(root / "no-mistakes-home"),
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     }
 

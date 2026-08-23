@@ -847,7 +847,7 @@ fi
 ENV_FILE=$STATE/cell.env
 {
   printf 'HOME=%s\n' "$HOME_DIR"
-  printf 'NO_MISTAKES_HOME=%s\n' "$NM_HOME"
+  printf 'NM_HOME=%s\n' "$NM_HOME"
   printf 'XDG_CACHE_HOME=%s\n' "$CACHE"
   printf 'TMPDIR=%s\n' "$TMP"
   printf 'FM_AZURE_VALIDATION_CELL=1\n'
