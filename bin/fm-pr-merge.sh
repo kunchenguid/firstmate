@@ -6,6 +6,11 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
+# On a successful merge, this is one of the two places (with
+# bin/fm-merge-local.sh) that stamps the durable provenance record
+# bin/fm-merge-attribution-lib.sh and bin/fm-merge-attribution.sh own; see
+# those for the attribution contract.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # GitLab adds no method flag at all: its merge method is the project's own
@@ -43,6 +48,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+# shellcheck source=bin/fm-merge-attribution-lib.sh
+. "$SCRIPT_DIR/fm-merge-attribution-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -251,7 +258,22 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
+    # Read live, right before merging, exactly like the GitLab head below: the
+    # head this run is about to merge, not whatever fm-pr-check.sh happened to
+    # resolve whenever the poll was last armed. Absent gh, or an unreadable
+    # head, is not a merge failure - it only means this merge cannot be stamped
+    # with provenance and will read as unattributed afterwards.
+    GH_MERGE_HEAD=
+    if command -v gh > /dev/null 2>&1; then
+      GH_MERGE_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2> /dev/null) || GH_MERGE_HEAD=
+    fi
     gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    if fm_pr_head_valid "$GH_MERGE_HEAD"; then
+      fm_merge_prov_write "$STATE" "$ID" pr-github github "$URL" "$GH_MERGE_HEAD" \
+        || echo "warning: merge succeeded but its provenance record could not be written; it will read as unattributed" >&2
+    else
+      echo "warning: merge succeeded but no head commit could be read for its provenance record; it will read as unattributed" >&2
+    fi
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
@@ -261,6 +283,8 @@ case "$PROVIDER" in
     # the conditions above are what authorize the merge.
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
+    fm_merge_prov_write "$STATE" "$ID" pr-gitlab gitlab "$URL" "$FM_PR_MERGE_HEAD" \
+      || echo "warning: merge succeeded but its provenance record could not be written; it will read as unattributed" >&2
     ;;
   *)
     echo "error: invalid PR merge request" >&2
