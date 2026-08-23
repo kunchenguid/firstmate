@@ -914,3 +914,35 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
+
+## Pi worker footer
+
+Pi's own footer already renders the working directory, the branch, context consumed against its ceiling, tokens exchanged, and the model, and firstmate reproduces none of them.
+The Ollama Cloud reserve rides beside them as a separate keyed entry, verified on 2026-08-20 against Pi 0.84.2 on macOS.
+
+Two facts carry the guarantee, and both are harness-dependent because Pi renders them:
+
+- `ctx.ui.setStatus(key, text)` APPENDS a line below Pi's own footer lines instead of replacing them.
+  A live pane with a fresh probe reading rendered three footer lines, the first two produced entirely by Pi:
+
+  ```
+  /private/tmp/.../wt (e2e)
+  0.0%/0 (auto)                                                        unknown
+  olla 85%
+  ```
+
+- An extension launched from outside the worktree through an explicit `-e` path loads its helper module from the code root by absolute path, with no project-trust dialog.
+  The pane's startup banner listed the extension under `[Extensions]` and reached the composer unprompted.
+
+Both were driven with the extension `bin/fm-spawn.sh` actually generates, not a hand-written stand-in, and the same run left `state/<id>.busy-state` carrying its spawn seed, so the reserve segment does not displace the busy-state wiring.
+An absent probe file and a reading stamped three hours earlier each rendered `olla ?` in the same live pane.
+
+The reserve is read from the private `srv-ollama-usage-watch` probe's `state/ollama-usage.json`; firstmate never measures that quota a second time.
+`quota-axi` does not model this provider, which is why the probe exists.
+
+The portable regression is `tests/fm-pi-ollama-reserve.test.sh`, which runs the real `fm-spawn` and drives the generated artifact in a plain Node host, pinning the reserve logic everywhere.
+Refresh this harness-dependent proof with the env-gated live guard before accepting a Pi upgrade, since only Pi decides where a status entry lands:
+
+```sh
+FM_PI_FOOTER_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-footer-live-e2e.test.sh
+```

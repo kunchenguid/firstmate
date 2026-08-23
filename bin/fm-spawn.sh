@@ -154,8 +154,9 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state, turn-end,
+#                  and Ollama-reserve footer extension, written by this script; outside
+#                  the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -2428,7 +2429,12 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
+// The footer also carries an Ollama Cloud reserve segment. Pi's own footer
+// already renders cwd, branch, context, tokens, and model; ctx.ui.setStatus
+// APPENDS a keyed line below those without reproducing any of them, so this
+// adds the one number Pi cannot know and rewrites nothing.
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -2436,13 +2442,69 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
+// Reserve rendering is owned by .pi/extensions/lib/fm-ollama-reserve.ts. It is
+// imported LAZILY and defensively: a footer nicety must never stop the
+// safety-critical busy-state and turn-end wiring above from registering, which
+// a failed top-level import would do.
+const RESERVE_PROBE = "$STATE_REAL/ollama-usage.json";
+const RESERVE_REFRESH_MS = 60000;
+let reserveLib: Promise<any> | null = null;
+let reserveText: string | null = null;
+let reserveCtx: any = null;
+let reserveTimer: any = null;
+const renderReserve = async (ctx: any) => {
+  if (ctx && ctx.ui && typeof ctx.ui.setStatus === "function") reserveCtx = ctx;
+  if (!reserveCtx) return;
+  // One shared promise, so concurrent events await the same load instead of
+  // racing it, and a failed load resolves to null rather than rejecting.
+  if (!reserveLib) {
+    reserveLib = import("$FM_ROOT/.pi/extensions/lib/fm-ollama-reserve.ts").catch(() => null);
+  }
+  const lib = await reserveLib;
+  if (!lib) return;
+  try {
+    const reserve = lib.readOllamaReserve(
+      (probe: string) => readFileSync(probe, "utf8"),
+      RESERVE_PROBE,
+      Date.now(),
+    );
+    const text = lib.formatOllamaReserve(reserve);
+    // Only publish on change, so the periodic refresh below costs no redraw.
+    if (text === reserveText) return;
+    reserveText = text;
+    reserveCtx.ui.setStatus(lib.OLLAMA_RESERVE_STATUS_KEY, text);
+  } catch {
+    // A footer segment must never break a turn.
+  }
+};
 export default function (pi: any) {
-  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_start", (_event: any, ctx: any) => {
+    void renderReserve(ctx);
+    return busyEvent("busy", "agent-start");
+  });
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", (_event: any, ctx: any) => {
+    void renderReserve(ctx);
+    execFile("touch", ["$TURNEND"]);
+  });
+  pi.on("session_start", (_event: any, ctx: any) => {
+    // A replacement session (/new, /resume, fork) clears Pi's extension-status
+    // store while reusing this loaded module, so the cached text must be
+    // dropped or the publish-on-change guard would skip the emptied store.
+    reserveText = null;
+    void renderReserve(ctx);
+    // A worker can idle for hours; without this the last reading would stay on
+    // screen past its shelf life and read as current. Unref'd so the segment
+    // can never hold the session open, and armed once so a restored session
+    // does not stack timers.
+    if (!reserveTimer) {
+      reserveTimer = setInterval(() => void renderReserve(null), RESERVE_REFRESH_MS);
+      if (typeof reserveTimer.unref === "function") reserveTimer.unref();
+    }
+  });
 }
 EOF
       ;;
