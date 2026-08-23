@@ -129,27 +129,19 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 ## Worktree pool sweep (config/worktree-pool-sweep)
 
-The optional local `config/worktree-pool-sweep` file enables the pre-acquire worktree pool safety sweep.
-When present and non-empty (any value other than `off`), the sweep is activated.
+The optional local, gitignored `config/worktree-pool-sweep` file enables the pre-acquire worktree pool safety sweep, which is shipped deactivated.
+A missing file, an empty file, or the value `off` leaves the sweep inert and acquisition unchanged; any other non-empty value activates it.
 `config/` resolves the same way as for every other script - `FM_CONFIG_OVERRIDE` when set, otherwise `$FM_HOME/config` - so the enable is per firstmate home, and `bin/fm-spawn.sh` passes its own resolved config dir down to the sweep.
-The sweep inspects pooled worktrees before a spawn uses them and refuses when unsafe state is observed.
 
-The sweep checks two conditions and refuses on either:
+When active, `bin/fm-spawn.sh` runs `bin/fm-treehouse-pool-sweep.sh` against the pooled worktree before the spawn uses it and refuses on either unsafe condition:
+
 - Dirty worktree: tracked modifications, staged changes, or untracked non-ignored files.
-- HEAD contains commits not reachable from an approved durable ref: local branches (`refs/heads/*`), tags (`refs/tags/*`), or rescue refs (`refs/firstmate/rescue/*`).
+- HEAD contains commits not reachable from an approved durable ref: local branches (`refs/heads/*`), tags (`refs/tags/*`), or rescue refs (`refs/firstmate/rescue/*`). Reflogs are not refs, so a commit reachable only from a reflog is unreferenced.
 
-Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
+A refusal aborts the spawn with an error naming the worktree, the sweep exit code, and this config file; the exit codes and the remote-tracking-ref reachability rules are owned by `bin/fm-treehouse-pool-sweep.sh`'s header (`bin/fm-treehouse-pool-sweep.sh --help`).
 
-`bin/fm-treehouse-pool-sweep.sh` reports its verdict through its exit code: `0` safe (or sweep disabled), `1` dirty, `2` HEAD not reachable from durable refs, `3` HEAD covered only by remote-tracking refs, `4` worktree does not exist, `64` usage error.
-
-For `refs/remotes/*`: they are counted for reachability so an ordinary freshly-checked-out pool worktree is not falsely refused, but the case where HEAD's commits are covered ONLY by remote-tracking refs (and no local head or tag) is classified as unsafe.
-
-This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant.
-Two structural gaps this mitigation cannot close:
-1. A direct `treehouse get` by anything other than firstmate bypasses the sweep.
-2. Another firstmate home can race between sweep and acquire.
-
-The sweep is currently disabled by default. Two live lanes hold pooled worktrees and must not be disturbed until they are free.
+This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant that no consumer can reuse an unsafe worktree.
+Two structural gaps it cannot close: a direct `treehouse get` by anything other than firstmate bypasses the sweep, and another firstmate home can race between sweep and acquire.
 
 ## Gate defaults (.no-mistakes.yaml)
 
