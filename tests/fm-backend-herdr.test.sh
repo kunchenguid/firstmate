@@ -4548,6 +4548,7 @@ wait_for_beat_advance() {  # <beat-file> <from-mtime> <timeout-secs>
 }
 
 FM_HERDR_WATCHER_PIDS=()
+FM_HERDR_WATCHER_LAST_PID=
 
 # quiet_fleet_watcher_setup <dir>: scratch state holding one busy herdr ship
 # window (a working agent keeps the watcher inside its poll loop instead of
@@ -4584,13 +4585,25 @@ quiet_fleet_watcher_setup() {  # <dir>
 }
 
 # launch_quiet_fleet_watcher <dir> <stdout-file> <stderr-file>: backgrounds the
-# REAL bin/fm-watch.sh as a direct child (the caller reads $!), tracked for the
-# suite's kill-on-exit cleanup below.
+# REAL bin/fm-watch.sh as a direct child, then learns its pid from the lock the
+# watcher itself takes ($state/.watch.lock/pid - the same pid a second
+# invocation's "already running" line names). Exposed in
+# FM_HERDR_WATCHER_LAST_PID and tracked for the suite's kill-on-exit cleanup
+# below.
 launch_quiet_fleet_watcher() {  # <dir> <stdout-file> <stderr-file>
+  local state="$1/state" pid deadline=$(( $(date +%s) + 20 ))
   quiet_fleet_watcher_setup "$1"
   PATH="$FM_HERDR_WATCHER_FAKEBIN:$PATH" \
     env "${FM_HERDR_WATCHER_ENV[@]}" "$ROOT/bin/fm-watch.sh" > "$2" 2> "$3" &
-  FM_HERDR_WATCHER_PIDS+=("$!")
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$pid" ] && break
+    sleep 0.2
+  done
+  [ -n "$pid" ] \
+    || fail "watcher never took its lock (out: $(tail -5 "$2" 2>/dev/null); err: $(tail -5 "$3" 2>/dev/null))"
+  FM_HERDR_WATCHER_PIDS+=("$pid")
+  FM_HERDR_WATCHER_LAST_PID=$pid
 }
 
 # run_quiet_fleet_watcher_once: one foreground bin/fm-watch.sh invocation with
@@ -4633,7 +4646,7 @@ test_watcher_beats_through_saturated_event_waits() {
   out="$dir/watch.out"; err="$dir/watch.err"
   beat="$state/.last-watcher-beat"
   launch_quiet_fleet_watcher "$dir" "$out" "$err"
-  wpid=$!
+  wpid=$FM_HERDR_WATCHER_LAST_PID
   wait_for_watcher_beat "$state" 15 \
     || fail "watcher never touched its beat (out: $(tail -5 "$out" 2>/dev/null); err: $(tail -5 "$err" 2>/dev/null))"
   m1=$(herdr_test_stat_mtime "$beat")
@@ -4662,7 +4675,7 @@ test_second_watcher_invocation_refuses_cleanly_on_fresh_beat() {
   dir="$TMP_ROOT/watcher-restart-refuse"; state="$dir/state"
   out="$dir/watch.out"; err="$dir/watch.err"
   launch_quiet_fleet_watcher "$dir" "$out" "$err"
-  wpid=$!
+  wpid=$FM_HERDR_WATCHER_LAST_PID
   wait_for_watcher_beat "$state" 15 \
     || fail "singleton watcher never touched its beat (err: $(tail -5 "$err" 2>/dev/null))"
   m1=$(herdr_test_stat_mtime "$state/.last-watcher-beat")
