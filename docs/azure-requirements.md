@@ -56,33 +56,55 @@ Status: DONE.
 
 `config/spawn-cloud=azure` is set and accepted by `bin/fm-spawn.sh`'s own parser, and a crewmate
 has been created, staged, and executed in Azure with exit 0.
-No crewmate has returned an outcome, which is R9 rather than a residual of this item.
-Placement is still single-profile; multi-profile placement is R5.
+Crewmates now return outcomes, which the earlier revision of this line recorded as outstanding.
+On 2026-08-22 the compartment child `azaccept-cf242c626` (task generation
+`spawn:a73823d99b3cab33`, assignment `asg-00000019`) returned exit 0, `timed_out false`, result
+digest `1f238e42...`, and an outcome bundle of one commit
+(`60-frozen-child-worker-result.json`); the two ordinary crewmates
+`r5-accept-readme-v3-20260822` (`asg-00000020`) and `r5-accept-package-v3-20260822`
+(`asg-00000021`) each returned exit 0, `timed_out false`, and `outcome_commits 0` for their
+read-only briefs. Evidence and paths are in R2/R3 and R5.
+Placement across distinct upstream accounts is R5, and is now proven live there.
 
 ## R2/R3. Secondmates run in Azure, and can spawn crewmates in Azure
 
-Status: NOT DONE, and the current build refuses it.
+Status: DONE, met live on 2026-08-22.
 
-`docs/azure-workers.md` states that a worker never runs Firstmate, a secondmate, another
-supervisor, or a nested team, and `bin/fm-spawn.sh` states that secondmate and account-recovery
-spawns always stay local.
+Acceptance: a secondmate running on an Azure worker requests a crewmate worker, the controller
+creates it, the crewmate completes a task, and both release cleanly.
 
-The fear behind that rule is sound: a worker must not be able to create unbounded child compute.
+The compact tracked record is [`docs/evidence/azure-live-acceptance-2026-08-22/evidence.json`](evidence/azure-live-acceptance-2026-08-22/evidence.json), derived from frozen manifest revision 12 at the SHA-256 recorded in `frozen_manifest.sha256`.
+Its [README](evidence/azure-live-acceptance-2026-08-22/README.md) maps claims to field paths and gives reproducible frozen-digest and authenticated live-ref checks.
+
+- Parent compartment: task `azaccept`, task generation `spawn:a632e0aaaa34a6ff`, assignment `asg-00000018` on slot 1 with its exact account-binding digest (`simultaneous_assignments[0]`).
+- It emitted child request `7970c2936d499c8525bbb1a91adddba7a3452afd3182be257c225995fea25c29` (sequence 2, `child_kind` `ship`, `child_request`) into the controller's durable outbox, and the controller created the child worker.
+- Child: task `azaccept-cf242c626`, task generation `spawn:a73823d99b3cab33`, assignment `asg-00000019` on slot 2 with its exact account-binding digest (`simultaneous_assignments[1]`).
+- The child completed its documentation brief: exit 0, `timed_out false`, result digest `1f238e423056b6193f80e826638a1aa19158dac4997c10af457defc9842ddff3`, outcome bundle `7e812cd519426a7e5990244c28eda033bf98be510f18e013b51a12270f39edb3` carrying one commit (`executions[0]`).
+- That commit is live on origin: `refs/heads/fm-child/azaccept-cf242c626-20260822` at `818e018d8dbb7b8d5bccae2b1d93192364533d1b`, with the frozen heads digest and authenticated exact-ref-line digest in `origin`.
+- The compartment then ended terminal: monitor status `closed`, `legs_completed: 1`, verified chain tip at sequence 7 (`parent_monitor`).
+- Both released cleanly (`release_proofs[0]` and `release_proofs[1]`).
+  Each `fm.worker-release/v2` record contains the complete `account`, `endpoint`, `landing`, `report`, and `worktree` authority map, with every verdict `proved` and every evidence and receipt digest retained.
+- Aftercare proves the 60 enumerated acceptance resources absent, zero provider workers, zero active specialized reservations, zero regional worker vCPUs, zero VMs, and no assigned controller queue entry (`post_reset`).
+  The final verifier string is retained exactly at `post_reset.final_verifier`.
+
+History, kept because the defect and its correction are what this section was written for.
+`docs/azure-workers.md` stated that a worker never runs Firstmate, a secondmate, another
+supervisor, or a nested team, and `bin/fm-spawn.sh` stated that secondmate and account-recovery
+spawns always stay local, so the build refused this requirement outright.
+
+The fear behind that rule was sound: a worker must not be able to create unbounded child compute.
 It was written as a blanket refusal of the requested architecture rather than as a bound on child
-compute, and that is the defect.
+compute, and that was the defect.
 
 The correction is a secondmate compartment class distinct from the crewmate worker.
 It runs a secondmate in Azure, and its child spawns go through the local controller's durable
 queue: the secondmate enqueues a worker request and the controller reconciles and creates it.
-No child-worker launcher exists on the worker, and the requested hierarchy still works, with
+No child-worker launcher exists on the worker, and the requested hierarchy works, with
 firstmate spawning secondmates in Azure and those secondmates obtaining crewmates in Azure.
 
-Work: a new compartment role and lifecycle class; endpoint and steering reachability for a
-compartment that outlives one task; a guest-to-controller request path; cost and capacity
-accounting for that longer life; and a rewrite of the two statements above.
-
-Acceptance: a secondmate running on an Azure worker requests a crewmate worker, the controller
-creates it, the crewmate completes a task, and both release cleanly.
+The work this took: a new compartment role and lifecycle class; endpoint and steering
+reachability for a compartment that outlives one task; a guest-to-controller request path; cost
+and capacity accounting for that longer life; and a rewrite of the two statements above.
 
 ## R4. no-mistakes runs on Azure
 
@@ -304,7 +326,7 @@ reaches `close` with its worktree disk released".
 
 ## R5. All of it runs on the pi multi-profile fleet
 
-Status: PARTIAL.
+Status: DONE, met live on 2026-08-22.
 
 Crosscheck on the pi fleet is done at the roster level: eight pi profiles across eight distinct
 upstream accounts, projected into single-profile account homes by `bin/fm-pi-account-home.py`,
@@ -334,20 +356,37 @@ ninth concurrent placement refuses although MAX_WORKERS is 16, and compartments 
 same pool. Sixteen crewmates never could run on eight accounts without sharing one; they used
 to do it silently. Raising the ceiling means adding profiles on distinct accounts.
 
-Still owed for DONE: the acceptance sentence on real compute. No leg of this has run against a live
-Azure worker, so "concurrent crewmates RUN on distinct pi profiles" is proven up to the credential
-the worker is handed and no further; what the guest agent does with that credential is unobserved
-here, and R9 (no crewmate has returned an outcome) still gates it.
-
 Acceptance: concurrent crewmates run on distinct pi profiles with no account collision.
+
+Met on real compute, which is what an earlier revision of this section still owed.
+The tracked evidence `simultaneous_assignments` array is derived from one controller snapshot holding four assignments simultaneously in `assigned` state, on four slots and four distinct upstream account bindings:
+
+| task | task generation | assignment | slot | account binding |
+|---|---|---|---|---|
+| `azaccept` (parent compartment) | `spawn:a632e0aaaa34a6ff` | `asg-00000018` | 1 | `2242ad73...` |
+| `azaccept-cf242c626` (compartment child) | `spawn:a73823d99b3cab33` | `asg-00000019` | 2 | `d48d22a8...` |
+| `r5-accept-readme-v3-20260822` | `spawn:a6e066062139056b` | `asg-00000020` | 3 | `82b2c485...` |
+| `r5-accept-package-v3-20260822` | `spawn:abcda52fbf779687` | `asg-00000021` | 4 | `dadc7a39...` |
+
+The two ordinary crewmates executed successfully: each returned exit 0, `timed_out false` and `outcome_commits 0` for its read-only inspection brief, with result digests `77c43f95...` and `55151c48...` (`executions[1]` and `executions[2]`).
+Each record in `release_proofs` records the `account` authority `proved` against exactly the binding above, so what the worker held is proved on release rather than only at staging.
+No account collision appears anywhere in that snapshot: four live workers, four bindings.
+
+What this does NOT prove, stated so nobody reads more into it: four concurrent accounts were exercised, not the pool of eight, and the two ordinary briefs were read-only inspections.
+The committing leg is the compartment child, recorded in R2/R3.
+These limits are machine-readable in `limitations`.
 
 ## R6. Crosscheck reviews outside the author's model family
 
-Status: PARTIAL. The codex-model leg is complete: accepted Azure review
-`azure-r4-respond-285` recorded a `cross-family-primary` verdict against the codex-declared PR
-#285 head. The non-codex-model leg is still owed, so R6 is not DONE. The acceptance is two
-completed reviews under the evidenceable amendment below, not correct wiring or one successful
-family-screen case. Read "Where the lane actually stands" before treating any of it as finished.
+Status: DONE, met live on 2026-08-22. Accepted Azure review `azure-r4-respond-285` recorded a
+`cross-family-primary` verdict against the codex-declared PR #285 head. Accepted Azure review
+`azure-r6-claude-acceptance` recorded a completed `codex-fallback` verdict against the
+non-codex-model declaration on PR #300, with no same-model marker or relaxation required.
+Together they complete the two evidenceable declaration legs below. The second verdict was
+blocking, not merge approval, and its finding is absorbed by the tracked evidence commit that is
+an ancestor of this record. The compact projection and exact source digests are in
+`docs/evidence/azure-crosscheck-r6-2026-08-22/`. Read "Where the lane actually stands" before
+treating DONE as a claim that every primary reviewer attempt succeeds.
 
 Context: see "The Azure Foundry Fireworks lane is unusable on this subscription" and "The lane is a
 named registry, now serving GLM-5.2 direct from Fireworks" below, both 2026-08-20. The retired
@@ -523,8 +562,8 @@ Later the same day the owner simplified the routing: ALL crosscheck reviews rout
 GLM lane, for codex-authored and claude-authored work alike. GLM belongs to neither author
 family, so single-family review is avoided for every author with one reviewer lane, and review
 capacity stops competing with the pi-codex subscription profiles that no-mistakes and the
-author fleet consume. The pi-codex roster (which R5 records as proven at the roster level while
-R9 still owes the live proof) is retained as a dormant fallback behind a config flip, never
+author fleet consume. The pi-codex roster (which R5 records as proven at the roster level) is
+retained as a dormant fallback behind a config flip, never
 deleted; every review must name the lane that produced it, and a status read must show whether
 GLM is serving or the fallback is active, so a silent fallback is impossible.
 (Correction, 2026-08-21: "behind a config flip" held for the LOCAL fallback only. For the
@@ -659,10 +698,13 @@ Later probe runs declare a codex author instead, per the asymmetry.
 
 Stated plainly, because wiring being right is not the acceptance.
 
-**Has a cross-family review run end to end and produced an accepted verdict? YES.** Azure review
+**Has the cross-family lane completed both evidenceable declaration legs? YES.** Azure review
 `azure-r4-respond-285` completed against the codex-declared PR #285 head and recorded
-`review_family_mode: cross-family-primary`. That completes the codex-model leg only. No accepted
-non-codex-model leg is recorded, so the requirement remains PARTIAL.
+`review_family_mode: cross-family-primary`. Azure review `azure-r6-claude-acceptance` completed
+against the non-codex-model declaration on PR #300 and recorded `model: gpt-5.6-sol`,
+`review_family_mode: codex-fallback`, and no `model_independence: same-model` marker. Its blocking
+verdict carried three citations and an executed Azure reproduction. The tracked compact record is
+`docs/evidence/azure-crosscheck-r6-2026-08-22/evidence.json`.
 
 The earlier local attempts against PR #281 on the direct Fireworks lane remain useful failure
 history:
@@ -734,16 +776,16 @@ the end of a long session.
   reviewer, which misprovisions a cross-family lane home (cc-769d7eba2ded).
 - The startup-credit item above, retired as moot.
 
-**What #281 does NOT close, and must not be read as closing:**
+**What #281 did NOT close by itself, and must not be read as closing:**
 
 - The acceptance itself was not closed by #281. The later accepted Azure review
-  `azure-r4-respond-285` completes the codex-model leg, but the evidenceable amendment requires a
-  second accepted review against a non-codex-model declaration, which is still owed.
+  `azure-r4-respond-285` completed the codex-model leg. The second leg was completed later by
+  `azure-r6-claude-acceptance`; it is not retroactive evidence for #281.
 - The status item was not closed by #281, but it was closed by #287.
   `bin/fm-crosscheck.sh status` is a lock-free, state-free read that reports the roster's first
   serving family, the current `crosscheck-same-model` policy, and the latest durable ledger run's
-  `review_family_mode`. It reports configuration and durable history, not proof that R6's
-  cross-family acceptance has completed.
+  `review_family_mode`. It reports configuration and durable history, not proof of acceptance by
+  itself; the two accepted ledger records and their tracked evidence are the proof that closes R6.
 - Review guards sized to the model's context window. Two of the three the Work list names DO
   exist and are stronger than asked: the findings schema is strict (`additionalProperties: false`,
   enum'd severities, `maxItems` caps), and citations are validated before filing by escape check,
@@ -834,8 +876,9 @@ after the credential purge, so a build that reached distribution could not have 
 Image Builder run succeeded between 22:26:20Z and 22:36:46Z on 2026-08-18, after #246 landed on
 main at 20:51:35Z, and `bin/fm-crosscheck-azure-image.sh` builds only from the tracked declaration
 at a HEAD already landed on public main. A Pi-harness review completing on this image is now proven
-by accepted Azure review `azure-r4-respond-285`; it completes R6's codex-model leg but not its
-non-codex-model leg.
+by accepted Azure review `azure-r4-respond-285`; it completes R6's codex-model leg. The separate
+accepted Azure review `azure-r6-claude-acceptance` completes the non-codex-model declaration leg
+on the same current image family.
 
 Acceptance (the evidenceable amendment above): the cross-family lane completes a review end to
 end, and the family screen admits it against both a codex-model declaration and a non-codex-model
@@ -843,7 +886,9 @@ declaration, with the ledger recording reviewer model, review family mode, and w
 same-model relaxation was required. The fallback flip to pi-codex is demonstrated once, its
 activation is visible in the review evidence and status read, and the demonstration records its
 degraded same-family mode. The codex-model leg is complete through `azure-r4-respond-285`; the
-non-codex-model leg is still owed.
+non-codex-model declaration leg is complete through `azure-r6-claude-acceptance`. The latter used
+the screened Codex fallback outside the declared Claude family, recorded that fallback family
+mode, omitted the same-model marker, and completed with a blocking verdict and executed proof.
 
 ## R7. Everything is logged in
 
@@ -915,20 +960,35 @@ they will cross is 2026-08-29. The mechanism is proven; the calendar is not.
 
 ## R9. Everything is set up and proven
 
-Status: NOT DONE.
+Status: PARTIAL.
 
-Unproven today: the worker landing path; any validation cell closing; and secondmate-in-Azure,
-which is blocked on R2/R3. An accepted Pi-harness review on the current model image is now proven
-by Azure review `azure-r4-respond-285`.
+Proven by the subset of the 2026-08-22 live acceptance recorded in the tracked evidence linked from R2/R3:
 
-The landing path is not synthetically exercisable, and that is correct behavior rather than a gap
-to route around.
+- The worker landing path.
+  The compartment child's outcome landed as commit `818e018d8dbb7b8d5bccae2b1d93192364533d1b` on `refs/heads/fm-child/azaccept-cf242c626-20260822` at origin (`origin`).
+- Execution on the leased Pi provider accounts.
+  All four records in `release_proofs` record the `account` authority `proved` against the account binding the controller leased for that task.
+- Secondmate-in-Azure, formerly blocked on R2/R3, which is now DONE:
+  `release_proofs[0]` records all five authorities `proved` for the compartment.
+- Resource cleanup.
+  `post_reset.final_verifier` reads `PASS post-reset 60 exact resources absent; queue complete; no workers or VMs`, with the digest-bound inventory, VM-list, resource-list, and controller source artifacts named in `source_artifacts`.
+
+An accepted Pi-harness review on the current model image is proven by Azure review
+`azure-r4-respond-285`.
+
+Outstanding at the moment this update is written: one fresh R4 validation cell reaching `close`
+with its worktree disk released. R6's second declaration leg is now complete. R4 is what keeps
+this requirement PARTIAL rather than DONE.
+
+The landing path used to be recorded here as unprovable synthetically, and that was correct
+behavior rather than a gap to route around.
 `--outcome-dir` requires full staging, and `request` derives every binding from
 `$FM_HOME/state/<task>.meta`, with caller-supplied bindings refused outside the hermetic test
 backstop.
-The existing smoke assignments cannot be reused because their `repository_generation` is not a
+The existing smoke assignments could not be reused because their `repository_generation` is not a
 commit that exists.
-Proving it requires a real spawned crewmate task that commits.
+Proving it required a real spawned crewmate task that commits, which is what `azaccept-cf242c626`
+did.
 
 ## R10. Crosscheck is exposed to team engineers through Slack
 
@@ -1086,7 +1146,8 @@ rested on a premise that has since been refuted. If the compartment lane becomes
 default, C1 has to be measured against it, and the three original candidate levers become live
 again at that point.
 
-The contradiction this section previously flagged is partly resolved: R6 now reads PARTIAL.
+The contradiction this section previously flagged is resolved at the R6 acceptance boundary:
+R6 now reads DONE.
 Note the correction that comes with it, since this section discusses R6's reviewer routing.
 GLM-5.2 is the primary reviewer on the registered Fireworks lane, and at the point this section
 describes, the 6m13s reading of 2026-08-20, it had not produced an accepted cross-family review.
@@ -1099,8 +1160,9 @@ unavailable fails closed rather than being reviewed by it. Eligibility does not 
 fallback serves reviews today or that it served either instrumented reading above.
 Which lane and which family served the two instrumented readings above, 35m33s and 44m25s, is not
 established by anything R6 records, and this section does not assert it.
-The accepted Azure verdict satisfies the codex-model leg only. R6 remains open because no accepted
-non-codex-model leg is recorded, and nothing here should be read as closing that remaining leg.
+The later `azure-r6-claude-acceptance` verdict satisfies the non-codex-model declaration leg and
+closes R6. Nothing in either accepted run identifies the reviewer behind the two instrumented C1
+timings, so R6 completion does not change this section's timing attribution or C1's NOT MET status.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 
@@ -1113,19 +1175,13 @@ outside the fleet lock under a non-blocking per-slot lease, with the drain after
 What remains for DONE is the acceptance itself: many crewmates, no-mistakes runs, and
 crosschecks demonstrated running in parallel against live capacity without contention.
 
-The lock is the other half, and the harder one: `controller_lock` is held across provider calls
-and for an execute's whole guest run, and the code's own note records that fixing only the lock was
-tried and reverted.
-
-Work: per-assignment pending state, so reconcile drives many workers concurrently, with
-idempotency preserved per action rather than globally, and a lock discipline that puts the provider
-call outside the fleet lock.
-The first of three changes landed on 2026-08-19: a provider mutation now applies into a copy,
+The completed implementation uses per-assignment pending state so reconcile drives many workers
+concurrently, with idempotency preserved per action rather than globally, and a lock discipline
+that puts provider calls outside the fleet lock.
+The first of the three changes landed on 2026-08-19: a provider mutation applies into a copy,
 commits only on success, and is refused if its effects reach outside the one compartment its slot
 owns.
-Two remain: the per-slot pending map with a revision fence, still fully serialized; then the lock
-discipline, which has to ship as one change because a half-serialized controller is worse than
-either end state.
+The later per-slot pending map and lock-discipline changes completed that work.
 
 One thing not to do, found while designing this: the three capacity commands stay fully locked.
 `merged_specialized_reservations` ignores local reservations whose status is not `reserved`, so a
@@ -1189,16 +1245,17 @@ billable capacity has not run yet.
 ## Order of work
 
 1. R8, done 2026-08-19.
-2. C2, because contention blocks demonstrating anything at scale. One of its three changes landed.
-3. R2/R3, the largest architectural gap and the requirement most misread by the current build.
-4. R6, whose direction is decided (GLM-5.2 on the Fireworks Foundry lane) and which no longer
-   needs an owner login.
+2. C2, whose three implementation changes are landed but whose live parallel acceptance remains.
+3. R2/R3, done 2026-08-22. It was the largest architectural gap and the requirement the build had
+   most misread.
+4. R6, done 2026-08-22 under its evidenceable two-declaration amendment; the accepted records keep
+   the actual primary or fallback family mode visible.
 5. R4, which needs one validation cell closed; the runner caller is built, and the offload lane is
    an optimisation rather than part of the acceptance.
-6. R5.
+6. R5, done 2026-08-22.
 7. C1, instrumented 2026-08-20; the measured local-lane runs are above the band rather than
    inside it, and the compartment lane's phases wait on that lane being switched back on.
-8. R9, which is the proof of the rest.
+8. R9, which is the proof of the rest; partial since 2026-08-22, waiting only on R4's cell close.
 9. R10, the Slack team exposure, dropped by the owner on 2026-08-21 and no longer ordered work.
 
 ## Standing constraints
