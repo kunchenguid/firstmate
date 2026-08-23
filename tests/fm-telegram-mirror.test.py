@@ -470,6 +470,13 @@ class MirrorTestCase(unittest.TestCase):
         self.assertEqual(frame["t"], "command_result")
         self.assertIn("Mirror is on", frame["text"])
 
+    def disable_mirror(self, pi: FakePi) -> None:
+        """Every process starts mirroring, so off coverage switches it off first."""
+        pi.send({"t": "command", "id": 900, "command": "off"})
+        frame = pi.read()
+        self.assertEqual(frame["t"], "command_result")
+        self.assertIn("Mirror is off", frame["text"])
+
     def card_id_for(self, text: str) -> int:
         """The transcript card is the edited placeholder, never a second message."""
         edit = self.telegram.wait_edit(
@@ -495,6 +502,7 @@ class MirrorTestCase(unittest.TestCase):
 
     def test_mirror_off_refuses_ordinary_text(self) -> None:
         pi = self.connect_pi()
+        self.disable_mirror(pi)
         self.telegram.push_text("do the thing", 11)
         reply = self.telegram.wait_sent(
             lambda m: m.get("text") == "Telegram mirror is off. Send /telegram_on to enable it."
@@ -505,16 +513,16 @@ class MirrorTestCase(unittest.TestCase):
     def test_commands_work_from_telegram_and_from_pi(self) -> None:
         pi = self.connect_pi()
         self.telegram.push_text("/telegram status", 12)
-        first = self.telegram.wait_sent(lambda m: str(m.get("text", "")).startswith("Mirror is off"))
+        first = self.telegram.wait_sent(lambda m: str(m.get("text", "")).startswith("Mirror is on"))
         self.assertIn("Firstmate is connected", first["text"])
-        self.telegram.push_text("/telegram on", 13)
-        self.telegram.wait_sent(lambda m: str(m.get("text", "")).startswith("Mirror is on"))
+        self.telegram.push_text("/telegram off", 13)
+        self.telegram.wait_sent(lambda m: str(m.get("text", "")).startswith("Mirror is off"))
         pi.send({"t": "command", "id": 7, "command": "status"})
         frame = pi.read()
         self.assertEqual(frame, {"t": "command_result", "id": 7,
-                                 "text": "Mirror is on. Firstmate is connected. Confirmations are on."})
-        pi.send({"t": "command", "id": 8, "command": "off"})
-        self.assertIn("Mirror is off", pi.read()["text"])
+                                 "text": "Mirror is off. Firstmate is connected. Confirmations are on."})
+        pi.send({"t": "command", "id": 8, "command": "on"})
+        self.assertIn("Mirror is on", pi.read()["text"])
 
     def processes_matching(self, needle: str) -> list[int]:
         found = []
@@ -712,6 +720,7 @@ class MirrorTestCase(unittest.TestCase):
 
     def test_transport_statuses_stay_plain(self) -> None:
         pi = self.connect_pi()
+        self.disable_mirror(pi)
         self.telegram.push_text("anything", 601)
         refusal = self.telegram.wait_sent(
             lambda m: str(m.get("text", "")).startswith("Telegram mirror is off")
@@ -946,6 +955,7 @@ class MirrorTestCase(unittest.TestCase):
 
     def test_mirror_off_names_a_real_telegram_command(self) -> None:
         pi = self.connect_pi()
+        self.disable_mirror(pi)
         published = self.telegram.wait_call("setMyCommands")
         names = [entry["command"] for entry in published["commands"]]
         self.telegram.push_text("do the thing", 801)
@@ -1341,6 +1351,7 @@ class MirrorTestCase(unittest.TestCase):
 
     def test_terminal_images_are_not_mirrored_while_the_mirror_is_off(self) -> None:
         pi = self.connect_pi()
+        self.disable_mirror(pi)
         pi.send({"t": "terminal", "text": "while off",
                  "images": [{"data": base64.b64encode(self.PNG).decode(), "mime": "image/png"}]})
         time.sleep(0.8)
@@ -1452,10 +1463,12 @@ class MirrorTestCase(unittest.TestCase):
             time.sleep(0.02)
         self.start_bot()
         restarted = self.connect_pi()
+        # Confirmations are a persisted setting; mirror mode is not, so the new
+        # process starts mirroring again.
         restarted.send({"t": "command", "id": 3, "command": "status"})
         self.assertEqual(
             restarted.read()["text"],
-            "Mirror is off. Firstmate is connected. Confirmations are off.",
+            "Mirror is on. Firstmate is connected. Confirmations are off.",
         )
         restarted.send({"t": "set", "id": 4, "setting": "confirmations", "value": True})
         self.assertIn("Confirmations are on", restarted.read()["text"])
@@ -1522,6 +1535,7 @@ class MirrorTestCase(unittest.TestCase):
 
     def test_terminal_and_reply_mirroring_follows_mirror_mode(self) -> None:
         pi = self.connect_pi()
+        self.disable_mirror(pi)
         pi.send({"t": "terminal", "text": "typed while off"})
         pi.send({"t": "reply", "text": "answered while off"})
         time.sleep(0.4)
@@ -1906,27 +1920,83 @@ class MirrorTestCase(unittest.TestCase):
         )
         self.assertEqual(self.voice_messages(75), ["Transcribing…"])
 
-    def test_a_restart_loses_the_in_memory_queue_and_resets_mirror_mode(self) -> None:
+    def test_a_restart_loses_the_in_memory_queue_and_returns_to_mirroring(self) -> None:
         pi = self.connect_pi()
-        self.enable_mirror(pi)
         pi.close()
         time.sleep(0.3)
         self.telegram.push_text("waiting for firstmate", 91)
         self.telegram.wait_sent(
             lambda m: m.get("text") == "Firstmate is not running. Your message is queued until it starts."
         )
+        # Off applies for the rest of this process, from either surface.
+        self.telegram.push_text("/telegram_off", 92)
+        self.telegram.wait_sent(
+            lambda m: str(m.get("text", "")).startswith("Mirror is off")
+            and m.get("reply_parameters", {}).get("message_id") == 92
+        )
+        self.telegram.push_text("ignored while off", 93)
+        refusal = self.telegram.wait_sent(
+            lambda m: m.get("reply_parameters", {}).get("message_id") == 93
+        )
+        self.assertEqual(refusal["text"],
+                         "Telegram mirror is off. Send /telegram_on to enable it.")
+
         self.stop_bot()
         deadline = time.time() + DEADLINE
         while self.socket_path.exists() and time.time() < deadline:
             time.sleep(0.02)
         self.assertFalse(self.socket_path.exists(), "the stopped bot left its socket behind")
 
+        # Mirror mode is process memory only, so the next process starts on even
+        # though /telegram_off disabled the last one, and the queue is gone.
         self.start_bot()
         later = self.connect_pi()
+        self.assertEqual(later.read_frame(), {"t": "state", "mirror": True, "confirmations": True})
         later.expect_nothing(1.0)
         later.send({"t": "command", "id": 1, "command": "status"})
         self.assertEqual(later.read()["text"],
-                         "Mirror is off. Firstmate is connected. Confirmations are on.")
+                         "Mirror is on. Firstmate is connected. Confirmations are on.")
+        self.telegram.push_text("/telegram_status", 94)
+        status = self.telegram.wait_sent(
+            lambda m: m.get("reply_parameters", {}).get("message_id") == 94
+        )
+        self.assertEqual(status["text"],
+                         "Mirror is on. Firstmate is connected. Confirmations are on.")
+
+    def test_a_fresh_start_mirrors_without_being_switched_on(self) -> None:
+        pi = self.connect_pi()
+        # The first state frame a connecting session sees is the live mode.
+        self.assertEqual(pi.read_frame(), {"t": "state", "mirror": True, "confirmations": True})
+        self.telegram.push_text("do the thing", 301)
+        delivered = pi.read()
+        self.assertEqual(delivered["text"], "do the thing")
+        pi.send({"t": "accepted", "id": delivered["id"]})
+        self.telegram.wait_sent(lambda m: m.get("text") == "Pi \u00b7 Sent to Firstmate.")
+        pi.send({"t": "terminal", "text": "check the logs"})
+        mirrored = self.telegram.wait_sent(lambda m: "check the logs" in str(m.get("text")))
+        self.assertEqual(mirrored["text"], "You \u00b7 Terminal\ncheck the logs")
+        # Both surfaces report the same untouched mode.
+        pi.send({"t": "command", "id": 5, "command": "status"})
+        self.assertEqual(pi.read()["text"],
+                         "Mirror is on. Firstmate is connected. Confirmations are on.")
+        self.telegram.push_text("/telegram_status", 302)
+        status = self.telegram.wait_sent(
+            lambda m: m.get("reply_parameters", {}).get("message_id") == 302
+        )
+        self.assertEqual(status["text"],
+                         "Mirror is on. Firstmate is connected. Confirmations are on.")
+
+    def test_a_fresh_start_still_refuses_unpaired_traffic(self) -> None:
+        """Starting on is not a pairing bypass: only the paired sender is heard."""
+        pi = self.connect_pi()
+        self.telegram.push_text("stranger", 311, user=1)
+        self.telegram.push_text("wrong chat", 312, chat=1)
+        self.telegram.push_text("paired", 313)
+        self.assertEqual(pi.read()["text"], "paired")
+        pi.expect_nothing()
+        joined = " ".join(self.telegram.sent_texts())
+        self.assertNotIn("stranger", joined)
+        self.assertNotIn("wrong chat", joined)
 
 
 class ServiceUnitTestCase(unittest.TestCase):

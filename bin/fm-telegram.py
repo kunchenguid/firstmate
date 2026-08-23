@@ -56,7 +56,9 @@ Firstmate as conversation text:
   /telegram                          Pi, toggles mirror mode
   /telegram-settings                 Pi, native settings UI
 
-Mirror mode starts off on every start and lives in memory only. The inbound
+Mirror mode starts on at every bot start and lives in memory only, so a
+restart always returns to on even when /telegram_off disabled the last run,
+and nothing about the previous mode is written to disk. The inbound
 queue is an in-memory FIFO with no durable queue, expiry, replay journal, or
 retention subsystem: a queued message that has not reached Pi is lost when the
 bot or WSL stops.
@@ -446,7 +448,9 @@ class Voice:
 class MirrorBot:
     config: Config
     api: TelegramApi
-    mirror_on: bool = False
+    # Process memory only, never persisted: every start begins mirroring, and
+    # /telegram_off applies to this process alone.
+    mirror_on: bool = True
     queue: deque[Queued] = field(default_factory=deque)
     pending: "OrderedDict[str, Queued]" = field(default_factory=OrderedDict)
     voices: dict[int, Voice] = field(default_factory=dict)

@@ -69,7 +69,7 @@ If you install the extension globally, keep it out of auto-discovery for worker 
 
 ## Mirror mode
 
-Mirror mode starts off every time the bot starts and is never persisted.
+Mirror mode starts on every time the bot starts and is never persisted, so a restart always returns to mirroring even if you turned it off before, and turning it off never has to be undone by hand after a restart.
 
 In Telegram, these switch it and are never sent to Firstmate as conversation text:
 

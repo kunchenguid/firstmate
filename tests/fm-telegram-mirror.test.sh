@@ -19,4 +19,4 @@ if ! timeout 600 python3 "$DRIVER" >"$OUT" 2>&1; then
   fail "bin/fm-telegram.py acceptance tests failed or timed out"
 fi
 
-pass "the Telegram mirror bot pairs to one chat, defaults mirror mode off, mirrors terminal and reply text, queues Telegram text to Pi in order, and drives the voice send, edit, and cancel flow"
+pass "the Telegram mirror bot pairs to one chat, starts every process with mirror mode on, mirrors terminal and reply text, queues Telegram text to Pi in order, and drives the voice send, edit, and cancel flow"
