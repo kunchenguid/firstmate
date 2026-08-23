@@ -159,10 +159,12 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded correlated status lines, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded correlated status lines independently, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+An invalid line or a line with an unfetchable document reference is retained in a private provenance-bound quarantine and does not block valid lines before or after it.
+The process-event handler dispatches the exact captured generation through its immutable adapter identity, so ordinary domain homes and dedicated reviewer homes use this same ingest, correlation, cursor, re-arm, and acknowledgement owner.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
-A stopped or rejected cursor recovers only through the adapter's guarded `rebase` command, which advances the cursor solely after validating the remote log's prefix hash at the requested offset and never ingests or bypasses line validation; its [script header](../bin/fm-procevent-remote-reply.sh) owns the exact contract.
+A stopped cursor recovers only through the adapter's guarded `cursor-rebase` command, which accepts a bounded complete-line boundary only after validating the configured remote home's log prefix, refuses an ambiguous live-source target, and never treats a quarantined line as valid; its [script header](../bin/fm-procevent-remote-reply.sh) owns the exact contract.
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The transport never retries automatically.

@@ -678,6 +678,8 @@ Results are published as ordinary `check` wakes carrying the source id and commi
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a captured result reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
 Delivery is reported at most once per captured source and sequence while any records for that key remain queued.
 A durable handled acknowledgement stops future re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain consumes it.
+`bin/fm-procevent.sh dispatch <source-id> <sequence>` routes one exact capture through its immutable adapter identity without parsing its result, while that adapter remains the sole owner of validation, effects, acknowledgement, and replay behavior.
+Remote-secondmate reply wakes use that command so every remote home, including a dedicated reviewer home, reaches its ordinary parent status channel through the same reply ingest and correlation owner.
 
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.

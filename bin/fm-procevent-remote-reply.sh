@@ -4,10 +4,11 @@
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh dispatch <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
-#   fm-procevent-remote-reply.sh rebase <secondmate-id> <offset> <prefix-sha256>
+#   fm-procevent-remote-reply.sh cursor-rebase <secondmate-id> <offset> <prefix-sha256>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -17,15 +18,19 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts bounded, printable UTF-8 status lines with an allowed lifecycle
-# verb and any number of well-formed bracket groups before the colon. `rebase`
-# advances the cursor only after validating the remote log prefix hash at the
-# requested offset; it never ingests or bypasses line validation.
-# New lines must carry corr=<16hex>, while legacy lines without corr= are
-# skipped after the byte-zero compatibility prefix and never block the cursor.
-# Exact lines are appended at most once to the parent's state/<id>.status.
-# A data/*.md pointer is fetched through the path-confined remote file reader and
-# rewritten to its local private copy before append for correlated lines.
+# Ingest handles each bounded line independently. Printable UTF-8 status lines
+# with an allowed lifecycle verb and strict corr=<16hex> are accepted, while an
+# invalid line or a line whose referenced document cannot be fetched is retained
+# in a private, provenance-bound quarantine and cannot block surrounding lines.
+# Legacy lines without corr= remain accepted only in the byte-zero compatibility
+# prefix. Exact accepted lines and quarantine artifacts are each committed at
+# most once. A data/*.md pointer is fetched through the path-confined remote file
+# reader and rewritten to its local private copy before append.
+#
+# `cursor-rebase` is the cursor owner's deliberate recovery command. It accepts
+# only a bounded complete-line boundary whose supplied prefix hash matches the
+# configured remote home's log, refuses while that source is armed, and reports
+# both the prior and target cursor. It never accepts a quarantined line as valid.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +52,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -88,6 +93,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+quarantine_dir_path() { printf '%s/quarantine/%s\n' "$CURSOR_DIR" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
   local path=$1 offset hash schema
@@ -235,7 +241,7 @@ fetch_document() { # <id> <remote-relative> <result-var>
   case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp"; then
+  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2>/dev/null; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -243,6 +249,71 @@ fetch_document() { # <id> <remote-relative> <result-var>
   mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
+}
+
+prepare_quarantine_dir() { # <id>; prints the private directory
+  local id=$1 root dir
+  mkdir -p "$CURSOR_DIR" || return 1
+  [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] || return 1
+  chmod 700 "$CURSOR_DIR" || return 1
+  root="$CURSOR_DIR/quarantine"
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    mkdir "$root" || return 1
+  fi
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  chmod 700 "$root" || return 1
+  dir=$(quarantine_dir_path "$id")
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir "$dir" || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  chmod 700 "$dir" || return 1
+  printf '%s\n' "$dir"
+}
+
+write_line_quarantine() { # <id> <result> <payload> <line-no> <reason> <detail> <from> <to> <from-hash> <to-hash>
+  local id=$1 result=$2 payload=$3 line_no=$4 quarantine_reason=$5 detail=$6
+  local from=$7 to=$8 from_hash=$9 to_hash=${10}
+  local dir raw line_hash line_bytes result_hash path tmp
+  dir=$(prepare_quarantine_dir "$id") || return 1
+  raw=$(umask 077; mktemp "$dir/.raw.XXXXXX") || return 1
+  FM_QUARANTINE_LINE_NUMBER=$line_no perl -ne '
+    print if $. == $ENV{FM_QUARANTINE_LINE_NUMBER};
+  ' "$payload" > "$raw" || { rm -f -- "$raw"; return 1; }
+  line_bytes=$(LC_ALL=C wc -c < "$raw" | tr -d ' ')
+  [ "$line_bytes" -gt 0 ] || { rm -f -- "$raw"; return 1; }
+  line_hash=$(sha256_file "$raw") || { rm -f -- "$raw"; return 1; }
+  result_hash=$(sha256_file "$result") || { rm -f -- "$raw"; return 1; }
+  path="$dir/$from.$line_no.$line_hash.$result_hash.quarantine"
+  tmp=$(umask 077; mktemp "$dir/.quarantine.XXXXXX") \
+    || { rm -f -- "$raw"; return 1; }
+  {
+    printf 'schema=fm-remote-reply-quarantine.v1\n'
+    printf 'reason=%s\n' "$quarantine_reason"
+    [ -z "$detail" ] || printf 'detail=%s\n' "$detail"
+    printf 'secondmate_id=%s\n' "$id"
+    printf 'source_path=%s\n' "$REMOTE_LOG"
+    printf 'from_offset=%s\n' "$from"
+    printf 'to_offset=%s\n' "$to"
+    printf 'from_prefix_sha256=%s\n' "$from_hash"
+    printf 'to_prefix_sha256=%s\n' "$to_hash"
+    printf 'result_sha256=%s\n' "$result_hash"
+    printf 'line_number=%s\n' "$line_no"
+    printf 'line_bytes=%s\n' "$line_bytes"
+    printf 'line_sha256=%s\n\n' "$line_hash"
+    cat "$raw"
+  } > "$tmp" || { rm -f -- "$raw" "$tmp"; return 1; }
+  rm -f -- "$raw"
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ ! -f "$path" ] || [ -L "$path" ] || ! cmp -s "$tmp" "$path"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    rm -f -- "$tmp"
+    return 0
+  fi
+  mv -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
 }
 
 line_bytes_bounded_printable() { # <line>
@@ -259,6 +330,19 @@ line_bytes_bounded_printable() { # <line>
   ' || return 1
 }
 
+payload_line_bounded_printable() { # <payload> <line-number>
+  FM_REMOTE_REPLY_LINE_NUMBER=$2 FM_REMOTE_REPLY_MAX_LINE_BYTES=$MAX_LINE_BYTES \
+    perl -MEncode=decode,FB_CROAK -ne '
+      next unless $. == $ENV{FM_REMOTE_REPLY_LINE_NUMBER};
+      s/\n\z//;
+      exit 1 if length($_) == 0 || length($_) > $ENV{FM_REMOTE_REPLY_MAX_LINE_BYTES};
+      my $decoded;
+      eval { $decoded = decode("UTF-8", $_, Encode::FB_CROAK); 1 } or exit 1;
+      exit 1 if $decoded =~ /[\x00-\x08\x0A-\x1F\x7F-\x9F]/;
+      exit 0;
+    ' "$1"
+}
+
 line_status_valid() { # <line>
   local line=$1
   line_bytes_bounded_printable "$line" || return 1
@@ -270,8 +354,8 @@ validate_sha256() { # <value>
   [ "${#1}" -eq 64 ] || return 1
 }
 
-remote_log_prefix_hash() { # <id> <offset>
-  local id=$1 offset=$2 tmp size prefix_hash
+remote_log_prefix_hash() { # <id> <offset>; return 2 when offset splits a line
+  local id=$1 offset=$2 tmp size prefix_hash boundary_byte
   case "$offset" in ''|*[!0-9]*) return 1 ;; esac
   [ "$offset" -le "$MAX_DOC_BYTES" ] || return 1
   if [ "$offset" -eq 0 ]; then
@@ -288,6 +372,11 @@ remote_log_prefix_hash() { # <id> <offset>
     rm -f -- "$tmp"
     return 1
   fi
+  boundary_byte=$(head -c "$offset" "$tmp" | tail -c 1 | LC_ALL=C od -An -tu1 | tr -d ' ')
+  if [ "$boundary_byte" != 10 ]; then
+    rm -f -- "$tmp"
+    return 2
+  fi
   prefix_hash=$(head -c "$offset" "$tmp" | sha256_stdin)
   rm -f -- "$tmp"
   [ -n "$prefix_hash" ] || return 1
@@ -295,7 +384,12 @@ remote_log_prefix_hash() { # <id> <offset>
 }
 
 line_has_valid_corr() { # <line>
-  printf '%s' "$1" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+  local corr_count
+  printf '%s' "$1" \
+    | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])*[[:space:]]+\[corr=[A-Fa-f0-9]{16}\]([[:space:]]+\[[^]]+\])*:' \
+    || return 1
+  corr_count=$(printf '%s' "$1" | grep -Eo 'corr=' | wc -l | tr -d ' ')
+  [ "$corr_count" -eq 1 ]
 }
 
 line_has_corr_token() { # <line>
@@ -304,8 +398,10 @@ line_has_corr_token() { # <line>
 
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
-  local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp legacy_prefix=1
+  local actual_bytes actual_hash line doc local_doc rewritten appended=0 quarantined=0 cursor_already=0 lock status_file tmp legacy_prefix=1
+  local line_number=0 quarantine_reason quarantine_detail doc_failed accepted_corrs
   validate_id "$id"
+  remote_route_exists "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
   [ "$class" != malformed ] || die "remote reply result is malformed"
@@ -356,9 +452,17 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
+  accepted_corrs="$tmp/accepted-corrs"
+  : > "$accepted_corrs"
+  # shellcheck disable=SC2094 # Helpers read this payload but write only separate private artifacts.
   while IFS= read -r line || [ -n "$line" ]; do
-    line_status_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid status line"; }
-    if ! line_has_valid_corr "$line"; then
+    line_number=$((line_number + 1))
+    quarantine_reason=
+    quarantine_detail=
+    if ! payload_line_bounded_printable "$payload" "$line_number" \
+      || ! line_status_valid "$line"; then
+      quarantine_reason=invalid-status
+    elif ! line_has_valid_corr "$line"; then
       if [ "$from" -eq 0 ] && [ "$legacy_prefix" -eq 1 ] && ! line_has_corr_token "$line"; then
         if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
           printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append legacy remote reply"; }
@@ -367,39 +471,60 @@ cmd_ingest() {
         continue
       fi
       if line_has_corr_token "$line"; then
-        fm_lock_release "$lock"
-        die "delta contains an invalid or uncorrelated status line"
+        quarantine_reason=invalid-correlation
+      else
+        quarantine_reason=missing-correlation
       fi
+    fi
+    if [ -n "$quarantine_reason" ]; then
+      write_line_quarantine "$id" "$result" "$payload" "$line_number" \
+        "$quarantine_reason" "$quarantine_detail" "$from" "$to" "$from_hash" "$to_hash" \
+        || { fm_lock_release "$lock"; die "cannot preserve invalid remote reply line"; }
+      quarantined=$((quarantined + 1))
       legacy_prefix=0
       continue
     fi
     legacy_prefix=0
     rewritten=$line
+    doc_failed=0
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
-      fetch_document "$id" "$doc" local_doc || { fm_lock_release "$lock"; die "could not fetch referenced remote document: $doc"; }
+      if ! fetch_document "$id" "$doc" local_doc; then
+        doc_failed=1
+        quarantine_detail=$doc
+        break
+      fi
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
+    if [ "$doc_failed" -eq 1 ]; then
+      write_line_quarantine "$id" "$result" "$payload" "$line_number" \
+        referenced-document-unfetchable "$quarantine_detail" "$from" "$to" "$from_hash" "$to_hash" \
+        || { fm_lock_release "$lock"; die "cannot preserve remote reply line with an unavailable document"; }
+      quarantined=$((quarantined + 1))
+      continue
+    fi
     if ! grep -Fqx -- "$rewritten" "$status_file" 2>/dev/null; then
       printf '%s\n' "$rewritten" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
       appended=$((appended + 1))
     fi
+    printf '%s\n' "$line" | grep -Eo '\[corr=[A-Fa-f0-9]{16}\]' \
+      | sed 's/^\[corr=//;s/\]$//' | tr 'A-F' 'a-f' >> "$accepted_corrs"
   done < "$payload"
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
-  done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
+  done < <(awk '!seen[$0]++' "$accepted_corrs")
+  if [ "$cursor_already" -eq 0 ]; then
+    write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
+  fi
   if [ -n "$seq" ]; then
     write_ingest_receipt "$id" "$seq" "$result" \
       || { fm_lock_release "$lock"; die "cannot commit remote reply ingestion receipt"; }
   fi
-  if [ "$cursor_already" -eq 0 ]; then
-    write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
-  fi
   fm_lock_release "$lock"
   trap - EXIT
   rm -rf -- "$tmp"
-  printf 'ingested: %s appended=%s offset=%s\n' "$id" "$appended" "$to"
+  printf 'ingested: %s appended=%s quarantined=%s offset=%s\n' "$id" "$appended" "$quarantined" "$to"
 }
 
 cmd_handle_locked() {
@@ -436,6 +561,15 @@ cmd_handle() {
   )
 }
 
+cmd_dispatch() {
+  local sid=${1:-} seq=${2:-} result=${3:-} id
+  case "$sid" in remote-reply-*) id=${sid#remote-reply-} ;; *) die "source id is not a remote reply source: $sid" ;; esac
+  validate_id "$id"
+  [ "$(source_id "$id")" = "$sid" ] || die "source id is not canonical: $sid"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
+  cmd_handle "$id" "$seq" "$result"
+}
+
 retirement_capture_scan() {
   local id=$1 sid inbox path base seq pending=0
   sid=$(source_id "$id")
@@ -460,21 +594,43 @@ retirement_capture_scan() {
   return 0
 }
 
-cmd_rebase() {
-  local id=${1:-} offset=${2:-} hash=${3:-} actual lock
+cmd_cursor_rebase_locked() {
+  local id=${1:-} offset=${2:-} hash=${3:-} actual actual_rc lock sid source current_offset current_hash
   validate_id "$id"
   remote_route_exists "$id"
-  case "$offset" in ''|*[!0-9]*) die "rebase offset must be a nonnegative integer" ;; esac
-  validate_sha256 "$hash" || die "rebase prefix hash must be a 64-character SHA-256 value"
+  case "$offset" in ''|*[!0-9]*) die "cursor rebase offset must be a nonnegative integer" ;; esac
+  validate_sha256 "$hash" || die "cursor rebase prefix hash must be a 64-character SHA-256 value"
   hash=$(printf '%s' "$hash" | tr 'A-F' 'a-f')
-  actual=$(remote_log_prefix_hash "$id" "$offset") \
-    || die "remote reply log prefix could not be validated for $id"
-  [ "$actual" = "$hash" ] || die "rebase prefix hash does not match the remote reply log"
+  sid=$(source_id "$id")
+  source="$STATE/procevent/$sid.source"
+  if [ -e "$source" ] || [ -L "$source" ]; then
+    die "cursor rebase target is ambiguous while the remote reply source is armed"
+  fi
+  actual=$(remote_log_prefix_hash "$id" "$offset")
+  actual_rc=$?
+  [ "$actual_rc" -ne 2 ] || die "cursor rebase target is not a complete-line boundary"
+  [ "$actual_rc" -eq 0 ] || die "remote reply log prefix could not be validated for $id"
+  [ "$actual" = "$hash" ] || die "cursor rebase prefix hash does not match the remote reply log"
   lock="$STATE/.remote-reply-ingest-$id.lock"
   fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
+  read_cursor "$id"
+  current_offset=$CURSOR_OFFSET
+  current_hash=$CURSOR_HASH
   write_cursor "$id" "$offset" "$hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
   fm_lock_release "$lock"
-  printf 'rebased: %s offset=%s\n' "$id" "$offset"
+  printf 'cursor-rebased: %s from_offset=%s from_prefix_sha256=%s to_offset=%s to_prefix_sha256=%s\n' \
+    "$id" "$current_offset" "$current_hash" "$offset" "$hash"
+}
+
+cmd_cursor_rebase() {
+  local id=${1:-} lock
+  validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_cursor_rebase_locked "$@"
+  )
 }
 
 cmd_retire_quiesce_locked() {
@@ -541,8 +697,9 @@ case "${1:-}" in
   arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
+  dispatch) shift; [ "$#" -eq 3 ] || usage; cmd_dispatch "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
-  rebase) shift; [ "$#" -eq 3 ] || usage; cmd_rebase "$@" ;;
+  cursor-rebase|rebase) shift; [ "$#" -eq 3 ] || usage; cmd_cursor_rebase "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;

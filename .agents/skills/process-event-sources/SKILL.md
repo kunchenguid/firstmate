@@ -29,8 +29,9 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
 A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
-Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
-A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
+Its header owns exact commands, while the adapter owns cursor continuity, line-by-line validated and deduplicated status ingest, private provenance-bound quarantine, path-confined document fetch, acknowledgement, and re-arming after a captured delta.
+An invalid line or unfetchable document reference is quarantined without blocking surrounding valid replies.
+A continuity break is escalated once and stays unarmed until an operator deliberately uses the adapter's guarded `cursor-rebase` command.
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
 
@@ -43,7 +44,10 @@ Two rules the commands cannot enforce for you:
 
 `procevent <adapter> <source-id> <sequence>`
 : The named durable result is waiting at `state/procevent-inbox/<source-id>.<sequence>.result`. Read that exact result; separate wakes identify later results independently.
-: A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
+: For the `remote-reply` adapter, do not copy the line by hand or acknowledge it directly.
+: Run `bin/fm-procevent.sh dispatch <source-id> <sequence>` so the immutable captured adapter identity routes the exact result through `fm-procevent-remote-reply.sh`'s existing validated ingest, correlation resolution, cursor, re-arm, and acknowledgement owner.
+: This applies identically to every configured remote secondmate, including dedicated reviewer homes.
+: A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled any other adapter result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
   ```

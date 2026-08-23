@@ -7,6 +7,7 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
+#   fm-procevent.sh dispatch <source-id> <sequence>
 #   fm-procevent.sh handled <source-id> <sequence>
 #   fm-procevent.sh retire <source-id>
 #   fm-procevent.sh sweep-home [--preflight]
@@ -29,6 +30,9 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+# dispatch   Route one exact captured result through its immutable adapter
+#            identity. The adapter owns validation, effects, acknowledgement,
+#            and replay behavior; the generic runner never parses the result.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -79,7 +83,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,67p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -528,6 +532,26 @@ stop_runner_pid() {  # <pid> <identity>
   return 2
 }
 
+# Dispatch one exact captured generation through the adapter identity committed
+# beside it. The adapter remains the only owner of validation, effects,
+# acknowledgement, and replay behavior.
+cmd_dispatch() {
+  local id=${1-} seq=${2-} inbox result adapter script
+  [ "$#" -eq 2 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  result="$inbox/$id.$seq.result"
+  [ -f "$result" ] && [ ! -L "$result" ] \
+    || die "captured result is unavailable or unsafe: $id $seq"
+  adapter=$(fm_procevent_result_adapter "$result") \
+    || die "captured result has no safe immutable adapter identity: $id $seq"
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] && [ -x "$script" ] \
+    || die "captured result adapter is unavailable or unsafe: $adapter"
+  "$script" dispatch "$id" "$seq" "$result"
+}
+
 # The owned handling interface: durably and idempotently record that a
 # captured result has been fully handled, keyed by the exact source id and
 # sequence generation. Serialized under the same per-source boundary as every
@@ -715,6 +739,7 @@ case "${1-}" in
   start)     shift; cmd_start_public "$@" ;;
   _start)    shift; cmd_start "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
+  dispatch)  shift; cmd_dispatch "$@" ;;
   handled)   shift; cmd_handled "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   sweep-home) shift; cmd_sweep_home "$@" ;;

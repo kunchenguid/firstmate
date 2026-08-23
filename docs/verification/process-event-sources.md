@@ -88,6 +88,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
 | acknowledgement precondition | `handled` is refused, with no marker created, unless matching captured result and adapter records already exist, so a premature or mistyped acknowledgement cannot suppress a future result |
 | immutable adapter identity | a captured result retains its adapter after its mutable registration is removed |
+| identity-bound adapter dispatch | `tests/fm-remote-reply.test.sh` dispatches a captured reviewer-home generation through its immutable `remote-reply` adapter identity, reaches only `state/reviewer.status` through the existing validated ingest, resolves the pending correlation, and remains idempotent on replay |
 | trusted classification boundary | Lavish lifecycle classification reads the leading response envelope, so prompt payload text that resembles a missing-session error cannot override a valid session status |
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
