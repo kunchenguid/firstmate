@@ -1548,7 +1548,7 @@ fm_super_main() {
         if ! is_wake_reason "$reason"; then
           log "watcher non-wake stdout, idling: $reason"
           WATCHER_PID=""
-          sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
+          sleep "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
           continue
         fi
         log "wake: $reason"
