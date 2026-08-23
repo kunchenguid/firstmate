@@ -166,11 +166,24 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 # attempt: unlike a file or symlink, `ln -s target dir` does not fail when
 # `dir` already exists as a directory - it silently creates the link INSIDE
 # that directory instead, so the loop would never even notice the stale
-# directory, let alone break it. The `[ -d ... ] && [ ! -L ... ]` check below
-# catches that case directly (a symlink also passes `-d` when its target is
-# a directory, so `-L` is checked first to exclude a legitimate lock),
-# removing it with `rm -rf` (not `rm -f`, which cannot remove a directory at
-# all) before every `ln -s` attempt.
+# directory, let alone break it. The `[ -e ... ] && [ ! -L ... ]` check below
+# catches that case directly (a symlink also passes `-e` when its target is
+# a directory, so `-L` is checked first to exclude a legitimate lock) and
+# routes it through fm_decision_tier_lock_break, same as a stale symlink.
+#
+# Breaking (removing) whatever currently sits at the lock path is never done
+# directly in this loop - it always goes through fm_decision_tier_lock_break,
+# which serializes breakers behind their own mkdir-based mutex. Without that,
+# two contenders can both observe the same abandoned lock as stale and both
+# act on it: one removes it and creates its own fresh lock, and the other -
+# having already decided the *original* lock was stale before the first one
+# acted - then removes whatever now sits at the path, destroying the first
+# contender's brand-new legitimate lock out from under it. Both then believe
+# they hold the lock exclusively. Routing every removal through a single
+# mkdir-guarded critical section (mkdir is an atomic test-and-set, unlike a
+# bare rm racing a bare ln -s) means only one breaker ever inspects-and-acts
+# at a time, and it re-confirms staleness after acquiring the mutex in case
+# another breaker already replaced the lock while this one was waiting.
 fm_decision_tier_lock_acquire() {  # <log_file>
   local log=$1
   local lockdir="$log.lock" dir start
@@ -178,16 +191,45 @@ fm_decision_tier_lock_acquire() {  # <log_file>
   [ -d "$dir" ] || mkdir -p "$dir" || return 1
   start=$(fm_decision_tier_pid_start_time "$$")
   while :; do
-    if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
-      rm -rf "$lockdir" 2>/dev/null
+    if [ ! -e "$lockdir" ] && ln -s "$$:$start" "$lockdir" 2>/dev/null; then
+      break
     fi
-    ln -s "$$:$start" "$lockdir" 2>/dev/null && break
-    if fm_decision_tier_lock_is_stale "$lockdir"; then
-      rm -rf "$lockdir" 2>/dev/null
-      continue
-    fi
+    fm_decision_tier_lock_break "$lockdir"
     sleep 0.05
   done
+}
+
+# fm_decision_tier_lock_break: the only place that ever removes whatever
+# currently sits at <lockdir>. Guarded by its own mkdir-based mutex so
+# concurrent contenders can never both act on the same abandoned artifact
+# (see fm_decision_tier_lock_acquire above for why that matters). A losing
+# contender that fails to grab the mutex returns immediately without
+# touching anything - the winner's inspection-and-removal is the only one
+# that runs, and the loser just retries fm_decision_tier_lock_acquire's loop.
+#
+# A leftover DIRECTORY is only ever removed via `rmdir`, which succeeds
+# solely when the directory is empty. That is exactly the shape the retired
+# mkdir-based locking scheme could abandon (a holder that died right after
+# `mkdir` and before writing anything into it). A directory that is NOT
+# empty is left alone rather than recursively deleted: this library has no
+# way to prove an arbitrary non-empty directory sitting at a lock path is an
+# abandoned lock artifact rather than someone else's real data, so it
+# refuses to guess and keeps the caller waiting instead of destroying it. A
+# leftover artifact that is neither a symlink nor a directory (e.g. a plain
+# file - not a shape any lock implementation here has ever written, only a
+# corrupt/foreign one) carries no such ambiguity and is removed with `rm -f`.
+fm_decision_tier_lock_break() {  # <lockdir>
+  local lockdir=$1
+  local mutex="$lockdir.break"
+  mkdir "$mutex" 2>/dev/null || return 0
+  if [ -L "$lockdir" ]; then
+    fm_decision_tier_lock_is_stale "$lockdir" && rm -f "$lockdir" 2>/dev/null
+  elif [ -d "$lockdir" ]; then
+    rmdir "$lockdir" 2>/dev/null
+  elif [ -e "$lockdir" ]; then
+    rm -f "$lockdir" 2>/dev/null
+  fi
+  rmdir "$mutex" 2>/dev/null
 }
 
 # fm_decision_tier_pid_start_time: prints the process-start timestamp

@@ -380,6 +380,84 @@ wait "$PIDREUSE_ACQUIRE_PID" 2>/dev/null
 [ ! -e "$PIDREUSE_LOG.lock" ] || fail "a broken PID-reuse lock must end up released, not just bypassed once"
 pass "lock_acquire detects a lock whose recorded PID is alive but was reassigned (start time mismatch) and breaks it instead of blocking forever"
 
+# --- concurrent contenders breaking the same stale lock must not both win --
+#
+# Greptile flagged that two contenders can both classify the same abandoned
+# lock as stale and both act on it: one removes it and installs its own
+# fresh lock, and the other - having decided independently that the
+# *original* lock was stale - then removes whatever now sits at the path,
+# destroying the first contender's brand-new legitimate lock and letting
+# both believe they hold it exclusively. This spawns many contenders against
+# one shared stale lock and has each, once acquired, try to atomically claim
+# a "critical section" marker directory; if two contenders are ever both
+# inside the critical section at once, the second one's mkdir fails and an
+# overlap flag is raised. Comment out the mkdir-mutex in
+# fm_decision_tier_lock_break (call fm_decision_tier_lock_is_stale/rm -f or
+# rmdir directly from fm_decision_tier_lock_acquire without going through
+# the mutex) to see this go red.
+RACE_LOG="$TMP_ROOT/decisions-stale-race.log"
+mkdir -p "$(dirname "$RACE_LOG")"
+( : ) &
+RACE_DEAD_PID=$!
+wait "$RACE_DEAD_PID" 2>/dev/null
+ln -s "$RACE_DEAD_PID" "$RACE_LOG.lock"
+
+RACE_CRIT_DIR="$TMP_ROOT/race-critical-section"
+RACE_OVERLAP_FLAG="$TMP_ROOT/race-overlap-detected"
+rm -rf "$RACE_CRIT_DIR" "$RACE_OVERLAP_FLAG"
+
+fm_decision_tier_race_contender() {
+  fm_decision_tier_lock_acquire "$RACE_LOG" || return 1
+  if mkdir "$RACE_CRIT_DIR" 2>/dev/null; then
+    sleep 0.1
+    rmdir "$RACE_CRIT_DIR" 2>/dev/null
+  else
+    : > "$RACE_OVERLAP_FLAG"
+  fi
+  fm_decision_tier_lock_release "$RACE_LOG"
+}
+
+RACE_PIDS=""
+for _ in $(seq 1 8); do
+  fm_decision_tier_race_contender &
+  RACE_PIDS="$RACE_PIDS $!"
+done
+# shellcheck disable=SC2086
+wait $RACE_PIDS
+
+[ ! -e "$RACE_OVERLAP_FLAG" ] \
+  || fail "two contenders both broke the same stale lock and both believed they held it exclusively at once"
+pass "concurrent contenders breaking the same stale lock are serialized, never both winning it at once"
+
+# --- a non-empty, unrelated directory at the lock path must not be --------
+# --- destroyed ---------------------------------------------------------------
+#
+# Greptile flagged that lock_acquire recursively deletes ANY directory found
+# at the lock path without establishing it is actually an abandoned lock
+# artifact - if a caller's log path happened to collide with an unrelated
+# directory holding real data, that data would be silently destroyed. This
+# fabricates a non-empty directory at the lock path and asserts lock_acquire
+# leaves it alone (waiting rather than guessing) instead of wiping it out.
+# Change the `rmdir` in fm_decision_tier_lock_break back to `rm -rf` to see
+# this go red (it will delete the directory and its contents right away).
+UNRELATED_LOG="$TMP_ROOT/decisions-unrelated-dir.log"
+mkdir -p "$(dirname "$UNRELATED_LOG")"
+mkdir -p "$UNRELATED_LOG.lock/some-subdir"
+printf 'precious\n' > "$UNRELATED_LOG.lock/some-subdir/data.txt"
+
+( fm_decision_tier_lock_acquire "$UNRELATED_LOG" && fm_decision_tier_lock_release "$UNRELATED_LOG" ) &
+UNRELATED_PID=$!
+sleep 0.3
+if ! kill -0 "$UNRELATED_PID" 2>/dev/null; then
+  fail "lock_acquire must not treat a non-empty directory at the lock path as reclaimable; it finished instead of waiting, which means it wrongly cleared the path"
+fi
+[ -f "$UNRELATED_LOG.lock/some-subdir/data.txt" ] \
+  || fail "lock_acquire destroyed a non-empty, unrelated directory sitting at the lock path instead of leaving it alone"
+kill "$UNRELATED_PID" 2>/dev/null
+wait "$UNRELATED_PID" 2>/dev/null
+rm -rf "$UNRELATED_LOG.lock"
+pass "lock_acquire refuses to reclaim a non-empty directory at the lock path, leaving unrelated data intact"
+
 # --- successful logging for each tier ---------------------------------------
 
 fm_decision_tier_log_auto "$LOG" 1000 dec-auto-1 precedent-match "matched the sibling ruling from dec-0" \
