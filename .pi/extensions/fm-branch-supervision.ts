@@ -8,9 +8,9 @@
 // merges an append-only note to main's tail. Main's captain/assistant dialog
 // is mirrored into the branch as read-only fm-main-mirror context at main's
 // turn_end. Pi-only by construction: this file lives in .pi/extensions, so no
-// other harness ever loads it, and a home that has not explicitly enabled it
-// (config/pi-supervision-branch = on) or runs away mode keeps today's
-// wake-to-main behavior untouched.
+// other harness ever loads it, and a home that has not explicitly granted the
+// wake's project in config/pi-supervision-branch (or runs away mode) keeps
+// today's wake-to-main behavior untouched.
 //
 // Prefix stability (the cache contract, owner: bin/fm-branch-prompt.sh
 // header): the branch's system prompt is the generator's byte-stable output,
@@ -103,15 +103,32 @@ const scriptEnv = {
   FM_CONFIG_OVERRIDE: config,
 };
 
-function branchEnabled(): boolean {
+function grantedProjects(): Set<string> {
   try {
-    // The branch exercises standing autonomy, so only the captain's explicit
-    // home-local grant enables it. Missing, unreadable, empty, and malformed
-    // configuration all preserve the pre-branch wake-to-main behavior.
-    return readFileSync(configFile, "utf8").trim() === "on";
+    // Standing autonomy is project-specific. Each line must be an exact
+    // `project=<value>` matching task metadata; comments and blank lines are
+    // allowed, while malformed content fails the whole grant closed.
+    const grants = new Set<string>();
+    for (const raw of readFileSync(configFile, "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      if (!line.startsWith("project=") || line.length === 8) return new Set();
+      grants.add(line.slice(8));
+    }
+    return grants;
   } catch {
-    return false;
+    return new Set();
   }
+}
+
+function branchConfigured(): boolean {
+  return grantedProjects().size > 0;
+}
+
+function offerIsGranted(offer: BranchDispatchOffer): boolean {
+  if (!Array.isArray(offer.projects) || offer.projects.length === 0) return false;
+  const grants = grantedProjects();
+  return grants.size > 0 && offer.projects.every((project) => grants.has(project));
 }
 
 function afkActive(): boolean {
@@ -616,9 +633,10 @@ ${context.command}
   pi.events?.on?.(FM_BRANCH_DISPATCH_EVENT, (data) => {
     const offer = data as BranchDispatchOffer;
     if (!offer || typeof offer.accept !== "function") return;
-    // Check consent before ownership activation so an unconfigured home gets
-    // neither branch routing nor branch-owned state/lease cleanup side effects.
-    if (!branchEnabled()) return;
+    // Check project-specific consent before ownership activation so an
+    // unconfigured or out-of-scope wake gets neither branch routing nor
+    // branch-owned state/lease cleanup side effects.
+    if (!offerIsGranted(offer)) return;
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
@@ -641,7 +659,7 @@ ${context.command}
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
-    if (!branchEnabled() || !actingAsOwner()) return;
+    if (!branchConfigured() || !actingAsOwner()) return;
     try {
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
     } catch {
@@ -661,7 +679,7 @@ ${context.command}
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
-    if (branchEnabled()) actingAsOwner(generation);
+    if (branchConfigured()) actingAsOwner(generation);
   });
 
   pi.on?.("session_shutdown", () => {

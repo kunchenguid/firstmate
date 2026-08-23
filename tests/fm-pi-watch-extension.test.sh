@@ -475,7 +475,7 @@ async function runScenario(withAcceptor) {
   };
   if (withAcceptor) {
     bus.on("fm-branch-supervision:dispatch", (offer) => {
-      offers.push(offer.message);
+      offers.push({ message: offer.message, projects: offer.projects });
       offer.accept();
     });
   }
@@ -503,10 +503,15 @@ async function runScenario(withAcceptor) {
 }
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/branch-offer.meta`, "project=/projects/approved\nwindow=fm-branch-offer\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tbranch-offer.status\tsignal: branch-offer synthetic wake\n");
 const accepted = await runScenario(true);
 if (accepted.offers.length !== 1) throw new Error(`expected one branch offer, got ${accepted.offers.length}`);
-if (!accepted.offers[0].includes("signal: branch-offer synthetic wake")) {
-  throw new Error(`offer missed the wake reason: ${accepted.offers[0]}`);
+if (!accepted.offers[0].message.includes("signal: branch-offer synthetic wake")) {
+  throw new Error(`offer missed the wake reason: ${accepted.offers[0].message}`);
+}
+if (JSON.stringify(accepted.offers[0].projects) !== JSON.stringify(["/projects/approved"])) {
+  throw new Error(`offer did not carry the queued task project: ${JSON.stringify(accepted.offers[0].projects)}`);
 }
 if (accepted.mainPrompt !== "") throw new Error(`accepted offer still reached main: ${accepted.mainPrompt}`);
 if (!accepted.rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {

@@ -162,12 +162,14 @@ const { pathToFileURL } = await import("node:url");
 
 const home = process.env.FM_HOME;
 const realRoot = process.env.FM_ROOT_OVERRIDE;
+const approvedProject = `${home}/projects/approved`;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
-// Most drivers exercise an explicitly granted branch. Consent-gating cases
+mkdirSync(approvedProject, { recursive: true });
+// Most drivers exercise an explicitly granted project. Consent-gating cases
 // opt out so they can prove that absence itself preserves old behavior.
 if (!process.env.FM_TEST_SKIP_BRANCH_GRANT) {
-  writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
+  writeFileSync(`${home}/config/pi-supervision-branch`, `project=${approvedProject}\n`);
 }
 // The branch acts only for the session that owns the fleet lock; drivers own
 // it by default, while cold-start and secondary-session scenarios opt out.
@@ -212,9 +214,10 @@ const pi = {
 function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
-function makeOffer(message) {
+function makeOffer(message, projects = [approvedProject]) {
   const offer = {
     message,
+    projects,
     accepted: false,
     accept() {
       offer.accepted = true;
@@ -222,8 +225,8 @@ function makeOffer(message) {
   };
   return offer;
 }
-function dispatch(message) {
-  const offer = makeOffer(message);
+function dispatch(message, projects) {
+  const offer = makeOffer(message, projects);
   bus.emit("fm-branch-supervision:dispatch", offer);
   return offer;
 }
@@ -433,13 +436,24 @@ if (dispatch("signal: while disabled").accepted) throw new Error("disabled branc
 writeFileSync(`${home}/config/pi-supervision-branch`, "yes\n");
 if (dispatch("signal: while malformed").accepted) throw new Error("malformed grant accepted a wake");
 
-// Exact opt-in grants the role, but away mode still owns supervision.
-writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
+// An exact project opt-in grants the role, but away mode still owns supervision.
+writeFileSync(`${home}/config/pi-supervision-branch`, `project=${home}/projects/approved\n`);
 writeFileSync(`${home}/state/.afk`, "");
 if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
 
-// Same build, gates cleared: accepted (the divergence proves the gates bind).
+// Same build, gates cleared: only wakes wholly inside the granted project are
+// accepted. A mixed-project drain stays on main rather than extending standing
+// authority to the other project.
 rmSync(`${home}/state/.afk`);
+if (dispatch("heartbeat", []).accepted) {
+  throw new Error("branch accepted an unscoped fleet-wide wake");
+}
+if (dispatch("signal: other project", [`${home}/projects/other`]).accepted) {
+  throw new Error("branch accepted an out-of-scope project wake");
+}
+if (dispatch("signal: mixed projects", [`${home}/projects/approved`, `${home}/projects/other`]).accepted) {
+  throw new Error("branch accepted a mixed-project wake");
+}
 if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 process.exit(0);
@@ -873,6 +887,7 @@ for (const handler of replacementPiHandlers.get("session_start") ?? []) handler(
 for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
 const offer = {
   message: "signal: after rebind",
+  projects: [`${home}/projects/approved`],
   accepted: false,
   accept() {
     offer.accepted = true;

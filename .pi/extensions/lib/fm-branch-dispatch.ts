@@ -17,14 +17,20 @@ export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
 export interface BranchDispatchOffer {
   /** The watcher's actionable close message (the wake reason line(s)). */
   message: string;
+  /**
+   * Exact project values from the unread task metadata this wake will drain.
+   * Empty means the wake is fleet-wide or could not be scoped safely.
+   */
+  projects: readonly string[];
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   accept(): void;
 }
 
-export function createBranchDispatchOffer(message: string): BranchDispatchOffer {
+export function createBranchDispatchOffer(message: string, projects: readonly string[] = []): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
+    projects: [...projects],
     accepted: false,
     accept() {
       offer.accepted = true;

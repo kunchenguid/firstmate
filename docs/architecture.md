@@ -64,7 +64,7 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 
-On a Pi primary with the supervision branch enabled, the watcher extension hands each ordinary actionable wake to a persistent in-process supervision conversation instead of the captain's, which handles it, stores the outcome durably, and merges an append-only note back; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns that architecture, and every other harness keeps the wake-to-main path unchanged.
+On a Pi primary with project-specific supervision grants, the watcher extension hands each wholly in-scope ordinary actionable wake to a persistent in-process supervision conversation instead of the captain's, which handles it, stores the outcome durably, and merges an append-only note back; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns that architecture, and every other harness keeps the wake-to-main path unchanged.
 
 ### Registered secondmate current state
 

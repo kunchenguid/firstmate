@@ -1,7 +1,7 @@
 # Pi supervision branch
 
 Fleet supervision on the Pi primary harness runs on a second, persistent conversation - the supervision branch - inside the same `pi` process as the captain's chat.
-The branch absorbs every ordinary actionable fleet wake that passes the watcher's unchanged first-stage classifier, handles it with real tools, and merges each outcome back by appending a short note to the captain conversation's tail; only captain-relevant outcomes open a turn.
+The branch absorbs ordinary actionable wakes that pass the watcher's unchanged first-stage classifier and resolve wholly to captain-granted projects, handles them with real tools, and merges each outcome back by appending a short note to the captain conversation's tail; fleet-wide, unresolvable, and out-of-scope wakes stay on main, and only captain-relevant branch outcomes open a turn.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
 This feature is Pi-only by construction and changes nothing anywhere else:
@@ -22,7 +22,7 @@ This feature is Pi-only by construction and changes nothing anywhere else:
   Outcomes are written to the store before any note is handed to Pi, and rows that never reach that handoff replay once through the next locked session-start digest.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
-- Captain autonomy grant: `config/pi-supervision-branch` (docs/configuration.md "Pi supervision branch"). The branch is disabled without the exact home-local value `on`; absence never assumes consent.
+- Captain autonomy grant: `config/pi-supervision-branch` (docs/configuration.md "Pi supervision branch"). Grants are explicit `project=<task-metadata project>` lines; the branch accepts a wake only when every unread row resolves wholly inside the listed projects, so sharing a home never broadens authority. Absence, malformed grants, fleet-wide wakes, and mixed-project drains stay on main.
 
 ## How the branch knows what the captain said
 

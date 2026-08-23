@@ -55,8 +55,9 @@ import { pathToFileURL } from "node:url";
 
 const home = resolve(process.env.FM_HOME);
 // The live guard exercises the branch only after the captain's explicit
-// home-local autonomy grant.
-writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
+// project-local autonomy grant.
+const approvedProject = `${home}/projects/live-probe`;
+writeFileSync(`${home}/config/pi-supervision-branch`, `project=${approvedProject}\n`);
 const busHandlers = new Map();
 const bus = {
   on(channel, handler) {
@@ -95,6 +96,7 @@ writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 
 const offer = {
   message: "signal: live-sdk probe",
+  projects: [approvedProject],
   accepted: false,
   accept() {
     offer.accepted = true;
