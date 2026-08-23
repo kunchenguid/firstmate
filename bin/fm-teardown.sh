@@ -66,7 +66,12 @@
 #   stale half of a genuine collision (verify_worktree_slot_is_stale) - it
 #   never blindly trusts the caller, so running it against a record that is
 #   not actually stale refuses rather than silently orphaning a live
-#   worktree. Only supported for a plain (non-secondmate, non-Orca)
+#   worktree. "Stale" means the worktree is provably owned by a DIFFERENT
+#   live entity: either another LIVE task's record still names the worktree
+#   (that other task's backend endpoint still exists), or the treehouse pool
+#   reports the worktree leased to a non-empty holder that is not this task.
+#   A record-vs-record collision whose other task is not live, or a lease
+#   with no holder, is uncertainty and refuses. Only supported for a plain (non-secondmate, non-Orca)
 #   treehouse-pool task. Because that precondition already proves the
 #   worktree is not this task's to protect either way, this flag also exempts
 #   the scout-deliverable and public-followup-reply gates below: both gates
@@ -103,8 +108,10 @@
 # protects a DIFFERENT task's live work, not this task's own unlanded work.
 # Its own refusal names --retire-stale-record as the safe next step, and
 # --retire-stale-record itself re-runs the same two signals through
-# verify_worktree_slot_is_stale, this time requiring a CONFIRMED collision
-# rather than merely refusing on one, before dropping anything.
+# verify_worktree_slot_is_stale, this time requiring the worktree be provably
+# owned by a DIFFERENT live entity (a live other task, or a lease held by
+# someone other than this task) rather than merely refusing on a collision,
+# before dropping anything.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -1269,24 +1276,98 @@ slot_collision_retire_hint() {
   echo "If $ID's own worktree= record is the stale one, drop just its record without touching the worktree: $0 $ID --retire-stale-record" >&2
 }
 
+# Does the task record at <meta> still name worktree $WT as its own? Matches by
+# the exact recorded worktree= string, or by canonical path when the recorded
+# directory still exists on disk (a recycled-slot alias resolves to the same
+# path even when recorded differently). Prints nothing; returns 0 on a match.
+# Shared by the ordinary collision guard and the --retire-stale-record
+# staleness check so the record signal is never implemented twice.
+other_record_names_this_worktree() {  # <meta> <wt-abs>
+  local meta=$1 wt_abs=$2 raw abs
+  raw=$(meta_value "$meta" worktree)
+  [ -n "$raw" ] || return 1
+  [ "$raw" = "$WT" ] && return 0
+  [ -d "$raw" ] || return 1
+  abs=$(canonical_existing_dir "$raw" 2>/dev/null) || return 1
+  [ "$abs" = "$wt_abs" ]
+}
+
+# Parse one `treehouse status` human-format slot line into
+# TREEHOUSE_LINE_STATE (the status word, whitespace-trimmed),
+# TREEHOUSE_LINE_PATH (the worktree path with any "  (held by <holder>)"
+# annotation stripped and a leading "~"/"~/" home abbreviation expanded), and
+# TREEHOUSE_LINE_HOLDER (the lease holder name, empty when the line carries
+# none). Returns 0 for a slot line, 1 for anything else (the indented
+# per-worktree process lines, a trailing blank, etc.). The human format is
+# fixed-width - "<name:4>  <status:11>  <path>  [annotations]" - so the path is
+# recovered by column offset, never by whitespace splitting: a pooled worktree
+# whose path itself contains spaces is still matched exactly. (Whitespace
+# splitting previously truncated such a path and could silently miss a live
+# lease, letting teardown reap a slot another task still held.)
+treehouse_status_parse_line() {  # <line>
+  local line=$1 pathfield holder
+  holder=''
+  TREEHOUSE_LINE_STATE=''; TREEHOUSE_LINE_PATH=''; TREEHOUSE_LINE_HOLDER=''
+  case "$line" in
+    [0-9]*) ;;
+    *) return 1 ;;
+  esac
+  [ "${#line}" -ge 19 ] || return 1
+  TREEHOUSE_LINE_STATE=${line:6:11}
+  TREEHOUSE_LINE_STATE=${TREEHOUSE_LINE_STATE%"${TREEHOUSE_LINE_STATE##*[![:space:]]}"}
+  pathfield=${line:19}
+  # A leased line appends "  (held by <holder>)" after the path. Cut there so
+  # the path is recovered in full even when it contains spaces, and capture
+  # the holder for the diagnostic. Newer treehouse releases append further
+  # "  (...)" notes AFTER this annotation; extracting up to the first ")" is
+  # still correct because the holder itself never contains one.
+  case "$pathfield" in
+    *"  (held by "*")")
+      holder=${pathfield##*"  (held by "}
+      holder=${holder%%)*}
+      pathfield=${pathfield%%"  (held by "*}
+      ;;
+  esac
+  if [ "${pathfield#"~/"}" != "$pathfield" ]; then
+    pathfield="$HOME/${pathfield#"~/"}"
+  elif [ "$pathfield" = "~" ]; then
+    pathfield="$HOME"
+  fi
+  TREEHOUSE_LINE_PATH=$pathfield
+  TREEHOUSE_LINE_HOLDER=$holder
+  return 0
+}
+
+# Is the task recorded at <meta> currently live? Read-only: checks whether its
+# recorded backend endpoint still exists, the same primitive the fleet
+# snapshot uses for endpoint.exists. This is the "another LIVE task" test that
+# makes a record-vs-record collision attributable to one owner: a conflicting
+# record whose task has no live endpoint cannot prove THIS task's record is
+# the stale half, so the retire path treats it as uncertainty rather than
+# permission. A task whose backend cannot be resolved is not live.
+other_task_record_is_live() {  # <meta> <id>
+  local meta=$1 id=$2 backend target
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$backend" ] && [ -n "$target" ] || return 1
+  fm_backend_target_exists "$backend" "$target" "fm-$id" 2>/dev/null
+}
+
 # Detects, without printing or refusing, whether worktree $1 (already
 # canonicalized) collides with another task's own record or the treehouse
 # pool's own lease state (see script header, "Worktree slot-collision guard",
-# signals 1 and 2). Both the ordinary guard (check_worktree_slot_collision,
-# which refuses on ANY hint of collision or uncertainty) and the
-# --retire-stale-record precondition (verify_worktree_slot_is_stale, which
-# requires a CONFIRMED collision before proceeding) share this one detector
-# so the two signals are never implemented twice.
+# signals 1 and 2). Used by the ordinary guard (check_worktree_slot_collision),
+# which refuses on ANY hint of collision or uncertainty.
 # Sets SLOT_COLLISION_STATE to one of:
 #   clear     - neither signal found any claim on this worktree
 #   collision - signal 1 or 2 found a genuine, confirmed conflict
 #   uncertain - the treehouse pool could not be read (unknown occupancy)
 # and SLOT_COLLISION_DETAIL to a human-readable description naming the
 # conflicting task or the pool's reported holder, for callers to fold into
-# their own refusal or confirmation message.
+# their own refusal message.
 detect_worktree_slot_collision() {
-  local wt_abs=$1 other_meta other_id other_wt_raw other_wt_abs
-  local status_out line slot state pathfield rest path_abs
+  local wt_abs=$1 other_meta other_id
+  local status_out line path_abs
   SLOT_COLLISION_STATE=clear
   SLOT_COLLISION_DETAIL=
 
@@ -1294,28 +1375,18 @@ detect_worktree_slot_collision() {
   # worktree? A match, by exact recorded string or by canonical path when the
   # other candidate directory still exists, means some other task's own
   # bookkeeping still claims this exact isolated copy - never a guess this
-  # function has to resolve on its own, since it never inspects that other
-  # task's liveness beyond the record existing.
+  # function has to resolve on its own. The guard refuses on ANY record match
+  # regardless of that other task's liveness; attributing which record is the
+  # stale half is --retire-stale-record's job, via other_task_record_is_live.
   for other_meta in "$STATE"/*.meta; do
     [ -e "$other_meta" ] || continue
     [ "$other_meta" != "$META" ] || continue
     other_id=$(basename "$other_meta" .meta)
     fm_task_id_path_safe "$other_id" || continue
-    other_wt_raw=$(meta_value "$other_meta" worktree)
-    [ -n "$other_wt_raw" ] || continue
-    if [ "$other_wt_raw" = "$WT" ]; then
-      SLOT_COLLISION_STATE=collision
-      SLOT_COLLISION_DETAIL="worktree $WT is also recorded by task $other_id"
-      return 0
-    fi
-    if [ -d "$other_wt_raw" ]; then
-      other_wt_abs=$(canonical_existing_dir "$other_wt_raw" 2>/dev/null) || continue
-      if [ "$other_wt_abs" = "$wt_abs" ]; then
-        SLOT_COLLISION_STATE=collision
-        SLOT_COLLISION_DETAIL="worktree $WT is also recorded by task $other_id (its worktree= resolves to the same path)"
-        return 0
-      fi
-    fi
+    other_record_names_this_worktree "$other_meta" "$wt_abs" || continue
+    SLOT_COLLISION_STATE=collision
+    SLOT_COLLISION_DETAIL="worktree $WT is also recorded by task $other_id"
+    return 0
   done
 
   # Signal 2: does the treehouse pool's own bookkeeping show this exact
@@ -1333,22 +1404,13 @@ detect_worktree_slot_collision() {
     return 0
   fi
   while IFS= read -r line; do
-    case "$line" in
-      [0-9]*) ;;
-      *) continue ;;
-    esac
-    slot='' state='' pathfield='' rest=''
-    # shellcheck disable=SC2034 # slot is unused; read needs it to land the
-    # remaining fields (state, path, holder annotation) in the right variables.
-    read -r slot state pathfield rest <<<"$line"
-    if [ "${pathfield#"~/"}" != "$pathfield" ]; then
-      pathfield="$HOME/${pathfield#"~/"}"
-    fi
-    [ -n "$pathfield" ] && [ -d "$pathfield" ] || continue
-    path_abs=$(canonical_existing_dir "$pathfield" 2>/dev/null) || continue
-    if [ "$path_abs" = "$wt_abs" ] && [ "$state" = leased ]; then
+    treehouse_status_parse_line "$line" || continue
+    [ "$TREEHOUSE_LINE_STATE" = leased ] || continue
+    [ -n "$TREEHOUSE_LINE_PATH" ] && [ -d "$TREEHOUSE_LINE_PATH" ] || continue
+    path_abs=$(canonical_existing_dir "$TREEHOUSE_LINE_PATH" 2>/dev/null) || continue
+    if [ "$path_abs" = "$wt_abs" ]; then
       SLOT_COLLISION_STATE=collision
-      SLOT_COLLISION_DETAIL="the treehouse pool reports worktree $WT as leased${rest:+ $rest}"
+      SLOT_COLLISION_DETAIL="the treehouse pool reports worktree $WT as leased${TREEHOUSE_LINE_HOLDER:+ (held by $TREEHOUSE_LINE_HOLDER)}"
       return 0
     fi
   done <<<"$status_out"
@@ -1390,32 +1452,84 @@ check_worktree_slot_collision() {
 # operator-facing hint printed by the guard above is not itself
 # authorization - an operator (or a future automated caller) invoking
 # --retire-stale-record against a record that is not actually stale would
-# silently orphan a live worktree with nothing left tracking it, so only a
-# CONFIRMED collision proceeds here; "clear" (no collision found) and
-# "uncertain" (pool unreadable) both refuse, mirroring the guard's own
-# "preserve rather than proceed" rule.
+# silently orphan a live worktree with nothing left tracking it. "Confirmed
+# stale" therefore means the worktree is provably owned by a DIFFERENT live
+# entity, not merely that a collision exists:
+#   - signal 2 (lease): the pool reports the worktree leased to a non-empty
+#     holder that is NOT this task (a plain ship/scout task never leases, so
+#     a lease held by anyone else is always someone else's live claim);
+#   - signal 1 (record): another task's record names the worktree AND that
+#     other task's backend endpoint is still live.
+# The lease is checked FIRST because it is the authoritative owner signal: a
+# lease held by this task itself is definitive "not stale" and refuses even
+# if some other record also names the worktree. A record-vs-record collision
+# whose other task is not live, a lease with no holder, or an unreadable pool
+# are all uncertainty, and uncertainty refuses - "preserve rather than
+# proceed".
 verify_worktree_slot_is_stale() {
-  local wt_abs
+  local wt_abs other_meta other_id
+  local status_out line path_abs holder
+  local saw_dead_other_record=0 saw_nameless_lease=0 pool_unreadable=0
   wt_abs=$(canonical_existing_dir "$WT") || {
     echo "REFUSED: cannot canonicalize worktree $WT to verify --retire-stale-record's staleness precondition." >&2
     return 1
   }
-  detect_worktree_slot_collision "$wt_abs"
-  case "$SLOT_COLLISION_STATE" in
-    collision)
-      echo "Confirmed stale: $SLOT_COLLISION_DETAIL." >&2
+
+  # Signal 2 (lease), first: the pool's holder names the current owner, so a
+  # foreign holder is positive confirmation and a self-holder is definitive
+  # refusal.
+  if ! status_out=$(cd "$PROJ" && treehouse status 2>/dev/null); then
+    pool_unreadable=1
+  else
+    while IFS= read -r line; do
+      treehouse_status_parse_line "$line" || continue
+      [ "$TREEHOUSE_LINE_STATE" = leased ] || continue
+      [ -n "$TREEHOUSE_LINE_PATH" ] && [ -d "$TREEHOUSE_LINE_PATH" ] || continue
+      path_abs=$(canonical_existing_dir "$TREEHOUSE_LINE_PATH" 2>/dev/null) || continue
+      [ "$path_abs" = "$wt_abs" ] || continue
+      holder=$TREEHOUSE_LINE_HOLDER
+      if [ -n "$holder" ] && [ "$holder" != "$ID" ]; then
+        echo "Confirmed stale: the treehouse pool reports worktree $WT as leased (held by $holder)." >&2
+        return 0
+      fi
+      if [ "$holder" = "$ID" ]; then
+        echo "REFUSED: --retire-stale-record given for $ID, but the treehouse pool reports worktree $WT as leased to $ID itself; that record is not stale." >&2
+        return 1
+      fi
+      saw_nameless_lease=1
+    done <<<"$status_out"
+  fi
+
+  # Signal 1 (record): a LIVE other task's record naming this worktree is a
+  # positive confirmation that THIS task's record is the stale half.
+  for other_meta in "$STATE"/*.meta; do
+    [ -e "$other_meta" ] || continue
+    [ "$other_meta" != "$META" ] || continue
+    other_id=$(basename "$other_meta" .meta)
+    fm_task_id_path_safe "$other_id" || continue
+    other_record_names_this_worktree "$other_meta" "$wt_abs" || continue
+    if other_task_record_is_live "$other_meta" "$other_id"; then
+      echo "Confirmed stale: worktree $WT is also recorded by live task $other_id." >&2
       return 0
-      ;;
-    clear)
-      echo "REFUSED: --retire-stale-record given for $ID, but worktree $WT does not appear stale - no other task's record and no treehouse pool lease claim it." >&2
-      echo "If you intended to discard this task's own unlanded work instead, use --force." >&2
-      return 1
-      ;;
-    uncertain)
-      echo "REFUSED: $SLOT_COLLISION_DETAIL; cannot confirm --retire-stale-record's staleness precondition, so preserving the record rather than dropping it." >&2
-      return 1
-      ;;
-  esac
+    fi
+    saw_dead_other_record=1
+  done
+
+  if [ "$pool_unreadable" = 1 ]; then
+    echo "REFUSED: cannot read the treehouse pool's lease state for worktree $WT; cannot confirm --retire-stale-record's staleness precondition, so preserving the record rather than dropping it." >&2
+    return 1
+  fi
+  if [ "$saw_nameless_lease" = 1 ]; then
+    echo "REFUSED: the treehouse pool reports worktree $WT as leased but names no holder; cannot confirm --retire-stale-record's staleness precondition, so preserving the record rather than dropping it." >&2
+    return 1
+  fi
+  if [ "$saw_dead_other_record" = 1 ]; then
+    echo "REFUSED: --retire-stale-record given for $ID, but worktree $WT is only claimed by another task whose endpoint is not live - cannot confirm which record is stale, so preserving rather than dropping." >&2
+    return 1
+  fi
+  echo "REFUSED: --retire-stale-record given for $ID, but worktree $WT does not appear stale - no other task's record and no treehouse pool lease claim it." >&2
+  echo "If you intended to discard this task's own unlanded work instead, use --force." >&2
+  return 1
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in

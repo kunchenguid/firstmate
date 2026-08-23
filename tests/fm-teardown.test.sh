@@ -1406,6 +1406,33 @@ test_slot_collision_pool_lease_refuses() {
   pass "a live treehouse pool lease on the slot refuses teardown"
 }
 
+test_slot_collision_pool_lease_whitespace_path_refuses() {
+  local case_dir rc
+  # A pool slot path containing spaces must still be matched exactly: the
+  # status line is fixed-width, and the old whitespace-split parse truncated
+  # such a path, silently missing the lease and letting teardown reap a slot
+  # another task still held.
+  case_dir=$(make_case "slot-collision leased whitespace path")
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  export FM_FAKE_TREEHOUSE_STATUS="1     leased       $case_dir/wt  (held by other-holder)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_FAKE_TREEHOUSE_STATUS
+
+  expect_code 1 "$rc" "slot-collision-leased-whitespace: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "slot-collision-leased-whitespace: no REFUSED line in stderr"
+  grep -q "other-holder" "$case_dir/stderr" || fail "slot-collision-leased-whitespace: refusal did not surface the pool's holder"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "slot-collision-leased-whitespace: refused teardown removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "slot-collision-leased-whitespace: refused teardown removed the worktree"
+  pass "a leased pool slot whose path contains spaces still refuses teardown"
+}
+
 test_slot_collision_unreadable_pool_refuses() {
   local case_dir rc
   case_dir=$(make_case slot-collision-unreadable)
@@ -1573,6 +1600,73 @@ test_retire_stale_record_succeeds_via_pool_lease_signal() {
   [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$wt_head" ] \
     || fail "retire-pool-leased: the worktree's branch/HEAD was reset"
   pass "--retire-stale-record succeeds when only the pool's own lease state confirms staleness"
+}
+
+test_retire_stale_record_refuses_when_other_record_not_live() {
+  local case_dir rc
+  case_dir=$(make_case retire-other-not-live)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  # Another task's record names this worktree, but that other task has no
+  # live endpoint (its pane is gone). A record-vs-record collision alone is
+  # symmetric: it cannot prove THIS task's record is the stale half, so
+  # --retire-stale-record must refuse rather than delete a live task's
+  # durable identity.
+  fm_write_meta "$case_dir/state/other-task.meta" \
+    "window=firstmate:fm-other-task" \
+    "endpoint_task_id=other-task" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes"
+  # The default fake tmux answers every endpoint query with success; replace
+  # it so the conflicting task's pane is gone (everything else still works).
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"firstmate:fm-other-task"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "retire-other-not-live: --retire-stale-record should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "retire-other-not-live: no REFUSED line in stderr"
+  grep -q "endpoint is not live" "$case_dir/stderr" \
+    || fail "retire-other-not-live: refusal did not explain the other task is not live"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-other-not-live: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "retire-other-not-live: refused --retire-stale-record removed the worktree"
+  pass "--retire-stale-record refuses when the only conflicting record's task is not live"
+}
+
+test_retire_stale_record_refuses_when_pool_lease_holder_is_self() {
+  local case_dir rc
+  case_dir=$(make_case retire-lease-self)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  # The pool reports this worktree leased to THIS task's own id. That is the
+  # one case a lease signal cannot make a plain task's record stale: the
+  # record's task is the lease holder, so retiring it would orphan a live
+  # lease. --retire-stale-record must refuse rather than drop it.
+  export FM_FAKE_TREEHOUSE_STATUS="1     leased       $case_dir/wt  (held by task-x1)"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_FAKE_TREEHOUSE_STATUS
+
+  expect_code 1 "$rc" "retire-lease-self: --retire-stale-record should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "retire-lease-self: no REFUSED line in stderr"
+  grep -q "not stale" "$case_dir/stderr" || fail "retire-lease-self: refusal did not explain the record is not stale"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-lease-self: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "retire-lease-self: refused --retire-stale-record removed the worktree"
+  pass "--retire-stale-record refuses when the pool lease holder is this task itself"
 }
 
 test_retire_stale_record_exempts_scout_report_gate() {
@@ -3008,12 +3102,15 @@ test_local_only_force_overrides_unpushed
 test_slot_collision_clean_teardown_still_works
 test_slot_collision_second_task_meta_refuses
 test_slot_collision_pool_lease_refuses
+test_slot_collision_pool_lease_whitespace_path_refuses
 test_slot_collision_unreadable_pool_refuses
 test_slot_collision_retire_stale_record_leaves_worktree_untouched
 test_slot_collision_refuses_before_dirty_check
 test_retire_stale_record_refuses_when_not_stale
 test_retire_stale_record_refuses_when_pool_unreadable
 test_retire_stale_record_succeeds_via_pool_lease_signal
+test_retire_stale_record_refuses_when_other_record_not_live
+test_retire_stale_record_refuses_when_pool_lease_holder_is_self
 test_retire_stale_record_exempts_scout_report_gate
 test_scout_report_gate_still_enforced_without_retire_flag
 test_retire_stale_record_refuses_for_local_secondmate
