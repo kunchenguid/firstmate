@@ -108,6 +108,29 @@ test_blocked_is_position_tolerant_like_needs_decision() {
   pass "blocked [key=X] opens X in both key positions"
 }
 
+# A worker may drop brief scope, but the drop cannot die in later prose or a
+# done: line. descoped: joins the same keyed open/resolved fold as blocked:
+# it stays open across unrelated later events until a matching resolved lands.
+test_descoped_opens_and_stays_open_until_resolved() {
+  local dir expected
+  dir=$(case_dir descoped)
+  expected=$(printf 'descope-x\tdescoped\tdropped the follow-up because it was out of scope\n')
+  printf 'descoped [key=descope-x]: dropped the follow-up because it was out of scope\n' \
+    > "$dir/before.status"
+  printf 'descoped: [key=descope-x] dropped the follow-up because it was out of scope\n' \
+    > "$dir/after.status"
+  assert_fold "$dir/before.status" "$expected" "documented descoped form"
+  assert_fold "$dir/after.status" "$expected" "colon-first descoped form"
+
+  printf 'working: finishing the remaining half\n' >> "$dir/before.status"
+  printf 'done: shipped the remaining half\n' >> "$dir/before.status"
+  assert_fold "$dir/before.status" "$expected" "done: must not close a keyed descoped event"
+
+  printf 'resolved [key=descope-x]: routed to a follow-up task\n' >> "$dir/before.status"
+  assert_fold "$dir/before.status" "" "matching resolved must close the descoped key"
+  pass "descoped [key=descope-x] opens like blocked and stays open until resolved"
+}
+
 test_two_colon_form_decisions_stay_distinct() {
   local dir expected
   dir=$(case_dir distinct)
@@ -266,6 +289,7 @@ test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision
+test_descoped_opens_and_stays_open_until_resolved
 test_two_colon_form_decisions_stay_distinct
 test_mid_note_prose_mention_is_not_a_stated_key
 test_malformed_stated_key_never_collapses_to_default
