@@ -64,7 +64,8 @@ digest `1f238e42...`, and an outcome bundle of one commit
 `r5-accept-readme-v3-20260822` (`asg-00000020`) and `r5-accept-package-v3-20260822`
 (`asg-00000021`) each returned exit 0, `timed_out false`, and `outcome_commits 0` for their
 read-only briefs. Evidence and paths are in R2/R3 and R5.
-Placement across distinct upstream accounts is R5, and is now proven live there.
+Placement across distinct upstream accounts is R5, where the former single-profile placement
+residual is closed and now proven live.
 
 ## R2/R3. Secondmates run in Azure, and can spawn crewmates in Azure
 
@@ -344,8 +345,9 @@ reaches `close` with its worktree disk released".
 
 Status: DONE, met live on 2026-08-22.
 
-Crosscheck on the pi fleet is done at the roster level: eight pi profiles across eight distinct
-upstream accounts, projected into single-profile account homes by `bin/fm-pi-account-home.py`,
+Crosscheck on the pi fleet is done at the roster level. The current operating split is six Azure
+worker profiles across six distinct upstream accounts plus one separate local Firstmate profile;
+Azure profiles are projected into single-profile account homes by `bin/fm-pi-account-home.py`,
 with the roster repointed and read back through the real `bin/fm-crosscheck.py` reader and
 policy screen. Under the second 2026-08-19 amendment this roster is now the dormant crosscheck
 fallback; the pi fleet's primary duties are authors and no-mistakes.
@@ -358,6 +360,9 @@ into a controller-owned account home, and `bin/fm-spawn.sh` narrows the staged p
 to it, so the worker receives exactly one account rather than the pooled `auth.json`. An exhausted
 pool refuses by name, listing every leased profile and the task holding it. Mechanics are owned by
 `docs/azure-workers.md` ("Provider-account placement across the Pi fleet").
+The host is also the sole OAuth refresh authority: staging requires twelve hours of access-token
+headroom against a six-hour worker shutdown deadline, so a guest cannot live long enough to rotate
+the copied refresh token independently of the Azure pool.
 
 Proven locally against a fixture provider by `tests/fm-worker-placement.test.sh` (eight concurrent
 placements racing the controller lock take eight distinct upstream accounts, read back from
@@ -367,10 +372,11 @@ account) and end to end through the real `bin/fm-spawn.sh` by `tests/fm-spawn-cl
 asserts the staged credential is the leased single profile.
 
 Operational consequence the owner must know: concurrent placements are now bounded by
-`min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`. With eight Pi accounts the
-ninth concurrent placement refuses although MAX_WORKERS is 16, and compartments compete in the
-same pool. Sixteen crewmates never could run on eight accounts without sharing one; they used
-to do it silently. Raising the ceiling means adding profiles on distinct accounts.
+`min(FM_AZURE_WORKER_MAX, distinct upstream accounts in the pool)`. With the current six-account
+Azure pool the seventh concurrent placement refuses although MAX_WORKERS is 16, and compartments
+compete in the same pool. Sixteen crewmates cannot run on six accounts without sharing one.
+Raising the ceiling means adding profiles on distinct accounts to the Azure pool; adding profiles
+to the separate local Firstmate pool does not change Azure capacity.
 
 Acceptance: concurrent crewmates run on distinct pi profiles with no account collision.
 

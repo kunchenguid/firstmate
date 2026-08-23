@@ -39,12 +39,13 @@
 #   account_home and worktree_git_dir_identity bindings that lifecycle derives
 #   its request from, and window= stays empty so local endpoint probes fail
 #   closed. Cloud spawns run ENTIRELY on the pi-codex runtime: harness
-#   dispatch and claude profile routing are bypassed, account_home is the pi
-#   coding-agent directory, and pi's extension owns multi-profile selection on
-#   the worker. With the switch off (default) spawns stay byte-identical to
-#   the local path. Secondmate and account-recovery spawns always stay local,
-#   and --backend, raw launch commands, or a non-pi harness cannot be combined
-#   with cloud placement.
+#   dispatch and claude profile routing are bypassed. account_home comes from
+#   config/azure-worker-account-home when that file exists, otherwise from the
+#   pi coding-agent directory for backward compatibility; pi's extension owns
+#   multi-profile selection on the worker. With the switch off (default),
+#   spawns stay byte-identical to the local path. Secondmate and
+#   account-recovery spawns always stay local, and --backend, raw launch
+#   commands, or a non-pi harness cannot be combined with cloud placement.
 #   FM_SPAWN_PARENT_TASK / FM_SPAWN_PARENT_TASK_GENERATION mark a cloud spawn as
 #   a SECONDMATE COMPARTMENT CHILD: both are forwarded to the lifecycle request
 #   as --parent-task/--parent-task-generation, where the controller's fan-out,
@@ -611,6 +612,7 @@ if [ "$SPAWN_CLOUD" = azure ] && [ "$STATE" != "$TASK_HOME/state" ]; then
   exit 1
 fi
 CLOUD_ACCOUNT_HOME=
+CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS=43200
 CLOUD_PLACEMENT_STATE=
 CLOUD_WORKER_LAUNCH=
 RESUME_META=
@@ -626,6 +628,80 @@ SPAWN_META_SNAPSHOT=
 SPAWN_PREFLIGHT_ID=${POS[0]:-}
 spawn_idpart=${SPAWN_PREFLIGHT_ID%%=*}
 SPAWN_PREFLIGHT_BATCH=0
+
+resolve_cloud_account_home() {
+  local config_file="$CONFIG/azure-worker-account-home" configured canonical lines
+  if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    [ -f "$config_file" ] && [ ! -L "$config_file" ] || {
+      echo "error: config/azure-worker-account-home must be a regular non-symlink file" >&2
+      return 1
+    }
+    lines=$(awk 'END { print NR }' "$config_file" 2>/dev/null) || return 1
+    [ "$lines" = 1 ] || {
+      echo "error: config/azure-worker-account-home must contain exactly one line" >&2
+      return 1
+    }
+    IFS= read -r configured < "$config_file" || {
+      echo "error: cannot read config/azure-worker-account-home" >&2
+      return 1
+    }
+    case "$configured" in
+      /*) ;;
+      *)
+        echo "error: config/azure-worker-account-home must name an absolute path" >&2
+        return 1
+        ;;
+    esac
+    [ -d "$configured" ] && [ ! -L "$configured" ] || {
+      echo "error: cloud placement account home '$configured' is not a real directory" >&2
+      return 1
+    }
+    canonical=$(CDPATH='' cd -- "$configured" 2>/dev/null && pwd -P) || return 1
+    [ "$canonical" = "$configured" ] || {
+      echo "error: config/azure-worker-account-home must name its canonical physical directory ($canonical)" >&2
+      return 1
+    }
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  printf '%s\n' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+}
+
+validate_cloud_account_pool() {
+  python3 - "$SCRIPT_DIR/fm-pi-account-home.py" "$CLOUD_ACCOUNT_HOME/auth.json" <<'PY'
+import importlib.util
+import sys
+
+module_path, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_pi_account_home", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+pool = module.read_pool(module.Path(source))
+if not pool:
+    module.fail("Azure Pi pool must contain at least one profile")
+expected = ["openai-codex"] + [
+    f"openai-codex-{index}" for index in range(2, len(pool) + 1)
+]
+if sorted(pool) != sorted(expected):
+    module.fail("Azure Pi pool profiles must be gap-free: " + ", ".join(expected))
+faults = {name: module.entry_faults(pool[name]) for name in expected}
+broken = [f"{name}: {', '.join(items)}" for name, items in faults.items() if items]
+if broken:
+    module.fail("Azure Pi pool has unusable profile shapes: " + "; ".join(broken))
+accounts = [pool[name]["accountId"].strip() for name in expected]
+if len(set(accounts)) != len(accounts):
+    module.fail("Azure Pi pool profiles must name distinct upstream accounts")
+PY
+}
+
+if [ "$SPAWN_CLOUD" = azure ]; then
+  CLOUD_ACCOUNT_HOME=$(resolve_cloud_account_home) || exit 1
+  [ -d "$CLOUD_ACCOUNT_HOME" ] || {
+    echo "error: cloud placement account home '$CLOUD_ACCOUNT_HOME' is not a directory" >&2
+    exit 1
+  }
+  validate_cloud_account_pool || exit 1
+fi
 
 release_secondmate_home_lifecycle_locks() {
   [ -z "${TASK_HOME_LIFECYCLE_LOCK:-}" ] \
@@ -2693,7 +2769,7 @@ launch_template() {
         # revisit this if pi ever ships a question tool that can park a secondmate -
         # fm-watch.sh skips stale-pane wakes for kind=secondmate, so a parked
         # secondmate would not trip stale detection.
-        printf '%s' '__AGENT__ --approve __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s' '__AGENT__ --approve --fast __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
         # --exclude-tools is a plain denylist over built-in, extension, and custom
         # tool names (pi 0.84.0 filters it as a Set, ignoring names that are not
@@ -2701,7 +2777,7 @@ launch_template() {
         # crewmate's contract is to run autonomously and report through its status
         # file, so a tool that halts the run to ask a question nobody is watching is
         # never the right behavior here.
-        printf '%s' '__AGENT__ --approve --exclude-tools ask_question __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' '__AGENT__ --approve --exclude-tools ask_question --fast __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -4091,7 +4167,7 @@ if [ "$SPAWN_CLOUD" = azure ]; then
   # NOT reused - its paths exist only on this machine. --print keeps the run
   # bounded and non-interactive under the supervisor's device-null stdin.
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands on the worker, not here
-  CLOUD_WORKER_LAUNCH="env PI_CODING_AGENT_DIR=/mnt/account/pi-agent pi --print --approve --exclude-tools ask_question ${MODELFLAG}${EFFORTFLAG}"'"$(cat /mnt/task/.fm-task/brief.md)"'
+  CLOUD_WORKER_LAUNCH="env PI_CODING_AGENT_DIR=/mnt/account/pi-agent pi --print --approve --exclude-tools ask_question --fast ${MODELFLAG}${EFFORTFLAG}"'"$(cat /mnt/task/.fm-task/brief.md)"'
   # A secondmate compartment has no single worker entrypoint: its session
   # legs are built and dispatched by fm-secondmate-cloud-monitor.sh, so the
   # crewmate launch string above is never persisted or executed for it.
@@ -4468,6 +4544,17 @@ spawn_cloud_bind_leased_account() {  # <request-stdout-file>
     echo "error: leased provider-account home '$leased' holds no credential for $ID" >&2
     return 1
   }
+  # Azure's hard VM shutdown is six hours after creation. Require twice that
+  # much access-token headroom before staging so the guest cannot reach Pi's
+  # automatic OAuth refresh path and rotate a refresh token independently of
+  # the controller-owned pool. The host refresh scheduler is the sole refresh
+  # authority; a stale pool slot is handed back rather than copied to Azure.
+  "$SCRIPT_DIR/fm-credential-expiry.py" check --harness pi \
+    --margin-seconds "$CLOUD_ACCOUNT_MIN_HEADROOM_SECONDS" \
+    --min-state usable "$leased" >/dev/null || {
+    echo "error: leased provider-account credential lacks twelve hours of access-token headroom for $ID" >&2
+    return 1
+  }
   # Exactly one provider slot, checked by shape and never by content: a home
   # carrying more than one is the pool, and the guest would pick the first.
   python3 - "$leased/auth.json" <<'PY' || return 1
@@ -4591,7 +4678,7 @@ spawn_cloud_persist_convergence_artifacts() {
       cp "$SCRIPT_DIR/fm-secondmate-session.py" "$STATE/$ID.cloud-payload/fm-secondmate-session.py" || exit 1
       cp "$SCRIPT_DIR/fm-secondmate-spawn.pi-ext.ts" "$STATE/$ID.cloud-payload/fm-secondmate-spawn.pi-ext.ts" || exit 1
     fi
-    CLOUD_ACCOUNT_SOURCE=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+    CLOUD_ACCOUNT_SOURCE=$CLOUD_ACCOUNT_HOME
     if [ ! -f "$CLOUD_ACCOUNT_SOURCE/auth.json" ]; then
       echo "error: cloud account source lacks auth.json at $CLOUD_ACCOUNT_SOURCE" >&2
       exit 1
@@ -4820,9 +4907,10 @@ META_WINDOW=$T
 # Cloud placement persists the exact identities the elastic worker lifecycle
 # derives its bindings from (docs/azure-workers.md "Queue request"): the
 # physical worktree Git-dir identity and the provider account home. The cloud
-# lane is pi-codex only, so the account home is always the pi coding-agent
-# directory - never a claude/codex profile home, and never a local
-# account-directory rotation (that machinery is bypassed entirely for cloud).
+# lane is pi-codex only, so the account home is the dedicated Azure worker Pi
+# pool when configured, otherwise the legacy pi coding-agent directory - never
+# a claude/codex profile home, and never a local account-directory rotation
+# (that machinery is bypassed entirely for cloud).
 if [ "$SPAWN_CLOUD" = azure ]; then
   [ "$DIRECT_ACCOUNT_ROUTING" != 1 ] || {
     echo "error: cloud placement must not reach direct account-directory routing; refusing to mix profile machinery into the worker lane" >&2
@@ -4834,7 +4922,6 @@ if [ "$SPAWN_CLOUD" = azure ]; then
       exit 1
     }
   fi
-  CLOUD_ACCOUNT_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
   [ -d "$CLOUD_ACCOUNT_HOME" ] || {
     echo "error: cloud placement account home '$CLOUD_ACCOUNT_HOME' is not a directory" >&2
     exit 1

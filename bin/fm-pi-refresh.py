@@ -727,6 +727,13 @@ def command_run_once(args: argparse.Namespace) -> int:
     now = time.time()
     try:
         code = _run_once(args)
+        azure_source = scheduled_azure_source(args)
+        if code == 0 and azure_source is not None:
+            azure_args = argparse.Namespace(**vars(args))
+            azure_args.source = str(azure_source)
+            azure_args.destination_root = str(scheduler_state_root() / "azure-account-homes")
+            azure_args.backup_root = str(scheduler_state_root() / "azure-pool-backups")
+            code = _run_once(azure_args)
     except RefreshError as exc:
         record_heartbeat(
             kind="attention" if exc.attention else "failed", detail=str(exc), now=now
@@ -738,6 +745,34 @@ def command_run_once(args: argparse.Namespace) -> int:
         now=now,
     )
     return code
+
+
+def scheduled_azure_source(args: argparse.Namespace) -> Path | None:
+    config_value = getattr(args, "azure_home_config", None)
+    if not getattr(args, "scheduled", False) or not config_value:
+        return None
+    config = Path(config_value)
+    try:
+        metadata = config.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        fail(f"Azure Pi pool config is unreadable at {config}: {exc.strerror}")
+    if not stat.S_ISREG(metadata.st_mode) or config.is_symlink():
+        fail(f"Azure Pi pool config must be a regular non-symlink file at {config}")
+    try:
+        lines = config.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        fail(f"Azure Pi pool config cannot be read at {config}: {exc.strerror}")
+    if len(lines) != 1 or not lines[0]:
+        fail(f"Azure Pi pool config must contain exactly one path at {config}")
+    home = Path(lines[0])
+    if not home.is_absolute() or home != home.resolve():
+        fail(f"Azure Pi pool config must name a canonical absolute directory at {config}")
+    source = home / "auth.json"
+    if source.expanduser().resolve() == Path(args.source).expanduser().resolve():
+        return None
+    return source
 
 
 def _run_once(args: argparse.Namespace) -> int:
@@ -1146,6 +1181,12 @@ def scheduler_job(interval: int, state_root: Path, nonce: str) -> dict[str, Any]
             "run-once",
             "--all",
             "--scheduled",
+            "--azure-home-config",
+            str(
+                Path(os.environ.get("FM_HOME") or BIN_DIR.parent).resolve()
+                / "config"
+                / "azure-worker-account-home"
+            ),
         ],
         "EnvironmentVariables": {
             "PATH": search,
@@ -1467,6 +1508,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="record the heartbeat, which only launchd's own invocation can do",
     )
+    run.add_argument("--azure-home-config", help=argparse.SUPPRESS)
     run.set_defaults(handler=command_run_once)
 
     install = commands.add_parser(

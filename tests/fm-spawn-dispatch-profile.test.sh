@@ -464,7 +464,7 @@ test_pi_omits_invalid_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --approve --exclude-tools ask_question --model 'sonnet' -e" \
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question --fast --model 'sonnet' -e" \
     "pi launch did not thread model after the autonomy flags"
   assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
   pass "pi threads model and omits unsupported max effort"
@@ -487,7 +487,7 @@ test_pi_crewmate_carries_autonomy_flags() {
   status=$?
   expect_code 0 "$status" "pi spawn with model and effort should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --approve --exclude-tools ask_question --model 'sonnet' --thinking 'high' -e" \
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question --fast --model 'sonnet' --thinking 'high' -e" \
     "pi launch with model/effort did not render the autonomy flags ahead of the profile flags"
 
   # Without model or effort: both placeholders expand to nothing, so --approve and
@@ -499,7 +499,7 @@ test_pi_crewmate_carries_autonomy_flags() {
   status=$?
   expect_code 0 "$status" "pi spawn without model or effort should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --approve --exclude-tools ask_question -e" \
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question --fast -e" \
     "pi launch without model/effort did not render well-formed autonomy flags"
   assert_not_contains "$launch" "--model" "bare pi launch must not carry a --model flag"
   assert_not_contains "$launch" "--thinking" "bare pi launch must not carry a --thinking flag"
@@ -530,7 +530,7 @@ test_pi_secondmate_approves_without_excluding_tools() {
   expect_code 0 "$status" "pi secondmate spawn should succeed: $out"
   assert_contains "$out" "spawned $id harness=pi kind=secondmate" "secondmate did not launch on pi"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --approve -e" \
+  assert_contains "$launch" "pi --approve --fast -e" \
     "pi secondmate launch did not carry --approve ahead of its extensions"
   assert_not_contains "$launch" "--exclude-tools" \
     "pi secondmate launch must keep its question tool; --exclude-tools is crewmate-only"

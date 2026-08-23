@@ -19,18 +19,19 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-cloud)
 # pi agent home, and placement leases ONE profile out of it (R5), so the fixture
 # has to look like the real pool: several profiles, each a complete oauth
 # credential shape naming a distinct upstream account.
-fm_spawn_cloud_write_pi_pool() {  # <auth.json path>
-  python3 - "$1" <<'PY'
+fm_spawn_cloud_write_pi_pool() {  # <auth.json path> [account prefix]
+  python3 - "$1" "${2:-fixture}" <<'PY'
 import json
 import sys
 
+prefix = sys.argv[2]
 pool = {}
-for index in range(1, 5):
+for index in range(1, 7):
     name = "openai-codex" if index == 1 else "openai-codex-{}".format(index)
     pool[name] = {
-        "type": "oauth", "access": "fixture-access-{}".format(index),
-        "refresh": "fixture-refresh-{}".format(index),
-        "accountId": "fixture-account-{}".format(index),
+        "type": "oauth", "access": "{}-access-{}".format(prefix, index),
+        "refresh": "{}-refresh-{}".format(prefix, index),
+        "accountId": "{}-account-{}".format(prefix, index),
         "expires": 4102444800000,
     }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
@@ -486,6 +487,7 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   assert_grep 'placement=azure' "$meta" "the cloud spawn did not record placement=azure"
   assert_grep 'harness=pi' "$meta" "the cloud spawn did not record the pi-codex runtime"
   assert_grep "account_home=$CASE_DIR/pi-agent-home" "$meta" "the cloud spawn did not record the pi coding-agent account home"
+  assert_grep '--fast' "$HOME_DIR/state/$id.cloud-entrypoint" "the cloud worker entrypoint did not force Fast Mode"
   assert_grep 'worktree_git_dir_identity=' "$meta" "the cloud spawn did not record the worktree Git-dir identity"
   assert_grep 'worktree_git_dir=' "$meta" "the cloud spawn did not record the worktree Git dir"
   # R5: the controller leased ONE profile out of that pool, and the credential
@@ -556,6 +558,113 @@ PY
   assert_grep '"request_digest"' "$HOME_DIR/state/$id.worker-result.json" \
     "the worker execution result is not digest-bound"
   pass "cloud spawn persists lifecycle bindings, assigns a worker, and runs the entrypoint remotely"
+}
+
+test_cloud_spawn_uses_the_dedicated_azure_account_pool() {
+  local record id out status meta azure_home
+  id=cloud-pool-c2b
+  record=$(make_cloud_case dedicated-account-pool "$id")
+  read_cloud_case "$record"
+  azure_home="$CASE_DIR/azure-pi-agent-home"
+  mkdir -p "$azure_home"
+  fm_spawn_cloud_write_pi_pool "$azure_home/auth.json" azure
+  printf '%s\n' "$azure_home" > "$HOME_DIR/config/azure-worker-account-home"
+  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "a cloud spawn with a dedicated account pool should succeed: $out"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account_home=$azure_home" "$meta" "the cloud spawn ignored config/azure-worker-account-home"
+  python3 - "$meta" "$HOME_DIR/state/azure-workers/controller.json" \
+    "$CASE_DIR/pi-agent-home/auth.json" "$azure_home/auth.json" "$id" <<'PY' \
+    || fail "the controller did not lease from the dedicated Azure pool"
+import json
+from pathlib import Path
+import sys
+
+meta_path, controller_path, local_path, azure_path, task = sys.argv[1:]
+meta = {}
+for line in open(meta_path, encoding="utf-8"):
+    if "=" in line:
+        key, value = line.rstrip("\n").split("=", 1)
+        meta[key] = value
+state = json.load(open(controller_path, encoding="utf-8"))
+item = next(entry for entry in state["queue"].values() if entry["task"] == task)
+local_pool = json.load(open(local_path, encoding="utf-8"))
+azure_pool = json.load(open(azure_path, encoding="utf-8"))
+assert item["account_pool_home"] == meta["account_home"]
+assert item["account_pool_home"] == str(Path(azure_path).parent)
+assert azure_pool[item["account_profile"]]["accountId"].startswith("azure-account-")
+assert azure_pool[item["account_profile"]]["accountId"] != local_pool[item["account_profile"]]["accountId"]
+PY
+  pass "config/azure-worker-account-home isolates Azure credentials from the primary Pi home"
+}
+
+test_cloud_spawn_refuses_an_unsafe_azure_account_pool_path() {
+  local record id out status
+  id=cloud-pool-bad-c2c
+  record=$(make_cloud_case unsafe-account-pool "$id")
+  read_cloud_case "$record"
+  printf '%s\n' relative/pi-agent-home > "$HOME_DIR/config/azure-worker-account-home"
+  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a relative Azure account-pool path should fail closed: $out"
+  assert_contains "$out" "must name an absolute path" "the refusal did not explain the account-pool path contract: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unsafe Azure account-pool path still wrote task metadata"
+  pass "an unsafe Azure account-pool path fails closed before spawn mutation"
+}
+
+test_cloud_spawn_refuses_a_gap_in_the_azure_account_pool() {
+  local record id out status azure_home
+  id=cloud-pool-gap-c2e
+  record=$(make_cloud_case incomplete-account-pool "$id")
+  read_cloud_case "$record"
+  azure_home="$CASE_DIR/azure-pi-agent-home"
+  mkdir -p "$azure_home"
+  fm_spawn_cloud_write_pi_pool "$azure_home/auth.json" azure
+  python3 - "$azure_home/auth.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+pool = json.load(open(path, encoding="utf-8"))
+del pool["openai-codex-4"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(pool, handle)
+PY
+  printf '%s\n' "$azure_home" > "$HOME_DIR/config/azure-worker-account-home"
+  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a gapped Azure account pool should fail closed: $out"
+  assert_contains "$out" "profiles must be gap-free" "the refusal did not explain the profile-numbering contract: $out"
+  assert_absent "$HOME_DIR/state/$id.meta" "a gapped Azure pool still wrote task metadata"
+  pass "Azure placement requires gap-free account numbering while allowing pool growth"
+}
+
+test_cloud_spawn_refuses_a_credential_that_could_refresh_on_the_guest() {
+  local record id out status
+  id=cloud-expiring-c2d
+  record=$(make_cloud_case expiring-account "$id")
+  read_cloud_case "$record"
+  python3 - "$CASE_DIR/pi-agent-home/auth.json" <<'PY'
+import json
+import sys
+import time
+
+path = sys.argv[1]
+pool = json.load(open(path, encoding="utf-8"))
+pool["openai-codex"]["expires"] = int((time.time() + 3600) * 1000)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(pool, handle, sort_keys=True, indent=2)
+PY
+  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "a credential that could refresh during the worker lifetime should fail closed: $out"
+  assert_contains "$out" "lacks twelve hours of access-token headroom" \
+    "the refusal did not explain the guest refresh boundary: $out"
+  assert_absent "$HOME_DIR/state/$id.cloud-account/auth.json" \
+    "a near-expiry credential was left staged after refusal"
+  assert_no_grep "\"task\":\"$id\"" "$HOME_DIR/state/azure-workers/controller.json" \
+    "the refused near-expiry credential kept its provider-account lease"
+  pass "cloud staging prevents a guest from becoming a second OAuth refresh authority"
 }
 
 test_cloud_spawn_stays_durably_queued_without_admission() {
@@ -1743,6 +1852,10 @@ test_compartment_child_withdraw_removes_the_staged_credential() {
 
 test_cloud_switch_off_keeps_the_local_path_and_metadata_shape
 test_cloud_spawn_places_worker_and_runs_the_entrypoint
+test_cloud_spawn_uses_the_dedicated_azure_account_pool
+test_cloud_spawn_refuses_an_unsafe_azure_account_pool_path
+test_cloud_spawn_refuses_a_gap_in_the_azure_account_pool
+test_cloud_spawn_refuses_a_credential_that_could_refresh_on_the_guest
 test_monitor_lands_the_outcome_bundle
 test_monitor_reports_an_already_landed_outcome
 test_monitor_reports_a_crewmate_that_never_committed
