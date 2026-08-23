@@ -172,6 +172,7 @@ The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status cont
 When the verified remote endpoint accepts the text and Enter but synchronous submit confirmation remains pending, the primary reports the request as delivered rather than failed; do not resend it, because its pending-reply expectation remains armed.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
+For the same reason, the session-start fleet digest never probes a `remote:<id>` endpoint locally: it reports that endpoint as not locally probed instead of classifying it alive or dead.
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
