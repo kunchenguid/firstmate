@@ -226,17 +226,21 @@ When rejection detects another owner for the acquired copy, Firstmate neither re
 A fresh spawn also refuses before endpoint or lease creation when its task id already has a durable record; [`agent-control.md`](agent-control.md) owns how `relaunch` safely reuses that task's recorded endpoint and worktree.
 
 A pool also runs out when delivered copies are never handed back, and a dispatch then fails for want of a slot rather than for want of work.
-A project may publish that housekeeping as a `pool:release-delivered` script, which `bin/fm-spawn.sh` runs once with `--yes` from a temporary authenticated snapshot of the canonical clone's `HEAD` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
+A project may publish that housekeeping as a `pool:release-delivered` script.
+[`bin/fm-project-script-lib.sh`](../bin/fm-project-script-lib.sh) owns the shared opt-in contract: only Git-proven `package.json` views from the working tree, index, or `HEAD` count; an untracked manifest publishes nothing; and confirmed absence remains distinct from an unavailable or unreadable published view.
+`bin/fm-spawn.sh` runs the script once with `--yes` from a temporary authenticated snapshot of the canonical clone's `HEAD` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
 This one is capacity rather than safety, so a release that fails or cannot be confirmed warns and the spawn continues.
-`FM_SPAWN_RELEASE_DELIVERED_TIMEOUT` (default 60 seconds) bounds it.
+`FM_SPAWN_RELEASE_DELIVERED_TIMEOUT` is a positive integer number of seconds and defaults to 60; an invalid value makes this optional housekeeping warn and leaves the spawn free to continue.
 
-A project may also publish its own custody verdict as a `check:worktree-custody` script in its `package.json`, run with the package manager its lockfile selects.
+A project may also publish its own custody verdict as a `check:worktree-custody` script under that same Git-proven opt-in contract, run with the package manager its lockfile selects.
+Teardown resolves that opt-in independently from the canonical clone and protected worktree, and requires custody whenever either one declares it.
+It treats the check as absent only when every available published view omits it; an unavailable repository, unreadable published view, or otherwise unconfirmable result refuses cleanup.
 `bin/fm-teardown.sh` then runs the version committed at the canonical clone's `HEAD` from an authenticated Git snapshot, passing `--worktree <absolute-path>` for the copy being judged, after its landed-work verdict and before any destructive operation.
 The mutable code in that protected copy is never trusted to authorize its own return, and an unavailable or unauthenticated canonical check refuses cleanup.
 A non-zero verdict also refuses cleanup, which covers the copies a landed-work test cannot judge: one handed to a second owner, or one whose branch was advanced from another checkout.
 `--force` does not bypass this custody verdict.
 A project that publishes no such script is unaffected.
-`FM_TEARDOWN_CUSTODY_TIMEOUT` (default 120 seconds) bounds that run.
+`FM_TEARDOWN_CUSTODY_TIMEOUT` must be a positive integer number of seconds and defaults to 120; an invalid value refuses cleanup before the check runs.
 
 ## Harness support
 
@@ -646,8 +650,8 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_POOL_ROOT=            # unsupported literal override; non-empty values refuse and must migrate to FM_POOL_ROOT_BASE
 FM_POOL_ROOT_BASE=$HOME/.treehouse-homes  # directory the per-home pool roots live in
-FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=60  # seconds bounding a project's own pool:release-delivered run before a spawn leases
-FM_TEARDOWN_CUSTODY_TIMEOUT=120  # seconds bounding a project's own check:worktree-custody run during cleanup
+FM_SPAWN_RELEASE_DELIVERED_TIMEOUT=60  # positive integer seconds bounding a project's own pool:release-delivered run before a spawn leases
+FM_TEARDOWN_CUSTODY_TIMEOUT=120  # positive integer seconds bounding a project's own check:worktree-custody run during cleanup
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
