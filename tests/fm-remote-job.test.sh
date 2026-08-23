@@ -180,12 +180,7 @@ MISE_COMPOSED=$(printf '%s\n' "$FM_REMOTE_JOB_OPERATOR_PATH" | tr ':' '\n' | gre
 MISE_EXPECTED=$(printf '%s\n' "$MISE_INSTALLS"/*/*/bin)
 [ "$MISE_COMPOSED" = "$MISE_EXPECTED" ] \
   || fail "the composed operator PATH did not order tool installs like the shell's own expansion"$'\n'"expected: $MISE_EXPECTED"$'\n'"actual:   $MISE_COMPOSED"
-# Bash sorts glob matches in pathexp.c, on the shell's own expansion path only.
-# `compgen -G` reaches glob_filename through pcomplete.c, which does not sort,
-# so on bash 3.2 it yields raw readdir order while the assertion above still
-# passes on a bash whose glob library sorts for both. Pin the mechanism too.
-grep -v '^[[:space:]]*#' "$ROOT/bin/fm-remote-job-lib.sh" | grep -q 'compgen' \
-  && fail "the operator PATH composes glob matches with compgen -G, which is unsorted on bash 3.2"
+# This assertion detects the defect on bash 3.2 and 5.2, where compgen -G returns unsorted glob matches, but reads green on bash 5.3+ because glob sorting moved into the glob library so both mechanisms agree there.
 rm -rf -- "$ACCOUNT_HOME/.local/share/mise"
 pass "operator PATH orders discovered tool installs deterministically"
 
