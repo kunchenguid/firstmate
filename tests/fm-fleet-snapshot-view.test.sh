@@ -766,7 +766,7 @@ test_oversized_backlog_survives_the_argv_string_ceiling() {
   # Assert the size the fixture actually reached, so a narrower parser output cannot
   # let this case pass without ever crossing the ceiling.
   backlog_bytes=$(printf '%s' "$json" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
-  [ "$backlog_bytes" -gt "$(fm_argv_string_ceiling)" ] \
+  [ "$backlog_bytes" -gt "$FM_ARGV_STRING_CEILING" ] \
     || fail "fixture never crossed the ceiling: parsed backlog is only $backlog_bytes bytes"
   printf '%s' "$json" | jq -e --argjson want "$FM_OVERSIZED_BACKLOG_ITEMS" '
     .schema == "fm-fleet-snapshot.v1"

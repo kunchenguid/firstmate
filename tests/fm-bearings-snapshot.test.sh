@@ -935,7 +935,7 @@ test_oversized_backlog_still_charts_bearings() {
   # Assert the size the fixture actually reached, so a narrower parser output cannot
   # let this case pass without ever crossing the ceiling.
   backlog_bytes=$(printf '%s' "$canon" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
-  [ "$backlog_bytes" -gt "$(fm_argv_string_ceiling)" ] \
+  [ "$backlog_bytes" -gt "$FM_ARGV_STRING_CEILING" ] \
     || fail "fixture never crossed the ceiling: parsed backlog is only $backlog_bytes bytes"
 
   toon=$(run "$home" "$fakebin") \
@@ -949,6 +949,59 @@ test_oversized_backlog_still_charts_bearings() {
     and ([.in_flight[] | select(.id == "filler-001")] | length) == 1
   ' >/dev/null || fail "oversized-backlog bearings JSON is malformed: $json"
   pass "bearings still charts a backlog wider than one argv string ($backlog_bytes parsed bytes)"
+}
+
+# The other unbounded value on this path is the child home summary's own reason, which
+# the parent splices into the record it builds for that child. It carries one id per
+# offending child, so it crosses the same per-argv-string ceiling a wide backlog does.
+# In-flight child rows with long ids and no child metadata make orphan_in_flight the
+# summary's first strict invalidity, and its reason is what the parent then has to
+# carry. tests/lib.sh owns the ceiling.
+test_oversized_child_summary_reason_survives_the_ceiling() {
+  local home mate fakebin canon record pad last_id reason_len count=300 i=1
+  home=$(make_home oversized-child-reason)
+  mate="$TMP_ROOT/oversized-child-reason-home"
+  make_valid_secondmate_home orphaned "$mate"
+  append_secondmate_registry "$home" orphaned "$mate"
+  write_parent_secondmate_event "$home" orphaned "$mate" "old orphan work"
+  pad=$(printf '%0489d' 0 | tr '0' 'x')
+  last_id=$(printf 'orphan-%03d-%s' "$count" "$pad")
+  {
+    printf '## In flight\n'
+    while [ "$i" -le "$count" ]; do
+      printf -- '- [ ] orphan-%03d-%s - Orphaned child %03d (repo: sample) (kind: ship) (since 2026-07-13)\n' \
+        "$i" "$pad" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_MAX_BYTES=1048576 FM_SNAPSHOT_SECONDMATE_TIMEOUT=60 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the canonical snapshot must survive a child summary reason wider than one argv string"
+  # Project the one record down first, so a failure reports the mismatch instead of a
+  # third of a megabyte of snapshot.
+  record=$(printf '%s' "$canon" | jq -c --arg last "$last_id" '
+    [ .secondmate_current.records[] | select(.id == "orphaned")
+      | {state:.current.state,provenance:.provenance.selected,trust:.provenance.trust,
+         reason_prefixed:((.current.reason // "")
+           | startswith("structured home state invalid: in-flight backlog item has no child metadata: ")),
+         reason_carries_last_id:((.current.reason // "") | contains($last)),
+         reason_length:((.current.reason // "") | length)} ]')
+  printf '%s' "$record" | jq -e '
+    length == 1
+    and (.[0] | .state == "no_active_work" and .provenance == "structured-home"
+      and .trust == "partial-structured"
+      and .reason_prefixed and .reason_carries_last_id)
+  ' >/dev/null || fail "the parent lost an oversized child summary reason: $record"
+  # Assert the length the fixture actually reached, so a shorter reason cannot let this
+  # case pass without ever crossing the ceiling.
+  reason_len=$(printf '%s' "$record" | jq '.[0].reason_length')
+  [ "$reason_len" -gt "$FM_ARGV_STRING_CEILING" ] \
+    || fail "fixture never crossed the ceiling: child summary reason is only $reason_len bytes"
+  pass "a child summary reason wider than one argv string still reaches its record ($reason_len bytes)"
 }
 
 test_toon_json_parity() {
@@ -2034,3 +2087,4 @@ test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
 test_oversized_backlog_still_charts_bearings
+test_oversized_child_summary_reason_survives_the_ceiling

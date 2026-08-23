@@ -234,16 +234,13 @@ fm_git_worktree() {
 # captain backlog grows past that size, so the suites that read the backlog pin the
 # behavior with a fixture whose PARSED form clears the ceiling with margin.
 #
-# fm_argv_string_ceiling echoes the ceiling, and fm_write_oversized_backlog writes
-# the fixture. The items are ordinary in-flight rows plus the retained note line
-# each one carries: wide, not unusual. A consuming test asserts the parsed size it
-# actually reached, so a narrower parser output cannot make the case vacuous.
+# FM_ARGV_STRING_CEILING is the ceiling, and fm_write_oversized_backlog writes the
+# fixture. The items are ordinary in-flight rows plus the retained note line each one
+# carries: wide, not unusual. A consuming test asserts the parsed size it actually
+# reached, so a narrower parser output cannot make the case vacuous.
+# shellcheck disable=SC2034 # Read by the suites that source this lib, not by the lib.
 FM_ARGV_STRING_CEILING=131072
 FM_OVERSIZED_BACKLOG_ITEMS=240
-
-fm_argv_string_ceiling() {
-  printf '%s\n' "$FM_ARGV_STRING_CEILING"
-}
 
 # fm_write_oversized_backlog <home> [count]: write <home>/data/backlog.md with
 # <count> in-flight items (default FM_OVERSIZED_BACKLOG_ITEMS).

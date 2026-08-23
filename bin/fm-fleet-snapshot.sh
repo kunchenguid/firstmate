@@ -212,9 +212,11 @@ command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; e
 # Every blob whose size tracks the backlog, the task inventory, the scout-report
 # inventory, a status-log decision fold, or a registered-secondmate aggregation
 # is therefore handed to jq with --slurpfile, which reads the value from a file
-# and has no argv ceiling. Each such filter binds the slurped value back to its
-# original name up front, so the filter bodies stay unchanged. Bounded scalars
-# and fixed-shape per-task objects stay on --arg/--argjson.
+# and has no argv ceiling. A raw string whose length tracks the data, such as a
+# child home summary's own reason, travels the same way through --rawfile. Each
+# such filter binds the file-read value back to its original name up front, so
+# the filter bodies stay unchanged. Bounded scalars and fixed-shape per-task
+# objects stay on --arg/--argjson.
 #
 # The blob files live in one private mktemp directory per process, so several
 # snapshot runs in flight on the same home cannot collide, and one file per
@@ -242,6 +244,17 @@ jq_blob_file() {  # <slot> <blob>
       return 1
       ;;
   esac
+  printf '%s' "$2" > "$file" || return 1
+  printf '%s' "$file"
+}
+
+# Write raw string <value> to this process's private file for <slot> and echo that
+# path, for a value read back with --rawfile. An empty value is written rather than
+# refused: --rawfile on an empty file binds the empty string, which is exactly what
+# --arg bound, and an empty reason is a meaningful "no reason" here. The value is
+# written with no trailing newline, because --rawfile keeps one.
+jq_raw_file() {  # <slot> <value>
+  local file="$SNAPSHOT_TMPDIR/$1.txt"
   printf '%s' "$2" > "$file" || return 1
   printf '%s' "$file"
 }
@@ -1223,7 +1236,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   local registry_file tasks_file summary_file decisions_file activities_file activity_scan_file reconciliation_file
-  local records_file record_file
+  local records_file record_file current_reason_file reason_file
   registry=$(registry_secondmates_json) || return 1
   registry_file=$(jq_blob_file union_registry "$registry") || return 1
   tasks_file=$(jq_blob_file union_tasks "$tasks") || return 1
@@ -1378,18 +1391,21 @@ secondmate_current_json() {  # <parent-tasks-json>
       activities_file=$(jq_blob_file current_activities "$activities") || return 1
       activity_scan_file=$(jq_blob_file current_activity_scan "$activity_scan") || return 1
       reconciliation_file=$(jq_blob_file current_reconciliation "$reconciliation") || return 1
+      current_reason_file=$(jq_raw_file current_reason "$current_reason") || return 1
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --argjson registered "$registered" --argjson summary_valid "$summary_valid" \
         --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" \
+        --rawfile current_reason_raw "$current_reason_file" \
         --slurpfile summary_blob "$summary_file" \
         --slurpfile decisions_blob "$decisions_file" \
         --slurpfile activities_blob "$activities_file" \
         --slurpfile activity_scan_blob "$activity_scan_file" \
         --slurpfile reconciliation_blob "$reconciliation_file" '
-        ($summary_blob[0]) as $summary
+        ($current_reason_raw) as $current_reason
+        | ($summary_blob[0]) as $summary
         | ($decisions_blob[0]) as $decisions
         | ($activities_blob[0]) as $activities
         | ($activity_scan_blob[0]) as $activity_scan
@@ -1426,17 +1442,20 @@ secondmate_current_json() {  # <parent-tasks-json>
       # The sampled home summary reaches here unbounded too: the byte-limit rejection
       # keeps the oversized text it just measured, so it cannot ride argv either.
       summary_file=$(jq_blob_file fallback_summary "$summary") || return 1
+      reason_file=$(jq_raw_file fallback_reason "$reason") || return 1
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg observed "$SNAPSHOT_NOW" \
         --arg spawn_gen "$sampled_spawn_gen" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson terminal "$terminal" \
         --argjson summary_sampled "$summary_sampled" \
+        --rawfile reason_raw "$reason_file" \
         --slurpfile activities_blob "$activities_file" \
         --slurpfile activity_scan_blob "$activity_scan_file" \
         --slurpfile decisions_blob "$decisions_file" \
         --slurpfile summary_blob "$summary_file" '
-        ($activities_blob[0]) as $activities
+        ($reason_raw) as $reason
+        | ($activities_blob[0]) as $activities
         | ($activity_scan_blob[0]) as $activity_scan
         | ($decisions_blob[0]) as $decisions
         | ($summary_blob[0]) as $summary
