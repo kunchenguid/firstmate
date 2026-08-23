@@ -97,3 +97,10 @@ Destructive, irreversible, and security-sensitive actions always require the cap
 ## 10. Explicitly abolished (with evidence)
 
 Hand-acknowledged wake loops and the standing warning in the payload channel (L15, L41) · "Captain, shipshape." and every address duty without a receiver (L27, L60) · the startup-memory token cap with its micro-curation (L17) · byte-exact plan signatures - replaced by a short substantive approval per undertaking with deadline and self-approval (L16) · hand-typed correlation marks and forced REPOSTs (L58) · mandatory full-text loading of rulebooks - replaced by a lookup point (L18) · window-stillness and idle alarms in counting form (L28, L36) · the hand-maintained secondary register (L04, L09, L23) · "merged = done" (L01) · the validation chain as the default (L14) · self-quoting security blocks and invisible markers in briefs (L26) · form rules whose violation voids correct answers (L20, L64).
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
