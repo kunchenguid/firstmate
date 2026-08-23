@@ -25,8 +25,9 @@
 #   (g) a project whose default branch was advanced by some other means, with
 #       no matching provenance record, reads unattributed
 #   (h) a refused (diverged) local-only merge writes no provenance record
-#   (i) the head recorded is the one GitHub actually merged, not a snapshot
-#       read before the merge call that a concurrent push could make stale
+#   (i) a PR whose head changed since fm-pr-merge.sh's pre-merge read is
+#       refused outright (mirroring GitHub's --match-head-commit), rather
+#       than merging under a head this run never verified
 #   (j) a local-only merge stays attributed after later, unrelated commits
 #       land on the default branch - the recorded merge itself never moves
 set -u
@@ -233,10 +234,10 @@ test_failed_github_merge_writes_no_provenance() {
 
 # add_gh_mock_head_changes_during_merge <case_dir> <old_head> <new_head>: a gh
 # mock that answers headRefOid from a file, and a gh-axi mock whose "pr merge"
-# call flips that file to new_head before returning success - simulating a
-# push landing exactly in the window between fm-pr-merge.sh's merge call and
-# any head read, so a head read taken BEFORE the merge call would record the
-# stale old_head instead of what GitHub actually merged.
+# call simulates a push landing exactly in the window between fm-pr-merge.sh's
+# pre-merge head read and this call: it flips the live head to new_head, then
+# - mirroring GitHub's real --match-head-commit behavior - refuses the merge
+# whenever it was invoked bound to a head (old_head) that no longer matches.
 add_gh_mock_head_changes_during_merge() {
   local case_dir=$1 old_head=$2 new_head=$3
   printf '%s\n' "$old_head" > "$case_dir/live-head"
@@ -244,7 +245,15 @@ add_gh_mock_head_changes_during_merge() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
 case "\${1:-} \${2:-}" in
-  "pr merge") printf '%s\n' '$new_head' > '$case_dir/live-head' ;;
+  "pr merge")
+    printf '%s\n' '$new_head' > '$case_dir/live-head'
+    case " \$* " in
+      *"--match-head-commit $old_head"*)
+        echo "error: head commit does not match" >&2
+        exit 1
+        ;;
+    esac
+    ;;
 esac
 exit 0
 SH
@@ -264,31 +273,23 @@ SH
   : > "$case_dir/gh-axi.log"
 }
 
-test_github_merge_records_head_actually_merged_not_a_pre_merge_snapshot() {
-  local case_dir rc out old_head new_head
+test_github_merge_refuses_when_head_changes_during_merge_window() {
+  local case_dir rc old_head new_head
   case_dir=$(make_pr_case github-race)
   old_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   new_head=cccccccccccccccccccccccccccccccccccccccc
   add_gh_mock_head_changes_during_merge "$case_dir" "$old_head" "$new_head"
 
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
-    > "$case_dir/merge.out" 2> "$case_dir/merge.err" \
-    || fail "github-race: fm-pr-merge should have succeeded: $(cat "$case_dir/merge.err")"
-
-  assert_present "$case_dir/state/task-x1.merge-provenance" \
-    "github-race: no provenance record was written after a successful merge"
-  grep -q "$old_head" "$case_dir/state/task-x1.merge-provenance" \
-    && fail "github-race: provenance recorded the pre-merge head instead of what was actually merged"
-  grep -q "$new_head" "$case_dir/state/task-x1.merge-provenance" \
-    || fail "github-race: provenance did not record the head actually merged"
-
   set +e
-  out=$(run_attribution "$case_dir" task-x1 2> "$case_dir/attr.err")
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/merge.out" 2> "$case_dir/merge.err"
   rc=$?
   set -e
-  expect_code 0 "$rc" "github-race: attribution check should exit 0"
-  assert_contains "$out" "attributed:" "github-race: verdict was not attributed: $out"
-  pass "fm-pr-merge records the head actually merged, not a stale pre-merge snapshot"
+
+  expect_code 1 "$rc" "github-race: fm-pr-merge should refuse when the bound head no longer matches"
+  assert_absent "$case_dir/state/task-x1.merge-provenance" \
+    "github-race: a refused (head-mismatch) merge must not write a provenance record"
+  pass "fm-pr-merge refuses to merge, and records nothing, when the PR head changed since its pre-merge read"
 }
 
 # --- local-only ---------------------------------------------------------
@@ -417,7 +418,7 @@ test_github_merge_without_provenance_is_unattributed
 test_github_merge_with_stale_provenance_is_unattributed
 test_github_open_pr_is_unmerged_not_unattributed
 test_failed_github_merge_writes_no_provenance
-test_github_merge_records_head_actually_merged_not_a_pre_merge_snapshot
+test_github_merge_refuses_when_head_changes_during_merge_window
 test_local_only_merge_via_recorded_path_is_attributed
 test_local_only_advance_without_recorded_path_is_unattributed
 test_local_only_stays_attributed_after_default_branch_advances

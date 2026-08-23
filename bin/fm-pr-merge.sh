@@ -17,6 +17,13 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# A GitHub merge binds to the head read live just before merging via
+# --match-head-commit, exactly like GitLab's --sha below: a push that lands
+# between that read and the merge refuses the merge outright (no commits
+# merged unverified) rather than recording provenance for a head this run
+# never saw. Absent gh, or an unreadable head, merges unbound as before and is
+# simply left unattributed afterward.
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -31,7 +38,8 @@
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
+# URL, nor --sha on GitLab or --match-head-commit on GitHub, because on both
+# providers the head comes only from the live read.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
@@ -101,11 +109,16 @@ reject_repo_overrides() {
   done
 }
 
+# reject_head_overrides <flag> <extra-args...>: the head this run binds the
+# merge to is determined only from its own live read, on both providers, so
+# neither GitLab's --sha nor GitHub's --match-head-commit is the caller's to
+# set.
 reject_head_overrides() {
+  local flag=$1; shift
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --sha|--sha=*)
+      "$flag" | "$flag"=*)
         echo "error: extra merge arguments must not override the head commit" >&2
         return 1
         ;;
@@ -114,7 +127,10 @@ reject_head_overrides() {
 }
 
 reject_repo_overrides "$@" || exit 1
-[ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+case "$PROVIDER" in
+  gitlab) reject_head_overrides --sha "$@" || exit 1 ;;
+  github) reject_head_overrides --match-head-commit "$@" || exit 1 ;;
+esac
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -258,24 +274,29 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
-    # Read live, right after merging, not before: GitHub has no equivalent of
-    # the GitLab path's --sha binding below, so a head read before the merge
-    # call can be stale by the time gh-axi actually merges (a push landing in
-    # that window would be merged under a head this run never recorded).
-    # Reading straight after the merge call returns keeps the recorded head
-    # matched to what GitHub actually merged. Absent gh, or an unreadable
-    # head, is not a merge failure - it only means this merge cannot be
-    # stamped with provenance and will read as unattributed afterwards.
+    # --match-head-commit binds the merge to the head this run verified,
+    # exactly like the GitLab path's --sha below: GitHub refuses the merge
+    # (gh-axi exits non-zero) if a push landed on the PR branch since this
+    # read, so a stale head is never recorded as provenance - the merge
+    # itself fails closed instead of silently merging different content
+    # under a head this run never saw. Absent gh, or an unreadable head, is
+    # not a merge failure - the merge proceeds unbound, exactly as before,
+    # and cannot be stamped with provenance, so it will read as unattributed.
     GH_MERGE_HEAD=
     if command -v gh > /dev/null 2>&1; then
       GH_MERGE_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2> /dev/null) || GH_MERGE_HEAD=
     fi
+    head_args=()
+    if fm_pr_head_valid "$GH_MERGE_HEAD"; then
+      head_args=(--match-head-commit "$GH_MERGE_HEAD")
+    else
+      echo "warning: no head commit could be read before merging; the merge will not be stamped with provenance" >&2
+    fi
+    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" \
+      "${head_args[@]+"${head_args[@]}"}" "$@"
     if fm_pr_head_valid "$GH_MERGE_HEAD"; then
       fm_merge_prov_write "$STATE" "$ID" pr-github github "$URL" "$GH_MERGE_HEAD" \
         || echo "warning: merge succeeded but its provenance record could not be written; it will read as unattributed" >&2
-    else
-      echo "warning: merge succeeded but no head commit could be read for its provenance record; it will read as unattributed" >&2
     fi
     ;;
   gitlab)
