@@ -109,7 +109,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|claude-ox|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -1150,6 +1150,14 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # claude-ox: the claude family's Ox Alpha launch profile (stealth/ox-alpha
+    # via OpenRouter), matching config/crew-dispatch.json rule 1's wrapper
+    # verbatim. __MODELFLAG__ is kept as a placeholder for template-shape
+    # parity with `claude`, but deliberately resolves to nothing: claude-ox is
+    # absent from model_flag_for_harness's case below on purpose, because the
+    # wrapper pins stealth/ox-alpha and a `--model` flag would be billed on
+    # OpenRouter instead of routed free. Never add claude-ox there.
+    claude-ox) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude1 --ox --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1399,6 +1407,9 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
+    # claude-ox is deliberately absent: its wrapper pins stealth/ox-alpha, and
+    # a --model flag would be billed on OpenRouter instead of routed free
+    # (config/crew-dispatch.json rule 1). Never add it here.
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
@@ -1409,7 +1420,7 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
-    claude)
+    claude|claude-ox)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac

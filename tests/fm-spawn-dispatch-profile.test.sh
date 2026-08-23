@@ -435,6 +435,32 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+# claude-ox is the claude family's Ox Alpha launch profile (fm-control-lib.sh
+# fm_control_harness_supported, mirroring config/crew-dispatch.json rule 1's
+# `claude1 --ox` wrapper). The requested model is still recorded in metadata,
+# same as codex's omitted max effort or cursor's omitted effort axis, but it
+# must never reach the launch command: the wrapper pins stealth/ox-alpha, and
+# a --model flag there would be billed on OpenRouter instead of routed free.
+test_claude_ox_threads_effort_but_never_model() {
+  local rec id out status launch
+  id=profile-claude-ox-z16
+  rec=$(make_spawn_case profile-claude-ox claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude-ox --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "claude-ox spawn with profile flags should succeed"
+  assert_contains "$out" "spawned $id harness=claude-ox" "spawn did not report the claude-ox harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude-ox sonnet high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude1 --ox --dangerously-skip-permissions --effort 'high'" \
+    "claude-ox launch did not thread the effort flag onto the Ox wrapper"
+  assert_not_contains "$launch" "--model" \
+    "claude-ox must never receive --model: the wrapper pins stealth/ox-alpha and a model flag bills on OpenRouter"
+  pass "claude-ox threads --effort onto the Ox wrapper and never emits --model"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -838,6 +864,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_ox_threads_effort_but_never_model
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

@@ -463,6 +463,41 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
   pass "fm-control relaunch: a harness switch resets model and effort unless they are named too"
 }
 
+# The O-0018 overload-diversion round trip: an account task moves onto the
+# claude-ox Ox Alpha profile, then back onto an account, at one real (fake
+# transport) endpoint through the ordinary relaunch verb - both directions,
+# not just the code path. Before claude-ox existed only the account-to-Ox leg
+# had a verified adapter value to name; the return leg had none.
+test_relaunch_moves_a_task_onto_ox_and_back_to_an_account() {
+  local dir out rc
+  dir=$(new_case oxroundtrip rl41)
+  add_ship_task "$dir" rl41 claude
+
+  printf 'claude-ox' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl41 relaunch --harness claude-ox --effort high \
+    --note "diverting onto Ox while account quota is tight"); rc=$?
+  expect_code 0 "$rc" "relaunching an account task onto claude-ox should succeed"$'\n'"$out"
+  assert_contains "$out" "harness=claude-ox from=claude" "the outcome should name the account-to-Ox transition"
+  [ "$(meta_field "$dir" rl41 harness)" = claude-ox ] \
+    || fail "the durable record should follow the switch onto claude-ox"
+  assert_grep "claude1 --ox --dangerously-skip-permissions --effort 'high'" "$dir/fake/literal" \
+    "the replacement launch should be the Ox wrapper with the requested effort threaded through"
+  assert_no_grep "--model" "$dir/fake/literal" \
+    "the Ox leg must never receive --model even though none was requested here"
+
+  : > "$dir/fake/literal"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl41 relaunch --harness claude --note "returning to an account"); rc=$?
+  expect_code 0 "$rc" "relaunching a claude-ox task back onto an account should succeed"$'\n'"$out"
+  assert_contains "$out" "harness=claude from=claude-ox" "the outcome should name the Ox-to-account transition"
+  [ "$(meta_field "$dir" rl41 harness)" = claude ] \
+    || fail "the durable record should follow the return to an account"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the return leg should launch a replacement agent"
+  assert_no_grep "claude1 --ox" "$dir/fake/literal" \
+    "the return-to-account launch must not carry the Ox wrapper"
+  pass "fm-control relaunch: an account task moves onto claude-ox and back onto an account through the same verb"
+}
+
 test_harness_switch_resolves_a_prefixed_recorded_harness() {
   local dir out rc auth
   dir=$(new_case prefixcontrol rl32)
@@ -1336,6 +1371,7 @@ test_relaunch_precedes_the_instructions_with_the_progress_note
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
+test_relaunch_moves_a_task_onto_ox_and_back_to_an_account
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes

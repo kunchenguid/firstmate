@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, claude-ox, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -209,6 +209,21 @@ Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean 
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
+
+### claude-ox (VERIFIED as a control-plane adapter value, 2026-08-23)
+
+`claude-ox` is a distinct verified adapter value for the claude family's Ox Alpha launch profile, the same family-variant pattern already used for `pi-signed` alongside `pi`: a family variant with its own launch template and its own entry in `fm-control-lib.sh`'s `fm_control_harness_supported`, so it is reachable by name from `bin/fm-spawn.sh --harness claude-ox` and `bin/fm-control.sh <task-id> relaunch --harness claude-ox` in both directions.
+Everything under the `claude` heading above (busy state, exit command, interrupt, skill invocation, trust dialog, ghost-text handling, primary-session guard) applies unchanged, because `fm_control_harness_family` folds `claude-ox` to `claude` by the same `claude*` prefix rule that already folds a raw launch command's basename (e.g. `claude1`).
+The distinct value exists only so a task's recorded `harness=` can name the Ox launch profile precisely, instead of falling back to the raw-command basename `claude1`, which cannot be reconstructed into a launch command on its own (`bin/fm-control.sh` refuses an implicit relaunch in that case and requires an explicit `--harness`).
+
+| Fact | Value |
+|---|---|
+| Launch | The `claude` launch shape with the `claude1 --ox` Ox Alpha wrapper in place of the bare `claude` binary, matching `config/crew-dispatch.json` rule 1's wrapper (`bin/fm-spawn.sh`'s `launch_template`). `claude1` is the Ox Alpha wrapper binary; `--ox` selects stealth/ox-alpha via OpenRouter. |
+| Model flag | Never emitted. `claude-ox` is deliberately absent from `model_flag_for_harness`'s case table, because the wrapper pins stealth/ox-alpha and a `--model` flag would be billed on OpenRouter instead of routed free. A requested model is still recorded in task metadata, same as codex's omitted `max` effort or cursor's omitted effort axis, but it never reaches the launch command. |
+| Effort flag | `--effort <low\|medium\|high\|xhigh\|max>`, same as `claude` (`effort_flag_for_harness`'s `claude|claude-ox` case). |
+| Secondmate use | Technically capable - it is the same claude engine and supervision wiring as `claude`, so `fm_control_harness_supports_kind` does not block it - but the captain's dispatch policy (`config/crew-dispatch.json` rule 1's rationale) keeps secondmates on account harnesses; that is a dispatch-profile choice, not a control-plane restriction. |
+
+Verification evidence: `rg -n 'is not a verified harness' bin/` (2026-08-23) showed the pre-fix refusal that made an Ox-to-account relaunch a one-way trip; `tests/fm-control-relaunch.test.sh`'s `test_relaunch_moves_a_task_onto_ox_and_back_to_an_account` exercises both directions end to end against the fake session provider, and `tests/fm-spawn-dispatch-profile.test.sh`'s `test_claude_ox_threads_effort_but_never_model` pins the launch-command shape.
 
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
