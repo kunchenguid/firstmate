@@ -28,12 +28,22 @@
 #   6. A local typed-plane unconfirmed send (a harness-native slash answer)
 #      still never closes a --resolve-key decision, and an unconfirmed typed
 #      secondmate send keeps its reply expectation armed.
+#   7. A gate-agent refusal inside the remote leg (ssh exits the reserved
+#      FM_GATE_REFUSE_EXIT with the gate stderr) is a hard failure, NOT a
+#      delivery: the parent fails loudly, replays the gate diagnostic, discards
+#      the undelivered expectation, and closes no --resolve-key decision. This
+#      is the exact false-positive the reserved code exists to prevent - the
+#      gate refusal must never be confused with the delivered-unconfirmed exit.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
+# Source the gate-refusal code from its owning library so this suite drives the
+# remote leg with the real reserved value instead of a hard-coded number.
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$ROOT/bin/fm-gate-refuse-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -215,6 +225,43 @@ test_remote_transport_unknown_preserves_expectation() {
   pass "fm-send remote: ssh 255 still refuses loudly and preserves the expectation as delivery_unknown"
 }
 
+test_remote_gate_refusal_is_hard_failure() {
+  local dir fb log ssh_log home rc err out
+  dir="$TMP_ROOT/remote-gate"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  home=$(setup_remote_home remote-gate)
+  printf 'needs-decision [key=upgrade-window]: tonight or the weekend\n' > "$home/state/rsm.status"
+
+  # The remote leg's inner fm-send refuses as a no-mistakes gate agent, exiting
+  # the reserved FM_GATE_REFUSE_EXIT with the gate diagnostic on stderr. That
+  # code was once 3, which the parent maps to delivered-unconfirmed; the reserve
+  # keeps a gate refusal - "nothing was sent" - from being reported as a
+  # delivered steer that answers the decision.
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC="$FM_GATE_REFUSE_EXIT" \
+    FM_FAKE_SSH_STDERR='error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)' \
+    "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >"$dir/out" 2>"$dir/err"; rc=$?
+  err=$(cat "$dir/err")
+  [ "$rc" -ne 0 ] || fail "a gate refusal inside the remote leg must exit nonzero, not as delivered"
+  assert_contains "$err" "error: text not sent to remote:rsm" \
+    "a gate refusal must report a real failure, never a delivered notice"
+  assert_not_contains "$err" "delivered to remote secondmate rsm" \
+    "a gate refusal must never be reported as delivered"
+  assert_contains "$err" "must not drive the fleet" \
+    "a gate refusal must replay the remote leg's gate diagnostic"
+  [ -z "$(pending_record "$home")" ] \
+    || fail "a gate refusal must discard the undelivered expectation"
+  if grep -F 'resolved' "$home/state/rsm.status" >/dev/null; then
+    fail "a gate refusal must not close the --resolve-key decision: $(cat "$home/state/rsm.status")"
+  fi
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=upgrade-window]' >/dev/null \
+    || fail "the decision must stay open after a gate-refused send: $out"
+  pass "fm-send remote: a gate refusal fails loudly, discards the expectation, and closes no decision"
+}
+
 test_remote_delivered_unconfirmed_closes_resolve_key() {
   local dir fb log ssh_log home rc out
   dir="$TMP_ROOT/remote-key"; mkdir -p "$dir"
@@ -315,6 +362,7 @@ test_local_pending_does_not_close_resolve_key() {
 test_remote_delivered_unconfirmed_is_not_failure
 test_remote_real_failure_still_fails
 test_remote_transport_unknown_preserves_expectation
+test_remote_gate_refusal_is_hard_failure
 test_remote_delivered_unconfirmed_closes_resolve_key
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key

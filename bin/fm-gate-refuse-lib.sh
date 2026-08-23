@@ -60,8 +60,12 @@
 # gate context.
 
 # The exit code every refusal uses, distinct enough to recognize in a caller or
-# test as "the gate refusal fired" rather than an ordinary usage error.
-FM_GATE_REFUSE_EXIT=3
+# test as "the gate refusal fired" rather than an ordinary usage error. 77 is
+# reserved OUTSIDE every fleet-lifecycle script's documented status space: it
+# must never collide with fm-send's delivered-unconfirmed exit 3, which the
+# remote leg maps to "delivered, do not resend" - a gate refusal wearing exit 3
+# would be reported as a delivered steer. Keep this value out of that space.
+FM_GATE_REFUSE_EXIT=77
 
 # fm_is_gate_agent: return 0 without output when this process looks like a
 # no-mistakes gate agent. An optional root anchors the git-common-dir check;
