@@ -30,6 +30,13 @@
 #       than merging under a head this run never verified
 #   (j) a local-only merge stays attributed after later, unrelated commits
 #       land on the default branch - the recorded merge itself never moves
+#   (k) a GitHub merge invoked with --auto that only queues (the PR is still
+#       open right after the call) writes no provenance record until the PR
+#       actually reads merged
+#   (l) a PR-based task (mode=direct-PR) with no recorded pr= reports an
+#       error rather than a verdict guessed from unrelated local git state,
+#       even when that local state looks exactly like a genuine local-only
+#       merge
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -56,10 +63,15 @@ make_pr_case() {
   printf '%s\n' "$case_dir"
 }
 
-# add_gh_mock <case_dir> <head> <state>: a gh mock answering both the
-# headRefOid lookup (used by fm-pr-check.sh, fm-pr-merge.sh, and the checker)
-# and the state lookup (used by the checker), and a gh-axi mock that records
-# every invocation and always succeeds.
+# add_gh_mock <case_dir> <head> <state>: a gh mock answering the headRefOid
+# lookup (fm-pr-check.sh's and fm-pr-merge.sh's single-field read), the
+# combined state+headRefOid @tsv lookup (the checker's single-call read, and
+# fm-pr-merge.sh's post-merge completion check), and the bare state lookup
+# (fm-pr-merge.sh's post-merge completion check uses --json state alone,
+# which does not contain "headRefOid"), plus a "pr merge" case that always
+# succeeds so fm-pr-merge.sh's real-gh merge call (bound to a valid head)
+# has somewhere to land. A gh-axi mock records every invocation it receives
+# and always succeeds, for the unbound-head fallback path.
 add_gh_mock() {
   local case_dir=$1 head=$2 state=$3
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -72,9 +84,14 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *'@tsv'*) printf '%s\t%s\n' '$state' '$head' ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
       *) printf '%s\n' '$state' ; exit 0 ;;
     esac
+    ;;
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    exit 0
     ;;
 esac
 exit 0
@@ -83,9 +100,11 @@ SH
   : > "$case_dir/gh-axi.log"
 }
 
-# add_gh_mock_merge_fails <case_dir> <head> <state>: like add_gh_mock, but
-# gh-axi's merge call itself fails, so provenance recording after a real
-# failure can be told apart from provenance recording after a real success.
+# add_gh_mock_merge_fails <case_dir> <head> <state>: like add_gh_mock, but the
+# merge call itself fails - on gh, the binary a valid, bound head routes to,
+# and on gh-axi too for defense in depth - so provenance recording after a
+# real failure can be told apart from provenance recording after a real
+# success.
 add_gh_mock_merge_fails() {
   local case_dir=$1 head=$2 state=$3
   add_gh_mock "$case_dir" "$head" "$state"
@@ -97,7 +116,25 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *'@tsv'*) printf '%s\t%s\n' '$state' '$head' ; exit 0 ;;
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *) printf '%s\n' '$state' ; exit 0 ;;
+    esac
+    ;;
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    echo "error: pr merge failed" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
 run_pr_merge() {
@@ -233,28 +270,20 @@ test_failed_github_merge_writes_no_provenance() {
 }
 
 # add_gh_mock_head_changes_during_merge <case_dir> <old_head> <new_head>: a gh
-# mock that answers headRefOid from a file, and a gh-axi mock whose "pr merge"
-# call simulates a push landing exactly in the window between fm-pr-merge.sh's
+# mock that answers headRefOid from a file, and whose "pr merge" call
+# simulates a push landing exactly in the window between fm-pr-merge.sh's
 # pre-merge head read and this call: it flips the live head to new_head, then
-# - mirroring GitHub's real --match-head-commit behavior - refuses the merge
-# whenever it was invoked bound to a head (old_head) that no longer matches.
+# refuses the merge whenever it was invoked bound to a head (old_head) that no
+# longer matches. This lives on the gh mock, not gh-axi: fm-pr-merge.sh routes
+# a bound-head GitHub merge to the real gh binary, because gh-axi does not
+# support --match-head-commit and would silently drop it - a mock on gh-axi
+# would be asserting behavior gh-axi does not actually have.
 add_gh_mock_head_changes_during_merge() {
   local case_dir=$1 old_head=$2 new_head=$3
   printf '%s\n' "$old_head" > "$case_dir/live-head"
-  cat > "$case_dir/fakebin/gh-axi" <<SH
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
-case "\${1:-} \${2:-}" in
-  "pr merge")
-    printf '%s\n' '$new_head' > '$case_dir/live-head'
-    case " \$* " in
-      *"--match-head-commit $old_head"*)
-        echo "error: head commit does not match" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
@@ -262,9 +291,24 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *'@tsv'*)
+        printf 'MERGED\t%s\n' "\$(cat '$case_dir/live-head')"
+        exit 0
+        ;;
       *headRefOid*) cat '$case_dir/live-head' ; exit 0 ;;
       *) printf 'MERGED\n' ; exit 0 ;;
     esac
+    ;;
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' '$new_head' > '$case_dir/live-head'
+    case " \$* " in
+      *"--match-head-commit $old_head"*)
+        echo "error: head commit does not match" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
     ;;
 esac
 exit 0
@@ -290,6 +334,66 @@ test_github_merge_refuses_when_head_changes_during_merge_window() {
   assert_absent "$case_dir/state/task-x1.merge-provenance" \
     "github-race: a refused (head-mismatch) merge must not write a provenance record"
   pass "fm-pr-merge refuses to merge, and records nothing, when the PR head changed since its pre-merge read"
+}
+
+test_github_auto_queue_does_not_stamp_before_actual_merge() {
+  local case_dir rc out
+  case_dir=$(make_pr_case github-auto-queue)
+  # --auto can exit 0 having only queued the merge; the PR is still open right
+  # after the call, exactly as this mock reports it before and after.
+  add_gh_mock "$case_dir" 1111111111111111111111111111111111111111 OPEN
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 -- --auto \
+    > "$case_dir/merge.out" 2> "$case_dir/merge.err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "github-auto-queue: fm-pr-merge should succeed when --auto only queues the merge"
+  assert_grep 'not yet merged' "$case_dir/merge.err" \
+    "github-auto-queue: no warning was printed for a queued, not-yet-completed auto-merge"
+  assert_absent "$case_dir/state/task-x1.merge-provenance" \
+    "github-auto-queue: provenance must not be stamped before the PR actually merges"
+
+  set +e
+  out=$(run_attribution "$case_dir" task-x1 2> "$case_dir/attr.err")
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-auto-queue: attribution check should read unmerged while the auto-merge is only queued"
+  assert_contains "$out" "unmerged:" "github-auto-queue: verdict was not unmerged: $out"
+  pass "a GitHub --auto merge that only queues is not stamped with provenance until it actually merges"
+}
+
+test_pr_mode_without_recorded_pr_is_error_not_local_only() {
+  local case_dir rc out proj
+  case_dir=$(make_local_case pr-mode-missing-pr)
+  proj="$case_dir/project"
+  # This project's fm/task-x1 branch is already merged into its default
+  # branch, exactly as a genuine local-only merge would leave it - but the
+  # task's own meta says mode=direct-PR, so this is a PR-based task whose pr=
+  # was simply never recorded (fm-pr-check.sh never ran, e.g. the PR was
+  # opened and merged by hand), not a local-only task. Local git state must
+  # not stand in for a PR verdict it says nothing about.
+  git -C "$proj" merge --ff-only "fm/task-x1" > /dev/null
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$proj-wt" \
+    "project=$proj" \
+    "kind=ship" \
+    "mode=direct-PR"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ATTRIBUTION" task-x1 2> "$case_dir/attr.err")
+  rc=$?
+  set -e
+  expect_code 3 "$rc" "pr-mode-missing-pr: attribution check should error, not guess from local git state"
+  assert_grep 'error:' "$case_dir/attr.err" \
+    "pr-mode-missing-pr: no error was reported: $(cat "$case_dir/attr.err")"
+  assert_not_contains "$out" "attributed:" \
+    "pr-mode-missing-pr: a PR-based task with no recorded pr= must never read as attributed from unrelated local git state"
+  assert_not_contains "$out" "unmerged:" \
+    "pr-mode-missing-pr: a PR-based task with no recorded pr= must never read as unmerged from unrelated local git state"
+  pass "a PR-based task with no recorded pr= reports an error instead of a verdict guessed from local git state"
 }
 
 # --- local-only ---------------------------------------------------------
@@ -419,6 +523,8 @@ test_github_merge_with_stale_provenance_is_unattributed
 test_github_open_pr_is_unmerged_not_unattributed
 test_failed_github_merge_writes_no_provenance
 test_github_merge_refuses_when_head_changes_during_merge_window
+test_github_auto_queue_does_not_stamp_before_actual_merge
+test_pr_mode_without_recorded_pr_is_error_not_local_only
 test_local_only_merge_via_recorded_path_is_attributed
 test_local_only_advance_without_recorded_path_is_unattributed
 test_local_only_stays_attributed_after_default_branch_advances

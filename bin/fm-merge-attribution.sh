@@ -67,14 +67,13 @@ if [ -n "$PR_LINE" ]; then
   case "$PROVIDER" in
     github)
       command -v gh > /dev/null 2>&1 || { echo "error: checking a GitHub PR requires gh on PATH" >&2; exit 3; }
-      GH_STATE=$(gh pr view "$URL" --json state -q .state 2> /dev/null) \
+      GH_LINE=$(gh pr view "$URL" --json state,headRefOid -q '[.state, .headRefOid] | @tsv' 2> /dev/null) \
         || { echo "error: could not read the PR state" >&2; exit 3; }
+      IFS=$'\t' read -r GH_STATE GH_HEAD <<< "$GH_LINE"
       if [ "$GH_STATE" != MERGED ]; then
         printf 'unmerged: %s is not merged\n' "$URL"
         exit 2
       fi
-      GH_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2> /dev/null) \
-        || { echo "error: could not read the merged head commit" >&2; exit 3; }
       fm_pr_head_valid "$GH_HEAD" || { echo "error: the PR reports no valid head commit" >&2; exit 3; }
       report_attribution pr-github github "$URL" "$GH_HEAD"
       ;;
@@ -103,8 +102,21 @@ if [ -n "$PR_LINE" ]; then
   exit 0
 fi
 
-# No pr= recorded: this is a local-only task, whose merge is a fast-forward of
-# the project's own default branch rather than a forge PR/MR.
+# No pr= recorded. That is expected only for mode=local-only, whose merge is a
+# fast-forward of the project's own default branch rather than a forge PR/MR
+# (bin/fm-merge-local.sh requires that same mode=local-only before it will
+# merge). A PR-based mode (direct-PR, no-mistakes) with no recorded pr= means
+# the PR was never bound to this task through bin/fm-pr-check.sh - opened or
+# merged by hand, say - and local git state (the fm/<id> branch's ancestry)
+# says nothing about that PR, so guessing a verdict from it would be reporting
+# on the wrong merge entirely.
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$MODE" != local-only ]; then
+  printf 'error: task mode is "%s" with no pr= recorded; the PR was never bound to this task, so its merge cannot be verified\n' \
+    "${MODE:-unset}" >&2
+  exit 3
+fi
+
 PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$PROJ" ] && [ -d "$PROJ" ] || { echo "error: task project is unavailable" >&2; exit 3; }
 BRANCH="fm/$ID"

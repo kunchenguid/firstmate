@@ -67,7 +67,12 @@ make_case() {
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup, plus a "pr merge" case that
+# logs to the same file and succeeds: fm-pr-merge.sh routes the real merge
+# call to gh, not gh-axi, whenever a valid head is available to bind to (which
+# a nonempty head param here always provides), because gh-axi does not
+# support --match-head-commit and would silently drop it. Args: case_dir
+# head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -81,7 +86,12 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *) printf 'MERGED\n' ; exit 0 ;;
     esac
+    ;;
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    exit 0
     ;;
 esac
 exit 0

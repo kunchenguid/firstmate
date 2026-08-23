@@ -562,11 +562,15 @@ test_valid_recording_and_merge_derivation() {
   count=$(grep -c '^pr_head=' "$dir/home/state/task-a.meta")
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
 
-  : > "$dir/gh-axi.log"
+  # A valid head is readable (the default FM_TEST_GH_HEAD), so the merge binds
+  # to it and goes through the real gh binary, not gh-axi, which does not
+  # support --match-head-commit (bin/fm-pr-merge.sh).
+  : > "$dir/gh.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit 0123456789abcdef0123456789abcdef01234567 --merge' \
+    "$dir/gh.log" \
+    || fail "merge wrapper did not preserve repository derivation, the bound head, and method"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?
