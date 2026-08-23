@@ -190,14 +190,17 @@ a { color: inherit; text-decoration: none; }
 .bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
 .bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
-.bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
-.bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+.bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25;
+  overflow-wrap: anywhere; }
+.bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45;
+  overflow-wrap: anywhere; }
 /* about / decide / recommended - three scannable context rows */
 .bb-ctx { display: flex; flex-direction: column; gap: 6px; }
 .bb-ctx__row { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 8px; align-items: baseline; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
-.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
+.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0;
+  overflow-wrap: anywhere; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
@@ -213,8 +216,10 @@ a { color: inherit; text-decoration: none; }
 .bb-opt:hover { border-color: var(--ink-300); }
 .bb-opt input { accent-color: var(--rust-500); margin-top: 3px; flex: none; }
 .bb-opt__body { min-width: 0; flex: 1 1 auto; }
-.bb-opt__label { display: block; font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3; }
-.bb-opt__hint { display: block; font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.35; margin-top: 1px; }
+.bb-opt__label { display: block; font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3;
+  overflow-wrap: anywhere; }
+.bb-opt__hint { display: block; font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.35; margin-top: 1px;
+  overflow-wrap: anywhere; }
 .bb-opt__rec { flex: none; align-self: center; font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase;
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
@@ -273,7 +278,7 @@ a { color: inherit; text-decoration: none; }
 .bb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
 
 @media (max-width: 900px) {
-  .bb-cols { grid-template-columns: 1fr; }
+  .bb-cols { grid-template-columns: minmax(0, 1fr); }
 }
 </style>
 </head>
@@ -468,7 +473,7 @@ __FM_BEARINGS_BOARD_DATA__
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
-    row.appendChild(el("span", "bb-ctx__v", v));
+    row.appendChild(titledEl("span", "bb-ctx__v", v));
     return row;
   }
 
@@ -486,10 +491,10 @@ __FM_BEARINGS_BOARD_DATA__
     }
     pad.appendChild(top);
 
-    pad.appendChild(el("h3", "bb-decision__title", item.title));
+    pad.appendChild(titledEl("h3", "bb-decision__title", item.title));
 
     if (item.type === "merge") {
-      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+      if (item.detail) pad.appendChild(titledEl("p", "bb-decision__detail", item.detail));
       if (item.pr_url) {
         var pr = titledEl("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
@@ -512,8 +517,8 @@ __FM_BEARINGS_BOARD_DATA__
       input.type = "radio"; input.name = "answer"; input.value = o.value;
       lab.appendChild(input);
       var body = el("span", "bb-opt__body");
-      body.appendChild(el("span", "bb-opt__label", o.label));
-      if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
+      body.appendChild(titledEl("span", "bb-opt__label", o.label));
+      if (o.hint) body.appendChild(titledEl("span", "bb-opt__hint", o.hint));
       lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
         lab.appendChild(el("span", "bb-opt__rec", "rec"));

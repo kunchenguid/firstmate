@@ -482,6 +482,61 @@ test_rendered_truncated_text_has_full_native_tooltips() {
   pass "the rendered board exposes exact full tooltips and none for absent text"
 }
 
+test_rendered_decision_body_text_exposes_full_values() {
+  local home data board token render entry cls want
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to render the board for the tooltip assertions"
+  home=$(make_home decision-body)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  # One unbreakable token wider than the single-column card: without a
+  # full-text affordance the card's overflow:hidden clips it outright.
+  token='https://github.com/example/sample/pull/1234#issuecomment-2938471029384-with-an-unbreakable-tail'
+  write_valid_payload "$data"
+  jq --arg token "$token" '
+    .captains_call[0].title = ("Adopt the change tracked at " + $token) |
+    .captains_call[0].about = ("see " + $token) |
+    .captains_call[0].decide = ("compare against " + $token) |
+    .captains_call[0].options[0].label = ("Adopt per " + $token) |
+    .captains_call[0].options[0].hint = ("rationale at " + $token) |
+    .captains_call[1].detail = ("validation green, evidence at " + $token)
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the unbreakable-token decision board did not build"
+  render=$(render_board_nodes "$board") \
+    || fail "the shipped renderer could not run over the built board"
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
+    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+
+  for entry in \
+    "bb-decision__title|Adopt the change tracked at $token" \
+    "bb-ctx__v|see $token" \
+    "bb-ctx__v|compare against $token" \
+    "bb-opt__label|Adopt per $token" \
+    "bb-opt__hint|rationale at $token" \
+    "bb-decision__detail|validation green, evidence at $token"; do
+    cls=${entry%%|*}
+    want=${entry#*|}
+    # The visible label keeps the text and the tooltip carries the same exact
+    # value - the affordance adds reach, it never replaces what is on screen.
+    printf '%s' "$render" | jq -e --arg cls "$cls" --arg want "$want" \
+      'any(.nodes[]; (.classes | index($cls)) != null and .title == $want and .text == $want)' \
+      >/dev/null \
+      || fail "the rendered decision card hid the full text of .$cls: $want"
+  done
+
+  # Static context keys are fully exposed, so they must stay tooltip-free.
+  printf '%s' "$render" | jq -e '
+    [.nodes[] | select((.classes | index("bb-ctx__k")) != null)] as $keys
+    | ($keys | length) >= 2 and ($keys | all(.title == null))
+  ' >/dev/null || fail "a fully exposed context key gained a redundant tooltip"
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
+    || fail "the rendered board exposed a stringified null as a tooltip"
+
+  pass "decision card body text exposes its exact full value without hiding the label"
+}
+
 test_registration_cannot_consume_before_any_origin_binding() {
   local home data runtime origin key hold board sid show
   home=$(make_home order-proof)
@@ -630,6 +685,7 @@ test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
 test_rendered_truncated_text_has_full_native_tooltips
+test_rendered_decision_body_text_exposes_full_values
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
