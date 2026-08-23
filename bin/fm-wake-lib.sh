@@ -480,6 +480,19 @@ fm_lock_after_failed_create() {  # <lock-path>
   return 1
 }
 
+# True when the primary lock is absent only because a foreign steal mutex
+# rejected the claim, which withdraws our own link on the way out. Nothing
+# outside the reclaim path below ever clears that mutex, so a holder killed
+# between removing its primary lock and releasing its mutex leaves the pair that
+# refusing here would wedge for good. A filesystem that refused outright is a
+# different state and must keep refusing.
+fm_lock_orphan_steal_blocks_create() {  # <lock-path>
+  fm_lock_is_steal_mutex "$1" && return 1
+  [ "$FM_LOCK_FAIL_REASON" = held ] || return 1
+  fm_lock_path_exists "$1" && return 1
+  fm_lock_path_exists "$1.steal"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   # Anything that does not positively identify itself as contention is a refused
@@ -1048,10 +1061,13 @@ fm_lock_try_acquire() {
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
-  # Nothing was left behind to reclaim, so the filesystem refused the operation.
-  # Refuse here: treating an absent path as a stale lock is what started the
-  # runaway, and stale-owner recovery has nothing to recover.
-  fm_lock_after_failed_create "$lockdir" || return 1
+  # An absent path after a refused primitive has no stale owner to recover, and
+  # treating it as one is what started the runaway, so that refusal stands. An
+  # absent path because a leftover steal mutex rejected the claim is the
+  # opposite: the reclaim below is the only thing that clears that mutex.
+  if ! fm_lock_after_failed_create "$lockdir"; then
+    fm_lock_orphan_steal_blocks_create "$lockdir" || return 1
+  fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
@@ -1067,6 +1083,7 @@ fm_lock_try_acquire() {
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
+      FM_LOCK_FAIL_REASON=
       return 0
     fi
     fm_lock_after_failed_create "$lockdir" || return 1
@@ -1385,16 +1402,25 @@ fm_autoarm_claim_abandoned() {  # <state-dir>
 
 # Remove a proven-abandoned auto-arm claim so the next claimant can arm.
 # The proof is re-verified while holding the lock's steal mutex, which is the
-# same serialization fm_lock_try_acquire uses for stale-owner reclaim: while it
-# is held no other process can publish the primary lock, so the window between
-# proving abandonment and removing the lock cannot swallow a genuine new claim.
+# same serialization fm_lock_try_acquire uses for stale-owner reclaim. That
+# mutex is a leaf and is not exclusive on its own: a racer reclaiming the same
+# stale mutex can take this one away mid-flight. What keeps the window between
+# proving abandonment and removing the lock from swallowing a genuine new claim
+# is therefore the same thing that protects the reclaim path - the mutex still
+# pointing at this process's owner directory, re-proved immediately before the
+# removal, since only the process that owns it can publish the primary lock.
 fm_autoarm_release_abandoned() {  # <state-dir>
-  local state=$1 lock steal
+  local state=$1 lock steal steal_owner
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   fm_autoarm_claim_abandoned "$state" || return 1
   fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
   if ! fm_autoarm_claim_abandoned "$state"; then
+    fm_lock_release "$steal"
+    return 1
+  fi
+  if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
     return 1
   fi

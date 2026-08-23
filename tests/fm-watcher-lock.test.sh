@@ -1246,6 +1246,73 @@ test_lock_clears_legacy_steal_chains() {
   pass "legacy .steal chains are cleared without evicting a live holder"
 }
 
+test_lock_reclaims_orphan_steal_with_absent_primary() {
+  local dir state lockdir dead owner rc newpid
+  dir=$(make_case lock-orphan-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  # A holder SIGKILLed between taking the steal mutex and publishing the
+  # primary lock leaves the mutex behind with NO primary lock beside it.
+  owner=$(mktemp -d "$state/steal-owner.XXXXXX")
+  printf '%s\n' "$dead" > "$owner/pid"
+  ln -s "$owner" "$lockdir.steal"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir" 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "orphan steal mutex with an absent primary lock refused acquisition (rc=$rc); the lock is wedged with no self-healing"
+  [ -n "$newpid" ] || fail "acquired lock has no pid recorded"
+  pass "an orphan steal mutex beside an absent primary lock is reclaimed, not treated as held"
+}
+
+# Reclaiming an orphan mutex must not become a way past the two refusals the
+# absent-primary path exists to make: a live mutex owner, and a filesystem that
+# cannot create the lock at all (issue #2787).
+test_lock_absent_primary_still_refuses_live_mutex_and_unavailable() {
+  local dir state parent lockdir live owner out target
+  dir=$(make_case lock-orphan-steal-refusals)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  owner=$(mktemp -d "$state/steal-owner.XXXXXX")
+  printf '%s\n' "$live" > "$owner/pid"
+  ln -s "$owner" "$lockdir.steal"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1 reason=held"*) ;;
+    *) fail "a live steal-mutex owner did not hold off the primary lock: $out" ;;
+  esac
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "the primary lock was published while another process held the steal mutex"
+  target=$(readlink "$lockdir.steal" 2>/dev/null || true)
+  [ "$target" = "$owner" ] || fail "a live steal mutex was evicted"
+
+  parent=$(make_unwritable_lock_parent "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$parent/session.lock" 2>/dev/null)
+  chmod 700 "$parent"
+  case "$out" in
+    *"rc=1 reason=unavailable"*) ;;
+    *) fail "an uncreatable lock stopped reporting the filesystem refusal: $out" ;;
+  esac
+  [ -z "$(find "$parent" -name '*.steal*' 2>/dev/null)" ] \
+    || fail "an uncreatable lock entered reclaim and left .steal paths behind"
+  pass "an absent primary lock still refuses a live mutex owner and an uncreatable path"
+}
+
 test_lock_stale_steal_mutex_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-mutex-concurrency)
@@ -1397,6 +1464,64 @@ test_lock_stale_steal_mutex_reclaim_race_has_one_publisher() {
   pass "a stalled reclaim race through one steal mutex yields at most one publisher"
 }
 
+# The abandoned-claim release removes a lock it did not itself publish, so the
+# only thing entitling it to do so is still owning the steal mutex. That mutex
+# is a leaf and is not exclusive on its own, so a racer reclaiming the same
+# stale mutex can take it away while the release is re-verifying abandonment.
+# The stall is injected by redefining the verification inside the releaser, so
+# bin/fm-wake-lib.sh carries no test-only hook.
+test_autoarm_release_refuses_after_losing_the_steal_mutex() {
+  local dir state lock dead live releaser ready holder i
+  dir=$(make_case autoarm-release-mutex-lost)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  ready="$dir/reverifying"
+  dead=$(dead_pid)
+  # A stale steal mutex, so the releaser reclaims it and believes it holds it.
+  mkdir "$lock" "$lock.steal"
+  printf '%s\n' "$dead" > "$lock/pid"
+  printf '%s\n' "$dead" > "$lock.steal/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_test_ready=$3
+    fm_test_calls=0
+    fm_autoarm_claim_abandoned() {
+      fm_test_calls=$((fm_test_calls + 1))
+      if [ "$fm_test_calls" -ge 2 ]; then
+        printf "reverifying\n" > "$fm_test_ready"
+        sleep 3
+      fi
+      return 0
+    }
+    fm_autoarm_release_abandoned "$2"
+  ' _ "$LIB" "$state" "$ready" >/dev/null 2>&1 &
+  releaser=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || fail "the releaser never reached its abandonment re-verification"
+  # Another reclaimer takes the mutex away, and a genuine new claimant then
+  # publishes the auto-arm lock the releaser is still about to remove.
+  sleep 300 &
+  live=$!
+  rm -rf "$lock.steal"
+  mkdir "$lock.steal"
+  printf '%s\n' "$live" > "$lock.steal/pid"
+  rm -rf "$lock"
+  mkdir "$lock"
+  printf '%s\n' "$live" > "$lock/pid"
+  wait "$releaser" 2>/dev/null || true
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -e "$lock" ] || fail "a genuine new auto-arm claim was removed by a releaser that had lost the steal mutex"
+  [ "$holder" = "$live" ] \
+    || fail "the auto-arm lock no longer records the genuine claimant (got '$holder', wanted $live)"
+  pass "an abandoned-claim release refuses to remove the lock once its steal mutex is gone"
+}
+
 test_lock_wait_never_proceeds_without_the_lock() {
   local dir parent waiter i alive errlines
   dir=$(make_case lock-wait-refuses)
@@ -1445,8 +1570,11 @@ test_lock_refuses_when_the_filesystem_cannot_create
 test_lock_failure_reason_separates_held_from_unavailable
 test_lock_steal_is_bounded_to_one_level
 test_lock_clears_legacy_steal_chains
+test_lock_reclaims_orphan_steal_with_absent_primary
+test_lock_absent_primary_still_refuses_live_mutex_and_unavailable
 test_lock_stale_steal_mutex_single_winner_under_concurrency
 test_lock_stale_steal_mutex_reclaim_race_has_one_publisher
+test_autoarm_release_refuses_after_losing_the_steal_mutex
 test_lock_wait_never_proceeds_without_the_lock
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
