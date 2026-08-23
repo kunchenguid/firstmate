@@ -835,10 +835,12 @@ fm_busy_grok_tail_busy() {
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed. <skip-live-probe>, when
-# "1", also skips the herdr-native fm_backend_busy_state check below (a live
-# `agent get` round trip) - a caller that is about to make its own live
+# the Grok arm; when absent AND <skip-live-probe> is not "1", the Grok arm
+# captures through fm_backend_capture if available, else reports unknown
+# capture-failed. <skip-live-probe>, when "1", also skips the herdr-native
+# fm_backend_busy_state check below (a live `agent get` round trip) and, when
+# <tail40> is absent, the Grok arm's own fallback capture (reporting unknown
+# live-probe-skipped instead) - a caller that is about to make its own live
 # capture moments later (bin/fm-peek.sh) passes this to avoid doubling the
 # live backend round-trip, mirroring bin/fm-worker-state-lib.sh's own
 # skip-live-probe tier.
@@ -925,6 +927,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40] [
       ;;
     grok*)
       if [ -z "$tail40" ]; then
+        if [ "$skip_live" = 1 ]; then
+          printf 'unknown live-probe-skipped'
+          return 0
+        fi
         if command -v fm_backend_capture >/dev/null 2>&1; then
           tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
             printf 'unknown capture-failed'
