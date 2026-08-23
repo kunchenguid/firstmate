@@ -2434,6 +2434,39 @@ EOF
   pass "session start pins active orders and demands recitation"
 }
 
+# --- context diff cursor (U1.8: pay for changes, not repetition) -------------
+
+test_context_diff_second_start_compacts() {
+  local rec root home fakebin out
+  rec=$(new_world context-diff)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'projektzeile eins\n' > "$home/data/projects.md"
+  printf 'kapitaenszeile eins\n' > "$home/data/captain.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "projektzeile eins" "first start must print projects.md in full"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "(unchanged since the last locked session start" \
+    "second start must compact an unchanged context file"
+  if printf '%s' "$out" | grep -q "projektzeile eins"; then
+    fail "an unchanged projects.md must not be re-printed in full"
+  fi
+
+  printf 'kapitaenszeile zwei\n' >> "$home/data/captain.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "kapitaenszeile zwei" "a changed captain.md must print in full again"
+  if printf '%s' "$out" | grep -q "projektzeile eins"; then
+    fail "projects.md must stay compact while only captain.md changed"
+  fi
+
+  pass "session start pays context tokens for changes, not repetition"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
@@ -2483,5 +2516,6 @@ test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 test_order_pin_empty_book_prints_compact_line
 test_order_pin_active_order_demands_recitation
+test_context_diff_second_start_compacts
 
 echo "# fm-session-start.test.sh: all assertions passed"
