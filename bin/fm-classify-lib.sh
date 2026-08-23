@@ -289,16 +289,24 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
 #                              bin/fm-send.sh header) for an unrelated, earlier
 #                              decision must never read as ending a pause that
 #                              has nothing to do with it.
-#   anything else            -> a plain unkeyed (default-bucket) declaration -
-#                              working, done, failed, or a bare/default-keyed
-#                              resolved above - is the crew's own general
-#                              report of what it is doing now, so it closes only
-#                              the unkeyed "default" slot (bin/fm-brief.sh rule
-#                              6: a worker reports an undeclared wait clearing
-#                              this way as it resumes). It never touches a
-#                              SPECIFICALLY keyed captain-held hold, which is a
+#   anything else            -> a plain declaration - working, done, failed, or
+#                              a bare/default-keyed resolved above - is the
+#                              crew's own general report of what it is doing
+#                              now. For the unkeyed "default" slot this closes
+#                              it (bin/fm-brief.sh rule 6: a worker reports an
+#                              undeclared wait clearing this way as it resumes).
+#                              For a SPECIFICALLY keyed slot it closes it too,
+#                              but ONLY when that key is open on "$pause": the
+#                              worker's own self-declared wait for that routed
+#                              phase, cleared by the SAME worker reporting a
+#                              terminal or resumed status for the SAME key
+#                              (e.g. `paused [key=foo]` then later
+#                              `done [key=foo]`) - otherwise the phase would
+#                              read as still paused forever. A key open on
+#                              "$held" is left untouched: captain-held is a
 #                              verified backlog transfer (fm-captain-hold.sh)
-#                              that only its own matching resolve can end.
+#                              that only its own matching resolve can end, not
+#                              the worker's own next report.
 _fm_pause_fold_line() {  # <open-set> <status-line> <pause-verb> <held-verb> <resolve-verb>
   local open=$1 line=$2 pause=$3 held=$4 resolve=$5 verb key note stripped
   stripped=${line//[[:space:]]/}
@@ -316,10 +324,31 @@ _fm_pause_fold_line() {  # <open-set> <status-line> <pause-verb> <held-verb> <re
       open=$(_fm_decision_drop "$open" "$key")
       ;;
     *)
-      [ "$key" != default ] || open=$(_fm_decision_drop "$open" default)
+      if [ "$key" = default ]; then
+        open=$(_fm_decision_drop "$open" default)
+      elif [ "$(_fm_open_verb_for_key "$open" "$key")" = "$pause" ]; then
+        open=$(_fm_decision_drop "$open" "$key")
+      fi
       ;;
   esac
   printf '%s' "$open"
+}
+# Verb recorded for <key> in a newline-terminated "<key>\t<verb>\t<note>" open
+# set, or empty when <key> has no open record. Pure lookup, no mutation.
+_fm_open_verb_for_key() {  # <open-set> <key>
+  local set=$1 key=$2 line rest
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"$'\t'*)
+        rest=${line#*$'\t'}
+        printf '%s' "${rest%%$'\t'*}"
+        return 0
+        ;;
+    esac
+  done <<EOF
+$set
+EOF
+  return 1
 }
 
 # The status line that actually speaks to the crew's own current pause/hold

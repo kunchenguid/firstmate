@@ -61,7 +61,13 @@
 #                          pause recheck cadence; every other pane goes through
 #                          the same wedge timer and surfaces with the identical
 #                          "stale: ..." reason, escalation count, and
-#                          demand-deep-inspection marker, for human inspection
+#                          demand-deep-inspection marker - EXCEPT the
+#                          foreground-process defer above, which busy panes never
+#                          get: a busy pane's own foreground process is the
+#                          worker launcher itself, alive for the pane's whole
+#                          life regardless of whether the turn underway is
+#                          healthy, so treating it as evidence would defer every
+#                          busy-turn escalation forever. For human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
@@ -424,16 +430,28 @@ clear_write_tracking() {  # <window-key>
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason key
+# <check-foreground> (default 1) gates the foreground-process defer only, never
+# the write-evidence one: busy_turn_bound_check passes 0 because a busy pane's
+# OWN foreground process is the persistent worker launcher itself, unchanged
+# for the pane's entire life regardless of whether the turn underway is
+# healthy or wedged - treating "the launcher is still alive" as evidence of a
+# legitimate long-running command would defer every busy-turn escalation
+# forever, the opposite of what this bound exists to catch. The plain
+# non-busy stale callers below leave it enabled: there the pane's foreground
+# process IS the bounded command in question (no launcher sitting on top), so
+# its continued presence is genuine liveness evidence.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [check-foreground=1]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 check_fg=${6:-1} since age n reason key
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
       key=$(window_key "$win")
       clear_write_tracking "$key"
-      fm_tmux_pane_foreground_pid "$win" > "$STATE/.fg-pid-$key" 2>/dev/null \
-        || rm -f "$STATE/.fg-pid-$key"
+      if [ "$check_fg" = 1 ]; then
+        fm_tmux_pane_foreground_pid "$win" > "$STATE/.fg-pid-$key" 2>/dev/null \
+          || rm -f "$STATE/.fg-pid-$key"
+      fi
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
@@ -443,7 +461,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
-        if crew_foreground_process_running_since "$win" "$STATE/.fg-pid-$(window_key "$win")"; then
+        if [ "$check_fg" = 1 ] \
+          && crew_foreground_process_running_since "$win" "$STATE/.fg-pid-$(window_key "$win")"; then
           wedge_defer_foreground "$win" "$since_file" "$label" "$age"
           return 0
         fi
@@ -526,14 +545,18 @@ handle_paused_stale() {  # <window> <task> <hash>
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
-# classification.
+# classification. The wedge_timer_check call below disables the
+# foreground-process defer (see its own comment): a busy pane's foreground
+# process is the worker launcher itself, alive for the pane's whole life
+# whether or not the turn underway is wedged, so it can never serve as
+# evidence one way or the other here.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
   if ! afk_present && status_is_paused_or_captain_held "$(last_general_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" 0
   return 1
 }
 
