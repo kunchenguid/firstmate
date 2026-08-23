@@ -1,0 +1,150 @@
+{
+  "schema": "fm.azure-r4-live-acceptance-evidence/v1",
+  "acceptance_date": "2026-08-23",
+  "cell": {
+    "id": "azv-c1bb1c5ff906",
+    "task": "r4-r6-acceptance-final",
+    "task_generation": "r4-r6-acceptance-final:20260823-i",
+    "validation_generation": "azv-r4-r6-20260823-i",
+    "attempt": 1,
+    "phase": "closed",
+    "outcome": "checks-passed",
+    "checks_green": true,
+    "request_digest": "sha256:aba3db5ef1497bb8ba2379da909fd930ec0d7dc5d05eb2d7a026f571b45ecf81",
+    "branch": "codex/azure-final-claude-acceptance",
+    "submitted_head": "bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9",
+    "current_head": "bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9",
+    "remote_head": "bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9",
+    "tree": "6c9c670d835620d4b6c04ee67f69453dd465f49f",
+    "run_id": "01M0Q8E8QDRRB2PHZ2VPQGYPRC",
+    "started_at": "2026-08-23T12:09:37Z",
+    "closed_at": "2026-08-23T13:47:36Z",
+    "pipeline_wall_seconds": 5596
+  },
+  "runtime": {
+    "provider": "claude",
+    "bundle_sha256": "e1d5de518f4dcca9572a471a35c9b42261b9739ee4f244d7138ecaf3c24d2742",
+    "manifest_file_record_count": 110,
+    "provider_binary_sha256": "55d281096f57d411ebbdd94dbf5e9ff3accb7c05713e37348c2c11d4b83bf9d9",
+    "no_mistakes_version": "v1.57.1-5-g3eb261a",
+    "no_mistakes_source_commit": "3eb261add486516995df0791f7dcf815acfbaf5d"
+  },
+  "owner_decision": {
+    "protocol": "fm.azure-validation-owner-decision/v1",
+    "protected": true,
+    "key_id": "6f9f081a52b6abdbb802238a8b5161dd556af033b942996c8e02d6ce27ceb30b",
+    "genesis_head": "49007283a5f1af3e6d28f8674a80fb0e0c09d57b7c95a2a033fa9e88f79f1fa4",
+    "history_head": "bf68b33c9a6de606a3c8c2daf50d1526e539db81fec530a88902c80f09d4e73a",
+    "source_commit": "3eb261add486516995df0791f7dcf815acfbaf5d",
+    "responded_gates": [
+      {
+        "gate_index": 1,
+        "challenge_digest": "sha256:baf608ea73dbc7099f3354f19610131b9a2caae2aed8688b6422bc65b273c5d3",
+        "decision_digest": "sha256:71f961065c4ef3b08fa2e57bad4b900b662fe6459470c91ae8f6f2581fa982aa",
+        "previous_head": "49007283a5f1af3e6d28f8674a80fb0e0c09d57b7c95a2a033fa9e88f79f1fa4",
+        "next_head": "bf68b33c9a6de606a3c8c2daf50d1526e539db81fec530a88902c80f09d4e73a",
+        "action": "approve"
+      }
+    ]
+  },
+  "behavior_shards": [
+    {
+      "shard": 1,
+      "shard_count": 4,
+      "invocation": "azr-0045d77f17ae",
+      "round": "round-f31b0be50456",
+      "exit_code": 0,
+      "duration_seconds": 862.647,
+      "cost_usd": 0.043612,
+      "request_digest": "sha256:9732d3b0bf710f273fd125145c017bb802d78e969f033bdc81a7192dad678da4",
+      "command_digest": "sha256:e9d9415a19c2c40a75a279d50eabb186f9ca88703169d53275043685bf2f26b0",
+      "artifact_digest": "sha256:f52d2533fba2691e47bf70c14e2f0c5330d57d011b90ae38b999417ade530c1a"
+    },
+    {
+      "shard": 2,
+      "shard_count": 4,
+      "invocation": "azr-5407326be3ba",
+      "round": "round-f31b0be50456",
+      "exit_code": 0,
+      "duration_seconds": 1066.217,
+      "cost_usd": 0.059827,
+      "request_digest": "sha256:4396a124915c3ecccc1613988cc588b20f60e3f325510607bc10191a44f6b80e",
+      "command_digest": "sha256:7bd70a7232a36e3a56fbc079fbf688b9088b1f8f34a7bd7410d1599ab717a0c5",
+      "artifact_digest": "sha256:21ecdd1da04e10ea9da3e477b0f45586033150da290fac3a10c0ca0a73cfc4bf"
+    },
+    {
+      "shard": 3,
+      "shard_count": 4,
+      "invocation": "azr-957bdcf24121",
+      "round": "round-f31b0be50456",
+      "exit_code": 0,
+      "duration_seconds": 851.179,
+      "cost_usd": 0.053908,
+      "request_digest": "sha256:8ac57c4a03e72e4ccd6075d05a2cb677d343f4ad6425898c2f00b63155f38020",
+      "command_digest": "sha256:c9e618519e2600d2b4f0c6236bc73509f58d24da31434ec8bc576ca3d20472c0",
+      "artifact_digest": "sha256:191a553b0d3dfe1d378e24d72d4511c066337732629b7c87d9c004c0b9e52178"
+    },
+    {
+      "shard": 4,
+      "shard_count": 4,
+      "invocation": "azr-267698fe9c3d",
+      "round": "round-f31b0be50456",
+      "exit_code": 0,
+      "duration_seconds": 807.349,
+      "cost_usd": 0.055842,
+      "request_digest": "sha256:6f37f622f5cc23c80dce7663b707d5eeb114d06acf02b2b520e81dbb7e18658f",
+      "command_digest": "sha256:37f043fd3af31100e584a01f6b4de641f817c4956dca89cde875118ec7afa4b6",
+      "artifact_digest": "sha256:0002c905a133650fc457a9ca6213e21876e157a2e0654520c7c428da4b50c3ca"
+    }
+  ],
+  "lint_shard": {
+    "invocation": "azr-ec94a9709d9a",
+    "round": "round-7e8a74e52f25",
+    "exit_code": 0,
+    "duration_seconds": 602.113,
+    "cost_usd": 0.03044,
+    "request_digest": "sha256:f6accad6412ffcf6c22c0785b8e0809dd8bee5763a2c79e3b90abedf6f10cf99",
+    "command_digest": "sha256:e8c2555fd3528f29547eb9ca5666c4083edc53cc53229d107b4f6fd396da2a2a"
+  },
+  "pull_request": {
+    "number": 319,
+    "url": "https://github.com/ruby-dlee/firstmate/pull/319",
+    "head": "bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9",
+    "base": "7b6b15f23c694aa25274fd292ad573afa4687948",
+    "merge_commit": "24a8bbcd65c6c310649013f897f1166d51916b21",
+    "merged_at": "2026-08-23T13:41:44Z",
+    "checks_total": 13,
+    "checks_passed": 13,
+    "checks_failed": 0
+  },
+  "cleanup": {
+    "worktree_disk_absent": true,
+    "cell_container_absent": true,
+    "cell_role_assignments_absent": true,
+    "exact_cell_tagged_resource_count": 0,
+    "controller_worker_count": 0,
+    "controller_noncomplete_queue_count": 0,
+    "controller_pending_action_count": 0,
+    "controller_live_capacity_reservation_count": 0,
+    "provider_active_specialized_reservation_count": 0,
+    "released_shape_reservation_count": 5
+  },
+  "source_artifacts": {
+    "closed_cell_state_sha256": "bab3806d1ec37e245502c460674699c95d4903b8ed937cda4bff2dd4c59dd2a4",
+    "collected_result_json_sha256": "4b275d699fab65eecc6c3ef84bf5f328a7ef63aaef34cb0083c1c4c7cad1924f",
+    "behavior_shards_json_sha256": "da76250531fc5798f3ba811b4af5bb6ae5cab1cf0ca37f00ddc795a1be2bb937",
+    "cell_metrics_json_sha256": "2c3c6080a9bb66cb5f9778713657770ab41027b9bc708e238492e232adb41897",
+    "result_archive_sha256": "73cd035abc207275c41bebe4bc62be77d82b86ff03265b0e613643aa64ee0af2",
+    "sealed_request_json_sha256": "47db2f6ae237ac66de877dba36193dcab29dccdc9aa7c0093a3edc26fa9f5e92",
+    "post_close_controller_sha256": "ccdd0633179cf6ed4112de2376ab56f99a563f52e1d8699397c012b2a97674bc"
+  },
+  "limitations": {
+    "runner_offload_live_acceptance_required": false,
+    "runner_offload_live_acceptance_recorded": false,
+    "does_not_prove": [
+      "C1",
+      "C2",
+      "C3"
+    ]
+  }
+}

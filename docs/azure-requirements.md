@@ -108,14 +108,23 @@ and capacity accounting for that longer life; and a rewrite of the two statement
 
 ## R4. no-mistakes runs on Azure
 
-Status: PARTIAL.
-The validation-cell lane, which is what the amended acceptance below turns on, is code-complete
-pending its one live acceptance run.
+Status: DONE, met live on 2026-08-23.
+The validation-cell lane completed its amended acceptance in cell `azv-c1bb1c5ff906` on exact
+head `bb96be9ebfd7562773fd8c8d9e5cb10af5e232a9`.
+The protected Claude-provider run completed all four behavior shards and its lint shard with exit
+0, produced `checks-passed` for pull request 319 with 13 of 13 checks green, collected the exact
+submitted/current/remote head, and reached `close` with the worktree disk, cell storage scope,
+and exact cell resources absent.
+The compact tracked proof is
+[`docs/evidence/azure-r4-live-acceptance-2026-08-23/evidence.json`](evidence/azure-r4-live-acceptance-2026-08-23/evidence.json),
+with its claim map and verification commands in the adjacent
+[README](evidence/azure-r4-live-acceptance-2026-08-23/README.md).
 The runner-offload lane is code-complete too, and it is an optimisation rather than a second
 required leg, so its own live run is not owed against this requirement.
 
 Two lanes exist.
-The validation-cell lane (`docs/azure-validation.md`) has never closed a cell.
+Before the accepted 2026-08-23 run, the validation-cell lane (`docs/azure-validation.md`) had
+never closed a cell.
 Its state is not absent: `$FM_HOME/state/azure-validation/azv-36b2726cbcf3.json` holds the
 complete record of the first live attempt, including its transition timestamps, and is the
 ground truth correcting the account below. An earlier revision of this line claimed no
@@ -144,8 +153,9 @@ exact error naming what is missing and the command runs nowhere; the `docs/azure
 exports remain an operator override, and `FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES` remains the
 only explicit local opt-out.
 
-Work remaining for the acceptance below: one live run, operator-driven after merge, in which a
-validation cell is driven from dispatch through `close` and its worktree disk is released.
+No R4 acceptance work remains.
+Before the accepted run, the remaining work was one operator-driven live run in which a
+validation cell moved from dispatch through `close` and released its worktree disk.
 The other live run this section used to owe, a no-mistakes run offloading a selected test class to
 Azure end to end, is worth taking on the optimisation lane's own merits and no longer gates this
 requirement.
@@ -159,8 +169,8 @@ sudo, tmux window creation, Keychain approval markers), the operator answered `a
 attempt 2 then ended without an authenticated result marker. The cell took the retain lane:
 compute zero, worktree disk and evidence retained, control reservation released.
 
-That attempt exposed two blockers that stand between this lane and its acceptance sentence, and
-neither is the receipts strand:
+At the time, that attempt exposed two blockers between the lane and its acceptance sentence, and
+neither was the receipts strand:
 
 1. `observe` took a terminal decision on a control view it never bound to the attempt, and the
    decision was unrecoverable. This was recorded here as "`respond` does not answer a gate" plus
@@ -234,10 +244,10 @@ neither is the receipts strand:
    only by rebuilding the bundle from the upgraded binary and submitting a NEW cell. Do not spend
    time waiting on a host upgrade here.
 
-2. The sealed suite is not Linux-clean, so every cell run parks. Shard 2 failed on host-coupled
+2. The sealed suite was not Linux-clean, so every cell run parked. Shard 2 failed on host-coupled
    units that cannot pass inside a Linux cell (passwordless sudo, tmux window creation, Keychain
-   approval markers), alongside 377 passing units. Until those units skip loudly off macOS, no
-   intent reaches a green test step here.
+   approval markers), alongside 377 passing units. Until those units skipped loudly off macOS, no
+   intent could reach a green test step there.
 
    Partially closed. The retained shard responses under
    `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and
@@ -302,7 +312,7 @@ neither is the receipts strand:
    it for a green check is an owner-level decision about the cell's security posture, not a test
    suite's call.
 
-Open finding from the same attempt, not addressed by that fix: the guest's `adjudicate_gates`
+Historical finding from the same attempt, later superseded: the guest's `adjudicate_gates`
 polls `control/gate-response-a<n>-<i>.txt` through `fetch_gate_response`, and nothing in this
 repo ever writes that blob, so the loop can only ever time out at its
 `FM_AZURE_VALIDATION_GATE_WAIT_SECONDS` default of 5400 seconds. That is 90 minutes of billable
@@ -310,8 +320,14 @@ cell per gate for nothing, and it is consistent with attempt 1's 1h57m wall time
 a scope decision between wiring the host to publish the blob and deleting the loop; the
 in-attempt response path the guest already has does not need it.
 
-So the receipts fix is exercised live up to the gate, which is exactly what used to be
-impossible, and `close` stays unproven: the acceptance sentence below is not yet met.
+The accepted run did not rely on that plaintext response path.
+It used the protected owner-decision protocol from no-mistakes source
+`3eb261add486516995df0791f7dcf815acfbaf5d`, recorded an immutable genesis head and signed history
+head, and completed the same daemon run after the owner decision.
+
+At the time of that earlier attempt the receipts fix was exercised only up to the gate, which was
+exactly what used to be impossible, and `close` remained unproven.
+The 2026-08-23 accepted run supersedes that state and meets the sentence below.
 
 Acceptance (amended by the owner 2026-08-21): one validation cell reaches `close` with its
 worktree disk released.
@@ -960,7 +976,7 @@ they will cross is 2026-08-29. The mechanism is proven; the calendar is not.
 
 ## R9. Everything is set up and proven
 
-Status: PARTIAL.
+Status: DONE, met live on 2026-08-23.
 
 Proven by the subset of the 2026-08-22 live acceptance recorded in the tracked evidence linked from R2/R3:
 
@@ -976,9 +992,11 @@ Proven by the subset of the 2026-08-22 live acceptance recorded in the tracked e
 An accepted Pi-harness review on the current model image is proven by Azure review
 `azure-r4-respond-285`.
 
-Outstanding at the moment this update is written: one fresh R4 validation cell reaching `close`
-with its worktree disk released. R6's second declaration leg is now complete. R4 is what keeps
-this requirement PARTIAL rather than DONE.
+The former outstanding dependency is now complete: R4 cell `azv-c1bb1c5ff906` reached `close`
+with its worktree disk released, as recorded in
+[`docs/evidence/azure-r4-live-acceptance-2026-08-23/evidence.json`](evidence/azure-r4-live-acceptance-2026-08-23/evidence.json).
+R6's second declaration leg was already complete, so the tracked evidence now covers every
+non-dropped R1-R10 requirement.
 
 The landing path used to be recorded here as unprovable synthetically, and that was correct
 behavior rather than a gap to route around.
@@ -1250,12 +1268,12 @@ billable capacity has not run yet.
    most misread.
 4. R6, done 2026-08-22 under its evidenceable two-declaration amendment; the accepted records keep
    the actual primary or fallback family mode visible.
-5. R4, which needs one validation cell closed; the runner caller is built, and the offload lane is
-   an optimisation rather than part of the acceptance.
+5. R4, done 2026-08-23 with one protected validation cell closed and its worktree disk released;
+   the offload lane remains an optimisation rather than part of the acceptance.
 6. R5, done 2026-08-22.
 7. C1, instrumented 2026-08-20; the measured local-lane runs are above the band rather than
    inside it, and the compartment lane's phases wait on that lane being switched back on.
-8. R9, which is the proof of the rest; partial since 2026-08-22, waiting only on R4's cell close.
+8. R9, done 2026-08-23 after R4's final cell close completed the tracked proof set.
 9. R10, the Slack team exposure, dropped by the owner on 2026-08-21 and no longer ordered work.
 
 ## Standing constraints
