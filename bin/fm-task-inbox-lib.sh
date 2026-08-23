@@ -166,10 +166,22 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "${rec##*/}" "$abs"
 }
 
+fm_task_inbox_action_claim() {  # <record-path>
+  local rec=$1 claim
+  claim="${rec%/*}/.action.${rec##*/}.${BASHPID:-$$}.${RANDOM:-0}"
+  ln -- "$rec" "$claim" 2>/dev/null || return 1
+  printf '%s' "$claim"
+}
+
+fm_task_inbox_action_release() {  # <claim-path>
+  rm -f -- "$1"
+}
+
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
 # backend's submit machinery with a minimal retry budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
+# (the watcher re-rings later), 2 the backend send failed, 3 the record was
+# acknowledged before this ring committed. No return value is
 # delivery proof; the acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
@@ -178,14 +190,21 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict claim
+  claim=$(fm_task_inbox_action_claim "$rec") || return 3
   line=$(fm_task_inbox_doorbell_line "$rec")
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      fm_task_inbox_action_release "$claim"
+      return 1
+      ;;
   esac
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null) \
-    || return 2
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+    fm_task_inbox_action_release "$claim"
+    return 2
+  fi
+  fm_task_inbox_action_release "$claim"
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2

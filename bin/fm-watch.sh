@@ -309,7 +309,7 @@ window_key() {  # <window>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc claim
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -327,16 +327,21 @@ inbox_steer_check() {  # <window> <task>
   fi
   case "$verb" in
     ring)
-      [ -f "$rec" ] || return 0
-      fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || true
+      ring_rc=0
+      fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      [ "$ring_rc" -ne 3 ] || return 0
       fm_task_inbox_record_ring "$STATE" "$task" "$rec"
       triage_log "steer-inbox re-ring: $task ${rec##*/}"
       ;;
     escalate)
-      [ -f "$rec" ] || return 0
+      claim=$(fm_task_inbox_action_claim "$rec") || return 0
       reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell re-rings with an idle pane; inspect the worker)"
-      fm_wake_append stale "$w" "$reason" || exit 1
+      if ! fm_wake_append stale "$w" "$reason"; then
+        fm_task_inbox_action_release "$claim"
+        exit 1
+      fi
       fm_task_inbox_record_escalated "$STATE" "$task" "$rec"
+      fm_task_inbox_action_release "$claim"
       wake "$reason"
       ;;
   esac

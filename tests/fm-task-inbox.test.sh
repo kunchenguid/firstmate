@@ -180,6 +180,22 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
+test_action_commit_orders_with_ack() {
+  local state rec claim
+  state="$TMP_ROOT/action-ack/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first")
+  claim=$(inbox_lib "$state" fm_task_inbox_action_claim "$rec") \
+    || fail "an unhandled record should allow an action commitment"
+  mv "$rec" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_action_release "$claim"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second")
+  mv "$rec" "$state/t1.inbox/handled/"
+  if inbox_lib "$state" fm_task_inbox_action_claim "$rec" >/dev/null; then
+    fail "an acknowledgement that wins the race must prevent the watcher action"
+  fi
+  pass "inbox: watcher actions and acknowledgement moves have atomic ordering"
+}
+
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -328,6 +344,7 @@ test_watcher_escalates_once_after_budget() {
 test_write_is_durable_and_exact
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_action_commit_orders_with_ack
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
