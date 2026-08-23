@@ -993,6 +993,449 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+
+# --- declared pause already covered by this task's own armed merge poll -------
+# The 2026-08-20 case: a task parked on an upstream PR with a validated merge
+# poll armed re-surfaced its pause every hour for eight consecutive hours, and
+# every answer was "still open". The poll wakes on the merge by itself, so the
+# recheck was pure cost. These tests pin the whole decision: an armed, validated
+# poll suppresses the recheck; anything less keeps it; only the declared
+# external-wait verb is ever offered the drop, never a captain-held transfer the
+# poll cannot answer; a covering PR positively observed closed without merging
+# lapses the coverage while every inconclusive reading leaves it standing; the
+# always-on watcher and the away-mode daemon reach the same verdict from the same
+# fixture; and the suppression leaves a note a supervisor can find instead of
+# going silent.
+
+# Arm a REAL validated merge poll for <task> in <state>, exactly as
+# bin/fm-pr-check.sh does for a PR-ready task. The stub FM_ROOT keeps the guard
+# banner out of the test output; the poll template still comes from the real bin/.
+# A fake gh goes into the case's fakebin so the watcher's own check sweep, which
+# is due on its first cycle, reads a canned OPEN instead of the network.
+arm_merge_poll() {  # <dir> <state> <task> <url>
+  local dir=$1 state=$2 task=$3 url=$4 fake_root
+  fake_root="$dir/pr-root"
+  mkdir -p "$fake_root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_root/bin/fm-guard.sh"
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+# FM_FAKE_GH_FAIL models every inconclusive outcome the poll must stay silent on
+# (an expired credential, a renamed repository, an unreachable forge).
+[ -n "${FM_FAKE_GH_FAIL:-}" ] && exit 1
+printf '%s\n' "${FM_FAKE_PR_STATE:-OPEN}"
+SH
+  chmod +x "$dir/fakebin/gh"
+  FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" "$task" "$url" >/dev/null 2>&1
+}
+
+# Run ONE away-mode housekeeping tick against <state> in a subshell. The daemon's
+# source guard gives library mode, so only its functions load - no lock, no loop.
+run_daemon_housekeeping() {  # <state> <pause-secs>
+  local state=$1 secs=$2
+  FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS="$secs" \
+    FM_ESCALATE_BATCH_SECS=999999 bash -c '
+      set -u
+      # shellcheck source=/dev/null
+      . "$1/bin/fm-supervise-daemon.sh"
+      housekeeping "$2"
+    ' _ "$ROOT" "$state"
+}
+
+# The shared predicate itself, as a pure decision over the three fixtures that
+# matter. A validated poll for THIS task is the only yes; the observable note
+# follows the verdict in both directions so a lapsed coverage cannot leave a
+# stale "suppressed" claim behind.
+test_pause_poll_coverage_predicate_matrix() {
+  local dir state note
+  dir=$(make_case pause-poll-predicate); state="$dir/state"
+  note="$state/.covered.pause-poll-covered"
+  printf 'window=test:fm-covered\nkind=ship\n' > "$state/covered.meta"
+
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    && fail "a task with no check at all was treated as poll-covered"
+  [ ! -e "$note" ] || fail "the no-poll case wrote a coverage note"
+
+  # A check that EXISTS but is not a validated merge poll must never suppress.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/covered.check.sh"
+  chmod 0700 "$state/covered.check.sh"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    && fail "an unvalidated custom check was treated as a merge poll"
+  rm -f "$state/covered.check.sh"
+
+  arm_merge_poll "$dir" "$state" covered https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    || fail "a genuinely armed, validated merge poll did not cover the pause"
+  [ "$FM_CLASSIFY_PAUSE_POLL_URL" = https://github.com/o/r/pull/2606 ] \
+    || fail "the covering PR URL was not reported back to the caller"
+  [ -f "$note" ] || fail "suppression did not record an observable coverage note"
+  grep -F 'https://github.com/o/r/pull/2606' "$note" >/dev/null \
+    || fail "the coverage note does not name the PR that covers the wait"
+
+  # A terminal observation recorded against a DIFFERENT PR cannot answer for this
+  # one, so coverage is untouched by it.
+  printf '%s\n%s\n%s\n%s\n' fm-pr-poll-terminal-v1 covered \
+    https://github.com/o/r/pull/99 closed-unmerged > "$state/covered.pr-poll-terminal"
+  chmod 0600 "$state/covered.pr-poll-terminal"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    || fail "a terminal observation for another PR withdrew this PR's coverage"
+
+  # The covering PR itself observed closed without merging: the poll will never
+  # speak again, so coverage lapses and the note is withdrawn.
+  printf '%s\n%s\n%s\n%s\n' fm-pr-poll-terminal-v1 covered \
+    https://github.com/o/r/pull/2606 closed-unmerged > "$state/covered.pr-poll-terminal"
+  chmod 0600 "$state/covered.pr-poll-terminal"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    && fail "a PR observed closed without merging still covered the wait"
+  [ ! -e "$note" ] || fail "a lapsed terminal outcome left its coverage note behind"
+
+  # A malformed record is not an observation, so it must not lapse anything.
+  printf 'closed\n' > "$state/covered.pr-poll-terminal"
+  chmod 0600 "$state/covered.pr-poll-terminal"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    || fail "an unparseable terminal record was mistaken for a positive observation"
+  rm -f "$state/covered.pr-poll-terminal"
+
+  # Break the trust binding only: the poll bytes and sidecar stay, so nothing but
+  # the registration distinguishes this from the armed case above.
+  rm -f "$state/covered.pr-poll-registration"
+  pause_recheck_covered_by_merge_poll "$state" covered \
+    && fail "a poll whose trust binding no longer matches still suppressed the recheck"
+  [ ! -e "$note" ] || fail "lapsed coverage left a stale suppression note behind"
+  pass "pause coverage requires a validated merge poll for that exact task, and its note follows the verdict"
+}
+
+# Always-on watcher: an aged declared pause whose task carries an armed poll is
+# absorbed with no wake at all, and the away-mode daemon absorbs the identical
+# fixture without escalating - the two modes must not diverge.
+test_paused_recheck_suppressed_by_armed_merge_poll() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back note dkey
+  dir=$(make_case paused-poll-covered); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for the upstream PR' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$statusf"
+  arm_merge_poll "$dir" "$state" held https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for the upstream PR")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  note="$state/.held.pause-poll-covered"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream PR 2606' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a poll-covered pause (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a poll-covered pause still printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a poll-covered pause still enqueued a recheck wake"
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || fail "suppression advanced the re-surface throttle; a lapse would then wait a whole extra window"
+  [ -f "$note" ] || fail "the suppressed recheck left no note for a supervisor to find"
+  grep -F 'https://github.com/o/r/pull/2606' "$note" >/dev/null \
+    || fail "the suppression note does not name the PR that covers the wait"
+
+  # Same fixture, away mode: the daemon must reach the same verdict.
+  dkey=$(printf '%s' held | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$dkey"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    run_daemon_housekeeping "$state" 240
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "away mode escalated a poll-covered pause the watcher absorbed: $(cat "$state/.subsuper-escalations")"
+  # An empty escalations file alone proves nothing: the daemon also escalates
+  # nothing when the window reads busy or gone, and BOTH of those drop the pause
+  # marker. Only suppression continues with the marker deliberately left in place,
+  # so the marker plus the coverage note is what distinguishes the path under test
+  # from a pass for the wrong reason.
+  [ -e "$state/.subsuper-paused-$dkey" ] \
+    || fail "away mode dropped the pause marker instead of suppressing a covered recheck"
+  [ -f "$note" ] || fail "away mode left no coverage note for the recheck it suppressed"
+  pass "a declared pause covered by its own armed merge poll is absorbed by both supervisors, with an observable note"
+}
+
+# The disconfirming case for the same fixture: a check.sh that is present and
+# perfectly legitimate, but is NOT a validated merge poll, must leave the hourly
+# recheck exactly as it was, in both modes. A registered custom check is the
+# sharpest version of that: the watcher trusts it enough to RUN it, so only
+# "is this task's merge poll" can be the thing that suppresses the recheck.
+# Losing this distinction is what would turn a real wedge into silence.
+test_paused_recheck_survives_untrusted_check() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back dkey
+  dir=$(make_case paused-untrusted-check); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for the upstream PR' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$statusf"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/held.check.sh"
+  chmod 0700 "$state/held.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" held >/dev/null \
+    || fail "could not register the fixture custom check"
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for the upstream PR")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream PR 2606' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "an untrusted check silenced the declared-pause recheck in the always-on watcher"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the surviving recheck was not the awaiting-external recheck: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the surviving recheck did not record its throttle marker"
+  [ ! -e "$state/.held.pause-poll-covered" ] || fail "an untrusted check wrote a suppression note"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the untrusted-check recheck wake"
+
+  # Same fixture, away mode: the daemon must also keep re-surfacing.
+  dkey=$(printf '%s' held | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$dkey"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    run_daemon_housekeeping "$state" 240
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "away mode dropped a recheck the watcher kept, for a check that is not a trusted poll"
+  pass "a check that is not a trusted validated merge poll keeps the declared-pause recheck in both modes"
+}
+
+# A merge poll answers exactly one question: did this PR merge. It says nothing
+# about whether the captain acted on a held decision, so the same absorber that
+# serves both verbs must offer the drop to the declared external wait ALONE. This
+# drives the real watcher over a captain-held task whose merge poll is genuinely
+# trusted - proved in-process first, so the assertion cannot pass merely because
+# the fixture poll was invalid - and requires the ordinary recheck to survive.
+test_captain_held_recheck_survives_armed_merge_poll() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back note dkey
+  dir=$(make_case captain-held-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle after the transfer' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'captain-held [key=upstream-cut]: tracked by hold-upstream-cut\n' > "$statusf"
+  arm_merge_poll "$dir" "$state" held https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  note="$state/.held.pause-poll-covered"
+  pause_recheck_covered_by_merge_poll "$state" held \
+    || fail "the captain-held fixture's merge poll is not trusted, so this test would prove nothing"
+  [ -f "$note" ] || fail "the fixture did not leave the coverage note this test expects withdrawn"
+
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after the transfer")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · held per captain' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "an armed merge poll silenced a captain-held recheck the poll cannot answer"
+  grep -F "awaiting the captain" "$out" >/dev/null \
+    || fail "the surviving captain-held recheck was not the bounded hold recheck: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the surviving recheck did not record its throttle marker"
+  [ ! -e "$note" ] \
+    || fail "a captain-held line kept claiming a suppression that is not in force"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the captain-held recheck wake"
+
+  # Same fixture, away mode: the daemon must apply the identical narrowing, or the
+  # two supervisors disagree about which declarations a merge poll can answer for.
+  dkey=$(printf '%s' held | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$dkey"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    run_daemon_housekeeping "$state" 240
+  grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "away mode let an armed merge poll silence a captain-held recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ ! -e "$note" ] \
+    || fail "away mode left a coverage note claiming a captain-held suppression that is not in force"
+  pass "a captain-held transfer keeps its bounded recheck in both modes even when the task's own merge poll is armed"
+}
+
+# The lapse rule. A covering PR the poll itself observes closed without merging
+# ends the watch the opposite way a merge does, so coverage must lapse rather than
+# leave the wait quiet forever. The watcher's own check sweep makes that
+# observation on its ordinary cadence, records it, and deliberately does not turn
+# it into a check wake - the ordinary declared-pause recheck is what resumes.
+test_paused_recheck_resumes_when_covering_pr_is_closed_unmerged() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back note dkey
+  dir=$(make_case paused-poll-closed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for the upstream PR' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$statusf"
+  arm_merge_poll "$dir" "$state" held https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  note="$state/.held.pause-poll-covered"
+  # Establish real coverage first, so what follows is a withdrawal rather than a
+  # note that was never written.
+  pause_recheck_covered_by_merge_poll "$state" held \
+    || fail "the fixture merge poll did not cover the pause to begin with"
+  [ -f "$note" ] || fail "the covered fixture recorded no coverage note"
+
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for the upstream PR")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_PR_STATE=CLOSED \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream PR 2606' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a PR closed without merging left its declared pause permanently quiet"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the resumed recheck was not the awaiting-external recheck: $(cat "$out")"
+  [ -f "$state/held.pr-poll-terminal" ] \
+    || fail "the poll's terminal non-merged observation was not recorded durably"
+  [ ! -e "$note" ] || fail "a lapsed coverage kept claiming the recheck was suppressed"
+  grep -F closed-unmerged "$out" >/dev/null \
+    && fail "the terminal observation was converted into a check wake of its own"
+  grep -F closed-unmerged "$state/.wake-queue" >/dev/null 2>&1 \
+    && fail "the terminal observation enqueued a check wake of its own"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the resumed recheck wake"
+
+  # Same fixture, away mode: the daemon reads the same durable observation.
+  dkey=$(printf '%s' held | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$dkey"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    run_daemon_housekeeping "$state" 240
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "away mode kept suppressing a wait whose covering PR was closed without merging"
+  pass "a covering PR observed closed without merging withdraws its note and resumes the recheck in both modes"
+}
+
+# The lapse rule depends on the observation being DURABLE, so the one case that
+# must never end in silence is a terminal state the poll can see but the state
+# directory refuses to hold. Nothing else reports it: with no record the coverage
+# predicate keeps answering yes, the re-surface throttle is never advanced, and
+# every later sweep re-observes the same state and fails to record it identically.
+# The obstruction here is a real one the artifact validator rejects - a symlink
+# where the private record belongs, which is what a relinked or tampered state
+# directory looks like - and the watcher must fall back to the ordinary check wake.
+test_unrecordable_terminal_observation_is_surfaced() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back note record
+  dir=$(make_case paused-poll-unrecordable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for the upstream PR' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$statusf"
+  arm_merge_poll "$dir" "$state" held https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  note="$state/.held.pause-poll-covered"
+  pause_recheck_covered_by_merge_poll "$state" held \
+    || fail "the fixture merge poll did not cover the pause to begin with"
+  [ -f "$note" ] || fail "the covered fixture recorded no coverage note"
+
+  record="$state/held.pr-poll-terminal"
+  ln -s "$dir/not-a-private-record" "$record"
+
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for the upstream PR")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_PR_STATE=CLOSED \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream PR 2606' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "an unrecordable terminal observation was swallowed instead of surfaced"
+  grep -F "held.check.sh: closed-unmerged" "$out" >/dev/null \
+    || fail "the unrecordable observation did not surface as a check wake: $(cat "$out")"
+  grep -F closed-unmerged "$state/.wake-queue" >/dev/null \
+    || fail "the unrecordable observation was not queued durably for the next drain"
+  [ -L "$record" ] || fail "the fixture obstruction was replaced rather than refused"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unrecordable-observation wake"
+  pass "a terminal outcome that cannot be recorded durably is surfaced as a wake, never swallowed"
+}
+
+# The disconfirming case for the lapse rule. An expired credential, a missing CLI,
+# a renamed repository, and every other inconclusive outcome leave the poll silent,
+# and silence must never be read as a rejection: the wait is still genuinely
+# covered, so the recheck stays suppressed and no terminal record is written.
+test_inconclusive_poll_is_not_a_terminal_outcome() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back note
+  dir=$(make_case paused-poll-inconclusive); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for the upstream PR' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$statusf"
+  arm_merge_poll "$dir" "$state" held https://github.com/o/r/pull/2606 \
+    || fail "could not arm the fixture merge poll"
+  note="$state/.held.pause-poll-covered"
+  back=$(( $(date +%s) - 5000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for the upstream PR")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_GH_FAIL=1 \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream PR 2606' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a failed forge lookup was mistaken for a terminal outcome: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -e "$state/held.pr-poll-terminal" ] \
+    || fail "a failed forge lookup was recorded as a positive terminal observation"
+  [ ! -s "$out" ] || fail "an inconclusive poll re-surfaced the covered pause: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an inconclusive poll enqueued a recheck wake"
+  [ -f "$note" ] || fail "an inconclusive poll withdrew coverage that still holds"
+  pass "an inconclusive or failed poll observation is never mistaken for a PR closed without merging"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2640,6 +3083,13 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_pause_poll_coverage_predicate_matrix
+test_paused_recheck_suppressed_by_armed_merge_poll
+test_paused_recheck_survives_untrusted_check
+test_captain_held_recheck_survives_armed_merge_poll
+test_paused_recheck_resumes_when_covering_pr_is_closed_unmerged
+test_unrecordable_terminal_observation_is_surfaced
+test_inconclusive_poll_is_not_a_terminal_outcome
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode

@@ -1060,6 +1060,40 @@ SH
   pass "session start: configured and auto-detected Herdr homes never require tmux"
 }
 
+# --- suppressed pause recheck is visible in the digest ------------------------
+# A declared wait whose hourly recheck the supervisors dropped, because this
+# task's own merge poll already wakes on the merge, must not simply go quiet:
+# the digest prints the note under that task so a future reader can tell
+# deliberate quiet from a recheck that broke.
+test_suppressed_pause_recheck_is_printed() {
+  local rec root home fakebin out
+  rec=$(new_world pause-poll-covered)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
+  printf 'paused: awaiting upstream PR 2606\n' > "$home/state/task-a.status"
+  printf 'declared-wait recheck suppressed since 2026-08-20T09:00:00Z: the armed merge poll for https://github.com/o/r/pull/2606 covers this wait and wakes firstmate when that PR merges\n' \
+    > "$home/state/.task-a.pause-poll-covered"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "pause recheck: declared-wait recheck suppressed since" \
+    "digest did not print the suppressed-pause-recheck note under its task"
+  assert_contains "$out" "https://github.com/o/r/pull/2606" \
+    "the printed note did not name the PR whose poll covers the wait"
+
+  rm -f "$home/state/.task-a.pause-poll-covered"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "pause recheck:" \
+    "digest printed a pause-recheck line for a task with no suppression note"
+
+  pass "a pause recheck suppressed by an armed merge poll is visible in the fleet digest"
+}
+
 # --- status tail bounding -----------------------------------------------------
 
 test_status_tail_bounding() {
@@ -2415,6 +2449,7 @@ test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
+test_suppressed_pause_recheck_is_printed
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed

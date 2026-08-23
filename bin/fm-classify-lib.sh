@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -25,7 +25,11 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
 # a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# at the moment they would otherwise escalate. pause_recheck_covered_by_merge_poll
+# (see "declared pauses a merge poll already covers" below) also writes: it
+# delegates the trust decision to bin/fm-pr-lib.sh and records or drops the
+# observable coverage note that keeps a suppressed recheck from looking like a
+# broken one.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -169,6 +173,120 @@ status_is_captain_held() {  # <status-line>
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
+}
+
+# --- declared pauses a merge poll already covers ----------------------------
+#
+# The bounded re-surface above exists because firstmate has no other way to learn
+# that a declared wait cleared. That is not true of a task whose PR merge is being
+# polled: bin/fm-pr-check.sh arms a static validated poll that prints exactly one
+# line the moment the PR merges and stays silent on everything inconclusive,
+# errors included, so the poll - not an hourly model turn - is what learns that
+# this exact wait cleared. Re-surfacing such a pause only re-asks a question
+# already answered by a check that cannot miss.
+#
+# This predicate answers about a poll, not about a verb: WHICH declarations may be
+# dropped is the caller's narrowing, and both supervisors offer it only to the
+# declared external-wait verb (bin/fm-watch.sh's handle_paused_stale owns that
+# rule). Never hand it a captain hold - a merge poll cannot report that.
+#
+# bin/fm-pr-lib.sh owns what makes a poll trustworthy (fm_pr_poll_artifacts_valid:
+# byte-identical poll source, private 0600 artifacts on the state device, and a
+# registration binding the task, the PR identity, and both file identities to the
+# task's own metadata). This predicate only asks that owner, so a check.sh that is
+# some other custom check, a poll whose trust binding no longer matches, or an
+# unreadable library all answer no. It is positive-evidence-only by design: only a
+# fully validated poll for THIS task suppresses the recheck, because a redundant
+# wake costs one turn while a lost one costs a stalled task nobody notices.
+#
+# Suppression is deliberately observable rather than silent. On a yes this records
+# state/.<task>.pause-poll-covered, a one-line human-readable note the session-start
+# fleet digest prints under that task; on a no it removes that note, so coverage
+# that lapses cannot leave a stale claim behind. That side effect is the fourth
+# documented exception to this library's otherwise pure reads.
+#
+# Coverage also LAPSES on a positively observed terminal non-merged outcome. The
+# poll only ever speaks on a merge, so a PR closed without merging would leave the
+# wait quiet forever; the poll durably records that observation when it sees it
+# (fm_pr_poll_terminal_observed) and this predicate reads that record on the way
+# past. Nothing inconclusive counts: silence, a forge error, an expired
+# credential, an absent CLI, and an unparseable answer leave no record, so this
+# path never asks the forge anything and never mistakes a lookup failure for a
+# rejection.
+#
+# The trust template is resolved from this library's own directory and is NOT
+# environment-overridable: it is the byte-comparison anchor that separates the
+# validated poll from any other check.sh, so an ambient value redirecting it would
+# let an arbitrary check suppress a real recheck.
+# FM_CLASSIFY_PAUSE_POLL_URL carries the covering PR URL back to callers that want
+# it for their own logging.
+FM_CLASSIFY_PAUSE_POLL_URL=
+
+# Path of the observable coverage note for <state> <task>.
+pause_poll_coverage_note_path() {  # <state> <task-id>
+  printf '%s/.%s.pause-poll-covered' "$1" "$2"
+}
+
+# Drop the coverage note for <state> <task>. Called by both supervisors when a
+# crew stops declaring its pause, and by teardown, so the note never outlives the
+# wait it describes.
+pause_poll_coverage_forget() {  # <state> <task-id>
+  local state=$1 task=$2
+  [ -n "$state" ] && [ -n "$task" ] || return 0
+  rm -f -- "$(pause_poll_coverage_note_path "$state" "$task")" 2>/dev/null || true
+  return 0
+}
+
+# 0 if <task>'s declared pause is already covered by an armed, validated merge
+# poll for that same task, so its bounded recheck is pure cost. Records the
+# observable coverage note on 0 and removes it on 1.
+pause_recheck_covered_by_merge_poll() {  # <state-dir> <task-id>
+  local state=$1 task=$2 note stamp template url
+  FM_CLASSIFY_PAUSE_POLL_URL=
+  [ -n "$state" ] && [ -n "$task" ] || return 1
+  # Cheap short-circuit so the common no-poll pause never pays for loading or
+  # running the validation owner below; the owner still decides every yes.
+  if [ ! -f "$state/$task.check.sh" ] || [ -L "$state/$task.check.sh" ]; then
+    pause_poll_coverage_forget "$state" "$task"
+    return 1
+  fi
+  if ! declare -F fm_pr_poll_artifacts_valid >/dev/null 2>&1; then
+    if [ ! -f "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh" ]; then
+      pause_poll_coverage_forget "$state" "$task"
+      return 1
+    fi
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh" || { pause_poll_coverage_forget "$state" "$task"; return 1; }
+  fi
+  template="$_FM_CLASSIFY_LIB_DIR/fm-pr-poll.sh"
+  if [ ! -f "$template" ] \
+    || ! fm_pr_poll_artifacts_valid "$state" "$task" "$template"; then
+    pause_poll_coverage_forget "$state" "$task"
+    return 1
+  fi
+  url=$FM_PR_DATA_URL
+  # The covering PR has been seen to end without merging, so the poll that was
+  # standing in for the recheck will never speak again: coverage lapses here and
+  # the ordinary bounded recheck resumes. A library too old to answer that
+  # question cannot establish coverage either, so it lapses the same way.
+  if ! declare -F fm_pr_poll_terminal_observed >/dev/null 2>&1 \
+    || fm_pr_poll_terminal_observed "$state" "$task" "$url"; then
+    pause_poll_coverage_forget "$state" "$task"
+    return 1
+  fi
+  FM_CLASSIFY_PAUSE_POLL_URL=$url
+  note=$(pause_poll_coverage_note_path "$state" "$task")
+  # Rewrite only when the covered PR changed, so the note keeps the timestamp of
+  # the moment this wait first went quiet instead of churning every poll.
+  if [ -f "$note" ] && grep -qF -- " $FM_CLASSIFY_PAUSE_POLL_URL " "$note" 2>/dev/null; then
+    return 0
+  fi
+  stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u)
+  if ( umask 077; printf 'declared-wait recheck suppressed since %s: the armed merge poll for %s covers this wait and wakes firstmate when that PR merges\n' \
+    "$stamp" "$FM_CLASSIFY_PAUSE_POLL_URL" > "$note" ) 2>/dev/null; then
+    chmod 0600 "$note" 2>/dev/null || true
+  fi
+  return 0
 }
 
 # --- durable keyed decisions ------------------------------------------------

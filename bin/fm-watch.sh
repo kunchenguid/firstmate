@@ -314,10 +314,22 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # two cadences cannot drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
+#
+# An optional <suppress-check> command is consulted ONLY once both gates have
+# passed and this pane is about to wake, so a caller pays for it once per window
+# rather than once per poll. A 0 from it drops that one wake and deliberately
+# leaves the throttle UNADVANCED, so the ordinary re-surface fires on the very
+# next poll the moment the suppression lapses; this function then returns 2 so the
+# caller can record why the pane stayed quiet. The gates themselves stay here, the
+# single owner of the bounded cadence, rather than being restated by each caller.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [<suppress-check> <arg>...]
   local win=$1 throttle=$2 age=$3 reason=$4
+  shift 4
   [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
   [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
+  if [ "$#" -gt 0 ] && "$@"; then
+    return 2
+  fi
   fm_wake_append stale "$win" "$reason" || exit 1
   date +%s > "$throttle"
   wake "$reason"
@@ -428,8 +440,25 @@ busy_turn_over_age() {  # <task>
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
+#
+# A due recheck is dropped when this exact task already carries an armed, validated
+# merge poll (fm-classify-lib.sh's pause_recheck_covered_by_merge_poll, the same
+# predicate the away-mode daemon applies): that poll already wakes on the merge, so
+# the recheck would only re-ask an answered question. It is handed to
+# resurface_absorbed as a suppression check so it runs once per window, and so the
+# throttle it leaves unadvanced restores the ordinary recheck on the very next poll
+# if the coverage ever lapses.
+#
+# That drop is offered ONLY to the declared external-wait verb, never to a
+# captain-held transfer, even though this absorber serves both. A merge poll
+# reports that a PR merged; it says nothing about whether the captain acted on a
+# held decision, so it cannot stand in for that recheck. The narrowing lives here,
+# at the single point the suppression decision is made, because every caller
+# reaches this absorber for both verbs. Any other line also withdraws the coverage
+# note the same task earned while it was still paused, so the note never claims a
+# suppression that is not in force.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason last rc
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -439,14 +468,25 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
+  last=$(last_status_line "$statusf")
+  if status_is_captain_held "$last"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
+  rc=0
+  if status_is_paused "$last"; then
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" \
+      pause_recheck_covered_by_merge_poll "$STATE" "$task" || rc=$?
+  else
+    pause_poll_coverage_forget "$STATE" "$task"
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" || rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    triage_log "suppressed paused recheck (armed merge poll $FM_CLASSIFY_PAUSE_POLL_URL covers the wait, age ${age}s): $win"
+  fi
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -474,14 +514,19 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   return 1
 }
 
-clear_pause_state() {  # <window-key>
-  local key=$1
+# Optional <task> drops that task's merge-poll coverage note alongside the pause
+# bookkeeping: a crew that stopped declaring its pause no longer has a recheck
+# suppressed, so the note must not outlive the wait it described. Every caller in
+# the poll loop already has the task resolved and passes it.
+clear_pause_state() {  # <window-key> [<task>]
+  local key=$1 task=${2:-}
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  [ -z "$task" ] || pause_poll_coverage_forget "$STATE" "$task"
 }
 
-clear_pause_tracking() {  # <window-key>
-  local key=$1
-  clear_pause_state "$key"
+clear_pause_tracking() {  # <window-key> [<task>]
+  local key=$1 task=${2:-}
+  clear_pause_state "$key" "$task"
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
@@ -1043,6 +1088,28 @@ while :; do
           continue
         fi
       fi
+      if [ "$is_pr_poll" -eq 1 ] && [ "$out" = closed-unmerged ]; then
+        # The poll positively observed the forge's own terminal non-merged state,
+        # which answers this watch the opposite way a merge does: this PR will
+        # never merge, so the poll will never speak again. Once that is DURABLY
+        # recorded the result is dropped rather than woken on, because a declared
+        # pause this poll was covering resumes its ordinary FM_PAUSE_RESURFACE_SECS
+        # recheck on the very next classification, which is the one channel that
+        # already knows how to bound such a wait.
+        #
+        # If the record cannot be written the result is kept and surfaced as an
+        # ordinary check wake instead. Nothing else would ever report it: with no
+        # record the coverage predicate keeps answering yes on every cycle, the
+        # re-surface throttle is never advanced, and the wait would go quiet for
+        # good. Re-observing the same state on the next sweep fails identically, so
+        # the wake is the only path that fails toward the recheck rather than into
+        # silence; the triage line below stays a diagnostic, never the only trace.
+        if fm_pr_poll_terminal_publish "$STATE" "$id" "$url"; then
+          out=
+        else
+          triage_log "terminal non-merged PR observation could not be recorded for $id"
+        fi
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
@@ -1134,7 +1201,7 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      clear_pause_tracking "$key" "$task"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
@@ -1170,7 +1237,7 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$key" ;;
+            *)      clear_pause_tracking "$key" "$task" ;;
           esac
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
@@ -1237,7 +1304,7 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$key"
+                clear_pause_tracking "$key" "$task"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -1254,7 +1321,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
+                working) clear_pause_state "$key" "$task"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
@@ -1282,7 +1349,7 @@ EOF
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
         if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$key"
+          clear_pause_tracking "$key" "$task"
         fi
       fi
     else
@@ -1299,12 +1366,12 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$key" ;;
+          *)      clear_pause_tracking "$key" "$task" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
         # declared-pause cadence recorded on this very poll.
-        clear_pause_tracking "$key"
+        clear_pause_tracking "$key" "$task"
       fi
     fi
   done < <(recorded_windows)

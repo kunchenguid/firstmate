@@ -44,9 +44,9 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, any suppressed-pause-recheck note,
+#                       a bounded state/*.status tail, state/.afk, and a cheap
+#                       per-task endpoint-liveness read: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -807,6 +807,16 @@ for meta in "$STATE"/*.meta; do
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
+  fi
+
+  # A declared wait whose bounded recheck is being suppressed because this task's
+  # own merge poll already covers it. Printed here so a quiet wait is visibly
+  # quiet on purpose rather than looking like a recheck that broke; the note is
+  # written and withdrawn by the supervisors themselves (fm-classify-lib.sh's
+  # pause_recheck_covered_by_merge_poll).
+  pause_note="$STATE/.$id.pause-poll-covered"
+  if [ -f "$pause_note" ]; then
+    printf 'pause recheck: %s\n' "$(cat "$pause_note")"
   fi
 
   status="$STATE/$id.status"
