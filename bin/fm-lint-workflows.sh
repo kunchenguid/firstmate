@@ -105,10 +105,12 @@ collect_workflow_files() {
 # branch, while a `pull_request_target` filter edit takes effect only once it
 # reaches the default branch. Do not carry `pull_request` reasoning across.
 #
-# Stated limitation: base names are compared literally. A glob or pattern in
-# the required check's branch list is not understood here, so a required check
-# written with one fails this lint loudly rather than passing silently. That is
-# the deliberate trade, for two reasons: a loud refusal is the opposite of the
+# Stated limitation: base names are compared literally, so a GitHub filter
+# pattern in any `branches:` list is refused by name with its reason rather
+# than compared. Comparing one literally cannot decide coverage: `**` and
+# `['**', '!docs']` match as strings while the second gates strictly fewer
+# bases, which would pass a set where a PR into `docs` gets CI and no required
+# check. Refusing keeps that path loud, which is the opposite of the
 # silent-absence defect this gate exists to catch, and no workflow in this repo
 # uses such a construct today. Teach this gate pattern semantics on the day one
 # does, rather than guessing at coverage in the meantime.
@@ -162,6 +164,25 @@ function events(s, n, i, a, e) {
 }
 function branch_list() {
   return bases == "" ? "unsupported empty branches list" : "bases" bases
+}
+# A GitHub filter pattern is not a base name, and this gate compares names
+# literally, so a pattern is a form it refuses rather than one it can judge.
+function pattern(b) {
+  return b ~ /[]*?+[]/ || substr(b, 1, 1) == "!"
+}
+function refuse_pattern(b) {
+  emit("unsupported pattern base \"" b "\" in a branches list")
+}
+# The flow form is scanned before tokens() strips its brackets, so a bracket
+# expression inside an entry is still visible as part of that entry.
+function flow_patterns(s, n, i, a, b) {
+  sub(/^[ \t]*\[/, "", s)
+  sub(/\][ \t]*$/, "", s)
+  n = split(s, a, /,/)
+  for (i = 1; i <= n; i++) {
+    b = unq(trim(a[i]))
+    if (b != "" && pattern(b)) refuse_pattern(b)
+  }
 }
 # An event block is only classified once it ends, because a narrowing `paths:`
 # sibling may follow the `branches:` list it narrows.
@@ -228,6 +249,7 @@ function bank(v) {
       if (dash && i >= br_indent) {
         b = unq(trim(substr(t, 2)))
         if (b == "") emit("unsupported empty branches entry")
+        if (pattern(b)) refuse_pattern(b)
         bases = bases " " b
         next
       }
@@ -266,6 +288,7 @@ function bank(v) {
       if (substr(val, 1, 1) == "[") {
         if (index(val, "]") == 0) \
           emit("unsupported multi-line flow sequence under branches")
+        flow_patterns(val)
         bases = tokens(val)
         has_branches = 1
         next
@@ -314,6 +337,13 @@ END {
 # Every classification the gate refuses is reported the same way, so a caller
 # never has to recognize a refusal by more than one shape.
 fm_lint_workflows_refuse() {
+  case "$2" in
+    "pattern base "*)
+      printf 'fm-lint-workflows.sh: %s: %s. Base names are compared literally here, so this gate cannot judge whether a pattern covers the bases other workflows gate. List each gated base by name, or teach this gate pattern semantics.\n' \
+        "$1" "$2" >&2
+      return
+      ;;
+  esac
   printf 'fm-lint-workflows.sh: %s: cannot read the pull_request base filter (%s). Keep the on: block in block style with an explicit branches: list, or teach this gate the new form.\n' \
     "$1" "$2" >&2
 }
@@ -336,7 +366,7 @@ fm_lint_workflows_event_note() {
 # workflow set rather than of one explicitly linted file.
 fm_lint_workflows_pr_gating() {
   local file name verdict required_verdict='' required_set='' found_required=0
-  local rc=0 i n base missing paths_filter required_paths='' glob_note='' skip_when
+  local rc=0 i n base missing paths_filter required_paths='' skip_when
   local verdict_event required_event='' event note
   local names=() verdicts=() wf_events=()
 
@@ -441,11 +471,6 @@ fm_lint_workflows_pr_gating() {
   case "$required_verdict" in
     bases*) required_set="${required_verdict#bases} " ;;
   esac
-  case "$required_verdict" in
-    *[*?]*)
-      glob_note=" Base names are compared literally, so a glob in $REQUIRED_CHECK_WORKFLOW is not expanded here; list each gated base by name."
-      ;;
-  esac
 
   i=0
   while [ "$i" -lt "$n" ]; do
@@ -458,9 +483,9 @@ fm_lint_workflows_pr_gating() {
     note=$note$(fm_lint_workflows_event_note "$name" "$event")
     [ "$required_verdict" != all ] || continue
     if [ "$verdict" = all ]; then
-      printf 'fm-lint-workflows.sh: %s gates every PR base through its %s trigger while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s%s\n' \
+      printf 'fm-lint-workflows.sh: %s gates every PR base through its %s trigger while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s\n' \
         "$name" "$event" "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}" \
-        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" "$note" >&2
+        "$REQUIRED_CHECK_WORKFLOW" "$note" >&2
       rc=1
       continue
     fi
@@ -477,9 +502,9 @@ fm_lint_workflows_pr_gating() {
     done
     set +f
     if [ -n "$missing" ]; then
-      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s through its %s trigger that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.%s%s\n' \
+      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s through its %s trigger that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.%s\n' \
         "$name" "$missing" "$event" "$REQUIRED_CHECK_WORKFLOW" \
-        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" "$note" >&2
+        "$REQUIRED_CHECK_WORKFLOW" "$note" >&2
       rc=1
     fi
   done

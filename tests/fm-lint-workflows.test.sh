@@ -729,7 +729,7 @@ test_paths_filter_on_other_workflow_passes() {
 }
 
 # Stated limitation, pinned as intentional: base names are compared literally,
-# so a glob in the required check fails loudly rather than passing silently.
+# so a filter pattern is refused by name rather than compared.
 test_glob_base_in_required_check_fails_loudly() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-glob)
@@ -742,8 +742,10 @@ test_glob_base_in_required_check_fails_loudly() {
   [ "$rc" -ne 0 ] || fail "a glob base in the required check unexpectedly passed"$'\n'"$out"
   assert_contains "$out" "compared literally" \
     "the failure did not disclose that base names are compared literally"
-  assert_contains "$out" "main" \
-    "the failure did not name the base it could not match"
+  assert_contains "$out" '"**"' \
+    "the failure did not name the pattern it refuses to judge"
+  assert_contains "$out" "no-mistakes-required.yml" \
+    "the failure did not name the workflow carrying the pattern"
   pass "a glob base in the required check fails loudly, not silently"
 }
 
@@ -1008,6 +1010,70 @@ test_empty_branches_list_refuses_by_name() {
   pass "an empty branches list is refused by name rather than banked as a verdict"
 }
 
+# Comparing patterns as strings cannot decide coverage: these two lists match
+# literally while the required check gates strictly fewer bases, so a PR into
+# `docs` would get CI and no required check. That set used to pass.
+test_negated_pattern_in_required_check_is_refused() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-negation)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' "    branches: ['**']"
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' "    branches: ['**', '!docs']"
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a negated pattern in the required check passed"$'\n'"$out"
+  assert_contains "$out" "compared literally" \
+    "the refusal did not disclose why a pattern cannot be judged"
+  case "$out" in
+    *"requires checks on"*)
+      fail "a negated pattern was reported as covered bases"$'\n'"$out"
+      ;;
+  esac
+  pass "a negated pattern in the required check is refused, not matched literally"
+}
+
+# The same refusal applies to the other side of the comparison, so a pattern
+# there cannot produce coverage advice that would be wrong.
+test_pattern_in_other_workflow_is_refused() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-pattern-other)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches:' '      - "releases/**"'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pattern base outside the required check passed"$'\n'"$out"
+  assert_contains "$out" "ci.yml" \
+    "the refusal did not name the workflow carrying the pattern"
+  assert_contains "$out" '"releases/**"' \
+    "the refusal did not name the block-sequence pattern entry"
+  case "$out" in
+    *"does not require"*)
+      fail "a pattern base was reported as an unrequired base"$'\n'"$out"
+      ;;
+  esac
+  pass "a pattern base outside the required check is refused, not miscompared"
+}
+
+# The refusal has to stay narrow: ordinary literal base names, including ones
+# carrying dashes and slashes, still classify and pass.
+test_literal_base_names_still_pass() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-literal-bases)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches:' '      - main' '      - feat/omp-adaptor'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "literal base names must still pass, got $rc"$'\n'"$out"
+  assert_contains "$out" "requires checks on: main feat/omp-adaptor" \
+    "the passing verdict did not list the literal bases"
+  pass "ordinary literal base names still classify and pass"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -1062,4 +1128,7 @@ test_required_check_pull_request_target_paths_fails
 test_both_gating_events_in_one_workflow_fails_closed
 test_event_note_names_the_file_it_describes
 test_empty_branches_list_refuses_by_name
+test_negated_pattern_in_required_check_is_refused
+test_pattern_in_other_workflow_is_refused
+test_literal_base_names_still_pass
 test_explicit_path_skips_set_level_gating
