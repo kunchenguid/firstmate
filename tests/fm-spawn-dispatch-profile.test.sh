@@ -808,6 +808,321 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+# --- per-secondmate Claude account pin ---------------------------------------
+# A persistent secondmate can be a separate business with its own Claude
+# subscription. Its account is pinned in its OWN home's config/claude-account and
+# re-resolved from there at every launch, so no respawn path can quietly put its
+# work back on the primary's account.
+
+# Write a Claude account store directory and pin it in <home>/config.
+pin_claude_account() {  # <home> <store-dir>
+  mkdir -p "$1/config" "$2"
+  printf '%s\n' "$2" > "$1/config/claude-account"
+}
+
+test_pinned_secondmate_launches_on_its_own_claude_account() {
+  local rec id sm store out status launch
+  id=profile-sm-account-z20
+  rec=$(make_spawn_case profile-sm-account claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$sm" "$store"
+
+  # The primary is authenticated as a DIFFERENT account, which is the case the
+  # pin exists for: without it the secondmate would bill this one.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a pinned secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a pinned secondmate did not launch on its own Claude account store"
+  assert_not_contains "$launch" "$CASE_DIR/claude-primary" \
+    "a pinned secondmate must not inherit the primary's Claude account store"
+  assert_contains "$out" "claude_account=$store" \
+    "a pinned launch should report the account it bills"
+  pass "a pinned secondmate launches on its own Claude account instead of the primary's"
+}
+
+test_unpinned_secondmate_keeps_todays_claude_account_behavior() {
+  local rec id sm out status launch
+  id=profile-sm-noaccount-z21
+  rec=$(make_spawn_case profile-sm-noaccount claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "an unpinned secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work'" \
+    "an unpinned secondmate should still inherit firstmate's own store, as before"
+  assert_not_contains "$out" "claude_account=" \
+    "an unpinned launch must not report a pinned account"
+  pass "an unpinned secondmate keeps inheriting the primary's Claude store exactly as before"
+}
+
+test_unpinned_secondmate_adds_no_prefix_with_the_single_store_default() {
+  local rec id sm out status launch
+  id=profile-sm-noaccount-default-z22
+  rec=$(make_spawn_case profile-sm-noaccount-default claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  # run_spawn pins CLAUDE_CONFIG_DIR empty: the single-store default, where the
+  # launch must stay byte-identical to the pre-pin shape.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "an unpinned secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "an unpinned secondmate on the single-store default must get no config-dir prefix"
+  pass "an unpinned secondmate on the single-store default launches with no config-dir prefix"
+}
+
+test_pinned_secondmate_carries_its_account_on_a_non_claude_harness() {
+  local rec id sm store out status launch
+  id=profile-sm-account-codex-z23
+  rec=$(make_spawn_case profile-sm-account-codex codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$sm" "$store"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a pinned codex secondmate spawn should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" \
+    "the pin must not disturb secondmate harness resolution"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a pinned secondmate on another harness still needs the account its own claude workers will use"
+  pass "a pinned secondmate carries its Claude account even when its own agent runs another harness"
+}
+
+test_secondmate_pin_reaches_the_crewmates_that_home_spawns() {
+  local rec id store out status launch
+  id=profile-sm-child-z24
+  rec=$(make_spawn_case profile-sm-child claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  # A secondmate is a firstmate in its own home: HOME_DIR stands in for that
+  # home, so this is the ordinary crewmate spawn its agent performs.
+  pin_claude_account "$HOME_DIR" "$store"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a crewmate spawn from a pinned home should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a crewmate spawned from a pinned home did not land on that home's Claude account"
+  assert_not_contains "$launch" "$CASE_DIR/claude-primary" \
+    "a crewmate spawned from a pinned home must not fall back to an inherited store"
+  pass "a pinned home's own crewmates land on the same Claude account as that home"
+}
+
+test_secondmate_respawn_without_a_home_argument_still_honours_the_pin() {
+  local rec id sm store out status launch
+  id=profile-sm-respawn-z25
+  rec=$(make_spawn_case profile-sm-respawn claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$sm" "$store"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "the first pinned secondmate spawn should succeed"$'\n'"$out"
+
+  # The recovery respawn shape: id only, home recovered from the durable record.
+  # A pin that only survived because the operator retyped the home would fail here.
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate)
+  status=$?
+  expect_code 0 "$status" "the recovery-shaped respawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a respawn that recovers the home from durable state lost the account pin"
+  pass "a respawn with no home argument re-resolves the pin from the recovered home"
+}
+
+test_unusable_secondmate_account_pin_refuses_loudly() {
+  local rec id sm out status
+  id=profile-sm-badaccount-z26
+  rec=$(make_spawn_case profile-sm-badaccount claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  mkdir -p "$sm/config"
+  printf '%s\n' "$CASE_DIR/no-such-store" > "$sm/config/claude-account"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "a pin naming a missing store must refuse the spawn"
+  assert_contains "$out" "secondmate $id" "the refusal did not name the secondmate"
+  assert_contains "$out" "$CASE_DIR/no-such-store" "the refusal did not name the pinned path"
+  assert_contains "$out" "$sm/config/claude-account" "the refusal did not name the pin file to fix"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unusable pin still wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unusable pin still typed a launch command"
+  pass "a pin naming a missing store refuses before any endpoint exists, never falling back silently"
+}
+
+test_pinned_home_carries_its_account_onto_a_non_claude_crewmate() {
+  local rec id store out status launch
+  id=profile-sm-child-codex-z28
+  rec=$(make_spawn_case profile-sm-child-codex codex "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  # HOME_DIR stands in for the pinned home: this is the ordinary codex crewmate
+  # its agent dispatches. That pane still has claude on its path and still
+  # spawns claude workers of its own, so the pin has to reach it too.
+  pin_claude_account "$HOME_DIR" "$store"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a codex crewmate spawn from a pinned home should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex" "the pin must not disturb crewmate harness resolution"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "a non-claude crewmate from a pinned home did not carry that home's Claude account"
+  assert_not_contains "$launch" "$CASE_DIR/claude-primary" \
+    "a non-claude crewmate from a pinned home must not fall back to an inherited store"
+  assert_contains "$out" "claude_account=$store" \
+    "the success line reported an account this launch did not actually carry"
+  pass "a pinned home carries its Claude account onto non-claude crewmates, so claude_account= is true for them"
+}
+
+# The claude_account= report is true by construction only for a launch this
+# script COMPOSED from an adapter template. A raw launch command is an opaque
+# shell string, and an environment-assignment prefix binds only to its first
+# simple command, so a compound one runs the real agent without the store. The
+# escape hatch must stay usable, so the spawn still succeeds - but it warns and
+# withholds the claim rather than name an account it cannot guarantee.
+test_raw_compound_launch_from_a_pinned_home_warns_instead_of_claiming_the_account() {
+  local rec id store out status launch spawned_line
+  id=profile-raw-account-z31
+  rec=$(make_spawn_case profile-raw-account claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$HOME_DIR" "$store"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd $CASE_DIR && custom-agent --flag")
+  status=$?
+  expect_code 0 "$status" "a raw launch command must stay usable from a pinned home"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=cd" "the raw launch command should still spawn"
+  # Scoped to the success line: the warning names the field it is withholding.
+  spawned_line=$(printf '%s\n' "$out" | grep "^spawned $id ")
+  assert_not_contains "$spawned_line" "claude_account=" \
+    "a raw launch command must not claim an account its prefix may not reach"
+  assert_contains "$out" "raw launch command" \
+    "a pinned raw launch should warn that carrying the store is the operator's"
+  assert_contains "$out" "$store" "the warning did not name the store the operator must carry"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --flag" "the raw launch command was not preserved"
+  pass "a pinned raw launch command warns and omits claude_account= instead of claiming it"
+}
+
+test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned() {
+  local rec id sm store out status
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unsearchable config directory case skipped: root can still search a mode-0 directory"
+    return 0
+  fi
+
+  # The home's OWN config/ holds the pin its crewmates resolve. An existing but
+  # unsearchable one makes the pin unstatable, so the absence test would read it
+  # as "no pin" and quietly bill the primary. The harness comes from the flag so
+  # this exercises the account resolution rather than harness resolution.
+  id=profile-child-unsearchable-z29
+  rec=$(make_spawn_case profile-child-unsearchable claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/claude-brandt"
+  pin_claude_account "$HOME_DIR" "$store"
+  chmod 000 "$HOME_DIR/config"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  chmod 755 "$HOME_DIR/config"
+  expect_code 1 "$status" "an unsearchable config directory must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "task $id" "the refusal did not name the subject of the launch"
+  assert_contains "$out" "$HOME_DIR/config" "the refusal did not name the config directory to fix"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unsearchable config directory still wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unsearchable config directory still typed a launch command"
+
+  # The same shape on a --secondmate target home must also refuse before any
+  # endpoint exists rather than launching that agent on the primary's account.
+  id=profile-sm-unsearchable-z30
+  rec=$(make_spawn_case profile-sm-unsearchable claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  pin_claude_account "$sm" "$CASE_DIR/claude-brandt"
+  chmod 000 "$sm/config"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  chmod 755 "$sm/config"
+  expect_code 1 "$status" "an unsearchable secondmate config directory must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "$sm/config" "the secondmate refusal did not name the config directory to fix"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unsearchable secondmate config directory still wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unsearchable secondmate config directory still typed a launch command"
+  pass "an existing but unsearchable config directory refuses instead of silently reading as no pin"
+}
+
+test_malformed_secondmate_account_pins_refuse_rather_than_fall_back() {
+  local rec id sm out status case_name
+  id=profile-sm-badpin-z27
+  for case_name in relative empty traversal notadir; do
+    rec=$(make_spawn_case "profile-sm-badpin-$case_name" claude "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    sm=$(cd "$sm" && pwd -P)
+    mkdir -p "$sm/config"
+    case "$case_name" in
+      relative) printf '%s\n' 'claude-brandt' > "$sm/config/claude-account" ;;
+      empty) printf '%s\n' '# only a comment' > "$sm/config/claude-account" ;;
+      traversal)
+        mkdir -p "$CASE_DIR/store"
+        printf '%s\n' "$CASE_DIR/../$(basename "$CASE_DIR")/store" > "$sm/config/claude-account"
+        ;;
+      notadir)
+        : > "$CASE_DIR/store-file"
+        printf '%s\n' "$CASE_DIR/store-file" > "$sm/config/claude-account"
+        ;;
+    esac
+
+    out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-primary" \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 1 "$status" "a $case_name Claude account pin must refuse the spawn"$'\n'"$out"
+    assert_contains "$out" "secondmate $id" "the $case_name refusal did not name the secondmate"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a $case_name pin still typed a launch command"
+  done
+  pass "relative, empty, traversing, and non-directory account pins each refuse instead of falling back"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -857,5 +1172,16 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_pinned_secondmate_launches_on_its_own_claude_account
+test_unpinned_secondmate_keeps_todays_claude_account_behavior
+test_unpinned_secondmate_adds_no_prefix_with_the_single_store_default
+test_pinned_secondmate_carries_its_account_on_a_non_claude_harness
+test_secondmate_pin_reaches_the_crewmates_that_home_spawns
+test_secondmate_respawn_without_a_home_argument_still_honours_the_pin
+test_pinned_home_carries_its_account_onto_a_non_claude_crewmate
+test_unusable_secondmate_account_pin_refuses_loudly
+test_raw_compound_launch_from_a_pinned_home_warns_instead_of_claiming_the_account
+test_unsearchable_config_directory_refuses_rather_than_reading_as_unpinned
+test_malformed_secondmate_account_pins_refuse_rather_than_fall_back
 
 echo "# all fm-spawn-dispatch-profile tests passed"

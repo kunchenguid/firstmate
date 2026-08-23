@@ -82,6 +82,10 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - A `relaunch` whose target home carries an unusable Claude account pin
+#     (config/claude-account) refuses BEFORE the old agent is stopped, asking
+#     bin/fm-claude-account-lib.sh - the launch owner's own validator - so a
+#     launch the owner will refuse can never strand a task with no agent.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -119,6 +123,7 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -126,6 +131,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-claude-account-lib.sh
+. "$SCRIPT_DIR/fm-claude-account-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -598,6 +605,7 @@ relaunch_rollback() {
 }
 
 resolve_relaunch_profile() {
+  local account_config account_subject relaunch_home
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
@@ -668,6 +676,26 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  # The launch owner refuses an unusable config/claude-account pin rather than
+  # silently billing the primary's Claude subscription, but that refusal too is
+  # reached only after the old agent has been stopped: a secondmate whose store
+  # was deleted, renamed, or made unreadable would be left with no agent at all
+  # until an operator noticed. Asking the SAME owner the same question here
+  # keeps that refusal on the pre-stop side of the transaction, exactly like the
+  # kind check above. The pin is read from the task's OWN recorded home, which
+  # is the durable state the launch owner will re-read a moment later, so the
+  # two can only agree.
+  if [ "$KIND" = secondmate ]; then
+    relaunch_home=$(fm_meta_get "$META" home)
+    [ -n "$relaunch_home" ] || relaunch_home=$WT
+    account_config="$relaunch_home/config"
+    account_subject="secondmate $ID"
+  else
+    account_config="$CONFIG"
+    account_subject="task $ID"
+  fi
+  fm_claude_account_resolve "$account_config" "$account_subject" \
+    || die "relaunching $ID would stop the running agent for a launch its Claude account pin must refuse; fix the pin named above first"
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

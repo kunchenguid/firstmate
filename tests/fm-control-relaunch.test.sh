@@ -642,6 +642,105 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+# A secondmate can be a separate business on its own Claude subscription. That
+# account is pinned in its own home and re-resolved at every launch, so the
+# control plane's relaunch - the path an operator's hand-set environment would
+# silently lose - has to put the replacement agent back on the same account.
+test_secondmate_relaunch_keeps_the_home_claude_account_pin() {
+  local dir home out rc launched
+  dir=$(new_case smaccount sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/config"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  mkdir -p "$dir/claude-brandt"
+  printf '%s\n' "$dir/claude-brandt" > "$dir/smhome/config/claude-account"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'claude' > "$dir/fake/becomes"
+
+  # The relaunching environment is authenticated as a DIFFERENT account, which is
+  # exactly the drift a hand-set store would reintroduce on every respawn.
+  out=$(CLAUDE_CONFIG_DIR="$dir/claude-primary" run_control "$dir" sm8 relaunch); rc=$?
+  expect_code 0 "$rc" "a pinned secondmate should relaunch"$'\n'"$out"
+  launched=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
+  assert_contains "$launched" "CLAUDE_CONFIG_DIR='$dir/claude-brandt'" \
+    "a secondmate relaunch did not re-resolve its home's Claude account pin"
+  assert_not_contains "$launched" "$dir/claude-primary" \
+    "a secondmate relaunch must not put the replacement agent on the relaunching environment's account"
+  pass "fm-control relaunch: a secondmate relaunch re-resolves its home's durable Claude account pin"
+}
+
+# The launch owner refuses an unusable Claude account pin so a secondmate can
+# never silently bill the primary's subscription, but it is reached only AFTER
+# this plane has stopped the running agent - a pinned home whose store was
+# deleted or renamed would be stopped and left with no agent at all. The control
+# plane asks the launch owner's own validator before it touches anything, so the
+# refusal lands while the agent is still up.
+test_secondmate_relaunch_with_an_unusable_account_pin_refuses_before_stop() {
+  local dir home out rc
+  dir=$(new_case smbadaccount sm9)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm9"
+  printf '# secondmate brief\n' > "$home/data/sm9/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin" "$dir/smhome/config"
+  printf 'sm9\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  # The pin names a store that is gone: the operator moved or removed it some
+  # time after this secondmate was provisioned.
+  printf '%s\n' "$dir/claude-brandt-removed" > "$dir/smhome/config/claude-account"
+  {
+    echo "window=fmses:fm-sm9"
+    echo "endpoint_task_id=sm9"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm9.meta"
+  printf '%s\n' "fm-sm9" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'claude' > "$dir/fake/becomes"
+
+  out=$(CLAUDE_CONFIG_DIR="$dir/claude-primary" run_control "$dir" sm9 relaunch); rc=$?
+  expect_code 1 "$rc" "an unusable Claude account pin should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "secondmate sm9" "the refusal did not name the secondmate"
+  assert_contains "$out" "$dir/claude-brandt-removed" "the refusal did not name the pinned store"
+  assert_contains "$out" "$dir/smhome/config/claude-account" "the refusal did not name the pin file to fix"
+  assert_not_contains "$out" "could not be launched" \
+    "a pre-stop refusal must never have reached the launch owner"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the previously running agent must still be running after a refused relaunch"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "a refused relaunch must deliver no lifecycle input to the running agent"
+  [ ! -e "$home/state/sm9.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  [ "$(meta_field "$dir" sm9 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: an unusable Claude account pin refuses before the agent is stopped"
+}
+
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
@@ -1329,6 +1428,8 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_keeps_the_home_claude_account_pin
+test_secondmate_relaunch_with_an_unusable_account_pin_refuses_before_stop
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
