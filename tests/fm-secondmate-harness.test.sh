@@ -1153,6 +1153,7 @@ inbox_stream() {  # <parent-state-dir> <task-id>
   for rec in "$1/$2.inbox"/*.msg; do
     [ -e "$rec" ] || continue
     bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+    printf '\n'
   done
 }
 

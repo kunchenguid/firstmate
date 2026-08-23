@@ -25,7 +25,7 @@
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
-#                              so the ladder escalates at most once per message
+#                              so later polls suppress another escalation
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -40,19 +40,22 @@
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
-# FM_TASK_INBOX_GRACE_SECS is due one ring per grace period; after
-# FM_TASK_INBOX_RING_MAX re-rings without an acknowledgement it escalates
-# exactly once. The caller owns the busy check (a busy pane just waits - the
-# record is durable and the worker reaches a turn boundary) and the wake
-# emission; this library owns only the schedule.
+# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
+# attempt may ring or be skipped to protect proven pending composer text. After
+# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
+# caller owns the busy check (a busy pane just waits - the record is durable and
+# the worker reaches a turn boundary) and the wake emission; this library owns
+# only the schedule. Escalation deliberately queues the wake before writing the
+# deduplication marker: normal polls surface a message once, while a crash or
+# marker failure may produce a rare duplicate rather than silently lose a wake.
 #
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
 # and tests. No side effects on source beyond its sourced libraries.
 #
 # Tunables (env):
-#   FM_TASK_INBOX_GRACE_SECS   default 90; re-ring grace and spacing
-#   FM_TASK_INBOX_RING_MAX     default 3; re-rings before the stale escalation
+#   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
+#   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -220,7 +223,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #   quiet                     nothing due (healthy, within grace or spacing,
 #                             or already escalated for the current oldest)
 #   ring <record-path>        one doorbell re-ring is due
-#   escalate <record-path> <count>   ring budget spent; surface once as stale
+#   escalate <record-path> <count>   attempt budget spent; surface as stale
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
@@ -268,8 +271,9 @@ EOF
   printf 'ring %s' "$oldest"
 }
 
-# Advance the ladder after a ring attempt (attempted counts: a ring into a
-# dead pane must still walk toward escalation, never retry forever).
+# Advance the ladder after a delivery attempt. A failed ring or a composer-
+# protected skip still consumes budget so neither a dead pane nor permanently
+# blocked composer can retry silently forever.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   local dir base ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
@@ -288,8 +292,10 @@ EOF
   fi
 }
 
-# Mark the current oldest as escalated so the stale wake fires at most once
-# per message; stuck-crewmate-recovery owns it from here.
+# Mark the current oldest as escalated after its stale wake is durably queued,
+# suppressing another wake on later polls. Wake-before-marker ordering favors
+# at-least-once recovery: a crash or marker failure can cause a rare duplicate;
+# stuck-crewmate-recovery owns the message from here.
 fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
   local dir
   dir=$(fm_task_inbox_dir "$1" "$2")

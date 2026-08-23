@@ -53,9 +53,9 @@
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
 #   stale: <window> (unread firstmate instruction: ...)
-#                          the steering-inbox re-ring ladder spent its doorbell
+#                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement;
-#                          quiet re-rings themselves never wake firstmate
+#                          quiet attempts themselves never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
@@ -303,9 +303,10 @@ window_key() {  # <window>
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
 # durable and the worker will reach a turn boundary - an idle pane gets one
-# doorbell re-ring, and a spent ring budget surfaces ONCE as an ordinary stale
-# wake for stuck-crewmate-recovery. The ring is data-plane typing, never a
-# wake, so a healthy re-ring keeps the watcher blocking. Runs for secondmates
+# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
+# wake for stuck-crewmate-recovery. The attempt is data-plane typing or a
+# composer-protected skip, never a wake, so normal retries keep the watcher
+# blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
