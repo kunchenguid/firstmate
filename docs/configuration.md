@@ -139,6 +139,8 @@ The sweep checks two conditions and refuses on either:
 
 Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
 
+`bin/fm-treehouse-pool-sweep.sh` reports its verdict through its exit code: `0` safe (or sweep disabled), `1` dirty, `2` HEAD not reachable from durable refs, `3` HEAD covered only by remote-tracking refs, `4` worktree does not exist, `64` usage error.
+
 For `refs/remotes/*`: they are counted for reachability so an ordinary freshly-checked-out pool worktree is not falsely refused, but the case where HEAD's commits are covered ONLY by remote-tracking refs (and no local head or tag) is classified as unsafe.
 
 This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant.

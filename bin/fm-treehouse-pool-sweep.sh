@@ -18,6 +18,7 @@
 #   2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs
 #   3 - Worktree is unsafe: HEAD covered only by remote-tracking refs (prunable)
 #   4 - Worktree does not exist
+#  64 - Usage error (no worktree path given)
 set -euo pipefail
 
 usage() {
@@ -51,6 +52,7 @@ Exit codes:
   2 - Worktree is unsafe: HEAD contains commits not reachable from durable refs
   3 - Worktree is unsafe: HEAD covered only by remote-tracking refs (prunable)
   4 - Worktree does not exist
+ 64 - Usage error (no worktree path given)
 
 Activation:
   The sweep is disabled by default. To enable, create:
@@ -83,7 +85,7 @@ WT="${1:-}"
 if [ -z "$WT" ]; then
   echo "error: worktree path required" >&2
   usage >&2
-  exit 4
+  exit 64
 fi
 
 CONFIG_DIR="${FM_ROOT:-$HOME/.firstmate}/config"
@@ -158,12 +160,6 @@ check_head_reachable() {
   local refs_list
   refs_list=$(git -C "$wt" for-each-ref --format='%(refname)' \
     'refs/heads/' 'refs/tags/' 'refs/firstmate/rescue/' 2>/dev/null)
-  if [ -z "$refs_list" ]; then
-    if has_only_remote_refs "$wt"; then
-      return 3
-    fi
-    return 2
-  fi
   unique_count=$(git -C "$wt" rev-list HEAD --not $refs_list 2>/dev/null | wc -l)
   if [ "$unique_count" -gt 0 ]; then
     return 2
@@ -176,8 +172,8 @@ if is_dirty "$WT"; then
   exit 1
 fi
 
-check_head_reachable "$WT"
-rc=$?
+rc=0
+check_head_reachable "$WT" || rc=$?
 
 if [ $rc -eq 2 ]; then
   echo "unsafe: HEAD contains commits not reachable from durable refs in $WT" >&2

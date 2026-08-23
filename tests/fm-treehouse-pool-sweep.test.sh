@@ -21,6 +21,7 @@ fm_create_test_repo() {
   local path=$1
   mkdir -p "$path"
   git init "$path" 2>/dev/null
+  git -C "$path" symbolic-ref HEAD refs/heads/main
   git -C "$path" config user.email "test@example.com"
   git -C "$path" config user.name "Test"
 }
@@ -68,10 +69,11 @@ test_refuses_dirty_worktree() {
   git commit -m "initial" 2>/dev/null
   echo "modified" > file.txt
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 1 ] || fail "dirty worktree: expected exit 1, got $rc"
-  pass "refuses dirty worktree"
+  assert_contains "$err" "unsafe: dirty worktree" "dirty worktree: missing diagnostic on stderr"
+  pass "refuses dirty worktree with a diagnostic"
 }
 
 test_refuses_staged_changes() {
@@ -193,10 +195,12 @@ test_refuses_reflog_only_reachability() {
   git checkout "$feature_commit" 2>/dev/null
   git branch -D feature 2>/dev/null || true
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 2 ] || fail "reflog only: expected exit 2, got $rc"
-  pass "refuses reflog-only reachability"
+  assert_contains "$err" "not reachable from durable refs" \
+    "reflog only: missing diagnostic on stderr"
+  pass "refuses reflog-only reachability with a diagnostic"
 }
 
 test_historical_reproduction() {
@@ -251,10 +255,12 @@ test_refuses_remote_only_refs() {
   git branch -D main 2>/dev/null || true
   git remote prune origin 2>/dev/null
 
-  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  err=$(FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
   rc=$?
   [ "$rc" -eq 3 ] || fail "remote only: expected exit 3, got $rc"
-  pass "refuses HEAD covered only by remote-tracking refs"
+  assert_contains "$err" "covered only by remote-tracking refs" \
+    "remote only: missing diagnostic on stderr"
+  pass "refuses HEAD covered only by remote-tracking refs with a diagnostic"
 }
 
 test_allows_with_local_branch() {
@@ -297,6 +303,19 @@ test_nonexistent_worktree() {
   pass "exits 4 for nonexistent worktree"
 }
 
+test_missing_argument_is_a_usage_error() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-usage)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  FM_ROOT="$tmp" "$SWEEP" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 64 ] || fail "missing argument: expected exit 64, got $rc"
+  [ "$rc" -ne 4 ] || fail "missing argument must not collide with the nonexistent-worktree code"
+  pass "exits 64 for a missing worktree argument"
+}
+
 test_help_text() {
   local out
   out=$("$SWEEP" --help 2>&1) || true
@@ -319,4 +338,5 @@ test_historical_reproduction
 test_refuses_remote_only_refs
 test_allows_with_local_branch
 test_nonexistent_worktree
+test_missing_argument_is_a_usage_error
 test_help_text
