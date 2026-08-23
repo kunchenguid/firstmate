@@ -219,6 +219,49 @@ sub consume_generation {
   print "$generation\n";
 }
 
+sub verify_committed_generation {
+  my ($task_path, $snapshot_path, $snapshot_dev, $snapshot_ino, $id, $expected_generation) = @_;
+  $id =~ /\A[A-Za-z0-9._-]+\z/ or fail("VERIFY_COMMITTED:task-id");
+  $expected_generation =~ /\A[0-9a-f]{64}\z/ or fail("VERIFY_COMMITTED:generation");
+  my ($task) = open_dir($task_path);
+  my ($snapshot, $snapshot_st) = open_dir($snapshot_path);
+  $snapshot_st->[0] == $snapshot_dev && $snapshot_st->[1] == $snapshot_ino
+    or fail("SNAPSHOT_IDENTITY");
+  my $task_snapshot = open_nested_dir($snapshot, 'data', $id);
+  my ($snapshot_receipt) = open_regular_at($task_snapshot, 'routing-decision.pending.json', 0);
+  my ($snapshot_brief) = open_regular_at($task_snapshot, 'brief.md', 0);
+  my $receipt_bytes = read_all($snapshot_receipt);
+  my $brief_bytes = read_all($snapshot_brief);
+  sha256_hex($receipt_bytes) eq $expected_generation
+    or fail("VERIFY_COMMITTED:generation-mismatch");
+
+  my ($ledger, $ledger_st) = open_regular_at($task, 'routing-generations.consumed', 0);
+  (($ledger_st->[2] & 0777) == 0600 && $ledger_st->[3] == 1)
+    or fail("LEDGER_OWNERSHIP:routing-generations.consumed");
+  my $ledger_bytes = read_all($ledger);
+  $ledger_bytes =~ /\A(?:[0-9a-f]{64}\n)*\z/
+    or fail("LEDGER_FORMAT:routing-generations.consumed");
+  my @generations = grep { length($_) } split(/\n/, $ledger_bytes);
+  @generations && $generations[-1] eq $expected_generation
+    or fail("COMMITTED_GENERATION_NOT_LATEST:$expected_generation");
+  scalar(grep { $_ eq $expected_generation } @generations) == 1
+    or fail("COMMITTED_GENERATION_AMBIGUOUS:$expected_generation");
+
+  my $generation_name = "routing-generation.$expected_generation";
+  my ($generation_dir, $generation_st) = open_dir_at($task, $generation_name, 0);
+  ($generation_st->[2] & 0777) == 0700
+    or fail("COLLISION:$generation_name:mode");
+  my ($receipt, $receipt_st) = open_regular_at($generation_dir, 'receipt.json', 0);
+  my ($brief, $brief_st) = open_regular_at($generation_dir, 'brief.md', 0);
+  (($receipt_st->[2] & 0777) == 0400 && $receipt_st->[3] == 1)
+    or fail("COLLISION:receipt.json:ownership");
+  (($brief_st->[2] & 0777) == 0400 && $brief_st->[3] == 1)
+    or fail("COLLISION:brief.md:ownership");
+  read_all($receipt) eq $receipt_bytes or fail("COMMITTED_RECEIPT_BYTES");
+  read_all($brief) eq $brief_bytes or fail("COMMITTED_BRIEF_BYTES");
+  print "$expected_generation\n";
+}
+
 my $operation = shift(@ARGV) // fail('USAGE');
 if ($operation eq 'identity') {
   my ($dir, $st) = open_dir($ARGV[0]);
@@ -231,6 +274,8 @@ if ($operation eq 'identity') {
   hash_regular(@ARGV);
 } elsif ($operation eq 'consume-generation') {
   consume_generation(@ARGV);
+} elsif ($operation eq 'verify-committed-generation') {
+  verify_committed_generation(@ARGV);
 } else {
   fail('USAGE');
 }

@@ -551,10 +551,10 @@ fm_routing_normalized_candidates() {
   esac
 }
 
-fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> <source-pending> <snapshot-dir>
+fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> <source-pending> <snapshot-dir> [fresh|committed]
   local data=$1 config_dir=$2 id=$3 harness=$4 model=$5 effort=$6 home=$7
   local raw_launch=$8 launch=$9 model_fragment=${10:-} effort_fragment=${11:-}
-  local source_pending=${12} snapshot_dir=${13} consumed_pending brief_final
+  local source_pending=${12} snapshot_dir=${13} freshness_mode=${14:-fresh} consumed_pending brief_final
   local task_dir brief intent pending quota_snapshot final config_file brief_hash intent_hash
   local receipt_task generated_at required_gate intent_gate source index candidates chosen candidate_count
   local quota_basis quota_source quota_observed quota_hash actual_quota_hash snapshot_observed
@@ -670,7 +670,19 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
   }
 
   generated_at=$(jq -r '.generated_at' "$pending")
-  fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1
+  case "$freshness_mode" in
+    fresh) fm_routing_timestamp_fresh "$generated_at" "STALE" || return 1 ;;
+    committed)
+      fm_routing_iso_epoch "$generated_at" >/dev/null || {
+        fm_routing_refuse "STALE" "timestamp is not RFC3339 UTC"
+        return 1
+      }
+      ;;
+    *)
+      fm_routing_refuse "NOT_VERIFIABLE(SCHEMA)" "routing freshness mode is unsupported"
+      return 1
+      ;;
+  esac
   required_gate=$(jq -r '.required_gate' "$pending")
   intent_gate=$(jq -r '.gate' "$intent")
   [ "$required_gate" = "$intent_gate" ] || {
@@ -824,7 +836,15 @@ fm_routing_decision_validate_snapshot() { # <data> <canonical-config> <task-id> 
       fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "receipt is not bound to the exact quota snapshot"
       return 1
     }
-    fm_routing_timestamp_fresh "$quota_observed" "NOT_VERIFIABLE(QUOTA)" || return 1
+    case "$freshness_mode" in
+      fresh) fm_routing_timestamp_fresh "$quota_observed" "NOT_VERIFIABLE(QUOTA)" || return 1 ;;
+      committed)
+        fm_routing_iso_epoch "$quota_observed" >/dev/null || {
+          fm_routing_refuse "NOT_VERIFIABLE(QUOTA)" "timestamp is not RFC3339 UTC"
+          return 1
+        }
+        ;;
+    esac
   fi
 
   FM_ROUTING_BRIEF_FINAL=$brief
@@ -916,7 +936,7 @@ fm_routing_decision_seal_prepared() {
   FM_ROUTING_PREPARED_PUBLISHED=0
 }
 
-fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>
+fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> [fresh|committed]
   local data=$1 config_dir=$2 id=$3 task_dir source_pending
   local snapshot_dir snapshot_data snapshot_config status identity snapshot_result snapshot_error
 
@@ -972,7 +992,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
 
   fm_routing_decision_validate_snapshot \
     "$snapshot_data" "$snapshot_config" "$id" "$4" "$5" "$6" "$7" "$8" "$9" \
-    "${10:-}" "${11:-}" "$source_pending" "$snapshot_dir"
+    "${10:-}" "${11:-}" "$source_pending" "$snapshot_dir" "${12:-fresh}"
   status=$?
   if [ "$status" -ne 0 ]; then
     fm_routing_decision_discard_prepared
@@ -982,6 +1002,52 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
   FM_ROUTING_PREPARED_ID=$id
   FM_ROUTING_PREPARED_HOME=$7
   FM_ROUTING_PREPARED_SOURCE_PENDING=$source_pending
+}
+
+fm_routing_decision_validate_committed_handoff() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> <prior-receipt>
+  local data=$1 id=$3 prior_receipt=${12:-} task_dir generation final brief_final result
+  fm_routing_decision_validate_and_prepare \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+    "${10:-}" "${11:-}" committed || return 1
+  task_dir="$data/$id"
+  generation=$FM_ROUTING_PREPARED_GENERATION
+  final="$task_dir/routing-generation.$generation/receipt.json"
+  brief_final="$task_dir/routing-generation.$generation/brief.md"
+  [ "$prior_receipt" != "$final" ] || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "receipt generation already authorizes the current agent"
+    return 1
+  }
+  result=$(fm_routing_fs_boundary verify-committed-generation \
+    "$task_dir" "$FM_ROUTING_PREPARED_DIR" \
+    "$FM_ROUTING_PREPARED_DIR_DEV" "$FM_ROUTING_PREPARED_DIR_INO" \
+    "$id" "$generation" 2>&1) || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "$result"
+    return 1
+  }
+  [ "$result" = "$generation" ] || {
+    fm_routing_refuse "PERSISTENCE_REFUSED" "committed generation verification returned an unexpected identity"
+    return 1
+  }
+  FM_ROUTING_DECISION_FINAL=$final
+  FM_ROUTING_BRIEF_FINAL=$brief_final
+}
+
+fm_routing_decision_seal_committed_handoff() {
+  [ -n "$FM_ROUTING_PREPARED_DIR" ] \
+    && [ -n "$FM_ROUTING_PREPARED_GENERATION" ] \
+    && [ "$FM_ROUTING_PREPARED_PUBLISHED" -eq 0 ] \
+    && [ -n "$FM_ROUTING_DECISION_FINAL" ] \
+    && [ -n "$FM_ROUTING_BRIEF_FINAL" ] || return 1
+  FM_ROUTING_PREPARED_DIR=
+  FM_ROUTING_PREPARED_DATA=
+  FM_ROUTING_PREPARED_ID=
+  FM_ROUTING_PREPARED_HOME=
+  FM_ROUTING_PREPARED_SOURCE_PENDING=
+  FM_ROUTING_PREPARED_DIR_DEV=
+  FM_ROUTING_PREPARED_DIR_INO=
+  FM_ROUTING_PREPARED_PENDING_DEV=
+  FM_ROUTING_PREPARED_PENDING_INO=
+  FM_ROUTING_PREPARED_GENERATION=
 }
 
 fm_routing_decision_validate_and_persist() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment>

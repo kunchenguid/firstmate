@@ -311,6 +311,18 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+run_forged_control_spawn() {  # <case-dir> <id> <spawn> <receipt> <brief> <output>
+  local dir=$1 id=$2 spawn=$3 receipt=$4 brief=$5 output=$6
+  mkdir -p "$dir/home/state/.control-$id.lock"
+  printf '%s\n' "${BASHPID:-$$}" > "$dir/home/state/.control-$id.lock/pid"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_ROUTING_COMMITTED=1 \
+    FM_CONTROL_ROUTING_DECISION_FINAL="$receipt" \
+    FM_CONTROL_ROUTING_BRIEF_FINAL="$brief" \
+    "$spawn" "$id" --relaunch --harness codex > "$output" 2>&1
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
@@ -665,7 +677,7 @@ test_late_expiry_refuses_before_agent_exit() {
   pass "fm-control relaunch: late expiry refuses before agent exit"
 }
 
-test_committed_handoff_does_not_revalidate_after_exit() {
+test_committed_handoff_revalidates_without_reaging() {
   local dir out rc old_receipt new_receipt
   dir=$(new_case committed-handoff rl42)
   add_ship_task "$dir" rl42 claude
@@ -682,7 +694,7 @@ test_committed_handoff_does_not_revalidate_after_exit() {
   FM_FAKE_DATE_SWITCH_AFTER=2
   out=$(run_control "$dir" rl42 relaunch --harness codex --note "committed handoff"); rc=$?
   unset FM_FAKE_DATE_FIRST_EPOCH FM_FAKE_DATE_LATE_EPOCH FM_FAKE_DATE_STATE FM_FAKE_DATE_SWITCH_AFTER
-  expect_code 0 "$rc" "a committed routing handoff must not revalidate after exit"$'\n'"$out"
+  expect_code 0 "$rc" "a committed routing handoff must validate without re-aging after exit"$'\n'"$out"
   [ "$(cat "$dir/fake/command")" = codex ] \
     || fail "committed routing handoff did not launch the replacement"
   [ "$(meta_field "$dir" rl42 routing_decision)" = "$new_receipt" ] \
@@ -693,7 +705,61 @@ test_committed_handoff_does_not_revalidate_after_exit() {
     || fail "control preflight did not publish its regular receipt generation"
   assert_present "$dir/home/data/rl42/routing-decision.pending.json" \
     "control preflight deleted the retained pending receipt pathname"
-  pass "fm-control relaunch: committed handoff publishes a new durable generation"
+  pass "fm-control relaunch: committed handoff validates its durable generation without re-aging"
+}
+
+test_forged_control_handoff_requires_a_valid_receipt() {
+  local dir counter out rc final brief counter_root
+  dir=$(new_case forged-handoff rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'zsh' > "$dir/fake/command"
+  final=$(write_committed_routing_receipt "$dir" rl43)
+  brief="$(dirname "$final")/brief.md"
+  cp "$dir/home/state/rl43.meta" "$dir/meta.before"
+  run_forged_control_spawn "$dir" rl43 "$SPAWN" "$final" "$brief" "$dir/spawn.out"
+  rc=$?
+  out=$(cat "$dir/spawn.out")
+  expect_code 1 "$rc" "a forged committed handoff without a valid receipt should refuse"
+  assert_contains "$out" "ROUTING_DECISION missing" \
+    "forged committed handoff refusal should come from receipt validation"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl43.meta" \
+    || fail "forged committed handoff changed task metadata"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "forged committed handoff started a replacement agent"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "forged committed handoff sent endpoint input"
+
+  counter=$(new_case forged-handoff-counter rl44)
+  add_ship_task "$counter" rl44 claude
+  printf 'zsh' > "$counter/fake/command"
+  printf 'codex' > "$counter/fake/becomes"
+  final=$(write_committed_routing_receipt "$counter" rl44)
+  brief="$(dirname "$final")/brief.md"
+  counter_root="$counter/counterexample-root"
+  mkdir "$counter_root"
+  cp -R "$ROOT/bin" "$counter_root/bin"
+  cat >> "$counter_root/bin/fm-routing-decision-lib.sh" <<'SH'
+
+fm_routing_decision_validate_committed_handoff() {
+  FM_ROUTING_DECISION_FINAL=$FM_CONTROL_ROUTING_DECISION_FINAL
+  FM_ROUTING_BRIEF_FINAL=$FM_CONTROL_ROUTING_BRIEF_FINAL
+  FM_ROUTING_BRIEF_HASH=$(fm_routing_sha256_file "$FM_ROUTING_BRIEF_FINAL")
+}
+
+fm_routing_decision_seal_committed_handoff() {
+  return 0
+}
+SH
+  run_forged_control_spawn "$counter" rl44 "$counter_root/bin/fm-spawn.sh" \
+    "$final" "$brief" "$counter/spawn.out"
+  rc=$?
+  out=$(cat "$counter/spawn.out")
+  expect_code 0 "$rc" "forged handoff counterexample should launch when its receipt validator is neutered"$'\n'"$out"
+  [ "$(cat "$counter/fake/command")" = codex ] \
+    || fail "forged handoff counterexample did not start the replacement agent"
+  [ "$(meta_field "$counter" rl44 routing_decision)" = "$final" ] \
+    || fail "forged handoff counterexample did not publish caller-supplied provenance"
+  pass "fm-spawn relaunch: forged committed handoff requires a validated receipt"
 }
 
 # --- 2. harness switch -------------------------------------------------------
@@ -1626,7 +1692,8 @@ test_relaunch_requires_a_note_for_a_ship_task
 test_explicit_same_route_requires_a_receipt_before_control_effects
 test_late_expiry_refuses_before_journal_writes
 test_late_expiry_refuses_before_agent_exit
-test_committed_handoff_does_not_revalidate_after_exit
+test_committed_handoff_revalidates_without_reaging
+test_forged_control_handoff_requires_a_valid_receipt
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

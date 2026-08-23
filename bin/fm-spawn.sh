@@ -1556,17 +1556,24 @@ fi
 # fresh decision under the same receipt gate as every other relaunch.
 if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
-    FM_ROUTING_DECISION_FINAL=${FM_CONTROL_ROUTING_DECISION_FINAL:-}
-    FM_ROUTING_BRIEF_FINAL=${FM_CONTROL_ROUTING_BRIEF_FINAL:-}
-    FM_ROUTING_LAUNCH_INPUT=${FM_CONTROL_ROUTING_LAUNCH_INPUT:-}
+    fm_routing_decision_validate_committed_handoff \
+      "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+      "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
+      || exit 1
   else
     fm_routing_decision_validate_and_prepare \
       "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
       "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
       || exit 1
-    fm_operational_verified_file_input \
-      launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
-      echo "error: validated routing brief changed before launch input construction" >&2
+  fi
+  fm_operational_verified_file_input \
+    launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
+    echo "error: validated routing brief changed before launch input construction" >&2
+    exit 1
+  }
+  if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+    fm_routing_decision_seal_committed_handoff || {
+      echo "error: validated control-plane routing handoff could not be sealed" >&2
       exit 1
     }
   fi
@@ -1578,11 +1585,6 @@ if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
     echo "error: validated relaunch routing preflight could not be sealed" >&2
     exit 1
   }
-  jq -cn \
-    --arg decision "$FM_ROUTING_DECISION_FINAL" \
-    --arg brief "$FM_ROUTING_BRIEF_FINAL" \
-    --arg launch_input "$FM_ROUTING_LAUNCH_INPUT" \
-    '{decision: $decision, brief: $brief, launch_input: $launch_input}'
   exit 0
 fi
 

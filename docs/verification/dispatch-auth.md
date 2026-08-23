@@ -210,9 +210,11 @@ Publication uses no-follow exclusive creation for the receipt and brief, preserv
 A refused publication may leave partial artifacts, but those artifacts cannot authorize a launch because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
 The canonical dispatch snapshot is opened through the executable no-follow boundary, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
 Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
+The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it resnapshots and validates the receipt semantics, derives the generation paths, and verifies the published artifacts plus latest ledger row through the no-follow boundary without re-aging the preflight acceptance.
+This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
 The negative battery's shared-validator mutations prove only that the dispatch integration call site is load-bearing; guard-specific mutation coverage remains owned by the separate external 64-site mutation sweep and is not claimed here.
 
-The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance, and the executable boundary operations `snapshot`, `publish`, `hash`, and `consume-generation`.
+The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance, and the executable boundary operations `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
 There are no surviving routing-lifecycle removal call sites.
 Publication between the generation directory and its two artifacts, cleanup of partial artifacts, and adversarial replacement after an identity check remain deliberately outside this ship; the ledger does not add rollback or an all-or-none publication claim.
 
@@ -224,6 +226,10 @@ bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 
 ```sh
 bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
+```
+
+```sh
+bin/fm-test-run.sh tests/fm-control-relaunch.test.sh
 ```
 
 Pipeline-owned test and documentation phases must refresh dated results, counts, timings, shell versions, and empirical outcome claims after either entrypoint changes.

@@ -523,9 +523,6 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
-ROUTING_HANDOFF_DECISION=
-ROUTING_HANDOFF_BRIEF=
-ROUTING_HANDOFF_INPUT=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -792,7 +789,7 @@ record_note() { # <fresh-routing-decision:0|1>
 }
 
 do_relaunch() {
-  local exit_result state note_line route_decision_fresh=0 routing_handoff_json routing_handoff_input
+  local exit_result state note_line route_decision_fresh=0
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -839,24 +836,9 @@ do_relaunch() {
         *) die "a route-changing relaunch requires its progress note to be present in the task brief before the routing receipt is authored" ;;
       esac
     fi
-    routing_handoff_json=$(FM_CONTROL_ROUTING_PREFLIGHT=1 FM_CONTROL_ROUTING_COMMITTED=0 \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}") \
+    FM_CONTROL_ROUTING_PREFLIGHT=1 FM_CONTROL_ROUTING_COMMITTED=0 \
+      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null \
       || die "the routing receipt for relaunching $ID onto $TARGET_HARNESS was refused; the running agent and durable task record are untouched"
-    jq -e '
-      type == "object"
-      and (keys | sort == ["brief", "decision", "launch_input"])
-      and (.decision | type == "string" and length > 0)
-      and (.brief | type == "string" and length > 0)
-      and (.launch_input | type == "string" and length > 0)
-    ' <<<"$routing_handoff_json" >/dev/null \
-      || die "the committed routing handoff for relaunching $ID is malformed; the running agent and durable task record are untouched"
-    ROUTING_HANDOFF_DECISION=$(jq -r '.decision' <<<"$routing_handoff_json") \
-      || die "the committed routing decision for relaunching $ID could not be read"
-    ROUTING_HANDOFF_BRIEF=$(jq -r '.brief' <<<"$routing_handoff_json") \
-      || die "the committed routing brief for relaunching $ID could not be read"
-    routing_handoff_input=$(jq -jr '.launch_input, "x"' <<<"$routing_handoff_json") \
-      || die "the committed routing launch input for relaunching $ID could not be read"
-    ROUTING_HANDOFF_INPUT=${routing_handoff_input%x}
   fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -875,9 +857,6 @@ do_relaunch() {
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       FM_CONTROL_ROUTING_COMMITTED="$route_decision_fresh" \
-      FM_CONTROL_ROUTING_DECISION_FINAL="$ROUTING_HANDOFF_DECISION" \
-      FM_CONTROL_ROUTING_BRIEF_FINAL="$ROUTING_HANDOFF_BRIEF" \
-      FM_CONTROL_ROUTING_LAUNCH_INPUT="$ROUTING_HANDOFF_INPUT" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else
