@@ -42,7 +42,11 @@
 # real. tasks-axi done runs only when config/backlog-backend is not "manual"
 # and a compatible tasks-axi is on PATH (bin/fm-tasks-axi-lib.sh's own
 # availability check); a manual backend leaves the operator with teardown's own
-# printed backlog-refresh reminder, exactly as today.
+# printed backlog-refresh reminder, exactly as today. A non-manual backend
+# whose tasks-axi is missing or too old is not treated the same as a deliberate
+# manual backend: it is a merge-chain failure reported with a non-zero exit,
+# because staying silent there would report success while the backlog record
+# stayed in flight.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--no-teardown] [-- <extra forge merge args>]
 set -eu
 
@@ -73,11 +77,24 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+# --no-teardown is recognized anywhere before the optional -- separator, not
+# only as the very first extra argument, so a caller combining it with a merge
+# method or other pre-separator flag still has it consumed here rather than
+# forwarded to the forge command as an unsupported flag.
 SKIP_TEARDOWN=0
-if [ "${1:-}" = "--no-teardown" ]; then
-  SKIP_TEARDOWN=1
-  shift
-fi
+kept_args=()
+saw_separator=0
+for arg in "$@"; do
+  if [ "$saw_separator" -eq 0 ] && [ "$arg" = "--" ]; then
+    saw_separator=1
+    kept_args+=("$arg")
+  elif [ "$saw_separator" -eq 0 ] && [ "$arg" = "--no-teardown" ]; then
+    SKIP_TEARDOWN=1
+  else
+    kept_args+=("$arg")
+  fi
+done
+set -- ${kept_args[@]+"${kept_args[@]}"}
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -312,4 +329,9 @@ if fm_tasks_axi_backend_available "$CONFIG"; then
     echo "error: $URL merged and task $ID torn down, but tasks-axi done $ID --pr $URL failed (exit $done_rc); run it by hand to close the backlog record" >&2
     exit "$done_rc"
   fi
+elif fm_backlog_backend_manual "$CONFIG"; then
+  : # config/backlog-backend=manual; teardown's own backlog-refresh reminder above already covers this.
+else
+  echo "error: $URL merged and task $ID torn down, but tasks-axi is missing or older than $FM_TASKS_AXI_MIN; run tasks-axi done $ID --pr $URL by hand once it is available to close the backlog record" >&2
+  exit 1
 fi

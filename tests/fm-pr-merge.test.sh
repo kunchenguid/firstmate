@@ -887,6 +887,22 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+# tasks-axi mock reporting a version older than FM_TASKS_AXI_MIN, so
+# fm_tasks_axi_compatible refuses it. Still records every invocation, so a
+# test can prove `done <id> --pr <url>` was never among them. Args: case_dir
+add_incompatible_tasks_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TASKS_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "--version "*|"--version") printf '%s\n' '0.1.0'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 # Runs the real fm-pr-merge.sh against a teardown-capable fixture, i.e.
 # without --no-teardown. Args: case_dir <fm-pr-merge args...>
 run_pr_merge_atomic() {
@@ -984,6 +1000,63 @@ test_no_teardown_flag_skips_both_steps() {
   pass "fm-pr-merge --no-teardown preserves the pre-existing merge-only behavior"
 }
 
+test_no_teardown_flag_recognized_before_other_pre_separator_args() {
+  local case_dir rc
+  case_dir=$(make_teardown_case no-teardown-flag-position)
+  add_gh_mocks "$case_dir" 4040404040404040404040404040404040404040
+  add_recording_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+
+  # --no-teardown here follows --squash and precedes no -- separator at all, so
+  # a parser that only checks the first extra argument would forward both
+  # flags straight to gh-axi pr merge and never set the opt-out.
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/14 \
+    --squash --no-teardown \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-teardown-flag-position: fm-pr-merge should still report the merge as successful"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "no-teardown-flag-position: --no-teardown after --squash should still leave the task metadata in place"
+  assert_present "$case_dir/wt" \
+    "no-teardown-flag-position: --no-teardown after --squash should still leave the worktree in place"
+  [ ! -s "$case_dir/tasks-axi.log" ] \
+    || fail "no-teardown-flag-position: tasks-axi done ran despite --no-teardown"
+  grep -qxF 'pr merge 14 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "no-teardown-flag-position: --no-teardown leaked into the gh-axi pr merge call: $(cat "$case_dir/gh-axi.log")"
+  pass "fm-pr-merge recognizes --no-teardown even when it follows another pre-separator argument"
+}
+
+test_tasks_axi_incompatible_surfaces_failure_after_teardown() {
+  local case_dir rc
+  case_dir=$(make_teardown_case tasks-axi-incompatible)
+  add_gh_mocks "$case_dir" 5050505050505050505050505050505050505050
+  add_incompatible_tasks_axi "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tasks-axi.log"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_pr_merge_atomic "$case_dir" task-x1 https://github.com/example/repo/pull/16 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "tasks-axi-incompatible: fm-pr-merge reported success while the backlog was never marked done"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "tasks-axi-incompatible: teardown should still have removed the task metadata"
+  assert_grep 'tasks-axi is missing or older than' "$case_dir/stderr" \
+    "tasks-axi-incompatible: the incompatible-tasks-axi failure was not surfaced"
+  ! grep -q '^done ' "$case_dir/tasks-axi.log" \
+    || fail "tasks-axi-incompatible: tasks-axi done ran despite the incompatible version"
+  pass "fm-pr-merge fails loudly instead of silently skipping tasks-axi done when tasks-axi is incompatible"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -1011,3 +1084,5 @@ test_gitlab_head_override_args_refuse_before_recording
 test_auto_teardown_and_backlog_done_after_merge
 test_teardown_refusal_surfaces_and_skips_backlog_done
 test_no_teardown_flag_skips_both_steps
+test_no_teardown_flag_recognized_before_other_pre_separator_args
+test_tasks_axi_incompatible_surfaces_failure_after_teardown
