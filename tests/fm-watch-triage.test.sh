@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -779,7 +781,7 @@ test_turn_ended_churning_pane_absorbed() {
   local dir state fakebin out capture_file window key pid
   dir=$(make_case turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-codexer"
+  window="test:fm-codex.er"
   : > "$state/codexer.turn-ended"
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexer.meta"
   printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
@@ -864,32 +866,56 @@ test_secondmate_turn_ended_churning_pane_surfaced() {
   pass "a churning secondmate turn-end surfaces without a stale resurface path"
 }
 
-test_turn_ended_colliding_window_key_surfaced() {
-  local dir state fakebin out drain_out capture_file window colliding key pid
-  dir=$(make_case turn-ended-colliding-key); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+test_turn_ended_resurfaces_after_later_colliding_spawn() {
+  local dir state fakebin out drain_out pane_a pane_b window colliding key pid
+  dir=$(make_case turn-ended-later-collision); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  pane_a="$dir/pane-a.txt"; pane_b="$dir/pane-b.txt"
   window="test:fm-a.b"; colliding="test:fm-a_b"
   : > "$state/a.b.turn-ended"
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/a.b.meta"
-  printf 'window=%s\nkind=ship\nharness=codex\n' "$colliding" > "$state/a_b.meta"
-  printf 'rendered after the prior poll' > "$capture_file"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s' "$(hash_text 'the other window pane')" > "$state/.hash-$key"
+  printf 'stopped after rendering this' > "$pane_a"
+  printf 'a different active pane' > "$pane_b"
+  key=$(fm_window_marker_key "$window")
+  printf '%s' "$(hash_text 'render before the final turn')" > "$state/.hash-$key"
   printf '0\n' > "$state/.count-$key"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}"
+    ;;
+  capture-pane)
+    case " $* " in
+      *" test:fm-a.b "*) cat "$FM_FAKE_TMUX_CAPTURE_A" ;;
+      *" test:fm-a_b "*) cat "$FM_FAKE_TMUX_CAPTURE_B" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  display-message)
+    printf 'fakepane\n'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
   export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$window" \
+    FM_FAKE_TMUX_CAPTURE_A="$pane_a" FM_FAKE_TMUX_CAPTURE_B="$pane_b" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an ambiguous pane marker"
-  grep -F "signal: $state/a.b.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced ambiguous-marker turn-end"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
-    || fail "drain after the ambiguous-marker turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/a.b.turn-ended" >/dev/null \
-    || fail "ambiguous-marker turn-end was not queued"
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "the initial churning turn-end was not absorbed: $(cat "$out")"; }
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$colliding" > "$state/a_b.meta"
+  wait_for_exit "$pid" 100 || fail "the absorbed turn-end did not resurface after a colliding task spawned"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the stopped pane did not surface through its independent stale marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after stale resurface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the resurfaced stopped pane was not queued"
   unset FM_FAKE_CREW_STATE
-  pass "a turn-end whose endpoint marker key collides with another window surfaces"
+  pass "an absorbed turn-end still resurfaces after a legacy-key-colliding task spawns"
 }
 
 test_working_note_not_working_surfaced() {
@@ -3277,7 +3303,7 @@ test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_still_pane_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
-test_turn_ended_colliding_window_key_surfaced
+test_turn_ended_resurfaces_after_later_colliding_spawn
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
