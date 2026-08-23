@@ -174,7 +174,8 @@ if [ ! -e "$REGISTRY" ] && [ ! -L "$REGISTRY" ]; then
   exit 0
 fi
 if ! secondmate_registry_validate_bindings "$REGISTRY" secondmate_registry_path_key; then
-  die "$SECONDMATE_REGISTRY_ERROR"
+  secondmate_registry_error_lines 'error: ' >&2
+  exit 1
 fi
 
 grep '^- ' "$REGISTRY" > "$TMP/records" 2>/dev/null || : > "$TMP/records"

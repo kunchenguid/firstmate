@@ -30,6 +30,9 @@
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
 #       duplicate ids or homes, and nested or overlapping homes.
+#       Every unparseable record in the file is reported, one "error:" line
+#       each, so a single bad entry never hides the rest; the remaining route
+#       and binding checks run only on a registry that parses end to end.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -196,7 +199,9 @@ registry_id_conflict_for_assignment() {
 validate_registry() {
   [ -e "$REG" ] || [ -L "$REG" ] || return 0
   secondmate_registry_validate_bindings "$REG" resolved_path || {
-    printf 'error: %s\n' "$SECONDMATE_REGISTRY_ERROR" >&2
+    # The parser reports every malformed record at once, so the reason may be
+    # several lines; prefix each one rather than only the first.
+    secondmate_registry_error_lines 'error: ' >&2
     return 1
   }
 }

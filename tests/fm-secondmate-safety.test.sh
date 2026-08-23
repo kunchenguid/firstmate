@@ -149,6 +149,46 @@ test_home_seed_validate_rejects_unparseable_registry_entry() {
   pass "home-seed validation rejects registry records no operational parser can consume"
 }
 
+# The 2026-08-08 live-registry breakage: a hand-repaired entry carried its
+# explanatory note AFTER the generated suffix, which the end-anchored parser
+# rejects, and validation aborted on that first bad line - so one annotated
+# entry silently disabled validation for every other secondmate in the home.
+# The contract now puts extra prose before the suffix; both halves are pinned
+# through the real validate command.
+test_home_seed_validate_accepts_prose_before_the_generated_suffix() {
+  local home err
+  home="$TMP_ROOT/annotated-registry-home"
+  err="$TMP_ROOT/annotated-registry.err"
+  mkdir -p "$home/data" "$TMP_ROOT/annotated-design"
+  printf -- '- design - design domain [entry reconstructed 2026-08-08 - the home was live and real] (home: %s; scope: design; projects: alpha; added 2026-07-30)\n' \
+    "$TMP_ROOT/annotated-design" > "$home/data/secondmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err" \
+    || fail "validate rejected an entry whose extra prose precedes the generated suffix: $(cat "$err")"
+  pass "home-seed validation accepts a registry entry whose extra prose precedes the generated suffix"
+}
+
+test_home_seed_validate_reports_every_malformed_registry_entry() {
+  local home err
+  home="$TMP_ROOT/multi-malformed-registry-home"
+  err="$TMP_ROOT/multi-malformed-registry.err"
+  mkdir -p "$home/data" "$TMP_ROOT/multi-malformed-good"
+  {
+    printf -- '- broken-first - prose (home: /tmp/first; scope: missing projects and date)\n'
+    printf -- '- good - good domain (home: %s; scope: good; projects: alpha; added 2026-07-30)\n' \
+      "$TMP_ROOT/multi-malformed-good"
+    printf -- '- broken-last - prose (home: /tmp/last; scope: last; projects: alpha; added 2026-07-30) [trailing note]\n'
+  } > "$home/data/secondmates.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "validate accepted a registry containing malformed records"
+  fi
+  grep -F 'error: malformed secondmate registry entry: - broken-first' "$err" >/dev/null \
+    || fail "validate did not report the first malformed record: $(cat "$err")"
+  grep -F 'error: malformed secondmate registry entry: - broken-last' "$err" >/dev/null \
+    || fail "validate stopped at the first malformed record instead of reporting them all: $(cat "$err")"
+  pass "home-seed validation reports every malformed registry record instead of aborting on the first"
+}
+
 test_home_seed_refuses_broken_registry_symlink() {
   local home sub err target
   home="$TMP_ROOT/broken-registry-symlink-home"
@@ -2957,6 +2997,8 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_unparseable_registry_entry
+test_home_seed_validate_accepts_prose_before_the_generated_suffix
+test_home_seed_validate_reports_every_malformed_registry_entry
 test_home_seed_refuses_broken_registry_symlink
 test_home_seed_refuses_unreadable_registry
 test_home_seed_validate_rejects_duplicate_homes

@@ -582,26 +582,64 @@ secondmate_liveness_sweep() {
   # adding the missing-session path the original bare-shell and Herdr-husk sweep
   # lacked.
   # A meta with no window remains owned by secondmate-provisioning recovery.
-  # Secondmate homes never contain kind=secondmate meta, so this is naturally a
+  # The registered set, not the runtime records, is what this must account for,
+  # so the meta scan is followed by a registry pass over every id it did not
+  # cover. Secondmate homes hold neither a kind=secondmate meta nor a
+  # data/secondmates.md of their own, so both passes are naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
-  [ -d "$STATE" ] || return 0
-  local meta id remote_host label __fm_timing_stamp
+  local meta id remote_host label swept=" " __fm_timing_stamp
   SECONDMATE_RESPAWNED_IDS=""
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
-    # Identity for the timing record is read here, in the loop, so the per-meta
-    # body below keeps its single-exit-per-outcome shape.
-    id=$(basename "$meta" .meta)
-    remote_host=$(fm_meta_get "$meta" remote_host)
-    label=$id
-    [ -z "$remote_host" ] || label="$id@$remote_host"
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_liveness_one "$meta" "$id"
-    fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
-  done
+  if [ -d "$STATE" ]; then
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+      # Identity for the timing record is read here, in the loop, so the per-meta
+      # body below keeps its single-exit-per-outcome shape.
+      id=$(basename "$meta" .meta)
+      swept="$swept$id "
+      remote_host=$(fm_meta_get "$meta" remote_host)
+      label=$id
+      [ -z "$remote_host" ] || label="$id@$remote_host"
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      secondmate_liveness_one "$meta" "$id"
+      fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
+    done
+  fi
+  secondmate_liveness_registry_only "$swept"
   return 0
+}
+
+# The registered secondmates the meta scan could not see. A registry entry with
+# no runtime record is exactly how a secondmate whose metadata was lost - a
+# crash, a partial teardown, a home restored from backup - would otherwise go
+# silently un-relaunched and unreported. Relaunch needs a recorded endpoint to
+# act on, so this pass names the gap instead of guessing at one; recovery for a
+# named entry stays with secondmate-provisioning. An unparseable record, and a
+# registry that is present but cannot be read at all, are reported too, because
+# a registration the parser cannot read is a registered secondmate this sweep
+# cannot account for either. Every line keeps the one documented shape
+# `secondmate <id>: skipped: <reason>`; where no real id is readable the
+# literal `<unknown>` stands in for it, which no registry id can collide with
+# because a registry id is a plain [A-Za-z0-9._-]+ slug.
+secondmate_liveness_registry_only() {  # <space-delimited-swept-ids>
+  local swept=$1 status id
+  while IFS=$'\t' read -r status id; do
+    if [ "$status" = unusable ]; then
+      echo "SECONDMATE_LIVENESS: secondmate <unknown>: skipped: unreadable or unsafe registry $DATA/secondmates.md; run bin/fm-home-seed.sh validate"
+      continue
+    fi
+    if [ "$status" = malformed ]; then
+      if [ "$id" = - ]; then
+        echo "SECONDMATE_LIVENESS: secondmate <unknown>: skipped: unparseable registry record with no readable id; run bin/fm-home-seed.sh validate"
+      else
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: unparseable registry record; run bin/fm-home-seed.sh validate"
+      fi
+      continue
+    fi
+    case "$swept" in *" $id "*) continue ;; esac
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: no runtime record"
+  done < <(secondmate_registry_ids "$DATA/secondmates.md")
 }
 
 # One secondmate's liveness check. Split out of the sweep so each is individually

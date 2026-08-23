@@ -8,7 +8,9 @@
 #   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
 # Summary text and scope text are natural language and may contain parentheses
 # and semicolons, so field boundaries are anchored to the suffix markers rather
-# than to the first incidental punctuation.
+# than to the first incidental punctuation. The suffix is therefore anchored to
+# end-of-line and must be the last thing on the record; extra prose belongs in
+# the summary, ahead of it.
 
 SECONDMATE_REGISTRY_ID=
 SECONDMATE_REGISTRY_SUMMARY=
@@ -89,6 +91,58 @@ secondmate_registry_line_for_id() {
   secondmate_registry_parse_line "$SECONDMATE_REGISTRY_LINE"
 }
 
+# Print every REGISTERED secondmate in file order, one TAB-separated
+# "<status><TAB><id>" record per "- " line:
+#   ok<TAB><id>         a record whose route fields parse
+#   malformed<TAB><id>  a record whose leading id token is readable but whose
+#                       route fields are not
+#   malformed<TAB>-     a record whose leading id token is unreadable
+#   unusable<TAB>-      the registry is present but cannot be read safely at all
+# An ABSENT registry prints nothing and succeeds, because a home with no
+# registry genuinely has no registered secondmates. A registry that is present
+# but is a symlink, is unreadable, or otherwise cannot be opened is never
+# silent, because zero output there reads as "nothing is registered" when the
+# truth is "nothing could be read".
+# This answers registration, not liveness: a caller that must account for every
+# registered secondmate reads this, and a caller that needs the route fields
+# still goes through secondmate_registry_line_for_id. Parsing clobbers the
+# SECONDMATE_REGISTRY_* globals, so read them before calling this or call it in
+# a subshell.
+secondmate_registry_ids() {
+  local reg=$1 line id
+  [ -e "$reg" ] || [ -L "$reg" ] || return 0
+  if [ ! -f "$reg" ] || [ -L "$reg" ] || [ ! -r "$reg" ]; then
+    printf 'unusable\t-\n'
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    if secondmate_registry_parse_line "$line"; then
+      printf 'ok\t%s\n' "$SECONDMATE_REGISTRY_ID"
+      continue
+    fi
+    id=-
+    if [[ "$line" =~ ^-[[:space:]]([A-Za-z0-9._-]+)([[:space:]]|$) ]]; then
+      id=${BASH_REMATCH[1]}
+    fi
+    printf 'malformed\t%s\n' "$id"
+  done < "$reg" || { printf 'unusable\t-\n'; return 0; }
+  return 0
+}
+
+# Print SECONDMATE_REGISTRY_ERROR with the given prefix on EVERY line. The
+# validator reports all malformed records at once, so the error can hold
+# several newline-separated reasons and a caller that interpolates it into one
+# message would label only the first. An empty error prints nothing rather than
+# a bare prefix.
+secondmate_registry_error_lines() {  # <prefix>
+  local prefix=$1 reason
+  [ -n "$SECONDMATE_REGISTRY_ERROR" ] || return 0
+  while IFS= read -r reason; do
+    printf '%s%s\n' "$prefix" "$reason"
+  done <<< "$SECONDMATE_REGISTRY_ERROR"
+}
+
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3
   secondmate_registry_line_for_id "$reg" "$id" || return 1
@@ -117,7 +171,8 @@ secondmate_registry_path_key() {
 
 secondmate_registry_validate_bindings() {
   local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
-  local tmp snapshot bindings line id host root home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  local tmp snapshot bindings line id host root home home_key duplicate_homes duplicate_ids overlaps expected_home_key malformed i
+  local -a rec_id=() rec_host=() rec_root=() rec_home=() rec_projects=() rec_remote=()
   SECONDMATE_REGISTRY_MATCH_HOST=
   SECONDMATE_REGISTRY_MATCH_ROOT=
   SECONDMATE_REGISTRY_MATCH_HOME=
@@ -141,103 +196,121 @@ secondmate_registry_validate_bindings() {
     SECONDMATE_REGISTRY_ERROR="secondmate registry is unavailable or unsafe: $reg"
     return 1
   fi
+  # Parse pass. Aborting on the first malformed record would let one bad entry
+  # hide every other record in the file from validation, so all of them are
+  # collected and reported together. The fields of every record that parses are
+  # kept here, so the binding pass below runs over a registry that is already
+  # known to parse end to end without parsing any record a second time.
+  malformed=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*)
-        if ! secondmate_registry_parse_line "$line"; then
-          rm -rf -- "$tmp"
-          SECONDMATE_REGISTRY_ERROR="malformed secondmate registry entry: $line"
-          return 1
-        fi
-        id=$SECONDMATE_REGISTRY_ID
-        host=$SECONDMATE_REGISTRY_HOST
-        root=$SECONDMATE_REGISTRY_ROOT
-        home=$SECONDMATE_REGISTRY_HOME
-        case "$home" in
-          /*) ;;
-          *)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unsafe non-absolute secondmate home for $id: $home"
-            return 1
-            ;;
-        esac
-        case "$home$host$root" in
-          *$'\t'*|*$'\n'*|*$'\r'*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unsafe secondmate route for $id"
-            return 1
-            ;;
-        esac
-        if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
-          case "$host" in ''|-*|*[!A-Za-z0-9._-]*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unsafe SSH host alias for $id: $host"
-            return 1
-            ;;
-          esac
-          case "$root" in /*) ;; *)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unsafe non-absolute remote root for $id: $root"
-            return 1
-            ;;
-          esac
-          case "/$root/" in */../*|*/./*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="remote code root contains traversal components for $id: $root"
-            return 1
-            ;;
-          esac
-          case "/$home/" in */../*|*/./*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="remote home contains traversal components for $id: $home"
-            return 1
-            ;;
-          esac
-          case "$root$home" in *'//'*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="remote route contains an empty path component for $id"
-            return 1
-            ;;
-          esac
-          if [ "$root" = "$home" ]; then
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="overlapping remote root and home for $id: $root"
-            return 1
-          fi
-          case "$home/" in "$root/"*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="remote home for $id is inside its code root: $home"
-            return 1
-            ;;
-          esac
-          case "$root/" in "$home/"*)
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="remote code root for $id is inside its home: $root"
-            return 1
-            ;;
-          esac
-          home_key="ssh:$host:$home"
+        if secondmate_registry_parse_line "$line"; then
+          rec_id+=("$SECONDMATE_REGISTRY_ID")
+          rec_host+=("$SECONDMATE_REGISTRY_HOST")
+          rec_root+=("$SECONDMATE_REGISTRY_ROOT")
+          rec_home+=("$SECONDMATE_REGISTRY_HOME")
+          rec_projects+=("$SECONDMATE_REGISTRY_PROJECTS")
+          rec_remote+=("$SECONDMATE_REGISTRY_REMOTE")
         else
-          home_key=$("$resolver" "$home" 2>/dev/null || true)
-          if [ -z "$home_key" ]; then
-            rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unresolvable secondmate home for $id: $home"
-            return 1
-          fi
-          home_key="local:$home_key"
-        fi
-        printf '%s\t%s\n' "$home_key" "$id" >> "$bindings"
-        if [ -n "$expected_id" ] && [ "$id" = "$expected_id" ]; then
-          SECONDMATE_REGISTRY_MATCH_HOST=$host
-          SECONDMATE_REGISTRY_MATCH_ROOT=$root
-          SECONDMATE_REGISTRY_MATCH_HOME=$home
-          SECONDMATE_REGISTRY_MATCH_HOME_KEY=$home_key
-          SECONDMATE_REGISTRY_MATCH_PROJECTS=$SECONDMATE_REGISTRY_PROJECTS
-          SECONDMATE_REGISTRY_MATCH_REMOTE=$SECONDMATE_REGISTRY_REMOTE
+          malformed="${malformed}${malformed:+$'\n'}malformed secondmate registry entry: $line"
         fi
         ;;
     esac
   done < "$snapshot"
+  if [ -n "$malformed" ]; then
+    rm -rf -- "$tmp"
+    SECONDMATE_REGISTRY_ERROR=$malformed
+    return 1
+  fi
+  for ((i = 0; i < ${#rec_id[@]}; i++)); do
+    id=${rec_id[i]}
+    host=${rec_host[i]}
+    root=${rec_root[i]}
+    home=${rec_home[i]}
+    case "$home" in
+      /*) ;;
+      *)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="unsafe non-absolute secondmate home for $id: $home"
+        return 1
+        ;;
+    esac
+    case "$home$host$root" in
+      *$'\t'*|*$'\n'*|*$'\r'*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="unsafe secondmate route for $id"
+        return 1
+        ;;
+    esac
+    if [ "${rec_remote[i]}" -eq 1 ]; then
+      case "$host" in ''|-*|*[!A-Za-z0-9._-]*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="unsafe SSH host alias for $id: $host"
+        return 1
+        ;;
+      esac
+      case "$root" in /*) ;; *)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="unsafe non-absolute remote root for $id: $root"
+        return 1
+        ;;
+      esac
+      case "/$root/" in */../*|*/./*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="remote code root contains traversal components for $id: $root"
+        return 1
+        ;;
+      esac
+      case "/$home/" in */../*|*/./*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="remote home contains traversal components for $id: $home"
+        return 1
+        ;;
+      esac
+      case "$root$home" in *'//'*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="remote route contains an empty path component for $id"
+        return 1
+        ;;
+      esac
+      if [ "$root" = "$home" ]; then
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="overlapping remote root and home for $id: $root"
+        return 1
+      fi
+      case "$home/" in "$root/"*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="remote home for $id is inside its code root: $home"
+        return 1
+        ;;
+      esac
+      case "$root/" in "$home/"*)
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="remote code root for $id is inside its home: $root"
+        return 1
+        ;;
+      esac
+      home_key="ssh:$host:$home"
+    else
+      home_key=$("$resolver" "$home" 2>/dev/null || true)
+      if [ -z "$home_key" ]; then
+        rm -rf -- "$tmp"
+        SECONDMATE_REGISTRY_ERROR="unresolvable secondmate home for $id: $home"
+        return 1
+      fi
+      home_key="local:$home_key"
+    fi
+    printf '%s\t%s\n' "$home_key" "$id" >> "$bindings"
+    if [ -n "$expected_id" ] && [ "$id" = "$expected_id" ]; then
+      SECONDMATE_REGISTRY_MATCH_HOST=$host
+      SECONDMATE_REGISTRY_MATCH_ROOT=$root
+      SECONDMATE_REGISTRY_MATCH_HOME=$home
+      SECONDMATE_REGISTRY_MATCH_HOME_KEY=$home_key
+      SECONDMATE_REGISTRY_MATCH_PROJECTS=${rec_projects[i]}
+      SECONDMATE_REGISTRY_MATCH_REMOTE=${rec_remote[i]}
+    fi
+  done
   duplicate_homes=$(awk -F '\t' '
     {
       if ($1 in owner) {

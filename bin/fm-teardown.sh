@@ -1591,7 +1591,7 @@ registered_descendant_home_for_removal() {
   local reg=$1 target=$2 line id registered_home registered_abs
   [ -f "$reg" ] || return 1
   if ! secondmate_registry_validate_bindings "$reg" secondmate_registry_path_key; then
-    echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2
+    secondmate_registry_error_lines 'REFUSED: ' >&2
     return 2
   fi
   while IFS= read -r line || [ -n "$line" ]; do
@@ -1695,9 +1695,10 @@ validate_firstmate_home_for_removal() {
       if ! secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$expected_id" "$abs_home_path"; then
         case "$SECONDMATE_REGISTRY_ERROR" in
           overlapping\ secondmate\ home\ assignment:*)
-            echo "REFUSED: unsafe $label removal target $home contains registered secondmate home; $SECONDMATE_REGISTRY_ERROR" >&2
+            secondmate_registry_error_lines \
+              "REFUSED: unsafe $label removal target $home contains registered secondmate home; " >&2
             ;;
-          *) echo "REFUSED: $SECONDMATE_REGISTRY_ERROR" >&2 ;;
+          *) secondmate_registry_error_lines 'REFUSED: ' >&2 ;;
         esac
         return 1
       fi

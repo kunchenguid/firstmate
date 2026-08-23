@@ -27,9 +27,17 @@
 #     already did).
 #   - The sweep is skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1 (the
 #     read-only session path), matching the other mutating sweeps.
+#   - The sweep accounts for every REGISTERED secondmate, not only every
+#     secondmate with a runtime record: a data/secondmates.md entry whose
+#     state/<id>.meta was lost is named as skipped rather than being invisible,
+#     and an unparseable record is named too.
+#   - No registered secondmate can go unreported through a registry the sweep
+#     cannot read: a record with no readable id and a registry that cannot be
+#     opened at all both report under the literal <unknown> id, keeping the one
+#     documented line shape, and neither ever kills or respawns anything.
 #   - The sweep is naturally scoped to the primary: with no kind=secondmate
-#     meta present (a secondmate's own state/ never holds one, since
-#     secondmates never spawn secondmates), it is a silent no-op.
+#     meta and no registry present (a secondmate's own home holds neither,
+#     since secondmates never spawn secondmates), it is a silent no-op.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -523,6 +531,102 @@ test_sweep_skipped_under_detect_only() {
   pass "sweep: skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1, exactly like the other mutating sweeps"
 }
 
+# add_sm_registry_entry <w> <id> <home>: a registered secondmate with NO runtime
+# metadata - the state a home reaches when a crash, a partial teardown, or a
+# restore loses state/<id>.meta while data/secondmates.md still routes work to
+# that secondmate.
+add_sm_registry_entry() {
+  local w=$1 id=$2 home=$3
+  mkdir -p "$w/home/data" "$home"
+  printf -- '- %s - %s domain (home: %s; scope: %s; projects: alpha; added 2026-08-16)\n' \
+    "$id" "$id" "$home" "$id" >> "$w/home/data/secondmates.md"
+}
+
+test_sweep_reports_registered_secondmate_with_no_runtime_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-only)
+  add_sm_registry_entry "$w" sm1 "$w/sm1"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: no runtime record" \
+    "a registered secondmate with no runtime record must be named, not silently invisible to the sweep"
+  [ ! -s "$log" ] || fail "a registry-only secondmate has no endpoint to act on and must never be killed or respawned: $(cat "$log")"
+  pass "sweep: a registered secondmate with no runtime record is reported instead of silently skipped"
+}
+
+test_sweep_does_not_double_report_a_registered_live_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-and-meta)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  add_sm_registry_entry "$w" sm1 "$w/sm1"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: no runtime record" \
+    "a secondmate the meta scan already covered must not also be reported as recordless"
+  [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
+  pass "sweep: the registry pass covers only the secondmates the runtime records did not"
+}
+
+test_sweep_reports_unparseable_registry_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-malformed)
+  mkdir -p "$w/home/data"
+  printf -- '- sm1 - sm1 domain (home: %s; scope: sm1; projects: alpha; added 2026-08-16) [trailing note]\n' \
+    "$w/sm1" > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: unparseable registry record" \
+    "a registered secondmate whose record the parser cannot read is still one the sweep cannot account for"
+  [ ! -s "$log" ] || fail "an unreadable registry record must never trigger kill or relaunch: $(cat "$log")"
+  pass "sweep: an unparseable registry record is reported rather than dropped"
+}
+
+test_sweep_reports_registry_record_with_no_readable_id() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-no-id)
+  mkdir -p "$w/home/data"
+  printf -- '- **sm1** - sm1 domain (home: %s; scope: sm1; projects: alpha; added 2026-08-16)\n' \
+    "$w/sm1" > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate <unknown>: skipped: unparseable registry record with no readable id" \
+    "a record whose id token is unreadable must still report under the one documented line shape"
+  [ ! -s "$log" ] || fail "a record with no readable id names no endpoint and must never trigger kill or relaunch: $(cat "$log")"
+  pass "sweep: a registry record with no readable id reports as <unknown> rather than breaking the line grammar"
+}
+
+test_sweep_reports_unreadable_registry() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-unusable)
+  mkdir -p "$w/home/data"
+  # A symlinked registry is the unsafe shape every other consumer already
+  # refuses; the sweep must not silently read it as "nothing is registered".
+  printf -- '- sm1 - sm1 domain (home: %s; scope: sm1; projects: alpha; added 2026-08-16)\n' \
+    "$w/sm1" > "$w/elsewhere.md"
+  ln -s "$w/elsewhere.md" "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate <unknown>: skipped: unreadable or unsafe registry" \
+    "a registry that cannot be read safely must be named, not silently treated as an empty registered set"
+  [ ! -s "$log" ] || fail "an unreadable registry names no endpoint and must never trigger kill or relaunch: $(cat "$log")"
+  pass "sweep: a present-but-unreadable registry is reported instead of reading as no secondmates at all"
+}
+
 test_sweep_noop_with_no_secondmate_meta() {
   local w fb tmuxfb log out
   w=$(new_world sweep-no-secondmates)
@@ -554,6 +658,11 @@ test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
+test_sweep_reports_registered_secondmate_with_no_runtime_record
+test_sweep_does_not_double_report_a_registered_live_secondmate
+test_sweep_reports_unparseable_registry_record
+test_sweep_reports_registry_record_with_no_readable_id
+test_sweep_reports_unreadable_registry
 test_sweep_noop_with_no_secondmate_meta
 
 echo "# all fm-secondmate-liveness tests passed"

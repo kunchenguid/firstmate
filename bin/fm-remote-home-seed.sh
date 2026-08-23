@@ -112,7 +112,7 @@ REGISTRY_LOCK_HELD=1
 if [ -e "$REG" ] || [ -L "$REG" ]; then
   [ -f "$REG" ] && [ ! -L "$REG" ] || die "secondmate registry is unavailable or unsafe: $REG"
   secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key \
-    || die "$SECONDMATE_REGISTRY_ERROR"
+    || { secondmate_registry_error_lines 'error: ' >&2; exit 1; }
   if secondmate_registry_line_for_id "$REG" "$ID"; then
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] \
       && [ "$SECONDMATE_REGISTRY_HOST" = "$HOST" ] \
@@ -215,7 +215,8 @@ printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; add
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
-  die "$SECONDMATE_REGISTRY_ERROR"
+  secondmate_registry_error_lines 'error: ' >&2
+  exit 1
 fi
 
 restore_registry_and_brief() {

@@ -1585,7 +1585,7 @@ if [ "$KIND" = secondmate ]; then
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
-      echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
+      secondmate_registry_error_lines 'error: ' >&2
       exit 1
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
