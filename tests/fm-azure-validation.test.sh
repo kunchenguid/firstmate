@@ -253,7 +253,10 @@ assert 'value.get("invocation") == invocation' in host
 assert 'invocation = "azr-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]' in host
 assert '"snapshot_bundle": str(extracted / "snapshot.bundle"),' in host
 assert '"invocation": plan["invocation"],' not in host[host.index('def prepare_shard_runner'):host.index('def run_shard_invocations')]
-assert host.index('save_state(env, state)', host.index('runner_stderr_tail"] = stderr')) < host.index('one or more shard transports retained ambiguous state')
+finish=host[host.index('def finish_shard_invocations'):host.index('def run_shard_invocations')]
+assert 'save_state(env, state)' not in finish
+drive=host[host.index('def drive(env, args)'):host.index('def queue(env)')]
+assert drive.index('save_state(env, live)') < drive.index('if transport_failures:')
 assert "parent_managed=True," in host
 assert 'round(bound["total"] + 1.0, 6)' in host
 assert host.count('* 24.0 * 1.5 + 5.0') == 1
@@ -1147,11 +1150,19 @@ spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importl
 tree=ast.parse(inspect.getsource(m.drive)); parents={}
 for node in ast.walk(tree):
  for child in ast.iter_child_nodes(node): parents[child]=node
-run_call=next(node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=="run_shard_invocations")
-ancestors=[]; current=run_call
-while current in parents: current=parents[current]; ancestors.append(current)
-with_sources=[ast.dump(node.items[0].context_expr) for node in ancestors if isinstance(node,ast.With)]
-assert len(with_sources)==1 and "shards" in with_sources[0]
+def with_sources(call):
+ ancestors=[]; current=call
+ while current in parents: current=parents[current]; ancestors.append(current)
+ return [ast.dump(node.items[0].context_expr) for node in ancestors if isinstance(node,ast.With)]
+launch_calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=="launch_shard_invocations"]
+launch_sources=[with_sources(call) for call in launch_calls]
+pending_launch=next(items for items in launch_sources if len(items)==2)
+assert any("shards" in item for item in pending_launch)
+assert any("Name(id='cell'" in item for item in pending_launch)
+assert any(len(items)==1 and "shards" in items[0] for items in launch_sources)
+finish_call=next(node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=="finish_shard_invocations")
+finish_sources=with_sources(finish_call)
+assert len(finish_sources)==1 and "shards" in finish_sources[0]
 # A dead guest control command ends the wait immediately instead of burning
 # the whole wall budget on a shard request that can never appear; the probe
 # is throttled and observe stays the sole owner of the state transition.
@@ -2236,12 +2247,15 @@ owner_decision_protocol_contract() {
   make_runtime "$tmp"
   python3 - "$HOST" "$tmp" <<'PY' || fail "protected owner-decision controller protocol failed"
 import base64
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import tarfile
 import time
 import types
 
@@ -2342,7 +2356,9 @@ challenge_blob="control/owner-decision/a1/gate-1.challenge.json"
 decision_blob="control/owner-decision/a1/gate-1.decision.json"
 blobs={challenge_blob:m.go_json_bytes(challenge)+b"\n"}
 crash={"before_upload":False}
+inventory={"shard_lists":0}
 def names(_env,_state,prefix="shards/"):
+    if prefix=="shards/": inventory["shard_lists"]+=1
     return sorted(name for name in blobs if name.startswith(prefix))
 def download(_env,name,path,container=None):
     pathlib.Path(path).write_bytes(blobs[name])
@@ -2356,8 +2372,9 @@ def upload(_env,path,name,overwrite=False,container=None):
 m.list_cell_blobs=names; m.storage_download=download; m.storage_upload=upload
 (env["state_dir"]/(cell+".json")).write_text(json.dumps(state))
 loaded=m.load_state(env,cell)
-gate=m.discover_owner_gate(env,loaded)
+gate,decision_ready=m.discover_owner_gate(env,loaded)
 assert gate["gate_index"]==1 and loaded["phase"]=="needs-decision"
+assert decision_ready is False
 assert loaded["run_id"]==run_id and loaded["owner_decision"]["history_head"]==genesis
 m.exact_live_run_command=lambda _env,_state: ({}, {})
 response.write_text("--action\napprove\n")
@@ -2381,10 +2398,280 @@ assert len(after["owner_decision"]["responded_gates"])==0
 assert after["owner_decision"]["pending_decision"]["next_head"]==after["owner_decision"]["history_head"]
 assert after["owner_decision"]["history_head"]!=genesis
 assert decision_blob in blobs
-decision=json.loads(blobs[decision_blob])
+decision_bytes=blobs[decision_blob]
+decision=json.loads(decision_bytes)
 assert decision["challenge"]==challenge and decision["response"]=={"action":"approve"}
 serialized=json.dumps(after)
 assert "owner.key" not in serialized and "K"*32 not in serialized
+
+# A signed decision remains pending in controller state until the daemon
+# publishes a successor gate or terminal result. The same daemon may request
+# behavior shards while that acknowledgement is pending, so drive must serve
+# a bound request before returning the pending-decision status.
+shard_blob="shards/round-aaaaaaaaaaaa/request-1.tar.gz"
+response_blob=shard_blob.replace("/request-","/response-")
+bundle=b"current snapshot bundle\n"
+command=[
+    "bin/fm-azure-runner-command.sh","bash","-c",
+    m.CELL_HOST_CAPABILITY_DECLARATION+
+    " FM_TEST_SKIP_HERDR=1 bin/fm-behavior-shards.sh --run 1 1 results/executed-1.tsv",
+]
+shard_request={
+    "schema":"fm.azure-validation-shard/v1","cell":cell,
+    "round":"round-aaaaaaaaaaaa","kind":"behavior","shard":1,"shard_count":1,
+    "repository":{
+        "slug":"o/r","branch":"fm/fixture","head":head,"tree":tree,
+        "snapshot_digest":m.sha256_bytes(bundle),
+    },
+    "command":{"argv":command},
+    "command_digest":m.sha256_bytes(m.canonical_bytes({"argv":command})),
+    "artifacts":["results/executed-1.tsv"],"resource_class":"behavior-heavy",
+}
+shard_request["request_digest"]=m.sha256_bytes(m.canonical_bytes(shard_request))
+class_bundle=root/"class-snapshot.bundle"; class_bundle.write_bytes(bundle)
+m.validate_shard_request(
+    after,shard_request,class_bundle,shard_blob
+)
+wrong_class=copy.deepcopy(shard_request); wrong_class["resource_class"]="validation-standard"
+wrong_class.pop("request_digest"); wrong_class["request_digest"]=m.sha256_bytes(m.canonical_bytes(wrong_class))
+try:
+    m.validate_shard_request(after,wrong_class,class_bundle,shard_blob)
+except m.ValidationError:
+    pass
+else:
+    raise AssertionError("behavior shard accepted the lint resource class")
+lint_command=[
+    "bin/fm-azure-runner-command.sh","bash","-c",
+    "bin/fm-lint.sh && uv run --directory tools/agent-fleet --locked ruff check .",
+]
+lint_request=copy.deepcopy(shard_request)
+lint_request.update({
+    "round":"round-bbbbbbbbbbbb","kind":"lint","command":{"argv":lint_command},
+    "command_digest":m.sha256_bytes(m.canonical_bytes({"argv":lint_command})),
+    "artifacts":[],"resource_class":"validation-standard",
+})
+lint_request.pop("request_digest"); lint_request["request_digest"]=m.sha256_bytes(m.canonical_bytes(lint_request))
+lint_blob="shards/round-bbbbbbbbbbbb/request-1.tar.gz"
+m.validate_shard_request(after,lint_request,class_bundle,lint_blob)
+wrong_class=copy.deepcopy(lint_request); wrong_class["resource_class"]="behavior-heavy"
+wrong_class.pop("request_digest"); wrong_class["request_digest"]=m.sha256_bytes(m.canonical_bytes(wrong_class))
+try:
+    m.validate_shard_request(after,wrong_class,class_bundle,lint_blob)
+except m.ValidationError:
+    pass
+else:
+    raise AssertionError("lint shard accepted the behavior resource class")
+archive_buffer=io.BytesIO()
+with tarfile.open(fileobj=archive_buffer,mode="w:gz") as archive:
+    for name,data in (
+        ("request.json",m.canonical_bytes(shard_request)+b"\n"),
+        ("snapshot.bundle",bundle),
+    ):
+        info=tarfile.TarInfo(name); info.size=len(data)
+        archive.addfile(info,io.BytesIO(data))
+blobs[shard_blob]=archive_buffer.getvalue()
+after["admission"]={"shard_plan":[{"shard":1}]}
+m.save_state(env,after)
+dispatches={"count":0}
+prepare_seam={"action":None}
+seam_successor=copy.deepcopy(challenge)
+seam_successor.update({
+    "step":"test","step_result_id":"step-seam","round_id":"round-seam",
+    "findings_digest":"6"*64,"previous_head":after["owner_decision"]["history_head"],
+    "nonce":"respond:round-seam:"+after["owner_decision"]["history_head"],
+    "issued_at":int(time.time())-1,"expires_at":int(time.time())+600,
+})
+seam_successor_blob="control/owner-decision/a1/gate-2.challenge.json"
+def prepare(_env,current,blob,request_value,_extracted,_plan):
+    record={
+        "request_digest":request_value["request_digest"],
+        "invocation":"azr-aaaaaaaaaaaa",
+    }
+    current.setdefault("shard_runs",{})[record["request_digest"]]=record
+    m.save_state(_env,current)
+    action=prepare_seam.pop("action",None)
+    if action=="remove":
+        blobs.pop(decision_blob,None)
+    elif action=="replace":
+        blobs[decision_blob]=b"{}\n"
+    elif action=="terminal":
+        live_checks["terminal"]=True
+    elif action=="successor":
+        blobs[seam_successor_blob]=m.go_json_bytes(seam_successor)+b"\n"
+    return record
+blocking={"active":False}
+class BlockingProcess:
+    returncode=125
+    def __init__(self,record): self.record=record
+    def communicate(self):
+        concurrent=m.load_state(env,cell)
+        concurrent["phase"]="result-published"
+        concurrent["owner_decision"]={"concurrent":"owner"}
+        concurrent["result"]={"outcome":"failed","concurrent":True}
+        concurrent["events"].append({
+            "at":"concurrent","phase":"result-published","note":"observe won",
+        })
+        m.save_state(env,concurrent)
+        self.record["invocation"]="azr-bbbbbbbbbbbb"
+        return "concurrent stdout","concurrent stderr"
+def launch_shards(_env,_current,records):
+    dispatches["count"]+=len(records)
+    if blocking["active"]:
+        return [(record,BlockingProcess(record)) for record in records]
+    return []
+def package(_env,_current,_request,_record,destination):
+    result=destination/"response.tar.gz"
+    result.write_bytes(b"fixture response")
+    return result
+m.prepare_shard_runner=prepare
+m.launch_shard_invocations=launch_shards
+real_finish=m.finish_shard_invocations
+def finish_shards(_env,_state,processes):
+    if blocking["active"]:
+        return real_finish(_env,_state,processes)
+    return []
+m.finish_shard_invocations=finish_shards
+m.run_shard_invocations=lambda _env,_state,records: launch_shards(_env,_state,records)
+m.package_shard_response=package
+live_checks={"count":0,"terminal":False}
+def exact_live(_env,_state):
+    live_checks["count"]+=1
+    if live_checks["terminal"]:
+        raise m.ValidationError("exact control command is terminal")
+    return {},{}
+m.exact_live_run_command=exact_live
+inventory["shard_lists"]=0
+captured=io.StringIO()
+with contextlib.redirect_stdout(captured):
+    m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+assert dispatches["count"]==1,repr((captured.getvalue(),sorted(blobs)))
+assert live_checks["count"]==2
+assert inventory["shard_lists"]==1
+assert "AZURE VALIDATION SHARDS DISPATCHED cell="+cell+" count=1" in captured.getvalue()
+assert "OWNER DECISION PENDING" not in captured.getvalue()
+assert response_blob in blobs
+
+# A retained pending decision is not dispatch authority until its exact signed
+# bytes are present in storage and the bound Run Command is still live.
+m.save_state(env,after)
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+blobs[shard_blob]=archive_buffer.getvalue()
+dispatches["count"]=0; live_checks["count"]=0; inventory["shard_lists"]=0
+captured=io.StringIO()
+with contextlib.redirect_stdout(captured):
+    m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+assert "AZURE VALIDATION OWNER DECISION PENDING" in captured.getvalue()
+assert dispatches["count"]==0 and live_checks["count"]==0
+assert inventory["shard_lists"]==0
+
+m.save_state(env,after)
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+blobs[decision_blob]=b"{}\n"; blobs[shard_blob]=archive_buffer.getvalue()
+dispatches["count"]=0; live_checks["count"]=0; inventory["shard_lists"]=0
+try:
+    m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+except m.ValidationError as exc:
+    assert "signed envelope bytes" in str(exc)
+else:
+    raise AssertionError("foreign pending decision reached shard dispatch")
+assert dispatches["count"]==0 and live_checks["count"]==0
+assert inventory["shard_lists"]==0
+
+m.save_state(env,after)
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+blobs[decision_blob]=decision_bytes; blobs[shard_blob]=archive_buffer.getvalue()
+dispatches["count"]=0; live_checks["count"]=0; live_checks["terminal"]=True
+inventory["shard_lists"]=0
+try:
+    m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+except m.ValidationError as exc:
+    assert "exact control command is terminal" in str(exc)
+else:
+    raise AssertionError("terminal exact command reached shard dispatch")
+assert dispatches["count"]==0 and live_checks["count"]==1
+assert inventory["shard_lists"]==0
+live_checks["terminal"]=False
+
+# The allocation proof is repeated after request preparation. A seam change
+# cannot survive until the first runner process is launched.
+for action,fragment in (
+    ("remove","pending owner decision changed before shard allocation"),
+    ("replace","signed envelope bytes"),
+    ("terminal","exact control command is terminal"),
+    ("successor","pending owner decision changed before shard allocation"),
+):
+    m.save_state(env,after)
+    blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+    blobs[decision_blob]=decision_bytes; blobs[shard_blob]=archive_buffer.getvalue()
+    dispatches["count"]=0; live_checks["count"]=0; live_checks["terminal"]=False
+    inventory["shard_lists"]=0; prepare_seam["action"]=action
+    try:
+        m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+    except m.ValidationError as exc:
+        assert fragment in str(exc),action+": "+str(exc)
+    else:
+        raise AssertionError(action+" prepare-seam mutation reached shard launch")
+    assert dispatches["count"]==0,action+" prepare-seam mutation launched a shard"
+    assert inventory["shard_lists"]==1
+
+# A runner can block while observe advances durable cell state. Finishing the
+# transport merges only its exact record delta, preserves the concurrent
+# phase/owner/result/events, and saves failure evidence before raising.
+m.save_state(env,after)
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+blobs[decision_blob]=decision_bytes; blobs[shard_blob]=archive_buffer.getvalue()
+dispatches["count"]=0; live_checks["count"]=0; live_checks["terminal"]=False
+inventory["shard_lists"]=0; blocking["active"]=True
+try:
+    m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+except m.ValidationError as exc:
+    assert "retained ambiguous state" in str(exc)
+else:
+    raise AssertionError("failed blocking shard transport did not raise")
+finally:
+    blocking["active"]=False
+concurrent=m.load_state(env,cell)
+assert concurrent["phase"]=="result-published"
+assert concurrent["owner_decision"]=={"concurrent":"owner"}
+assert concurrent["result"]=={"outcome":"failed","concurrent":True}
+assert concurrent["events"][-1]=={
+    "at":"concurrent","phase":"result-published","note":"observe won",
+}
+merged=concurrent["shard_runs"][shard_request["request_digest"]]
+assert merged["invocation"]=="azr-bbbbbbbbbbbb"
+assert merged["runner_stdout_tail"]=="concurrent stdout"
+assert merged["runner_stderr_tail"]=="concurrent stderr"
+assert response_blob not in blobs
+
+# Gate validation must still precede every shard dispatch: neither an
+# unowned response nor a skipped future challenge can use a valid shard
+# request to bypass controller authority.
+for label,owner_blobs in (
+    ("unowned response",{
+        challenge_blob:m.go_json_bytes(challenge)+b"\n",
+        decision_blob:blobs[decision_blob],
+    }),
+    ("future challenge",{
+        "control/owner-decision/a1/gate-2.challenge.json":m.go_json_bytes(challenge)+b"\n",
+    }),
+):
+    hostile=copy.deepcopy(state)
+    hostile["admission"]={"shard_plan":[{"shard":1}]}
+    m.save_state(env,hostile)
+    blobs.clear(); blobs.update(owner_blobs); blobs[shard_blob]=archive_buffer.getvalue()
+    dispatches["count"]=0
+    try:
+        m.drive(env,types.SimpleNamespace(cell=cell,wait_seconds=0))
+    except m.ValidationError:
+        pass
+    else:
+        raise AssertionError(label+" gate path reached shard dispatch")
+    assert dispatches["count"]==0, label+" gate path dispatched a shard"
+
+blobs.clear()
+blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"
+blobs[decision_blob]=decision_bytes
+m.save_state(env,after)
 # A second daemon challenge carrying the signed next head acknowledges that
 # gate 1 was appended, then becomes the only gate the controller may answer.
 challenge2=copy.deepcopy(challenge)
@@ -2397,8 +2684,9 @@ challenge2.update({
 challenge2_blob="control/owner-decision/a1/gate-2.challenge.json"
 blobs[challenge2_blob]=m.go_json_bytes(challenge2)+b"\n"
 advanced_state=copy.deepcopy(after)
-next_gate=m.discover_owner_gate(env,advanced_state)
+next_gate,decision_ready=m.discover_owner_gate(env,advanced_state)
 assert next_gate["gate_index"]==2 and next_gate["challenge"]==challenge2
+assert decision_ready is False
 assert len(advanced_state["owner_decision"]["responded_gates"])==1
 assert advanced_state["owner_decision"]["responded_gates"][0]["next_head"]==after["owner_decision"]["history_head"]
 
