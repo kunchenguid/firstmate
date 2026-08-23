@@ -30,7 +30,18 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -l ]; then
+        [ -z "${FM_FAKE_LITERAL_LOG:-}" ] || printf '%s\n' "$arg" >> "$FM_FAKE_LITERAL_LOG"
+        break
+      fi
+      prev=$arg
+    done
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -66,6 +77,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LITERAL_LOG="$home/tmux-literals.log" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -79,6 +91,26 @@ EOF
 
 classify() {  # <harness> <id> <state-dir>
   fm_busy_classify tmux fake:w "$1" "$2" "$3"
+}
+
+test_turnend_signal_requires_live_spawn_incarnation() {
+  local state="$TMP_ROOT/turnend-signal" id=turnend-x1 marker meta
+  marker="$state/$id.turn-ended"
+  meta="$state/$id.meta"
+  mkdir -p "$state"
+  printf 'endpoint_task_id=%s\nspawn_gen=spawn-one\n' "$id" > "$meta"
+
+  "$ROOT/bin/fm-turnend-signal.sh" "$state" "$id" spawn-one
+  assert_present "$marker" "the live spawn incarnation did not publish its turn-end marker"
+
+  rm -f "$marker"
+  "$ROOT/bin/fm-turnend-signal.sh" "$state" "$id" spawn-old
+  assert_absent "$marker" "a mismatched spawn incarnation published a turn-end marker"
+
+  rm -f "$meta"
+  "$ROOT/bin/fm-turnend-signal.sh" "$state" "$id" spawn-one
+  assert_absent "$marker" "a retired task's turn-end writer recreated its marker"
+  pass "turn-end marker publication requires the exact live task spawn incarnation"
 }
 
 # drive_pi_ext <ext-path> <mode>: load the generated Pi extension in a plain
@@ -142,6 +174,10 @@ test_pi_extension_semantic_lifecycle() {
   out=$(drive_pi_ext "$ext" settle-idle) || fail "final settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended" "$state/$id.meta"
+  out=$(drive_pi_ext "$ext" turn-end) || fail "retired turn_end drive failed: $out"
+  assert_absent "$state/$id.turn-ended" "a retired Pi extension recreated its task marker"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
 }
 
@@ -246,6 +282,10 @@ test_opencode_plugin_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.idle"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
+
+  rm -f "$state/$id.turn-ended" "$state/$id.meta"
+  out=$(drive_oc_plugin "$plugin" "$(oc_idle ses2)") || fail "retired session.idle drive failed: $out"
+  assert_absent "$state/$id.turn-ended" "a retired OpenCode plugin recreated its task marker"
   pass "opencode plugin classifies from session.status, scoped to the latched worker session"
 }
 
@@ -295,7 +335,7 @@ test_claude_hooks_semantic_lifecycle() {
 }
 
 test_claude_hooks_stale_incarnation_harmless() {
-  local rec id=busy-cl-2 out state settings
+  local rec id=busy-cl-2 out state settings meta tmp
   rec=$(make_spawn_case claude-stale claude "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -303,6 +343,14 @@ test_claude_hooks_stale_incarnation_harmless() {
   state="$HOME_DIR/state"
   settings="$WT_DIR/.claude/settings.local.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  meta="$state/$id.meta"
+  tmp="$meta.tmp"
+  awk '{ if ($0 ~ /^spawn_gen=/) print "spawn_gen=replacement"; else print }' "$meta" > "$tmp"
+  mv -f "$tmp" "$meta"
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop \
+    || fail "a stale-incarnation Stop hook must still exit 0 so Claude can stop"
+  assert_absent "$state/$id.turn-ended" "a stale Claude hook recreated its task marker"
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
@@ -311,7 +359,7 @@ test_claude_hooks_stale_incarnation_harmless() {
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
-  local rec id=busy-cx-1 out state
+  local rec id=busy-cx-1 out state launch notify_cmd
   rec=$(make_spawn_case codex-unverified codex "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -324,6 +372,18 @@ test_codex_unverified_until_a_semantic_source_exists() {
   [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"
   out=$(fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "unknown codex-unverified" ] || fail "codex must not fall back to footer text, got '$out'"
+
+  launch=$(tail -1 "$HOME_DIR/tmux-literals.log")
+  notify_cmd=$(printf '%s\n' "$launch" \
+    | sed -n 's/.*notify=\[\\"bash\\",\\"-c\\",\\"\(.*\)\\"\].*/\1/p')
+  [ -n "$notify_cmd" ] || fail "codex launch did not carry an executable turn-end notification"
+  rm -f "$state/$id.turn-ended"
+  sh -c "$notify_cmd"
+  assert_present "$state/$id.turn-ended" "codex notification did not publish for its live spawn"
+
+  rm -f "$state/$id.turn-ended" "$state/$id.meta"
+  sh -c "$notify_cmd"
+  assert_absent "$state/$id.turn-ended" "a retired Codex notification recreated its task marker"
   pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
 }
 
@@ -342,6 +402,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_turnend_signal_requires_live_spawn_incarnation
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
