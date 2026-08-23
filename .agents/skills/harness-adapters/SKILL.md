@@ -164,7 +164,7 @@ For Cursor, select the intended reasoning class through a model id the account's
 ## Triggering no-mistakes validation
 
 Do not trigger validation with a skill-invocation form (`/no-mistakes`, `$no-mistakes`, or equivalent) sent into a worker's pane: it resolves only when that harness's active config directory contains the installed skill, and firstmate cannot assume that at trigger time.
-For `claude` specifically, `bin/fm-spawn.sh` forwards firstmate's own `CLAUDE_CONFIG_DIR` onto the crewmate launch when set, to keep credential/config parity with firstmate's own store; a non-default store commonly has no `skills/` directory at all, so `/no-mistakes` reliably fails to resolve for a claude crewmate in that configuration - the identical failure `bin/fm-brief.sh`'s `no-mistakes`-mode ship brief already warns the crewmate about directly.
+For `claude` specifically, `bin/fm-spawn.sh` forwards firstmate's own `CLAUDE_CONFIG_DIR` onto the crewmate launch when set, to keep credential/config parity with firstmate's own store; a non-default store commonly has no `skills/` directory at all, so `/no-mistakes` reliably fails to resolve for a claude crewmate in that configuration.
 
 Instead, send a short natural-language instruction telling the worker to drive no-mistakes itself through its CLI (`no-mistakes axi run`, per `no-mistakes axi --help`).
 The crewmate's own brief already carries the full CLI-driven contract, so the trigger message only needs to tell it to proceed; it never needs to restate the mechanics.
