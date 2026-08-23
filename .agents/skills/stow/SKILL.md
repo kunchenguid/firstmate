@@ -132,7 +132,8 @@ Never describe the session as reset-safe while the memory total is over budget o
 ## The cold tier: data/memory-archive.md
 
 Stale never means deleted: pruning an entry from an editable memory file always means moving it to `data/memory-archive.md`, this home's append-only, never-injected cold tier, gitignored with the rest of `data/` and never counted by the budget report.
-Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, unreinforced-pass counter when it carried one, and the reason it left.
+Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, and the reason it left.
+Include the unreinforced-pass counter only when the optional pass horizon itself made the entry stale, using the exact reason `unreinforced <N>p`; omit the counter when the wall-clock horizon or any other reason caused archival, even if the active marker carried one.
 Archive provenance stays verbose rather than compact because the cold tier is never budget-counted.
 
 ```markdown
@@ -140,7 +141,7 @@ Archive provenance stays verbose rather than compact because the cold tier is ne
 - (from learnings.md, tier: perishable, reinforced: 2026-06-30) While state/.afk exists, the away-daemon owns triage... [archived: unreinforced 39d]
 ```
 
-Reasons include `unreinforced <N>d`, plus `unreinforced <N>p` when the optional pass horizon is the one that fired, `budget oldest-first`, and `legacy-unvalidated`.
+Reasons include `unreinforced <N>d`, `unreinforced <N>p`, `budget oldest-first`, and `legacy-unvalidated`.
 Archiving is a move, not a removal, and recovery is `grep` plus copy back with no tooling.
 Each home keeps its own archive, the archive never cascades, and truncating a grown archive is a captain decision, not a mechanism.
 

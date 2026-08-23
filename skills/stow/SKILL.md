@@ -94,7 +94,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 - `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
 - `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
 - `<!--a:YYYY-MM-DD/N-->` - only in a file whose header pointer opts in to the pass horizon below: either dated marker may carry `/N`, the number of passes that evaluated the entry without reinforcing it.
-  An absent `/N` means zero, so an entry you keep exercising costs no counter bytes at all, and a file that has not opted in never carries one.
+  An absent `/N` means zero, so an entry you keep exercising costs no counter bytes at all, and a file that has not opted in never writes one.
 - `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
 - `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
@@ -127,10 +127,11 @@ Rules:
   Never add that opt-in on your own initiative; the user chooses it, one file at a time.
 - While a file is opted in, an `aging` entry there is stale at whichever comes first - 10 passes that evaluated it without reinforcing it, or 30 days - and a `perishable` entry at whichever comes first - 3 unreinforced passes, or 7 days.
   Increment the counter of every dated entry that pass did not reinforce before judging staleness, read a dated marker with no `/N` as counter zero so nothing needs migrating, and clear the counter only by refreshing the date on real evidence.
-  In a file that is not opted in, never write a counter and never read one that is already there.
+  In a file that is not opted in, never write a counter and never read one that is already there; preserve any existing `/N` byte-for-byte instead of normalizing or removing it.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
-- Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, the unreinforced-pass counter when it carried one, and a one-line reason naming whichever horizon it reached first.
+- Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, and a one-line reason.
+  Include the unreinforced-pass counter only when the pass horizon itself made the entry stale, using the exact reason `unreinforced <N>p`; omit the counter when the wall-clock horizon or any other reason caused archival, even if the active marker carried one.
   In a git worktree, verify that this archive path is not already tracked in the index before writing any archived fact there.
   If it is tracked, do not write to it and report that archival is blocked until the user chooses a safe destination.
   Otherwise add a `.stow-archive.md` line to a `.gitignore` file in the archive's directory, and never write archived facts into a git-tracked file.
