@@ -1041,7 +1041,10 @@ families_for_changed_path() {
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
-    tests/lib.sh|tests/*-helpers.sh)
+    tests/lib.sh|tests/*-helpers.sh|tests/remote-herdr-fixture.sh)
+      # Shared test material: select every suite that references it. The remote
+      # Herdr fixture is named explicitly because it is shared the same way
+      # without carrying the *-helpers.sh spelling.
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;

@@ -49,8 +49,15 @@
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that runs this same verified
 # submit against the recorded remote Herdr pane and relays its exit status
-# unchanged. A leg that delivered the text into the live verified pane but
-# could not synchronously confirm the submit (exit 3 - typically a busy mate
+# unchanged. That leg resolves the explicit endpoint against the private
+# parent-route metadata, while the already-applied marker and correlation stay
+# transport data rather than creating remote-home reply state. The host-local
+# leg runs this warning guard against the remote home's ordinary state before
+# entering the route-scoped submission. Popup settling classifies the body
+# inside that envelope, so supported harness behavior is identical on local and
+# remote routes.
+# A leg that delivered the text into the live verified pane but could not
+# synchronously confirm the submit (exit 3 - typically a busy mate
 # whose harness queues the steer and keeps rendering it) is reported here as
 # DELIVERED with confirmation pending: fm-send prints a non-error notice,
 # exits 0, marks the pending-reply expectation delivered, and closes any
@@ -144,7 +151,14 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
+# Skip this guard when the caller already ran it against the right home
+# (FM_SEND_GUARD_DONE is set by bin/fm-remote-secondmate-control.sh, whose
+# host-local leg guards the remote home's ordinary state before repointing this
+# send at the private parent-route state), so the warning still covers that
+# home's real supervision instead of route-only endpoint metadata.
+if [ "${FM_SEND_GUARD_DONE:-0}" != 1 ]; then
+  FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
+fi
 
 fm_send_id_from_meta() {  # <meta-file>
   local base
@@ -561,9 +575,12 @@ else
   # invocation, so a `$...` message to a codex target gets the same settle. That
   # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to claude/opencode/pi. The target backend's
-  # verified submit retry still backs the settle up either way.
-  case "$*" in
+  # needlessly slow plain text to claude/opencode/pi. A remote host-local leg
+  # receives the parent's already-framed message, so classify the request body
+  # rather than mistaking its marker for the first user byte. The target
+  # backend's verified submit retry still backs the settle up either way.
+  fm_pending_reply_request_body "$MESSAGE" SETTLE_MESSAGE || SETTLE_MESSAGE=$MESSAGE
+  case "$SETTLE_MESSAGE" in
     /*) settle=1.2 ;;
     \$*)
       if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi

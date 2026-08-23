@@ -24,10 +24,27 @@
 #
 # Every invocation is appended verbatim to <log-file>, so a test reads back what
 # the remote pane received. Creating <send-fail-flag> makes every pane write
-# fail, which is how a test simulates an endpoint that cannot be reached.
+# fail, which is how a test simulates an endpoint that cannot be reached. The
+# optional <send-fail-flag>.popup-required flag keeps a draft whose request
+# body begins with `$` from submitting until the caller publishes
+# <send-fail-flag>.popup-settled. That models the real completion popup: Enter
+# selects a completion instead of submitting, so the typed draft stays in the
+# composer and remains readable, and no agent submission is recorded.
+#
+# The from-firstmate carrier that frames a parent request is read from its owner
+# (bin/fm-operational-input.sh, via the bin/fm-marker-lib.sh entry point the
+# other marker tests use) instead of being re-spelled here. Re-spelling it
+# would fail silently rather than loudly: a changed marker stops matching, the
+# fixture then reads the marker bytes as the request's first byte, no draft ever
+# begins with `$`, the popup never opens, and every popup regression passes
+# without exercising anything.
+
+# shellcheck source=bin/fm-marker-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/fm-marker-lib.sh"
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
+  local fromfirst_mark=$FM_FROMFIRST_MARK
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
@@ -35,12 +52,31 @@ set -u
 STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
+POPUP_REQUIRED='$send_fail.popup-required'
+POPUP_SETTLED='$send_fail.popup-settled'
+FROMFIRST_MARK='$fromfirst_mark'
 SOCKET='$socket'
 SH
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+popup_is_open() { # <composer-draft>
+  local body=$1
+  case "$body" in
+    "$FROMFIRST_MARK"corr=????????????????*)
+      body=${body#"$FROMFIRST_MARK"}
+      body=${body#corr=}
+      body=${body#????????????????}
+      case "$body" in
+        ' '*) body=${body# } ;;
+        $'\t'*) body=${body#$'\t'} ;;
+      esac
+      ;;
+  esac
+  case "$body" in \$*) return 0 ;; esac
+  return 1
+}
 ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
@@ -92,11 +128,28 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" --arg text "${4:-}" '.typed[$p] = true | .draft[$p] = $text' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
-  "pane read") printf '\n' ;;
+    pane=${3:-}
+    key=${4:-}
+    draft=$(jq_state -r --arg p "$pane" '.draft[$p] // ""')
+    if [ "$key" = enter ] && [ -f "$POPUP_REQUIRED" ] && [ ! -f "$POPUP_SETTLED" ] \
+      && popup_is_open "$draft"; then
+      exit 0
+    fi
+    submitted=false
+    [ "$key" != enter ] || submitted=true
+    jq_state --arg p "$pane" --argjson submitted "$submitted" '
+      .typed[$p] = true
+      | .working[$p] = true
+      | .draft[$p] = ""
+      | .submissions[$p] = ((.submissions[$p] // 0) + (if $submitted then 1 else 0 end))' | save ;;
+  "pane read")
+    pane=${3:-}
+    draft=$(jq_state -r --arg p "$pane" '.draft[$p] // ""')
+    printf '❯ %s\n' "$draft"
+    ;;
   "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
   "agent get")
     pane=${3:-}
@@ -121,5 +174,5 @@ SH
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
 reset_remote_herdr_fixture() { # <state>
-  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{}}\n' > "$1"
+  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{},"draft":{},"submissions":{}}\n' > "$1"
 }

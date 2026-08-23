@@ -158,13 +158,38 @@ fm_pending_reply_text_has_corr() {  # <text> <corr_id>
   return 1
 }
 
+# Extract the request body from the parent-routing envelope, preserving the
+# original bytes and trailing newlines. An unmarked message is returned as-is.
+# This is the exact inverse of fm_pending_reply_embed_corr, which writes the
+# marker, the corr token, and exactly ONE separator blank ahead of the body:
+# only that one separator is removed, so leading blanks the sender actually
+# typed survive and the marked and unmarked forms of the same text resolve to
+# the same body.
+fm_pending_reply_request_body() {  # <message> <result-var>
+  local message=$1 result_var=$2 extracted leading
+  [ -n "$result_var" ] || return 2
+  extracted=$message
+  if fm_message_from_firstmate "$message"; then
+    fm_operational_input_body "$message" extracted || return 1
+    leading=${extracted:0:21}
+    case "$leading" in
+      corr=[a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9][a-fA-F0-9])
+        extracted=${extracted:21}
+        case "$extracted" in
+          ' '*) extracted=${extracted# } ;;
+          $'\t'*) extracted=${extracted#$'\t'} ;;
+        esac
+        ;;
+    esac
+  fi
+  printf -v "$result_var" '%s' "$extracted"
+}
+
 # Sanitize a short request summary: single line, bounded, no control chars.
 fm_pending_reply_summarize() {  # <text>
-  local text=$1 cleaned
-  cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | tr -cd '\11\12\15\40-\176' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  # Drop an already-present marker/corr prefix so the durable summary stays short.
-  cleaned=${cleaned#"$FM_FROMFIRST_MARK"}
-  cleaned=$(printf '%s' "$cleaned" | sed -E "s/^corr=[A-Fa-f0-9]{16}[[:space:]]*//")
+  local text=$1 body cleaned
+  fm_pending_reply_request_body "$text" body || body=$text
+  cleaned=$(printf '%s' "$body" | tr '\t\r\n' '   ' | tr -cd '\11\12\15\40-\176' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   if [ "${#cleaned}" -gt 120 ]; then
     cleaned="${cleaned:0:117}..."
   fi
