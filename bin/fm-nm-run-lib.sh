@@ -157,19 +157,31 @@ fm_nm_run_attributable() {  # <worktree> <run_head> <active|terminal>
 # Seconds represented by a no-mistakes duration token (32s, 2m39s, 1h51m). Prints
 # nothing for anything that is not one, so a caller's `[ -n ... ]` guard is the
 # single test for "no usable duration here".
+#
+# Every component is evaluated in explicit base 10, because a zero-padded
+# component is ordinary in these tokens and bash reads a zero-prefixed literal as
+# OCTAL. `2m09s` and `08s` therefore aborted the whole expansion with a bash
+# diagnostic on stderr and returned nothing, which reads to the caller below as
+# "no usable age" - so the wedge escalation this clock exists to suppress fired
+# anyway, against a run that had just reported progress. `1h05m` was the worse
+# half: it parsed, and was right only by the coincidence that octal and decimal
+# agree below 8. A component longer than any real duration is refused rather than
+# wrapped silently around the arithmetic range, because a wrapped negative age
+# would read as activity from the future and suppress a GENUINE wedge.
 fm_nm_duration_secs() {  # <token>
   local t=${1:-} total=0 n unit found=0
   case "$t" in ''|*[!0-9hms]*) return 0 ;; esac
   while [ -n "$t" ]; do
     n=${t%%[hms]*}
     case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "${#n}" -le 9 ] || return 0
     t=${t#"$n"}
     unit=${t%"${t#?}"}
     t=${t#?}
     case "$unit" in
-      h) total=$(( total + n * 3600 )) ;;
-      m) total=$(( total + n * 60 )) ;;
-      s) total=$(( total + n )) ;;
+      h) total=$(( total + 10#$n * 3600 )) ;;
+      m) total=$(( total + 10#$n * 60 )) ;;
+      s) total=$(( total + 10#$n )) ;;
       *) return 0 ;;
     esac
     found=1
@@ -196,12 +208,30 @@ fm_nm_duration_secs() {  # <token>
 # the token rather than splitting the row on commas. Observed ages spanned 32s,
 # 2m10s, 2m39s and 7m50s, and `active_for` values (20m15s, 58m59s, 1h51m, 2h31m)
 # sit in the same row without an " ago" suffix, which is what keeps them out.
+#
+# The table ends at the first line that is not one of its own data rows, decided
+# by INDENTATION relative to the header: a row of this table is always indented
+# deeper than the header that introduced it, so anything at or left of the header
+# column - a following scalar, a sibling table, a blank line, the end of the
+# object - closes it. Terminating only on a header-shaped line was not enough: a
+# trailing scalar such as `updated: 3s ago` stayed inside the block and its token
+# became activity evidence, and because the SMALLEST age wins one stray token
+# after the table proved recent liveness for a run that had said nothing for
+# forty minutes - suppressing a genuine wedge escalation, the exact failure this
+# probe must never cause. A key-shaped line is still refused at any depth, so a
+# nested object under the table cannot re-open the same hole.
 fm_nm_last_activity_secs() {  # <toon-output>
   local block tok secs min=
   block=$(printf '%s\n' "${1:-}" | awk '
-    /active_steps\[/ { inblk = 1; next }
-    inblk && /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\[[0-9]+\])?(\{[^}]*\})?:[[:space:]]*$/ { inblk = 0 }
-    inblk { print }
+    !inblk && /active_steps\[/ {
+      match($0, /^[[:space:]]*/); header_indent = RLENGTH; inblk = 1; next
+    }
+    inblk {
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= header_indent) { inblk = 0; next }
+      if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*(\[[0-9]+\])?(\{[^}]*\})?:/) { inblk = 0; next }
+      print
+    }
   ')
   [ -n "$block" ] || return 0
   for tok in $(printf '%s\n' "$block" | grep -oE '[0-9][0-9hms]*[[:space:]]+ago' | sed 's/[[:space:]]*ago$//'); do

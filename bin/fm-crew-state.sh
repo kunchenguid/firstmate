@@ -404,12 +404,17 @@ nm_runs_status_for_branch() {  # <branch>
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
       # Same attribution policy as the axi-status path, phased by THIS row's own
-      # status: the runs list carries no outcome, so a `running` row is the
-      # active phase and every other word is terminal. That phasing is what stops
-      # the walk from doing the exact inversion this fallback was reported for -
-      # skipping a live row whose head it cannot place, then accepting an older
-      # cancelled row that still sits at the worktree HEAD and calling a healthy
-      # validation failed.
+      # status word. The runs list carries no outcome, so fm_nm_status_is_terminal
+      # judges the word alone and only completed/failed/cancelled are terminal:
+      # every other word - running, fixing, ci, awaiting_approval, fix_review, and
+      # any word this reader does not recognise - takes the ACTIVE phase. That
+      # phasing is what stops the walk from doing the exact inversion this
+      # fallback was reported for - skipping a live row whose head it cannot
+      # place, then accepting an older cancelled row that still sits at the
+      # worktree HEAD and calling a healthy validation failed. What an
+      # unrecognised word is then allowed to MEAN is coarse_run_state_for's
+      # business, not this walk's: attribution decides whose run a row describes,
+      # never what state it reports.
       phase=terminal
       fm_nm_status_is_terminal "$st" "" || phase=active
       if ! nm_coarse_head_attributable "$sha" "$phase"; then
@@ -447,6 +452,40 @@ nm_run_is_terminal() {
 # above.
 nm_coarse_head_attributable() {  # <short-sha> <active|terminal>
   fm_nm_run_attributable "$WT" "$1" "$2"
+}
+
+# The coarse runs list carries ONE status word per row and nothing else - no
+# outcome, no step, no gate - so this mapping is the entirety of what such a row
+# can say. Sets COARSE_RUN_STATE/COARSE_RUN_DETAIL and returns 0 for a word this
+# reader understands; returns 1 for every other word, and that 1 means the row
+# supplies no verdict at all.
+#
+# NOT KNOWING MUST NEVER BE ASSERTED AS KNOWLEDGE. The catch-all is therefore
+# silent by construction rather than by enumeration. A status word no-mistakes
+# adds later lands in it, and the honest answer to "what state is that" is to say
+# nothing and let the pane and status-log sources answer - not to emit `unknown`
+# sourced to the run step, which reads as a confident finding ABOUT the run and
+# suppresses every other source that could have answered. Listing today's
+# vocabulary and nothing else would reintroduce exactly that the moment a sixth
+# word ships, so the caller keys HAVE_RUN off this return value rather than off
+# the presence of a word.
+COARSE_RUN_STATE=""
+COARSE_RUN_DETAIL=""
+coarse_run_state_for() {  # <status-word>
+  COARSE_RUN_STATE=""
+  COARSE_RUN_DETAIL=""
+  case "$1" in
+    running)   COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="validating (background run)" ;;
+    fixing)    COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="validating (fixing, background run)" ;;
+    ci)        COARSE_RUN_STATE=working; COARSE_RUN_DETAIL="ci running (background run)" ;;
+    awaiting_approval|fix_review)
+               COARSE_RUN_STATE=parked;  COARSE_RUN_DETAIL="parked at $1 (background run)" ;;
+    completed) COARSE_RUN_STATE="done";  COARSE_RUN_DETAIL="run completed" ;;
+    failed)    COARSE_RUN_STATE=failed;  COARSE_RUN_DETAIL="run failed" ;;
+    cancelled) COARSE_RUN_STATE=failed;  COARSE_RUN_DETAIL="run cancelled" ;;
+    *)         return 1 ;;
+  esac
+  return 0
 }
 
 HAVE_RUN=0
@@ -493,7 +532,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # a wrong `working` would be recoverable where a wrong `failed` invites
           # tearing the crew down.
           COARSE_STATUS=""
-        else
+        elif coarse_run_state_for "$COARSE_STATUS"; then
           HAVE_RUN=1
           RUN_SOURCE=coarse
         fi
@@ -511,20 +550,18 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
+    # No step/gate detail is available from the plain runs list - only the one
+    # word coarse_run_state_for already mapped, which is why the mapping and the
+    # HAVE_RUN decision above are the same call: a row this reader cannot map
+    # never reaches here at all, it falls through to the pane and status-log
+    # sources instead. A crew genuinely parked at a gate still gets full detail
+    # once `axi status` reports its own branch again (e.g. once its own step is
+    # the most-recently-touched one), and its own needs-decision/blocked
+    # status-log append (a captain-relevant VERB) is surfaced through
+    # signal_reason_is_actionable regardless of this coarse-vs-full distinction,
+    # so a real gate is never silently missed.
+    RUN_STATE=$COARSE_RUN_STATE
+    RUN_DETAIL=$COARSE_RUN_DETAIL
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status

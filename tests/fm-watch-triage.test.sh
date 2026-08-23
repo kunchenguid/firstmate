@@ -548,13 +548,106 @@ test_run_activity_parsers() {
   [ -z "$(fm_nm_duration_secs 12)" ] || fail "a bare number parsed as a duration"
   [ -z "$(fm_nm_duration_secs '')" ] || fail "an empty token parsed as a duration"
   [ -z "$(fm_nm_duration_secs 'fix 6')" ] || fail "a non-duration parsed as a duration"
+  # Zero-padded components are ordinary in these tokens, and bash reads a
+  # zero-prefixed literal as OCTAL: `2m09s` and `08s` aborted the whole expansion
+  # with a diagnostic on stderr and returned nothing, which reads to the caller as
+  # "no usable age" - so the false wedge escalation this clock exists to suppress
+  # fired anyway. `1h05m` parsed, and was right only by the coincidence that octal
+  # and decimal agree below 8.
+  local err
+  [ "$(fm_nm_duration_secs 2m09s)" = 129 ] || fail "2m09s did not parse as 129 seconds"
+  [ "$(fm_nm_duration_secs 08s)" = 8 ] || fail "08s did not parse as 8 seconds"
+  [ "$(fm_nm_duration_secs 1h05m)" = 3900 ] || fail "1h05m did not parse as 3900 seconds"
+  err=$(fm_nm_duration_secs 2m09s 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a zero-padded duration wrote a diagnostic to stderr: $err"
+  err=$(fm_nm_duration_secs 08s 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a zero-padded seconds token wrote a diagnostic to stderr: $err"
+  # A component no real duration could carry is refused rather than wrapped around
+  # the arithmetic range, because a wrapped negative age reads as activity from the
+  # future and would suppress a genuine wedge.
+  [ -z "$(fm_nm_duration_secs 99999999999999999999s)" ] \
+    || fail "an out-of-range component was turned into a duration"
   local two
   two=$(printf 'run:\n  active_steps[2]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,2h31m,"5m10s ago: log: a","1","fix 6"\n    test,running,44m,"41s ago: log: b","2","fix 1"\n')
   [ "$(fm_nm_last_activity_secs "$two")" = 41 ] || fail "the most recent of several active steps did not win"
   [ -z "$(fm_nm_last_activity_secs 'run:
   status: running
   active_for: 2h31m')" ] || fail "active_for outside the active_steps table was read as activity"
+  # A scalar AFTER the table is not one of its rows. Because the smallest age wins,
+  # one stray ` ago` token following the table would prove recent liveness for a run
+  # that had said nothing for forty minutes, suppressing a genuine escalation.
+  local trailing
+  trailing=$(printf 'run:\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,50m,"40m2s ago: log: applying the fix","1827880",fix 1\nupdated: 3s ago\n')
+  [ "$(fm_nm_last_activity_secs "$trailing")" = 2402 ] \
+    || fail "a scalar after the active_steps table was read as step activity"
   pass "run-activity parsers: durations, the newest active step, and no-evidence cases"
+}
+
+# The run-activity probe's own wall-clock bound. It runs synchronously in the
+# watcher's poll loop at the exact moment an escalation would otherwise fire, so
+# an unresponsive CLI must cost the escalation the bound and nothing more: an
+# unbounded call stops the watcher updating its beacon and triaging every other
+# window, which is the wedge-the-supervisor failure the bound exists to prevent.
+# A zero or non-numeric FM_RUN_ACTIVITY_TIMEOUT is not a bound at all - `timeout 0`
+# and the perl fallback's `alarm 0` both cancel the deadline - so both must fall
+# back to a usable bound rather than be passed through.
+test_run_activity_probe_is_wall_clock_bounded() {
+  local dir state fakebin slowbin wt started elapsed zero_rc word_rc zero_pid word_pid
+  dir=$(make_case classify-run-probe-bound); state="$dir/state"
+  fakebin="$dir/fakebin"; slowbin="$dir/slowbin"; wt="$dir/wt"
+  mkdir -p "$slowbin"
+  make_fake_no_mistakes "$fakebin"
+  make_probe_repo "$wt" fm/bound
+  printf 'window=test:fm-bound\nkind=ship\nworktree=%s\n' "$wt" > "$state/bound.meta"
+  export FM_FAKE_AXI_STATUS
+  FM_FAKE_AXI_STATUS=$(fake_run_toon fm/bound running ffffff00 "32s ago: log: still working")
+
+  # The same answer, from a CLI that takes far longer than any bound to give it,
+  # so a probe that returns without it is a probe that was actually bounded.
+  cat > "$slowbin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+sleep 30
+case "${1:-}" in
+  axi) shift; case "${1:-}" in status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;; esac ;;
+esac
+exit 0
+SH
+  chmod +x "$slowbin/no-mistakes"
+
+  # A prompt CLI first, so the bounded assertions below cannot pass merely because
+  # this fixture never reports progress under any circumstances.
+  PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" \
+    || fail "a run answering inside its bound was not read as progress"
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=1 \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" \
+    && fail "a run-status call that outlived its bound was reported as progress"
+
+  # The two values that are not bounds. Run concurrently so proving both costs one
+  # fallback bound rather than two.
+  started=$(date +%s)
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=0 \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" &
+  zero_pid=$!
+  PATH="$slowbin:$PATH" FM_RUN_ACTIVITY_TIMEOUT=10m \
+    bash -c '. "$1"; crew_run_active_within bound "$2" 300' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" &
+  word_pid=$!
+  zero_rc=0; wait "$zero_pid" || zero_rc=$?
+  word_rc=0; wait "$word_pid" || word_rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$zero_rc" -ne 0 ] \
+    || fail "a zero FM_RUN_ACTIVITY_TIMEOUT let an unanswered call report progress"
+  [ "$word_rc" -ne 0 ] \
+    || fail "a non-numeric FM_RUN_ACTIVITY_TIMEOUT let an unanswered call report progress"
+  [ "$elapsed" -lt 25 ] \
+    || fail "an unusable FM_RUN_ACTIVITY_TIMEOUT was passed through: the probe held its caller for ${elapsed}s"
+  unset FM_FAKE_AXI_STATUS
+  pass "the run-activity probe is wall-clock bounded, and a zero or non-numeric bound falls back instead of disabling the deadline"
 }
 
 # End to end: the same crew the wedge timer would have escalated is SUPPRESSED
@@ -587,6 +680,13 @@ test_nonterminal_stale_run_active_suppressed_not_wedged() {
   # Absorbed on first sight, with the escalation timer already past the threshold.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
+  # A write-deferral chain left over from an EARLIER quiet stretch, long past the
+  # re-surface cadence. Suppression is a bookkeeping reset like every other one, so
+  # it must drop the chain: carrying it forward would make the next write deferral
+  # measure its age from an abandoned timestamp, waking once immediately and
+  # reporting a writing-for-Ns duration spanning a stretch with no writes in it.
+  echo $(( $(date +%s) - 100000 )) > "$state/.writing-since-$key"
+  echo $(( $(date +%s) - 100000 )) > "$state/.writing-resurfaced-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -594,6 +694,10 @@ test_nonterminal_stale_run_active_suppressed_not_wedged() {
   if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher exited instead of suppressing a crew whose validation is reporting progress: $(cat "$out")"
   fi
+  [ ! -e "$state/.writing-since-$key" ] \
+    || { reap "$pid"; fail "suppression kept a stale write-deferral chain, so the next deferral would resurface from an abandoned timestamp"; }
+  [ ! -e "$state/.writing-resurfaced-$key" ] \
+    || { reap "$pid"; fail "suppression kept a stale write re-surface throttle"; }
   grep -F "possible wedge" "$out" >/dev/null && { reap "$pid"; fail "a validation reporting progress 32s ago was still called a possible wedge"; }
   # Suppression, not a longer cadence: no wake reason, and nothing queued.
   [ ! -s "$out" ] || { reap "$pid"; fail "a suppressed run-active stale printed a wake reason: $(cat "$out")"; }
@@ -2881,5 +2985,6 @@ test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_crew_run_active_within_classifier
 test_run_activity_parsers
+test_run_activity_probe_is_wall_clock_bounded
 test_nonterminal_stale_run_active_suppressed_not_wedged
 test_nonterminal_stale_frozen_run_still_escalates

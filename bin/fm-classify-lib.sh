@@ -1329,7 +1329,14 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 # `no-mistakes axi status` call. Like the write probe's walk, that call runs
 # synchronously in the caller's poll loop at the exact moment an escalation would
 # otherwise fire, so an unresponsive CLI must cost the escalation the bound and
-# nothing more.
+# nothing more. Validated at point of use exactly as the write probe validates
+# its own bound: bin/fm-timeout-lib.sh states that a non-positive bound is not a
+# bound at all (`timeout 0` and the perl fallback's `alarm 0` both cancel the
+# deadline), and a non-integer `timeout` still accepts - `10m` - would hold the
+# poll loop for ten minutes, so a hung CLI would stop the watcher updating its
+# beacon and triaging every other window. That is the wedge-the-supervisor
+# failure this bound exists to prevent, so an unusable value falls back to the
+# default rather than being passed through.
 FM_RUN_ACTIVITY_TIMEOUT=${FM_RUN_ACTIVITY_TIMEOUT:-10}
 
 # 0 when crew <id>'s OWN no-mistakes run reports that it did something within the
@@ -1361,7 +1368,7 @@ FM_RUN_ACTIVITY_TIMEOUT=${FM_RUN_ACTIVITY_TIMEOUT:-10}
 # invocation, so callers must reach it only when they are otherwise about to
 # escalate, never on every poll.
 crew_run_active_within() {  # <id> <state> <secs>
-  local id=$1 state=$2 window=$3 wt kind branch out run_branch run_head status outcome age
+  local id=$1 state=$2 window=$3 wt kind branch out run_branch run_head status outcome age bound
   [ -n "$id" ] || return 1
   case "$window" in ''|*[!0-9]*) return 1 ;; esac
   command -v no-mistakes >/dev/null 2>&1 || return 1
@@ -1371,7 +1378,9 @@ crew_run_active_within() {  # <id> <state> <secs>
   [ -z "$kind" ] || [ "$kind" = ship ] || return 1
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
-  out=$(fm_nm_run "$wt" "$FM_RUN_ACTIVITY_TIMEOUT" axi status)
+  bound=$FM_RUN_ACTIVITY_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  out=$(fm_nm_run "$wt" "$bound" axi status)
   [ -n "$out" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1

@@ -181,11 +181,19 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # Idle secs before a stale pane escalates as a possible wedge when nothing can
 # prove its crew is alive. Deliberately NOT a knob for quieting long pipeline
 # steps: raising it would buy quiet by slowing detection of a genuinely wedged
-# crew. At the threshold the crew gets one chance to prove PROGRESS - its own
-# run's activity clock (crew_run_active_within) or writes in its worktree
-# (crew_worktree_written_since). Proven progress suppresses the escalation and
-# restarts this window from the proof; anything less escalates on schedule,
-# because a frozen run and a working one look identical from outside.
+# crew. At the threshold the crew gets one chance to prove PROGRESS, through two
+# probes with deliberately DIFFERENT outcomes:
+#   - its own run's activity clock (crew_run_active_within) SUPPRESSES the
+#     escalation outright, with no wake at all, and restarts this window from the
+#     proof - the pipeline reporting on itself is the strongest evidence there is
+#     (wedge_suppress_run_active).
+#   - writes in its worktree (crew_worktree_written_since) DEFER the escalation
+#     and restart this window, but the deferral chain keeps ageing, so the pane
+#     still re-surfaces once every PAUSE_RESURFACE_SECS for a recheck
+#     (wedge_defer_writing). A churning worktree is evidence of activity, not of
+#     progress, so it buys a longer cadence rather than silence.
+# Neither proven, and the escalation fires on the unchanged schedule, because a
+# frozen run and a working one look identical from outside.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -552,10 +560,18 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # no-mistakes' own idle timeout and fix-round caps, and any gate or terminal
 # state it reaches appends status and wakes the supervisor through the ordinary
 # signal path.
+#
+# This is a bookkeeping reset like every other one here, so it drops the write
+# deferral chain too: a .writing-since-<key> left by an earlier deferral would
+# otherwise keep ageing across the whole suppressed stretch, and the next write
+# deferral would measure its re-surface age from that abandoned chain - waking
+# once immediately and reporting a "writing its worktree for Ns" duration that
+# spans a period the crew spent not writing at all.
 wedge_suppress_run_active() {  # <window> <since-file> <triage-label> <idle-age>
-  local since_file=$2 label=$3 age=$4
+  local win=$1 since_file=$2 label=$3 age=$4
   date +%s > "$since_file"
-  triage_log "absorbed $label (validation reported activity inside the idle window, idle ${age}s): $1"
+  clear_write_tracking "$(window_key "$win")"
+  triage_log "absorbed $label (validation reported activity inside the idle window, idle ${age}s): $win"
 }
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
@@ -574,9 +590,12 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# BOTH progress probes run ONLY here, inside the at-threshold branch that is about
+# to escalate: at most one bounded run-status call and one bounded worktree walk
+# per window per STALE_ESCALATE_SECS, never per poll. Their outcomes are not the
+# same and must not be collapsed - run activity SUPPRESSES the escalation with no
+# wake, worktree writes DEFER it on the bounded re-surface cadence, and with
+# neither proven the escalation fires on the unchanged schedule.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)

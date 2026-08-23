@@ -1619,6 +1619,85 @@ test_other_branch_terminal_run_never_reports_failed() {
   pass "a terminal run on a foreign branch is refused, even at this worktree's own head"
 }
 
+# --- what a coarse row is allowed to MEAN -----------------------------------
+# The runs list carries one status word and nothing else, so the mapping from that
+# word to a state is the whole of what such a row can say. Every word no-mistakes
+# emits today maps; anything else must not, because NOT KNOWING MUST NEVER BE
+# ASSERTED AS KNOWLEDGE. Claiming a run-step verdict of `unknown` for a word this
+# reader does not understand is a confident finding about the run, and it silences
+# the pane and status-log sources that could have answered - which is how a plainly
+# running crew reads as `unknown - source: run-step` instead of working.
+#
+# Deliberately fed a word no-mistakes does not emit today: what is pinned is the
+# behaviour of the CATCH-ALL, not the vocabulary, so a sixth word added upstream
+# degrades to the fallbacks instead of reintroducing this.
+test_unrecognised_coarse_status_falls_through_to_pane() {
+  reset_fakes
+  local d out; d=$(new_case coarse-unknown-word-pane)
+  make_repo_on_branch "$d/wt" fm/coarse-newword
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nw.meta" "window=fm:fm-nw" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/nw.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  reticulating  fm/coarse-newword ${FM_FAKE_RUN_HEAD}  2026-08-23 01:10
+EOF
+)"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" nw)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" nw busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" nw)
+  assert_not_contains "$out" "source: run-step" "an unrecognised coarse word must not supply a run-step verdict"
+  assert_not_contains "$out" "state: unknown" "an unrecognised coarse word must not be reported as an unknown run state"
+  assert_not_contains "$out" "reticulating" "an unrecognised coarse word must not be echoed as a verdict detail"
+  assert_contains "$out" "source: pane" "the pane fallback must still run"
+  assert_contains "$out" "state: working" "a busy pane still reports the crew as working"
+  pass "an unrecognised coarse status word falls through to the pane instead of asserting an unknown run state"
+}
+
+test_unrecognised_coarse_status_falls_through_to_status_log() {
+  reset_fakes
+  local d out; d=$(new_case coarse-unknown-word-log)
+  make_repo_on_branch "$d/wt" fm/coarse-newword2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nw2.meta" "window=fm:fm-nw2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: [key=gate] which option\n' > "$d/state/nw2.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  reticulating  fm/coarse-newword2 ${FM_FAKE_RUN_HEAD}  2026-08-23 01:10
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" nw2
+  out=$(run_crew_state "$d" nw2)
+  assert_not_contains "$out" "source: run-step" "an unrecognised coarse word must not supply a run-step verdict"
+  assert_not_contains "$out" "state: unknown" "an unrecognised coarse word must not be reported as an unknown run state"
+  assert_contains "$out" "source: status-log" "the status-log fallback must still run"
+  pass "an unrecognised coarse status word leaves the status log free to answer"
+}
+
+# The recognised non-terminal words the coarse walk can now attribute: a fix round
+# and a gate both have a word here, and neither is terminal, so neither may be
+# dropped into the catch-all.
+test_coarse_gate_word_reports_parked() {
+  reset_fakes
+  local d out; d=$(new_case coarse-gate-word)
+  make_repo_on_branch "$d/wt" fm/coarse-gate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cg.meta" "window=fm:fm-cg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/cg.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  fix_review  fm/coarse-gate ${CUSTODY_HEAD}  2026-08-23 01:10
+EOF
+)"
+  out=$(run_crew_state "$d" cg)
+  assert_contains "$out" "state: parked" "a coarse fix_review row is a run parked at a gate"
+  assert_contains "$out" "source: run-step" "the attributed coarse row supplies the verdict"
+  pass "a coarse gate word reports parked rather than falling into the catch-all"
+}
+
 # The same guard, one layer down: every coarse runs-list row is matched on branch
 # before its sha is considered, so a foreign row sitting at this worktree's exact
 # HEAD is still refused.
@@ -1706,6 +1785,9 @@ test_coarse_unrelated_sha_still_rejected
 test_coarse_terminal_row_never_outranks_active_named_run
 test_custody_run_closes_unknown_none_after_resolved_event
 test_other_branch_terminal_run_never_reports_failed
+test_unrecognised_coarse_status_falls_through_to_pane
+test_unrecognised_coarse_status_falls_through_to_status_log
+test_coarse_gate_word_reports_parked
 test_coarse_foreign_branch_row_at_our_head_refused
 
 echo "all fm-crew-state tests passed"
