@@ -806,6 +806,51 @@ test_turn_ended_churning_pane_absorbed() {
   pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
 }
 
+test_turn_ended_churn_resets_prior_stale_classification() {
+  local dir state fakebin out capture_file window key old_hash active_hash pid i
+  dir=$(make_case turn-ended-churn-resets-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexreturned"
+  : > "$state/codexreturned.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexreturned.meta"
+  old_hash=$(hash_text 'idle prompt from an earlier turn')
+  active_hash=$(hash_text 'rendering a new turn')
+  printf 'rendering a new turn' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$old_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$old_hash" > "$state/.stale-$key"
+  date +%s > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a churning turn-end with prior stale state was not absorbed: $(cat "$out")"; }
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" != "$active_hash" ]; do
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited before recording the active pane"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.hash-$key" 2>/dev/null || true)" = "$active_hash" ] \
+    || { reap "$pid"; fail "watcher did not record the active pane after absorbing its turn-end"; }
+
+  # The worker stops on bytes that happened to be stale in an earlier turn.
+  # This is a new quiet interval, so it must surface through ordinary staleness
+  # instead of inheriting the earlier interval's wedge timer.
+  printf 'idle prompt from an earlier turn' > "$capture_file"
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a stopped pane matching an earlier stale render waited for the wedge timeout"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "the returned stale render did not surface through ordinary staleness"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the returned stale render inherited the earlier quiet interval's wedge classification"
+  unset FM_FAKE_CREW_STATE
+  pass "pane churn starts a fresh stale-classification interval before a stopped render returns"
+}
+
 # The safety half: the same unverifiable harness, the same fixture, but the pane
 # has NOT changed since the previous poll. There is no positive evidence, so the
 # wake must still surface - a stopped worker is exactly what the turn-end marker
@@ -3302,6 +3347,7 @@ test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
+test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced

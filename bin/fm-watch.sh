@@ -412,12 +412,16 @@ inbox_steer_check() {  # <window> <task>
 # append is content the supervisor may need to read, so only the mechanical
 # turn-end marker gets this fallback.
 #
-# NOT a pure read: one bounded pane capture per referenced task. Reached only for
-# a no-verb turn-end whose crew is not already provably working - precisely the
+# NOT a pure read: one bounded pane capture per referenced task. Once EVERY task
+# passes, its prior .stale- classification is cleared because churn begins a new
+# quiet interval; retaining an older matching hash would route a later stopped
+# render through the wedge timer instead of ordinary stale surfacing. Reached only
+# for a no-verb turn-end whose crew is not already provably working - precisely the
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
   local f base task meta kind w key other matches prev now seen=""
+  local -a churned_keys=()
   [ "$#" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
@@ -448,6 +452,10 @@ signal_turnend_panes_churned() {  # <file> ...
     now=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
+    churned_keys+=("$key")
+  done
+  for key in "${churned_keys[@]}"; do
+    rm -f "$STATE/.stale-$key" || return 1
   done
   return 0
 }
