@@ -147,9 +147,22 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      printf '%s\n' "$remote_out" | sed 's/^/  /'
+    remote_status=0
+    remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) \
+      || remote_status=$?
+    printf '%s\n' "$remote_out" | fm_config_relay_remote_deviations "$id"
+    if [ -n "$remote_out" ]; then
+      while IFS= read -r remote_line; do
+        case "$remote_line" in
+          deviation:*|deviation-rejected:*) ;;
+          *) printf '  %s\n' "$remote_line" ;;
+        esac
+      done <<EOF
+$remote_out
+EOF
+    fi
+    if [ "$remote_status" -eq 0 ]; then
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
@@ -166,7 +179,6 @@ while IFS='|' read -r id home _window meta; do
         rm -f -- "$remote_marker"
       fi
     else
-      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
     fm_lock_release "$remote_lock" || true

@@ -184,6 +184,17 @@ fm_config_deviation_display() {  # <path>
   fi
 }
 
+fm_config_relay_remote_deviations() {  # <secondmate-id>, remote output on stdin
+  local id=$1 line
+  while IFS= read -r line; do
+    case "$line" in
+      deviation:*|deviation-rejected:*)
+        printf 'SECONDMATE_SYNC: secondmate %s: %s\n' "$id" "$line"
+        ;;
+    esac
+  done
+}
+
 # fm_config_deviation_holds <dest-config-dir> <item> <src> <dest>
 # Called only where convergence is about to CHANGE <dest>, so an item the
 # primary already agrees with reports nothing. Returns 0 when the destination

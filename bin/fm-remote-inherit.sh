@@ -129,7 +129,7 @@ commit_generation() {
 # pushed/removed/unchanged, so a remote divergence is as visible as a local one
 # (bin/fm-config-inherit-lib.sh owns the record contract).
 deviation_holds() {
-  local item answer rc
+  local primary=$1 item answer rc
   case "$REL" in
     config/*) item=${REL#config/} ;;
     *) return 1 ;;
@@ -137,11 +137,14 @@ deviation_holds() {
   answer=$(fm_config_deviation_evidence "$PARENT_REAL" "$item") && rc=0 || rc=$?
   case "$rc" in
     0)
-      printf 'deviation: %s held locally: %s\n' "$REL" "$answer"
+      printf 'deviation: %s held locally at %s against primary %s: %s\n' \
+        "$REL" "$(fm_config_deviation_display "$DEST")" \
+        "$(fm_config_deviation_display "$primary")" "$answer"
       return 0
       ;;
     2)
-      printf 'deviation-rejected: %s (%s)\n' "$REL" "$answer"
+      printf 'deviation-rejected: %s deviation record rejected (%s); converging to the primary value\n' \
+        "$REL" "$answer"
       ;;
   esac
   return 1
@@ -172,12 +175,12 @@ case "$COMMAND" in
     ACTUAL_HASH=$(sha256_file "$TMP") || die "cannot hash inherited material"
     [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || die "inherited material digest does not match its commitment"
     commit_generation
-    if deviation_holds; then
-      exit 0
-    fi
     if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
       printf 'unchanged: %s\n' "$REL"
+      exit 0
+    fi
+    if deviation_holds "$TMP"; then
       exit 0
     fi
     quarantine_shared replaced
@@ -195,11 +198,11 @@ case "$COMMAND" in
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
     commit_generation
-    if deviation_holds; then
-      exit 0
-    fi
     if [ ! -e "$DEST" ]; then
       printf 'unchanged: %s\n' "$REL"
+      exit 0
+    fi
+    if deviation_holds "$EMPTY"; then
       exit 0
     fi
     quarantine_shared removed

@@ -190,6 +190,8 @@ test_remote_receiver_honors_the_record() {
     || fail "remote convergence reverted an honored deviation"
   assert_contains "$out" "deviation: config/backend" \
     "the remote receiver must report the divergence to the pushing primary"
+  assert_contains "$out" 'held locally at "tmux" against primary "herdr"' \
+    "the remote divergence must carry both bounded values"
 
   # Control: with the record gone the same receiver converges as it always did,
   # so honoring a deviation never becomes the remote path's default.
@@ -202,6 +204,69 @@ test_remote_receiver_honors_the_record() {
     || fail "remote convergence stopped applying the primary value"
   assert_contains "$out" "pushed: config/backend" "an ordinary remote push still reports pushed"
   pass "a remote home's deviation record is honored and reported too"
+}
+
+test_remote_receiver_agreement_stays_quiet() {
+  local home payload out empty_hash
+  home="$TMP_ROOT/remote-agreeing/home"
+  mkdir -p "$home/config"
+  printf 'tmux\n' > "$home/config/backend"
+  printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+  payload="$TMP_ROOT/remote-agreeing/payload"
+  printf 'tmux\n' > "$payload"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+    "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" \
+    "$(fm_inherit_sha256 "$payload")" 1 < "$payload") \
+    || fail "remote receiver failed on an agreeing value"
+  assert_contains "$out" "unchanged: config/backend" \
+    "an agreeing remote value must retain the ordinary unchanged result"
+  assert_not_contains "$out" "deviation:" \
+    "an agreeing remote value must not report a divergence"
+
+  rm -f "$home/config/backend"
+  empty_hash=$(printf '' | fm_inherit_sha256 /dev/stdin)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" absent config/backend \
+    0 "$empty_hash" 2 < /dev/null) \
+    || fail "remote receiver failed on agreeing absence"
+  assert_contains "$out" "unchanged: config/backend" \
+    "agreeing remote absence must retain the ordinary unchanged result"
+  assert_not_contains "$out" "deviation:" \
+    "agreeing remote absence must not report a divergence"
+  pass "a remote deviation record stays quiet when values agree"
+}
+
+test_remote_receiver_reports_primary_absence() {
+  local home out empty_hash
+  home="$TMP_ROOT/remote-absence/home"
+  mkdir -p "$home/config"
+  printf 'tmux\n' > "$home/config/backend"
+  printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+  empty_hash=$(printf '' | fm_inherit_sha256 /dev/stdin)
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" absent config/backend \
+    0 "$empty_hash" 1 < /dev/null) \
+    || fail "remote receiver failed on a deviation against primary absence"
+  assert_contains "$out" 'held locally at "tmux" against primary absence' \
+    "the remote divergence must name primary absence"
+  [ "$(cat "$home/config/backend")" = tmux ] \
+    || fail "remote primary absence erased an honored local value"
+  pass "a remote divergence names primary absence"
+}
+
+test_remote_deviation_relay_survives_later_failure() {
+  local out
+  out=$(printf '%s\n' \
+    'unchanged: config/crew-harness' \
+    'deviation: config/backend held locally at "tmux" against primary "herdr": verified' \
+    'error: later item failed' \
+    | fm_config_relay_remote_deviations ios)
+  assert_contains "$out" \
+    'SECONDMATE_SYNC: secondmate ios: deviation: config/backend held locally at "tmux" against primary "herdr": verified' \
+    "the primary relay must preserve a divergence before a later failure"
+  assert_not_contains "$out" "later item failed" \
+    "the divergence relay must not misclassify ordinary remote output"
+  pass "remote divergence relay is independent of overall push success"
 }
 
 test_remote_receiver_commits_honored_generation() {
@@ -242,4 +307,7 @@ test_record_without_evidence_is_refused
 test_record_for_a_non_deviable_item_is_refused
 test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
+test_remote_receiver_agreement_stays_quiet
+test_remote_receiver_reports_primary_absence
+test_remote_deviation_relay_survives_later_failure
 test_remote_receiver_commits_honored_generation
