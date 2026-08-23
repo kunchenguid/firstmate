@@ -8,9 +8,13 @@
 # launches a worker, and refuses admission unless all four of the following
 # are true, each independently proven rather than assumed:
 #
-#   1. push-path       the resolved push target (a 'fork' remote if one is
-#                       configured, else 'origin') actually accepts a push
-#                       from the authenticated GitHub identity.
+#   1. push-path       the resolved push target actually accepts a push from
+#                       the authenticated GitHub identity: for no-mistakes
+#                       mode with a 'no-mistakes' remote configured, that is
+#                       the delivery remote 'no-mistakes status' reports (the
+#                       'no-mistakes' git remote itself is a local gate repo,
+#                       never the real upstream); otherwise it is a 'fork'
+#                       remote if one is configured, else 'origin'.
 #   2. delivery-path    the requested --mode can complete for THIS repo:
 #                       no-mistakes requires the repo to be no-mistakes
 #                       initialized; direct-PR requires that no committed
@@ -40,11 +44,15 @@
 #     project hosted elsewhere gets an explicit "cannot verify" refusal rather
 #     than a silent pass, because this check has no other forge's permissions
 #     API wired up yet.
-#   - Check 2's direct-PR detection is a structural grep for the literal marker
-#     no-mistakes itself writes into a PR body ("git push no-mistakes") inside
-#     a pull_request-triggered workflow. It catches the no-mistakes-required
-#     convention (which is what actually blocked direct-PR on firstmate's own
-#     repo); it does not evaluate arbitrary branch-protection rules.
+#   - Check 2's direct-PR detection is a structural grep for a pull_request-
+#     triggered workflow that both reads the PR body (references
+#     "pull_request.body") and checks it for the literal marker no-mistakes
+#     itself writes ("git push no-mistakes"). Requiring the pull_request.body
+#     reference keeps an unrelated comment, doc string, or echo that merely
+#     mentions the phrase from being mistaken for enforcement. It catches the
+#     no-mistakes-required convention (which is what actually blocked
+#     direct-PR on firstmate's own repo); it does not evaluate arbitrary
+#     branch-protection rules.
 #   - Check 3 measures quota-axi's own reported state. AGENTS.md section 4
 #     treats missing quota data as "disclosed uncertainty that keeps a
 #     candidate eligible" when CHOOSING among harnesses at intake - a
@@ -141,11 +149,25 @@ fm_preflight_github_owner_repo() {  # <remote-url> -> "<owner>/<repo>" on stdout
 }
 
 fm_preflight_check_push_path() {  # <project-dir> <mode>
-  local dir=$1 mode=$2 remote_name target_url owner_repo perm
+  local dir=$1 mode=$2 remote_name target_url owner_repo perm nm_status nm_target
   if [ "$mode" = local-only ]; then
     return 0
   fi
-  if target_url=$(git -C "$dir" remote get-url fork 2>/dev/null); then
+  if [ "$mode" = no-mistakes ] && git -C "$dir" remote get-url no-mistakes >/dev/null 2>&1; then
+    # The 'no-mistakes' git remote is always a local gate repo (see
+    # bin/fm-home-seed.sh and tests/fm-secondmate-safety.test.sh), never the
+    # real upstream, so checking IT for push permission would be meaningless.
+    # 'no-mistakes status' reports the actual delivery destination it will
+    # push to once its pipeline passes.
+    nm_status=$(cd "$dir" && "$FM_PREFLIGHT_NM_CMD" status 2>&1) || true
+    nm_target=$(printf '%s' "$nm_status" | sed -n 's/^[[:space:]]*remote:[[:space:]]*//p' | head -n1)
+    if [ -z "$nm_target" ]; then
+      FM_PREFLIGHT_FAIL_REASON="'$FM_PREFLIGHT_NM_CMD status' in $dir did not report its configured delivery remote; cannot verify push access to the real no-mistakes-managed target"
+      return 1
+    fi
+    remote_name=no-mistakes
+    target_url=$nm_target
+  elif target_url=$(git -C "$dir" remote get-url fork 2>/dev/null); then
     remote_name=fork
   elif target_url=$(git -C "$dir" remote get-url origin 2>/dev/null); then
     remote_name=origin
@@ -154,7 +176,11 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
     return 1
   fi
   owner_repo=$(fm_preflight_github_owner_repo "$target_url") || {
-    FM_PREFLIGHT_FAIL_REASON="push path unverifiable: remote '$remote_name' ($target_url) is not a github.com URL this check can inspect"
+    if [ "$remote_name" = no-mistakes ]; then
+      FM_PREFLIGHT_FAIL_REASON="push path unverifiable: the no-mistakes-configured delivery remote ($target_url) is not a github.com URL this check can inspect"
+    else
+      FM_PREFLIGHT_FAIL_REASON="push path unverifiable: remote '$remote_name' ($target_url) is not a github.com URL this check can inspect"
+    fi
     return 1
   }
   perm=$("$FM_PREFLIGHT_GH_CMD" api "repos/$owner_repo" --jq '.permissions.push' 2>/dev/null) || {
@@ -164,7 +190,9 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
   case "$perm" in
     true) return 0 ;;
     false)
-      if [ "$remote_name" = origin ]; then
+      if [ "$remote_name" = no-mistakes ]; then
+        FM_PREFLIGHT_FAIL_REASON="no push access to the no-mistakes-configured delivery target ($owner_repo)"
+      elif [ "$remote_name" = origin ]; then
         FM_PREFLIGHT_FAIL_REASON="no push access to origin ($owner_repo), and no 'fork' remote is configured as an alternate push target"
       else
         FM_PREFLIGHT_FAIL_REASON="no push access to the configured fork remote ($owner_repo)"
@@ -201,8 +229,15 @@ fm_preflight_check_delivery_path() {  # <project-dir> <mode>
     direct-PR)
       for f in "$dir"/.github/workflows/*.yml "$dir"/.github/workflows/*.yaml; do
         [ -f "$f" ] || continue
-        if grep -q 'pull_request' "$f" 2>/dev/null && grep -qF 'git push no-mistakes' "$f" 2>/dev/null; then
-          FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (matches the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
+        # Require all three: a pull_request trigger, an actual read of the PR
+        # body (not just the phrase appearing in a comment/echo/doc string
+        # elsewhere in the file), and the no-mistakes marker text - so an
+        # unrelated mention of "git push no-mistakes" cannot be mistaken for
+        # enforcement.
+        if grep -q 'pull_request' "$f" 2>/dev/null \
+          && grep -q 'pull_request\.body' "$f" 2>/dev/null \
+          && grep -qF 'git push no-mistakes' "$f" 2>/dev/null; then
+          FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (checks pull_request.body for the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
           return 1
         fi
       done

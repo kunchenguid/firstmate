@@ -116,6 +116,34 @@ test_push_path_fork_remote_restores_access() {
   pass "push-path passes when a pushable fork remote is configured"
 }
 
+test_push_path_no_mistakes_remote_is_the_real_target() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/pp-nm-target")
+  # A pushable fork remote is configured, but a 'no-mistakes' remote (always a
+  # local gate repo, never the real upstream) is ALSO configured, and its
+  # reported delivery destination is a non-GitHub URL. The real target - not
+  # the fork - must be what gets checked, so this must refuse as unverifiable
+  # even though the fork remote itself would pass.
+  git -C "$dir" remote add fork https://github.com/me/widgets.git
+  git -C "$dir" remote add no-mistakes "$TMP_ROOT/pp-nm-target-gate.git"
+  fakebin=$(fm_fakebin "$TMP_ROOT/pp-nm-target-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  printf '%s\n' "    repo:  /fake" "  remote:  https://gitlab.example.com/acme/widgets.git" "    gate:  /fake/.no-mistakes/repos/fake.git"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" no-mistakes claude "$fakebin")
+  status=$?
+  expect_code 4 "$status" "push-path must check the no-mistakes-configured delivery remote, not the pushable fork remote, when a no-mistakes remote exists"
+  assert_contains "$out" "error: preflight refused [push-path]:" "refusal must name push-path"
+  assert_contains "$out" "no-mistakes-configured delivery remote" "reason should name the actual no-mistakes delivery target, not the fork"
+  pass "push-path uses the no-mistakes-configured delivery remote instead of a pushable fork/origin when no-mistakes is initialized"
+}
+
 test_push_path_non_github_remote_unverifiable() {
   local dir fakebin out status
   dir=$(make_repo "$TMP_ROOT/pp-nongh")
@@ -169,8 +197,14 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
     steps:
-      - run: echo "Contributions must be submitted via 'git push no-mistakes'."
+      - run: |
+          if ! printf '%s' "$PR_BODY" | grep -qF 'git push no-mistakes'; then
+            echo "Contributions must be submitted via 'git push no-mistakes'." >&2
+            exit 1
+          fi
 YML
   fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-blocked-bin")
   fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
@@ -196,6 +230,30 @@ test_delivery_path_direct_pr_without_required_workflow_passes() {
   assert_not_contains "$out" "[delivery-path]" "an ordinary CI workflow must not trip the no-mistakes-marker heuristic"
   [ "$status" -ne 4 ] || fail "direct-PR should not refuse without a no-mistakes-required workflow: $out"
   pass "delivery-path passes direct-PR when no workflow requires the no-mistakes marker"
+}
+
+test_delivery_path_direct_pr_unrelated_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-mention")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Maintainers: contributions are normally submitted via 'git push no-mistakes'.
+      - run: echo "building"
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-mention-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "a workflow that only mentions the marker in a comment must not trip the no-mistakes-body heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker is not tied to a PR-body check: $out"
+  pass "delivery-path does not refuse direct-PR when 'git push no-mistakes' appears only in an unrelated comment, not a PR-body enforcement check"
 }
 
 # --- check 3: quota headroom ---------------------------------------------------
@@ -405,11 +463,13 @@ test_spawn_wiring_admits_and_launches_normally() {
 
 test_push_path_no_fork_no_access_refuses
 test_push_path_fork_remote_restores_access
+test_push_path_no_mistakes_remote_is_the_real_target
 test_push_path_non_github_remote_unverifiable
 test_push_path_local_only_needs_no_remote
 test_delivery_path_no_mistakes_uninitialized_refuses
 test_delivery_path_direct_pr_blocked_by_required_workflow_refuses
 test_delivery_path_direct_pr_without_required_workflow_passes
+test_delivery_path_direct_pr_unrelated_mention_does_not_refuse
 test_quota_stale_refuses
 test_quota_exhausted_refuses
 test_quota_healthy_passes
