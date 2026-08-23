@@ -16,7 +16,7 @@
 #      pane_current_command is deliberately not read - version-named harness
 #      binaries broke that check and produced duplicate sessions (W3).
 #   3. Neither holds -> dead: after the debounce the revival types
-#      $FM_TOTMANN_RELAUNCH_CMD (default `claude3 --continue`) into the target
+#      $FM_TOTMANN_RELAUNCH_CMD (default `claude4 --continue`) into the target
 #      window, creating session and window when missing, and notifies the
 #      captain best-effort via the notifier.
 #
@@ -30,7 +30,8 @@
 #
 # Environment:
 #   FM_TOTMANN_TARGET        tmux target pane (default firstmate:0)
-#   FM_TOTMANN_RELAUNCH_CMD  command typed to revive (default: claude3 --continue)
+#   FM_TOTMANN_RELAUNCH_CMD  command typed to revive (default: claude4 --continue;
+#                            follows the firstmate seat - account 4 since O-0006, 23.08.2026)
 #   FM_TOTMANN_TMUX          extra tmux args, e.g. "-L testsock" (tests)
 #   FM_TOTMANN_DEBOUNCE      seconds between revivals (default 1800)
 #   FM_TOTMANN_NOTIFY        notifier executable (default claw-notify; "" disables)
@@ -42,7 +43,7 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="$FM_HOME/state"
 TARGET="${FM_TOTMANN_TARGET:-firstmate:0}"
 SESSION="${TARGET%%:*}"
-RELAUNCH="${FM_TOTMANN_RELAUNCH_CMD:-claude3 --continue}"
+RELAUNCH="${FM_TOTMANN_RELAUNCH_CMD:-claude4 --continue}"
 DEBOUNCE="${FM_TOTMANN_DEBOUNCE:-1800}"
 NOTIFY="${FM_TOTMANN_NOTIFY-claw-notify}"
 read -r -a TMUX_EXTRA <<< "${FM_TOTMANN_TMUX:-}"
