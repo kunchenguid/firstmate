@@ -152,7 +152,8 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# Print the pid of the session the harness itself publishes, or return 1.
+# Print the pid of the session the harness itself publishes for lock path $1,
+# or return 1.
 #
 # Ancestry answers "which harness am I running inside" only while the caller is
 # actually a descendant of its session. Claude Code serves tool and hook
@@ -165,9 +166,11 @@ fm_harness_pid_alive() {
 # publishes one today; every other harness has no such variable and keeps the
 # ancestry-only behavior below unchanged.
 #
-# The pid is trusted only while it is still a live Claude Code process, so a
-# value inherited from an exited session whose pid has been recycled onto
-# something else - or onto a different harness entirely - proves nothing.
+# The pid is trusted only while it is still a live Claude Code process that
+# predates the lock. The lock's existing mtime is process-generation evidence:
+# if an exited session's pid is recycled, the replacement process necessarily
+# starts after the lock the original session published and is rejected even
+# when the replacement is another Claude process.
 #
 # Trust boundary. The variable is inherited by any child, so on its own it says
 # "a Claude session named this pid", never "I am that session". That is why
@@ -177,13 +180,27 @@ fm_harness_pid_alive() {
 # one, which is true however deep the caller sits below that session. It can
 # therefore never let a caller take a lock away from another session, and never
 # turns an unheld lock into a held one.
-fm_harness_session_pid() {
-  local pid=${CLAUDE_PID:-}
+fm_harness_session_pid() {  # <lock-path>
+  local lock=$1 pid=${CLAUDE_PID:-} started started_epoch lock_epoch
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
   fm_harness_pid_alive "$pid" || return 1
   [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  started=$(printf '%s' "$started" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$started" ] || return 1
+  started_epoch=$(LC_ALL=C date -d "$started" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$started" +%s 2>/dev/null) \
+    || return 1
+  lock_epoch=$(stat -f %m "$lock" 2>/dev/null) \
+    || lock_epoch=$(stat -c %Y "$lock" 2>/dev/null) \
+    || return 1
+  case "$started_epoch:$lock_epoch" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  [ "$started_epoch" -le "$lock_epoch" ] || return 1
   printf '%s\n' "$pid"
 }
 
@@ -208,7 +225,7 @@ fm_session_lock_owned_by_self() {
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  if session_pid=$(fm_harness_session_pid) && [ "$session_pid" = "$lock_pid" ]; then
+  if session_pid=$(fm_harness_session_pid "$state/.lock") && [ "$session_pid" = "$lock_pid" ]; then
     return 0
   fi
   pids=$(fm_harness_ancestry_pids) || return 1

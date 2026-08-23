@@ -243,6 +243,7 @@ case "$pid:$field" in
   700:comm=) printf '%s\n' claude ;;
   700:args=) printf '%s\n' 'claude --model opus' ;;
   700:ppid=) printf '%s\n' 1 ;;
+  700:lstart=) printf '%s\n' "${FM_TEST_SESSION_START:-Thu Jan  1 00:00:00 1970}" ;;
   650:comm=) printf '%s\n' claude ;;
   650:args=) printf '%s\n' 'claude --model opus' ;;
   650:ppid=) printf '%s\n' 1 ;;
@@ -264,6 +265,15 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$1/ps"
+  cat > "$1/stat" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_TEST_LOCK_MTIME:-}" ]; then
+  printf '%s\n' "$FM_TEST_LOCK_MTIME"
+else
+  exec /usr/bin/stat "$@"
+fi
+SH
+  chmod +x "$1/stat"
 }
 
 test_pool_served_session_owns_the_lock_it_holds() {
@@ -278,7 +288,8 @@ test_pool_served_session_owns_the_lock_it_holds() {
   # cannot see the session and every re-verification would refuse this home.
   [ "$(lib_eval "$fakebin" 'fm_harness_ancestry_pid')" = 300 ] \
     || fail "fixture did not reproduce a pool-served call rooted at pid 1"
-  CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+  FM_TEST_LOCK_MTIME=172800 CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "a session served by a reparented worker pool could not prove it owns its own lock"
   pass "session-lock: a session served by a worker pool proves it owns the lock it holds"
 }
@@ -293,13 +304,14 @@ test_pool_served_session_never_claims_another_session_lock() {
   # 650 is a different live session. Widening ownership to the published session
   # pid must not widen it to any other live harness.
   printf '650\n' > "$dir/state/.lock"
-  if CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+  if FM_TEST_LOCK_MTIME=172800 CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
     fail "a lock held by a different live session was claimed as this session's own"
   fi
   pass "session-lock: a pool-served session never claims a lock held by another session"
 }
 
-test_published_session_pid_is_trusted_only_while_it_is_a_live_harness() {
+test_published_session_pid_requires_the_original_live_harness_generation() {
   local dir fakebin
   dir="$TMP_ROOT/pool-stale"
   fakebin=$(fm_fakebin "$dir")
@@ -322,7 +334,16 @@ test_published_session_pid_is_trusted_only_while_it_is_a_live_harness() {
   if CLAUDE_PID=660 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
     fail "a published session pid pointing at a different harness was trusted"
   fi
-  pass "session-lock: a published session pid is trusted only while it is a live Claude session"
+
+  # A replacement Claude process can reuse the same numeric pid after the
+  # original session exits. It is still not the process that published this
+  # lock, and its start time after the lock mtime must make ownership fail.
+  printf '700\n' > "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME=172800 FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a replacement Claude process that reused the published pid was trusted"
+  fi
+  pass "session-lock: a published session pid requires the original live Claude process generation"
 }
 
 # The reported failure is reached through bin/fm-lock.sh, which compares the
@@ -351,6 +372,7 @@ case "$pid:$field" in
   "$FM_TEST_SESSION_PID:comm=") printf '%s\n' claude ;;
   "$FM_TEST_SESSION_PID:args=") printf '%s\n' 'claude --model opus' ;;
   "$FM_TEST_SESSION_PID:ppid=") printf '%s\n' 1 ;;
+  "$FM_TEST_SESSION_PID:lstart=") exec /usr/bin/ps -p "$pid" -o lstart= ;;
   300:comm=) printf '%s\n' claude ;;
   300:args=) printf '%s\n' 'claude daemon run' ;;
   300:ppid=) printf '%s\n' 1 ;;
@@ -526,7 +548,7 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_pool_served_session_owns_the_lock_it_holds
 test_pool_served_session_never_claims_another_session_lock
-test_published_session_pid_is_trusted_only_while_it_is_a_live_harness
+test_published_session_pid_requires_the_original_live_harness_generation
 test_lock_acquire_is_not_refused_to_the_session_that_holds_it
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home

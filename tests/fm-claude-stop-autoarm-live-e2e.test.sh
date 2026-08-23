@@ -68,7 +68,7 @@ cat > "$PROJECT/bin/tool-logger.sh" <<'SH'
 #!/usr/bin/env bash
 P=$(cat 2>/dev/null || true)
 printf '%s\n' "$P" | jq -r '.tool_input.command // "unknown"' >> "$FM_HOME/state/tool-calls.log" 2>/dev/null
-VALIDATED_PID=$(bash -c '. "$1"; fm_harness_session_pid' _ "$CLAUDE_PROJECT_DIR/bin/fm-session-lock-lib.sh" 2>/dev/null || true)
+VALIDATED_PID=$(bash -c '. "$1"; fm_harness_session_pid "$2"' _ "$CLAUDE_PROJECT_DIR/bin/fm-session-lock-lib.sh" "$FM_HOME/state/.lock" 2>/dev/null || true)
 printf '%s\t%s\n' "${CLAUDE_PID:-}" "$VALIDATED_PID" >> "$FM_HOME/state/claude-session-pids.log"
 exit 0
 SH

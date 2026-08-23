@@ -42,7 +42,7 @@ me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in
 # with like. Ownership is only ever recognized here, never transferred - a lock
 # this session does not already hold leaves $me as the ancestry resolved it.
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
-  session_pid=$(fm_harness_session_pid) || session_pid=''
+  session_pid=$(fm_harness_session_pid "$LOCK") || session_pid=''
   if [ -n "$session_pid" ] && [ "$session_pid" = "$(cat "$LOCK" 2>/dev/null || true)" ]; then
     me=$session_pid
   fi
