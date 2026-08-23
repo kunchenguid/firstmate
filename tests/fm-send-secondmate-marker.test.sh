@@ -6,12 +6,15 @@
 # status file). fm-send therefore prepends a from-firstmate marker
 # (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
 # selector whose meta records kind=secondmate, so the secondmate can recognize
-# the request and route its reply via the status path. These tests pin that
-# behavior hermetically (stubbed tmux, no real agent):
-#   1. Exact-id and stable-label kind=secondmate selectors prepend the marker.
+# the request and route its reply via the status path. The marker now travels
+# inside the durable inbox record's body (the payload is never typed; only the
+# doorbell is). These tests pin that behavior hermetically (stubbed tmux, no
+# real agent):
+#   1. Exact-id and stable-label kind=secondmate selectors prepend the marker
+#      to the recorded steer, never to the typed doorbell.
 #   2. Exact-id and stable-label ordinary crewmate selectors stay unmarked.
-#   3. Explicit endpoints stay unmarked, with or without matching local meta.
-#   4. The --key path never carries the marker.
+#   3. Explicit endpoints stay unmarked and typed, with or without local meta.
+#   4. The --key path never carries the marker and never enqueues a record.
 #   5. Direct captain text stays unmarked, and already-marked text is idempotent.
 #   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
 set -u
@@ -90,6 +93,13 @@ setup_home() {
   printf '%s\n' "$home"
 }
 
+# The exact enqueued text of one inbox record, read through the production
+# owner (bin/fm-task-inbox-lib.sh). Command substitution strips trailing
+# newlines, so byte-exact trailing assertions read the raw record instead.
+record_body() {  # <record-path>
+  bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$1"
+}
+
 test_secondmate_target_is_marked() {
   local dir fb log home rc got corr
   dir="$TMP_ROOT/sm"; mkdir -p "$dir"
@@ -98,14 +108,17 @@ test_secondmate_target_is_marked() {
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
   run_send "$fb" "$home" "$log" "fm-domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to a secondmate target should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/domain.inbox/001.msg")
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=[a-f0-9][a-f0-9]*) : ;;
-    *) fail "secondmate send: literal text should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    *) fail "secondmate send: the recorded steer should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
   case "$got" in
     *audit\ the\ build) : ;;
     *) fail "secondmate send lost the request body"$'\n'"$got" ;;
+  esac
+  case "$(cat "$log")" in
+    *"$FM_FROMFIRST_MARK"*) fail "the marker must ride the record, never the typed doorbell" ;;
   esac
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
@@ -123,10 +136,10 @@ test_exact_secondmate_task_id_is_marked() {
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
   run_send "$fb" "$home" "$log" "domain" "audit the build"; rc=$?
   expect_code 0 "$rc" "send to an exact secondmate task id should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/domain.inbox/001.msg")
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=[a-f0-9]*) : ;;
-    *) fail "exact secondmate send: literal text should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    *) fail "exact secondmate send: the recorded steer should be marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
@@ -135,7 +148,7 @@ test_exact_secondmate_task_id_is_marked() {
   already_marked="${FM_FROMFIRST_MARK}corr=${corr} already routed"
   run_send "$fb" "$home" "$log" "domain" "$already_marked"; rc=$?
   expect_code 0 "$rc" "send of already-marked exact-id content should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/domain.inbox/002.msg")
   case "$got" in
     "${FM_FROMFIRST_MARK}corr=${corr} already routed") : ;;
     *) fail "exact secondmate send altered already-correlated content"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -tx1)" ;;
@@ -153,14 +166,14 @@ test_crewmate_target_is_not_marked() {
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
   expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/build.inbox/001.msg")
   [ "$got" = "fix the test" ] \
-    || fail "stable-label crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+    || fail "stable-label crewmate send: expected bare recorded text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
   run_send "$fb" "$home" "$log" "build" "fix the exact test"; rc=$?
   expect_code 0 "$rc" "send to an exact-id crewmate target should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/build.inbox/002.msg")
   [ "$got" = "fix the exact test" ] \
-    || fail "exact-id crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+    || fail "exact-id crewmate send: expected bare recorded text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
   pass "fm-send: exact-id and stable-label kind=ship selectors are sent unmarked"
 }
 
@@ -197,6 +210,8 @@ test_key_path_is_not_marked() {
   expect_code 0 "$rc" "--key send to a secondmate should succeed"
   [ ! -s "$log" ] \
     || fail "--key path logged a literal send (marker leaked into a keypress)"$'\n'"--- bytes ---"$'\n'"$(od -An -c "$log")"
+  [ ! -d "$home/state/domain.inbox" ] \
+    || fail "--key path must never enqueue an inbox record"
   pass "fm-send: the --key path carries no marker (no literal text is typed)"
 }
 
@@ -241,16 +256,18 @@ test_marked_send_preserves_trailing_newlines() {
   expect_code 0 "$rc" "marked send with trailing newlines should succeed"
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
-  corr=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  corr=$(fm_pending_reply_extract_corr "$(record_body "$home/state/domain.inbox/001.msg")")
   [ -n "$corr" ] || fail "marked send should embed a corr id"
-  # Body after marker+corr+space must preserve the original trailing newlines.
+  # The record's raw body region is the exact enqueued text plus the writer's
+  # single terminating newline, so the payload's own trailing newlines must
+  # survive byte-exact ahead of that one added 0a.
   body_hex=$(printf '%s' "$payload" | od -An -tx1 | tr -d ' \n')
-  got_hex=$(od -An -tx1 "$log" | tr -d ' \n')
+  got_hex=$(sed -e '1,/^--$/d' "$home/state/domain.inbox/001.msg" | od -An -tx1 | tr -d ' \n')
   case "$got_hex" in
-    *"$body_hex") : ;;
-    *) fail "marked send lost trailing newline body bytes: got $got_hex expected to end with $body_hex" ;;
+    *"${body_hex}0a") : ;;
+    *) fail "the record lost trailing newline body bytes: got $got_hex expected to end with ${body_hex}0a" ;;
   esac
-  pass "fm-send: marked secondmate payload preserves trailing newline bytes"
+  pass "fm-send: marked secondmate payload preserves trailing newline bytes in its record"
 }
 
 test_secondmate_target_is_marked

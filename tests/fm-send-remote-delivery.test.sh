@@ -20,10 +20,14 @@
 #      expectation as delivery_unknown.
 #   4. A delivered-unconfirmed remote answer still closes its --resolve-key
 #      decision (delivered-with-pending-confirmation counts as delivered).
-#   5. A LOCAL send whose submit read-back stays pending exits 3 with an
-#      honest non-error message (text delivered, submission unconfirmed).
-#   6. That local unconfirmed send still never closes a --resolve-key
-#      decision (the local ledger boundary is unchanged).
+#   5. A LOCAL typed-plane send (an explicit backend target, mirroring the
+#      remote leg's inner send) whose submit read-back stays pending exits 3
+#      with an honest non-error message (text delivered, submission
+#      unconfirmed). Ordinary text steers to recorded tasks ride the durable
+#      inbox instead and never reach this ladder.
+#   6. A local typed-plane unconfirmed send (a harness-native slash answer)
+#      still never closes a --resolve-key decision, and an unconfirmed typed
+#      secondmate send keeps its reply expectation armed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -241,10 +245,12 @@ test_local_secondmate_pending_keeps_expectation_armed() {
   fm_write_meta "$home/state/lsm.meta" \
     "window=sess:fm-lsm" "harness=claude" "kind=secondmate" "mode=secondmate" "home=$home/sm"
 
+  # A harness-native slash invocation keeps the typed plane even for a marked
+  # secondmate target, so this pins the kept armed-expectation semantics there.
   : > "$log"
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" lsm "audit the ledger" >/dev/null 2>&1; rc=$?
+    "$SEND" lsm "/audit the ledger" >/dev/null 2>&1; rc=$?
   expect_code 3 "$rc" "an unconfirmed local secondmate submit must exit delivered-unconfirmed"
   rec=$(pending_record "$home")
   [ -n "$rec" ] \
@@ -264,12 +270,13 @@ test_local_pending_reports_delivered_unconfirmed() {
   dir="$TMP_ROOT/local-pending"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending)
-  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
 
+  # An explicit backend target is the typed plane - the same shape the remote
+  # leg's inner send runs host-locally - so the exit-3 ladder still governs it.
   : > "$log"
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" t1 "steer text" >"$dir/out" 2>"$dir/err"; rc=$?
+    "$SEND" sess:win "steer text" >"$dir/out" 2>"$dir/err"; rc=$?
   err=$(cat "$dir/err")
   expect_code 3 "$rc" "an unconfirmed local submit must exit with the delivered-unconfirmed status"
   assert_contains "$err" "submission is unconfirmed" \
@@ -289,10 +296,12 @@ test_local_pending_does_not_close_resolve_key() {
   fm_write_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t2.status"
 
+  # A harness-native slash answer keeps the typed plane, so the unconfirmed
+  # ladder still governs it; a plain-text answer would close at enqueue instead.
   : > "$log"
   env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" t2 --resolve-key creds "token is in the vault now" >/dev/null 2>&1; rc=$?
+    "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1; rc=$?
   expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"
   if grep -F 'resolved' "$home/state/t2.status" >/dev/null; then
     fail "an unconfirmed local answer must not close the decision: $(cat "$home/state/t2.status")"
