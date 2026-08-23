@@ -134,6 +134,26 @@ fi
 [ ! -s "$LOG" ] || fail "a refused whitespace-only-default-action open_default must not write anything to the log"
 pass "open_default refuses a default action that is whitespace only"
 
+# A recommendation/default action made up solely of a non-whitespace control
+# byte (e.g. SOH, $'\x01') is not whitespace, so the [:space:]-only strip in
+# an earlier version of fm_decision_tier_require_meaningful left it as
+# "content" and let it through - fm_decision_tier_clean_field never touches
+# it either (it only scrubs TAB/CR/LF), so it would persist verbatim into a
+# default-veto record with no real stated recommendation or executable
+# default. Comment the '[:cntrl:]' class out of the `tr -d` in
+# fm_decision_tier_require_meaningful to see this go red.
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "$(printf '\x01')" "apply default" 300 2>/dev/null; then
+  fail "open_default must refuse a recommendation that is only a control byte"
+fi
+[ ! -s "$LOG" ] || fail "a refused control-byte-only-recommendation open_default must not write anything to the log"
+pass "open_default refuses a recommendation that is only a non-whitespace control byte"
+
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "prefer A" "$(printf '\x01')" 300 2>/dev/null; then
+  fail "open_default must refuse a default action that is only a control byte"
+fi
+[ ! -s "$LOG" ] || fail "a refused control-byte-only-default-action open_default must not write anything to the log"
+pass "open_default refuses a default action that is only a non-whitespace control byte"
+
 # --- mutators refuse an id that already has any record in the log ----------
 
 REUSE_LOG="$TMP_ROOT/decisions-reuse.log"
@@ -287,6 +307,39 @@ fi
 wait "$NOPID_ACQUIRE_PID" 2>/dev/null
 [ ! -e "$NOPID_LOG.lock" ] || fail "a broken no-PID lock must end up released, not just bypassed once"
 pass "lock_acquire detects a lock with no readable PID and breaks it instead of blocking forever"
+
+# --- a lock left as a plain directory (the pre-symlink scheme) must not -----
+# --- block every later writer -----------------------------------------------
+#
+# Greptile flagged that `rm -f` cannot remove a directory: it fails silently
+# and the acquire loop would retry `ln -s` against a lock path that never
+# goes away, hanging forever. This fabricates exactly the artifact an
+# earlier mkdir-based locking scheme could leave behind - a lock path that
+# is a directory, not a symlink or file - and asserts a fresh acquire still
+# completes instead of wedging. Change the `rm -rf` stale-lock recovery in
+# fm_decision_tier_lock_acquire back to `rm -f` to see this go red (it will
+# hang until the poll loop below gives up and fails).
+LEGACYDIR_LOG="$TMP_ROOT/decisions-legacydir.log"
+mkdir -p "$(dirname "$LEGACYDIR_LOG")"
+mkdir -p "$LEGACYDIR_LOG.lock"
+
+( fm_decision_tier_lock_acquire "$LEGACYDIR_LOG" && fm_decision_tier_lock_release "$LEGACYDIR_LOG" ) &
+LEGACYDIR_ACQUIRE_PID=$!
+LEGACYDIR_ACQUIRED=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$LEGACYDIR_ACQUIRE_PID" 2>/dev/null; then
+    LEGACYDIR_ACQUIRED=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$LEGACYDIR_ACQUIRED" -ne 1 ]; then
+  kill "$LEGACYDIR_ACQUIRE_PID" 2>/dev/null
+  fail "lock_acquire must break a leftover lock directory instead of blocking forever"
+fi
+wait "$LEGACYDIR_ACQUIRE_PID" 2>/dev/null
+[ ! -e "$LEGACYDIR_LOG.lock" ] || fail "a broken legacy lock directory must end up released, not just bypassed once"
+pass "lock_acquire detects a leftover legacy lock directory and breaks it instead of blocking forever"
 
 # --- successful logging for each tier ---------------------------------------
 

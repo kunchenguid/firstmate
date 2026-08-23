@@ -75,9 +75,10 @@
 # logging a category as auto when it classifies default-veto or hard-stop is
 # refused, opening a default-veto record for a hard-stop category is refused,
 # opening a default-veto record with a recommendation or default action that
-# is empty OR consists solely of whitespace is refused (the tier's whole
-# contract is a stated recommendation and an executable default - whitespace
-# is not one), reusing an id that already has any record in the log is
+# is empty OR consists solely of whitespace/control characters is refused
+# (the tier's whole contract is a stated recommendation and an executable
+# default - whitespace or an unprintable control byte is not one), reusing
+# an id that already has any record in the log is
 # refused for every one of log_auto/log_hard_stop/open_default (a reused id
 # would let status/report collapse two unrelated decisions into one), and
 # vetoing a decision that is not currently pending (already vetoed or already
@@ -110,17 +111,20 @@ fm_decision_tier_require_int() {  # <label> <value>
 }
 
 # fm_decision_tier_require_meaningful: refuses a value that is empty OR
-# normalizes to nothing but whitespace once fm_decision_tier_clean_field's
-# TAB/CR/LF scrub runs on it. require_nonempty alone lets a value through
-# that is technically non-empty but carries no content (all spaces, or a
-# lone TAB/newline that the record builder turns into spaces) - exactly the
-# case where a default-veto record would be persisted with no stated
-# recommendation or executable default despite passing validation.
+# normalizes to nothing but whitespace/control characters once stripped.
+# require_nonempty alone lets a value through that is technically non-empty
+# but carries no content: all spaces, a lone TAB/newline that the record
+# builder turns into spaces, or a non-whitespace control byte (e.g. $'\x01')
+# that fm_decision_tier_clean_field does not touch and that persists verbatim
+# - every one of those is a case where a default-veto record would be
+# persisted with no stated recommendation or executable default despite
+# passing validation. Stripping both [:space:] and [:cntrl:] catches all
+# three: only printable, non-whitespace content counts as meaningful.
 fm_decision_tier_require_meaningful() {  # <label> <value>
   local label=$1 value=${2:-} stripped
-  stripped=$(printf '%s' "$value" | tr -d '[:space:]')
+  stripped=$(printf '%s' "$value" | LC_ALL=C tr -d '[:space:][:cntrl:]')
   if [ -z "$stripped" ]; then
-    printf 'fm-decision-tier-lib: %s must contain non-whitespace content\n' "$label" >&2
+    printf 'fm-decision-tier-lib: %s must contain meaningful (printable, non-whitespace) content\n' "$label" >&2
     return 1
   fi
 }
@@ -142,17 +146,33 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 # (`readlink`) and checks whether that PID is still alive (`kill -0`); if
 # it is not - or the lock isn't a valid PID symlink at all, e.g. a
 # leftover/corrupt artifact - the lock is treated as abandoned and broken
-# before retrying. A live holder's PID always answers `kill -0`, so this
-# never steals a lock that is still legitimately held.
+# before retrying.
+#
+# A plain DIRECTORY left at the lock path (e.g. by the earlier mkdir-based
+# locking scheme this replaced) needs its own check ahead of the `ln -s`
+# attempt: unlike a file or symlink, `ln -s target dir` does not fail when
+# `dir` already exists as a directory - it silently creates the link INSIDE
+# that directory instead, so the loop would never even notice the stale
+# directory, let alone break it. The `[ -d ... ] && [ ! -L ... ]` check below
+# catches that case directly (a symlink also passes `-d` when its target is
+# a directory, so `-L` is checked first to exclude a legitimate lock),
+# removing it with `rm -rf` (not `rm -f`, which cannot remove a directory at
+# all) before every `ln -s` attempt. A live holder's PID always answers
+# `kill -0`, so none of this ever steals a lock that is still legitimately
+# held.
 fm_decision_tier_lock_acquire() {  # <log_file>
   local log=$1
   local lockdir="$log.lock" dir holder_pid
   dir=$(dirname "$log")
   [ -d "$dir" ] || mkdir -p "$dir" || return 1
-  while ! ln -s "$$" "$lockdir" 2>/dev/null; do
+  while :; do
+    if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      rm -rf "$lockdir" 2>/dev/null
+    fi
+    ln -s "$$" "$lockdir" 2>/dev/null && break
     holder_pid=$(readlink "$lockdir" 2>/dev/null) || holder_pid=""
     if [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
-      rm -f "$lockdir" 2>/dev/null
+      rm -rf "$lockdir" 2>/dev/null
       continue
     fi
     sleep 0.05
