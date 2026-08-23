@@ -1260,7 +1260,7 @@ if (stale.details?.ok !== false || !String(stale.details.message).includes("shut
 }
 if (!pidAlive(activeChild)) throw new Error("active generation child died after stale callback");
 if (existsSync(startupMarker)) throw new Error("startup generation child was resurrected");
-// Model the old generation's PID being recycled for the active child.
+// Model the old generation PID being recycled for the active child.
 // Its retired lifetime marker must keep the historical row from counting live.
 writeFileSync(process.env.FM_ARM_LOG, `arm pid=${activeChild} marker=${startupMarker}\n`, { flag: "a" });
 if (liveArmPids().length !== 1 || liveArmPids()[0] !== activeChild) {
