@@ -365,6 +365,24 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+# An invalid cadence override must use the shared default rather than disabling
+# the daemon's long-cadence recheck.
+test_housekeeping_invalid_pause_resurface_falls_back() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase invalid-pause-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-invalid-cadence"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-invalid-cadence.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-invalid-cadence" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=not-a-number housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "invalid daemon pause cadence disabled the long-cadence recheck"
+  pass "the daemon falls back to the shared pause cadence for an invalid override"
+}
+
 # The other half of quieting a captain-held task: it must NOT be silenced outright.
 # fm-classify-lib.sh's cadence comment is explicit that a forgotten hold cannot rot
 # invisibly, so a held task re-surfaces on the same bounded window as a pause, with
@@ -1944,6 +1962,7 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_invalid_pause_resurface_falls_back
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared

@@ -283,6 +283,30 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# The watcher owns a runtime copy of the shared pause cadence, so test its
+# resolved value through the watcher's source guard rather than the library alone.
+test_watcher_resolves_pause_resurface_secs() {
+  local dir state expected default_value invalid_value
+  dir=$(make_case watcher-pause-cadence); state="$dir/state"
+  expected=$FM_PAUSE_RESURFACE_SECS_DEFAULT
+  default_value=$(
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_HOME='' FM_PAUSE_RESURFACE_SECS='' \
+      bash -c '. "$1"; printf "%s" "$PAUSE_RESURFACE_SECS"' _ "$WATCH"
+  )
+  case "$default_value" in
+    ''|*[!0-9]*) fail "watcher pause cadence default was not numeric: $default_value" ;;
+  esac
+  [ "$default_value" = "$expected" ] \
+    || fail "watcher pause cadence default was $default_value, expected $expected"
+  invalid_value=$(
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_HOME='' FM_PAUSE_RESURFACE_SECS=not-a-number \
+      bash -c '. "$1"; printf "%s" "$PAUSE_RESURFACE_SECS"' _ "$WATCH"
+  )
+  [ "$invalid_value" = "$expected" ] \
+    || fail "invalid watcher pause cadence did not fall back to $expected: $invalid_value"
+  pass "the watcher resolves the shared pause cadence and falls back safely for invalid overrides"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -968,10 +992,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional paused phase-A stop"
 
-  # Phase B: age the pause past the (now normal) threshold by backdating its
+  # Phase B: age the pause past the shared default threshold by backdating its
   # status file, re-prime .seen-* to the new signature so the signal scan stays
   # quiet, and confirm it re-surfaces as a paused recheck - never a wedge.
-  back=$(( $(date +%s) - 500 ))
+  back=$(( $(date +%s) - 5000 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
@@ -979,10 +1003,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   printf 'idle, holding for upstream (token 2)' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a declared pause past the threshold"
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a declared pause past the shared default threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
   grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
@@ -2610,6 +2634,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_watcher_resolves_pause_resurface_secs
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier

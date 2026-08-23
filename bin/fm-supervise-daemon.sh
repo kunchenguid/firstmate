@@ -1037,7 +1037,7 @@ housekeeping() {  # <state>
   # reset the marker so the window repeats. The digest names WHICH human the wait is
   # on, because the captain is the one reading it: an external dependency for a
   # paused: declaration, and the captain themself for a verified hold transfer.
-  pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  pause_secs=$(fm_pause_resurface_secs)
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"

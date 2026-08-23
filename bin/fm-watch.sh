@@ -90,6 +90,10 @@ mkdir -p "$STATE"
 # The shared transition owner is a canonical lint root itself. Stop duplicate
 # source-graph expansion here: following its backend graph from this large
 # runtime can exceed the bounded CI lint worker while adding no uncovered file.
+# The watcher consumes the shared status classifiers and their pause-cadence
+# default directly. Do not rely on another sourced library to provide them.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -190,7 +194,7 @@ SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # liveness is deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
-PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+PAUSE_RESURFACE_SECS=$(fm_pause_resurface_secs)
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section

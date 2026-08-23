@@ -80,10 +80,21 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
 # invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
-# one owner.
+# both consumers resolve FM_PAUSE_RESURFACE_SECS through this default so the
+# cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
+
+# Resolve the declared-wait re-surface cadence for both consumers. Invalid
+# overrides fall back to the shared default so an arithmetic comparison never
+# receives an empty or nonnumeric operand and silently disables throttling.
+fm_pause_resurface_secs() {
+  local pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  case "$pause_secs" in
+    ''|*[!0-9]*) pause_secs=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;;
+  esac
+  printf '%s\n' "$pause_secs"
+}
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
