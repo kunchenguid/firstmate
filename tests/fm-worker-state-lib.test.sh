@@ -15,6 +15,10 @@
 #   (d) bin/fm-peek.sh's projection call skips the live pane/busy probe
 #       (it is about to make that exact live capture itself), so peeking a
 #       no-run worker never doubles a live backend round-trip
+#   (e) the same skip-live flag also reaches the herdr-native busy check, the
+#       remote-secondmate state check, and the grok fallback capture - not
+#       just pane_readable - so none of those three live round trips doubles
+#       up with peek's own capture either
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -147,10 +151,106 @@ test_peek_skips_the_live_probe_crew_state_still_makes() {
   pass "fm-peek.sh's annotation skips the live probe it is about to make itself as its own raw capture"
 }
 
+# --- (e) skip-live also gates the herdr-native, remote-secondmate, and grok
+#         fallback live paths, not just pane_readable ------------------------
+
+test_skip_live_skips_herdr_native_busy_probe() {
+  local d call_log record
+  d=$(new_case skip-live-herdr)
+  make_repo_on_branch "$d/wt" fm/feat-herdr
+  fm_write_meta "$d/state/feat-herdr.meta" "worktree=$d/wt" "kind=scout" "harness=claude" "backend=herdr" "window=s:p"
+  call_log="$d/herdr-busy.log"; : > "$call_log"
+  # pane_readable's own herdr-backed live probe (a separate call this same
+  # skip-live flag already gates) must succeed for either call below to reach
+  # crew_busy_verdict at all.
+  # shellcheck disable=SC2329 # invoked indirectly through pane_readable
+  fm_backend_capture() { return 0; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_worker_state_project -> fm_busy_classify
+  fm_backend_busy_state() { printf '%s\n' "$*" >> "$call_log"; printf 'busy'; }
+
+  record=$(FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-herdr 1)
+  [ "$(wc -l < "$call_log" | tr -d ' ')" = 0 ] \
+    || fail "skip-live must not call the herdr-native busy-state check, got:"$'\n'"$(cat "$call_log")"
+  assert_contains "$record" $'\nsource=pane' "skip-live still emits a pane-tier record with no other signal"
+
+  record=$(FM_STATE_OVERRIDE="$d/state" fm_worker_state_project feat-herdr 0)
+  [ "$(wc -l < "$call_log" | tr -d ' ')" = 1 ] \
+    || fail "sanity: without skip-live, the herdr-native busy-state check should fire exactly once, got:"$'\n'"$(cat "$call_log")"
+  unset -f fm_backend_capture fm_backend_busy_state
+  pass "skip-live also skips fm_busy_classify's herdr-native busy-state round trip"
+}
+
+test_skip_live_skips_remote_secondmate_state_probe() {
+  local d ssh_log record_live record_skip
+  d=$(new_case skip-live-remote)
+  mkdir -p "$d/data" "$d/fakebin"
+  fm_write_meta "$d/state/rsm.meta" \
+    "worktree=/remote/home/never-locally-present" \
+    "harness=claude" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "remote_host=remote-mac" \
+    "remote_root=/remote/root" \
+    "remote_backend=herdr" \
+    "remote_herdr_session=fm-remote" \
+    "remote_target=fm-remote:w1:p1"
+  cat > "$d/data/secondmates.md" <<EOF
+- rsm - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
+EOF
+  cat > "$d/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+[ -z "${FM_FAKE_SSH_LOG:-}" ] || printf 'call\n' >> "$FM_FAKE_SSH_LOG"
+printf 'alive\n'
+exit 0
+SH
+  chmod +x "$d/fakebin/fake-ssh"
+
+  ssh_log="$d/ssh-live.log"; : > "$ssh_log"
+  record_live=$(FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" FM_SSH_BIN="$d/fakebin/fake-ssh" \
+    FM_FAKE_SSH_LOG="$ssh_log" fm_worker_state_project rsm 0)
+  [ "$(wc -l < "$ssh_log" | tr -d ' ')" = 1 ] \
+    || fail "sanity: without skip-live, the remote-secondmate state round trip should fire exactly once, got:"$'\n'"$(cat "$ssh_log")"
+  assert_contains "$record_live" $'\nsource=remote-endpoint' "sanity: a live alive verdict with no log reads remote-endpoint"
+
+  ssh_log="$d/ssh-skip.log"; : > "$ssh_log"
+  record_skip=$(FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" FM_SSH_BIN="$d/fakebin/fake-ssh" \
+    FM_FAKE_SSH_LOG="$ssh_log" fm_worker_state_project rsm 1)
+  [ "$(wc -l < "$ssh_log" | tr -d ' ')" = 0 ] \
+    || fail "skip-live must not make the remote-secondmate state round trip, got:"$'\n'"$(cat "$ssh_log")"
+  assert_contains "$record_skip" $'\nsource=remote-endpoint' "skip-live remote falls back to remote-endpoint source without a live probe"
+  pass "skip-live also skips fm_worker_state_project's remote-secondmate state round trip"
+}
+
+test_skip_live_skips_grok_fallback_capture() {
+  local d capture_log out
+  d=$(new_case skip-live-grok)
+  capture_log="$d/grok-capture.log"; : > "$capture_log"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_capture() { printf '%s\n' "$*" >> "$capture_log"; printf 'Ctrl+c:cancel\n'; }
+
+  out=$(fm_busy_classify tmux w1 grok t1 "$d/state" '' 1)
+  [ "$out" = "unknown live-probe-skipped" ] \
+    || fail "skip-live grok arm with no pre-captured tail must report unknown live-probe-skipped, got '$out'"
+  [ "$(wc -l < "$capture_log" | tr -d ' ')" = 0 ] \
+    || fail "skip-live must not make the grok fallback live capture, got:"$'\n'"$(cat "$capture_log")"
+
+  out=$(fm_busy_classify tmux w1 grok t1 "$d/state")
+  [ "$out" = "busy grok-regex" ] \
+    || fail "sanity: without skip-live, the grok arm should fall back to its own live capture, got '$out'"
+  [ "$(wc -l < "$capture_log" | tr -d ' ')" = 1 ] \
+    || fail "sanity: without skip-live exactly 1 live capture call should be made, got:"$'\n'"$(cat "$capture_log")"
+  unset -f fm_backend_capture
+  pass "skip-live also skips fm_busy_classify's grok fallback live capture"
+}
+
 test_record_carries_source_and_computed_at
 test_render_line_matches_documented_shape
 test_render_line_omits_empty_detail
 test_crew_state_and_peek_report_byte_identical_lines
 test_peek_skips_the_live_probe_crew_state_still_makes
+test_skip_live_skips_herdr_native_busy_probe
+test_skip_live_skips_remote_secondmate_state_probe
+test_skip_live_skips_grok_fallback_capture
 
 echo "all fm-worker-state-lib tests passed"
