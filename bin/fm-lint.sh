@@ -76,7 +76,7 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
     shellcheck_args=(--norc --external-sources)
-    if [ "${FM_LINT_FAST:-0}" -eq 1 ]; then
+    if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
       shellcheck_args+=(--extended-analysis=false)
     fi
     "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" > "$output.out" 2>&1 &
@@ -124,12 +124,8 @@ fm_lint_run_workflows() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
-FAST=${FM_LINT_FAST:-0}
-case "$FAST" in
-  1|true) FAST=1 ;;
-  0|false|'') FAST=0 ;;
-  *) printf 'fm-lint.sh: FM_LINT_FAST must be 0 or 1, got %s.\n' "$FAST" >&2; exit 2 ;;
-esac
+FAST=0
+ANALYSIS_MODE=full
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -153,6 +149,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --fast)
       FAST=1
+      ANALYSIS_MODE=fast
       shift
       ;;
     --list-files)
@@ -411,18 +408,18 @@ fm_lint_run_worker() {  # <worker-index>
     if [ "$(uname)" = Darwin ]; then
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-      env FM_LINT_INTERNAL=1 FM_LINT_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }
@@ -553,6 +550,7 @@ EOF
     printf 'git_head\t%s\n' "$git_head"
     printf 'content_cksum\t%s\n' "$content_cksum"
     printf 'shellcheck_version\t%s\n' "$resolved"
+    printf 'analysis_mode\t%s\n' "$ANALYSIS_MODE"
     printf 'jobs\t%s\n' "$JOBS"
     printf 'root_count\t%s\n' "$ROOT_COUNT"
     printf 'direct_lines\t%s\n' "$direct_lines"

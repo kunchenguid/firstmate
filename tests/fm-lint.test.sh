@@ -266,12 +266,13 @@ SH
 }
 
 test_fast_mode_disables_extended_analysis() {
-  local tmp fakebin log mode_log fixture out
+  local tmp fakebin log mode_log telemetry fixture out
   tmp=$(fm_test_tmproot fm-lint-fast-mode)
   fakebin=$(fm_fakebin "$tmp")
   fixture="$tmp/fixture.sh"
   log="$tmp/shellcheck.log"
   mode_log="$tmp/mode.log"
+  telemetry="$tmp/telemetry.tsv"
   cat > "$fixture" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${1:-ok}"
@@ -280,12 +281,13 @@ SH
   fm_lint_stub_shellcheck "$fakebin" "$log"
 
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
-    FM_TEST_MODE_LOG="$mode_log" "$LINT" --fast "$fixture" 2>&1) \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" --fast --telemetry "$telemetry" "$fixture" 2>&1) \
     || fail "fast lint mode failed"$'\n'"$out"
   [ "$(cat "$mode_log")" = off ] \
     || fail "fast lint mode did not disable extended analysis"
   [ "$(cat "$log")" = "$fixture" ] \
     || fail "fast lint mode did not lint the requested root"
+  assert_grep $'analysis_mode\tfast' "$telemetry" "telemetry did not record fast analysis mode"
   pass "fm-lint.sh --fast disables ShellCheck extended analysis"
 }
 
@@ -303,7 +305,7 @@ SH
   chmod +x "$fixture"
   fm_lint_stub_shellcheck "$fakebin" "$log"
 
-  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_FAST=1 FM_LINT_JOBS=1 \
     FM_TEST_MODE_LOG="$mode_log" "$LINT" "$fixture" 2>&1) \
     || fail "CI full lint mode failed"$'\n'"$out"
   [ "$(cat "$mode_log")" = on ] \
@@ -801,6 +803,7 @@ SH
     || fail "telemetry-enabled clean lint failed"
   [ "$telemetry_out" = "$out_clean_2" ] || fail "quiet telemetry changed routine lint output"
   assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" "telemetry format marker is missing"
+  assert_grep $'analysis_mode\tfull' "$telemetry" "telemetry did not record full analysis mode"
   assert_grep $'jobs\t2' "$telemetry" "telemetry did not record bounded jobs"
   assert_grep $'root_count\t1' "$telemetry" "telemetry did not record root count"
   assert_grep $'wall_seconds\t' "$telemetry" "telemetry did not record wall time"
