@@ -169,8 +169,8 @@ sudo, tmux window creation, Keychain approval markers), the operator answered `a
 attempt 2 then ended without an authenticated result marker. The cell took the retain lane:
 compute zero, worktree disk and evidence retained, control reservation released.
 
-That attempt exposed two blockers that stand between this lane and its acceptance sentence, and
-neither is the receipts strand:
+At the time, that attempt exposed two blockers between the lane and its acceptance sentence, and
+neither was the receipts strand:
 
 1. `observe` took a terminal decision on a control view it never bound to the attempt, and the
    decision was unrecoverable. This was recorded here as "`respond` does not answer a gate" plus
@@ -244,10 +244,10 @@ neither is the receipts strand:
    only by rebuilding the bundle from the upgraded binary and submitting a NEW cell. Do not spend
    time waiting on a host upgrade here.
 
-2. The sealed suite is not Linux-clean, so every cell run parks. Shard 2 failed on host-coupled
+2. The sealed suite was not Linux-clean, so every cell run parked. Shard 2 failed on host-coupled
    units that cannot pass inside a Linux cell (passwordless sudo, tmux window creation, Keychain
-   approval markers), alongside 377 passing units. Until those units skip loudly off macOS, no
-   intent reaches a green test step here.
+   approval markers), alongside 377 passing units. Until those units skipped loudly off macOS, no
+   intent could reach a green test step there.
 
    Partially closed. The retained shard responses under
    `$FM_HOME/state/azure-validation/shards/azv-36b2726cbcf3/*/response/` are the measurement, and
