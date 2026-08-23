@@ -206,11 +206,12 @@ The skill's primary path is that default TOON; `--json` is the documented defens
 ## Routing receipt boundary
 
 Verified 2026-08-22 against the generation-specific routing receipt implementation.
-Publication uses no-follow exclusive creation for the receipt and brief, preserves every prior generation, and intentionally makes no all-or-none guarantee across those two files.
+Publication uses exclusive creation with `O_NOFOLLOW` on the final receipt and brief path components, preserves every prior generation, and intentionally makes no all-or-none guarantee across those two files.
+The routing filesystem boundary applies `O_NOFOLLOW` only to the final path component supplied to each operation and does not reject an intermediate symlink, notably `FM_HOME/data`.
 A refused publication may leave partial artifacts, but those artifacts cannot authorize a launch because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
-The canonical dispatch snapshot is opened through the executable no-follow boundary, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
+The canonical dispatch snapshot applies the same final-component no-follow check, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
 Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
-The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it resnapshots and validates the receipt semantics, derives the generation paths, and verifies the published artifacts plus latest ledger row through the no-follow boundary without re-aging the preflight acceptance.
+The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it resnapshots and validates the receipt semantics, derives the generation paths, and verifies the published artifacts plus latest ledger row through the final-component no-follow checks without re-aging the preflight acceptance.
 This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
 The negative battery's shared-validator mutations prove only that the dispatch integration call site is load-bearing; guard-specific mutation coverage remains owned by the separate external 64-site mutation sweep and is not claimed here.
 
