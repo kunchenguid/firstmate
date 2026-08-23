@@ -32,6 +32,12 @@ suite() {
 bot() {
   printf '{"__typename":"CheckRun","workflowName":"","name":"%s","status":"COMPLETED","conclusion":"%s"}' "$1" "$2"
 }
+# Every suite fm_ci_required_suites actually requires, all green - the only
+# rollup shape that a real, fully-reported CI run produces.
+complete_suite() {
+  printf '%s' "$FM_CI_REQUIRED_SUITES" \
+    | jq -c '[.[] | {"__typename":"CheckRun","workflowName":"CI","name":.,"status":"COMPLETED","conclusion":"SUCCESS"}]'
+}
 
 # --- the classifier ---------------------------------------------------------
 
@@ -59,11 +65,33 @@ LEGACY='[{"__typename":"StatusContext","context":"ci/external","state":"SUCCESS"
   || fail "a passing legacy commit status must be no-repo-ci"
 pass "a legacy commit status does not count as a repository-owned suite"
 
-# One real suite is what changes the answer, and the bot may ride along.
+# One real suite moves the answer off no-repo-ci, but one suite is not the
+# whole roster: it stays incomplete, never passing, until every required
+# suite has reported. The bot may still ride along either way.
 WITH_SUITE="[$(suite Lint SUCCESS),$(bot 'Greptile Review' SUCCESS)]"
-[ "$(fm_ci_checks_state "$WITH_SUITE")" = passing ] \
-  || fail "a passing repository suite alongside a passing bot must be passing"
-pass "a repository-owned suite is what makes an all-green rollup passing"
+GOT=$(fm_ci_checks_state "$WITH_SUITE")
+[ "$GOT" = incomplete ] \
+  || fail "a passing repository suite short of the full roster must be incomplete, got: $GOT"
+pass "a repository-owned suite short of the full roster classifies as incomplete, not passing"
+
+# The whole required roster, every one of them green, is what actually makes
+# a rollup passing. This is the P1 false-green shape reported against
+# fm_ci_state: a single green CI job read as "CI ran" when most of the
+# roster never reported at all.
+COMPLETE_SUITE=$(complete_suite)
+WITH_COMPLETE_SUITE=$(printf '%s' "$COMPLETE_SUITE" | jq -c ". + [$(bot 'Greptile Review' SUCCESS)]")
+[ "$(fm_ci_checks_state "$WITH_COMPLETE_SUITE")" = passing ] \
+  || fail "every required suite passing alongside a passing bot must be passing"
+pass "the complete required-suite roster is what makes an all-green rollup passing"
+
+# Missing even one required suite out of an otherwise all-green roster is
+# still incomplete, not passing - conclusion-tallying alone cannot tell the
+# two apart, which is exactly why fm_ci_missing_suites exists.
+ALMOST_COMPLETE=$(printf '%s' "$COMPLETE_SUITE" | jq -c '.[1:]')
+GOT=$(fm_ci_checks_state "$ALMOST_COMPLETE")
+[ "$GOT" = incomplete ] \
+  || fail "a roster missing one required suite must be incomplete, got: $GOT"
+pass "a rollup missing part of the required suite roster is incomplete even when everything present is green"
 
 # The second false-green shape: a repository-owned check that is real, but is
 # not the CI workflow - the PR-body policy check can pass while ci.yml never
@@ -202,12 +230,25 @@ assert_contains "$OUT" "Greptile Review" "the refusal must name the check it did
 assert_contains "$OUT" "0 repository-owned" "the refusal must say how many suites it found"
 pass "fm-pr-ci-verify.sh refuses a pull request whose only check is a third-party bot"
 
-FM_TEST_ROLLUP="$WITH_SUITE"
+FM_TEST_ROLLUP="$WITH_COMPLETE_SUITE"
 OUT=$(verify); CODE=$?
-[ "$CODE" = 0 ] || fail "the guard must accept a passing repository suite, exited $CODE: $OUT"
+[ "$CODE" = 0 ] || fail "the guard must accept the complete required-suite roster, exited $CODE: $OUT"
 assert_contains "$OUT" "validated" "the accepting run must state the verdict"
 assert_contains "$OUT" "Lint" "the roster must name the suite that ran"
 pass "fm-pr-ci-verify.sh accepts a pull request whose own suites ran and passed"
+
+# A rollup short of the complete roster is not evidence either, even though
+# every check it does carry is green - this is the P1 false-green shape
+# reported against fm-pr-ci-verify.sh: a lone passing CI job authorizing a
+# validation verdict without establishing the rest of the roster ran.
+FM_TEST_ROLLUP="$WITH_SUITE"
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "the guard must refuse a rollup short of the required roster, exited $CODE: $OUT"
+assert_contains "$OUT" "incomplete" "the refusal must name the incomplete state"
+assert_contains "$OUT" "required suite roster" "the refusal must say the roster is incomplete"
+assert_contains "$OUT" "missing required suites" "the refusal must list what is missing"
+assert_contains "$OUT" "Test coverage guard" "the missing-suites list must name a suite that never reported"
+pass "fm-pr-ci-verify.sh refuses a pull request whose rollup is short of the required suite roster"
 
 FM_TEST_ROLLUP="[$(suite Lint FAILURE)]"
 OUT=$(verify); CODE=$?
@@ -238,6 +279,19 @@ assert_contains "$OUT" "no example/repo suite ran on this commit" \
   "the verdict must still say the base repository ran nothing"
 pass "a fork-validated verdict still states that the base repository ran no suite of its own"
 
+# incomplete falls through to the head repository exactly like no-repo-ci: a
+# rollup short of the required roster is not evidence either, but the fork
+# may still have validated the commit in full.
+FM_TEST_ROLLUP="$WITH_SUITE"
+FM_TEST_RUNS="[$(run 42 completed '"success"')]"
+OUT=$(verify); CODE=$?
+[ "$CODE" = 0 ] || fail "an incomplete base-repo rollup must still fall through to a validated fork run, exited $CODE: $OUT"
+assert_contains "$OUT" "example/fork" "the verdict must name the repository the evidence came from"
+assert_contains "$OUT" "checks do not cover the required suite roster" \
+  "the verdict must say why the base repository was not evidence"
+pass "fm-pr-ci-verify.sh falls through an incomplete base-repo rollup to a validated head-repository run"
+
+FM_TEST_ROLLUP="$ONLY_BOT"
 FM_TEST_RUNS="[$(run 42 completed '"failure"')]"
 OUT=$(verify); CODE=$?
 [ "$CODE" = 1 ] || fail "a red head-repository run must be refused, exited $CODE"

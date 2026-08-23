@@ -63,8 +63,12 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
+# The complete required-suite roster (bin/fm-ci-checks-lib.sh
+# FM_CI_REQUIRED_SUITES), all green - the default fixture stands in for a
+# pull request CI genuinely validated, so it must carry evidence that would
+# actually classify as passing rather than one lone suite.
 cat <<'JSON'
-[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","workflowName":"CI","name":"Lint","conclusion":"SUCCESS","status":"COMPLETED"}]}]
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","workflowName":"CI","name":"Lint","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Test coverage guard","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable parallel 1","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable parallel 2","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 1","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 2","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 3","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior portable serial 4","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior tests (Herdr)","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Behavior timing aggregate","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Stock macOS Bash snapshot compatibility","conclusion":"SUCCESS","status":"COMPLETED"},{"__typename":"CheckRun","workflowName":"CI","name":"Repo invariants","conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
 SH
   cat > "$fb/gh-axi" <<'SH'

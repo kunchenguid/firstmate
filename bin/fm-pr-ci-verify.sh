@@ -23,7 +23,8 @@
 #
 # Usage: fm-pr-ci-verify.sh <pr-url>
 # Exit:  0 repository suites ran and passed, upstream or in the head repository
-#        1 they did not: none ran, one is red, or one has not finished
+#        1 they did not: none ran, one is red, one has not finished, or fewer
+#          than the full required roster reported
 #        2 the request or the reply could not be read
 set -eu
 
@@ -89,6 +90,14 @@ own=$(printf '%s' "$rollup" | jq "$FM_CI_CHECKS_JQ_DEFS"'
   [.[] | select(fm_ci_repo_owned)] | length' 2>/dev/null) || own='?'
 printf '%s checks: %s (%s repository-owned)\n' "$BASE_REPO" "$state" "$own"
 
+# An incomplete roster names what it is missing, the same way a red or
+# pending check names its own state above, so the refusal is never just "not
+# passing" with no way to tell what would make it so.
+if [ "$state" = incomplete ]; then
+  missing=$(printf '%s' "$rollup" | jq -r "$FM_CI_CHECKS_JQ_DEFS"'fm_ci_missing_suites | .[]' 2>/dev/null) || missing=''
+  [ -z "$missing" ] || printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$missing" | sed 's/^/  /')"
+fi
+
 if [ "$state" = passing ]; then
   printf 'validated: %s suites passed on %s in %s\n' "$BASE_REPO" "$head_sha" "$BASE_REPO"
   exit 0
@@ -104,18 +113,27 @@ case "$state" in
     ;;
 esac
 
-# Nothing upstream validated this commit. Ask the head repository, which is
-# where an unapproved fork pull request's suites actually ran.
+# Nothing upstream validated this commit: no-repo-ci and incomplete are both
+# "the base repository is not evidence", just for different reasons - nothing
+# of ours ran, or only part of it did - so both fall through the same way to
+# ask the head repository, which is where an unapproved fork pull request's
+# suites actually ran.
+if [ "$state" = incomplete ]; then
+  base_reason="$BASE_REPO checks do not cover the required suite roster"
+else
+  base_reason="no $BASE_REPO suite ran on this commit"
+fi
+
 if [ -z "$head_repo" ] || [ -z "$head_sha" ] || [ "$head_repo" = "$BASE_REPO" ]; then
   {
-    printf 'error: refusing to call %s green: no repository suite ran on this commit.\n' "$URL"
+    printf 'error: refusing to call %s green: %s.\n' "$URL" "$base_reason"
     echo "A third-party check passing is not this repository's CI passing, and there is"
     echo "no separate head repository whose own run could have validated it."
   } >&2
   exit 1
 fi
 
-printf 'no %s suite ran on this commit; reading %s at %s\n' "$BASE_REPO" "$head_repo" "$head_sha"
+printf '%s; reading %s at %s\n' "$base_reason" "$head_repo" "$head_sha"
 runs=$(gh api "repos/$head_repo/actions/runs?head_sha=$head_sha&per_page=100" \
   --jq '[.workflow_runs[] | {id, name, status, conclusion, event}]' 2>/dev/null) \
   || unreadable "the workflow runs in $head_repo"
