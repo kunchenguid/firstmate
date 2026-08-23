@@ -176,8 +176,17 @@ network_mutation_authorized() {
   [ "$current" = "$expected" ]
 }
 
+# Captain-ordered fleet stop (file contract: bin/fm-fleet-stop.sh header). While
+# the flag exists the four mutating network sweeps stand down here, and
+# detect_local_config prints the self-contained FLEET_STOP banner every run.
+fleet_stop_active() { [ -f "$STATE/.fleet-stop" ]; }
+
 network_sweep_authorized() {
   local label=$1
+  if fleet_stop_active; then
+    echo "NETWORK_CHECKS: fleet stop active, so '$label' stood down (bin/fm-fleet-stop.sh status)"
+    return 1
+  fi
   if network_mutation_authorized; then
     return 0
   fi
@@ -1161,6 +1170,11 @@ detect_local_tools() {
 }
 
 detect_local_config() {
+  # Self-contained banner, printed every run including detect-only, so no session
+  # can miss an active stop; the line carries its own handling and needs no skill.
+  if fleet_stop_active; then
+    echo "FLEET_STOP: active since $(head -1 "$STATE/.fleet-stop" 2>/dev/null | cut -d= -f2-) - every agent start and mutating network sweep is refused; this is a standing captain order, lift only on captain word with bin/fm-fleet-stop.sh lift"
+  fi
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
   # primary only; detached-HEAD worktrees and secondmate homes never trip it.
