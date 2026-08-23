@@ -685,6 +685,65 @@ test_missing_required_check_with_pr_workflow_fails() {
   pass "a PR-triggered workflow set with no required check fails the lint"
 }
 
+# A `paths:` filter makes a trigger conditional on which files a PR touches, so
+# a required check carrying one produces no run at all for a PR that touches no
+# matching file - zero checks, which reads exactly like a passing one.
+test_required_check_with_paths_filter_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-required-paths)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]' '    paths: ["bin/**"]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a paths-filtered required check unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "no-mistakes-required.yml" \
+    "the failure did not name the conditionally triggered required check"
+  assert_contains "$out" "paths" \
+    "the failure did not name the filter that made the check conditional"
+  assert_contains "$out" "main" \
+    "the failure did not name the base left only conditionally gated"
+  pass "a paths filter on the required check fails the lint"
+}
+
+# The same filter elsewhere only makes that workflow conditional, which cannot
+# defeat the required check, so it must not fail the lint. The block-sequence
+# form doubles as coverage of the non-flow paths spelling.
+test_paths_filter_on_other_workflow_passes() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-other-paths)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    paths:' '    - "bin/**"' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a paths filter outside the required check must pass, got $rc"$'\n'"$out"
+  assert_contains "$out" "requires checks on: main" \
+    "the passing verdict did not read the paths-filtered workflow base list"
+  pass "a paths filter on a workflow other than the required check passes"
+}
+
+# Stated limitation, pinned as intentional: base names are compared literally,
+# so a glob in the required check fails loudly rather than passing silently.
+test_glob_base_in_required_check_fails_loudly() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-glob)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: ["**"]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a glob base in the required check unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "compared literally" \
+    "the failure did not disclose that base names are compared literally"
+  assert_contains "$out" "main" \
+    "the failure did not name the base it could not match"
+  pass "a glob base in the required check fails loudly, not silently"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -726,4 +785,7 @@ test_unreadable_base_filter_fails_closed
 test_zero_indent_on_sequence_is_pr_triggered
 test_branches_sequence_at_key_indent_is_read
 test_missing_required_check_with_pr_workflow_fails
+test_required_check_with_paths_filter_fails
+test_paths_filter_on_other_workflow_passes
+test_glob_base_in_required_check_fails_loudly
 test_explicit_path_skips_set_level_gating

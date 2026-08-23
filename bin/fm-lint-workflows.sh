@@ -94,6 +94,14 @@ collect_workflow_files() {
 # also be gated by the required check, so a base can never get CI without also
 # getting the check branch protection requires. The reminder to add a new
 # long-lived base at all lives in each workflow's own `on:` block comment.
+#
+# Stated limitation: base names are compared literally. A glob or pattern in
+# the required check's branch list is not understood here, so a required check
+# written with one fails this lint loudly rather than passing silently. That is
+# the deliberate trade, for two reasons: a loud refusal is the opposite of the
+# silent-absence defect this gate exists to catch, and no workflow in this repo
+# uses such a construct today. Teach this gate pattern semantics on the day one
+# does, rather than guessing at coverage in the meantime.
 REQUIRED_CHECK_WORKFLOW=no-mistakes-required.yml
 
 # Prints exactly one classification line for one workflow file:
@@ -101,6 +109,9 @@ REQUIRED_CHECK_WORKFLOW=no-mistakes-required.yml
 #   all                   `pull_request` with no base filter, so every base
 #   bases <base>...       `pull_request` filtered to these bases
 #   unsupported <reason>  a form this gate refuses to guess at
+# A definite verdict carries a `paths <key> ` prefix when the `pull_request`
+# trigger is also narrowed by a `paths:` or `paths-ignore:` filter, because
+# such a trigger produces no run at all for a PR touching no matching file.
 fm_lint_workflows_pr_filter() {
   awk '
 function ind(s) { match(s, /^ */); return RLENGTH }
@@ -116,7 +127,13 @@ function unq(s, q) {
   }
   return s
 }
-function emit(v) { print v; emitted = 1; exit }
+function emit(v) {
+  if (pathsfilter != "" && (v == "all" || substr(v, 1, 5) == "bases")) \
+    v = "paths " pathsfilter " " v
+  print v
+  emitted = 1
+  exit
+}
 function tokens(s, n, i, a, t, r) {
   gsub(/[\[\]]/, " ", s)
   gsub(/,/, " ", s)
@@ -132,6 +149,11 @@ function events(s, n, i, a) {
 }
 function branch_list() {
   return bases == "" ? "unsupported empty branches list" : "bases" bases
+}
+# The pull_request block is only classified once it ends, because a narrowing
+# `paths:` sibling may follow the `branches:` list it narrows.
+function pr_verdict() {
+  return has_branches ? branch_list() : "all"
 }
 {
   line = $0
@@ -169,9 +191,10 @@ function branch_list() {
       bases = bases " " b
       next
     }
-    # Anything that is not an item of this sequence ends the branches list.
-    if (i <= br_indent) emit(branch_list())
-    emit("unsupported non-sequence entry under branches")
+    # Anything that is not an item of this sequence ends the branches list and
+    # is reconsidered below as a sibling key of the pull_request block.
+    if (i > br_indent) emit("unsupported non-sequence entry under branches")
+    mode = 2
   }
   if (mode == 1) {
     # The first member line decides whether on: holds a sequence or a mapping;
@@ -198,8 +221,9 @@ function branch_list() {
     pr_indent = -1
     next
   }
-  # The pull_request block ended without a branches filter: every base.
-  if (i <= on_indent) emit("all")
+  # A line at or above the pull_request key ends its block, so the collected
+  # branches list, or its absence, is the verdict.
+  if (i <= on_indent) emit(pr_verdict())
   if (pr_indent < 0) {
     if (dash) emit("unsupported sequence under pull_request")
     pr_indent = i
@@ -207,17 +231,25 @@ function branch_list() {
   if (i != pr_indent) next
   if (key == "branches-ignore") \
     emit("unsupported branches-ignore under pull_request")
+  # A paths filter makes the trigger conditional on which files a PR touches,
+  # whatever its value, so only the key itself needs reading.
+  if (key == "paths" || key == "paths-ignore") {
+    pathsfilter = key
+    next
+  }
   if (key != "branches") next
   if (val == "") {
     mode = 3
     br_indent = i
+    has_branches = 1
     next
   }
   if (substr(val, 1, 1) == "[") {
     if (index(val, "]") == 0) \
       emit("unsupported multi-line flow sequence under branches")
     bases = tokens(val)
-    emit(branch_list())
+    has_branches = 1
+    next
   }
   emit("unsupported scalar branches value")
 }
@@ -226,8 +258,7 @@ END {
   if (mode == 0) emit("unsupported no top-level on: key")
   if (seq) emit(events(ev))
   if (mode == 1) emit("none")
-  if (mode == 2) emit("all")
-  emit(branch_list())
+  emit(pr_verdict())
 }
 ' "$1"
 }
@@ -237,7 +268,7 @@ END {
 # workflow set rather than of one explicitly linted file.
 fm_lint_workflows_pr_gating() {
   local file name verdict required_verdict='' required_set='' found_required=0
-  local rc=0 i n base missing
+  local rc=0 i n base missing paths_filter required_paths='' glob_note=''
   local names=() verdicts=()
 
   for file in "${FILES[@]}"; do
@@ -254,9 +285,18 @@ fm_lint_workflows_pr_gating() {
         return 1
         ;;
     esac
+    paths_filter=''
+    case "$verdict" in
+      "paths "*)
+        verdict=${verdict#paths }
+        paths_filter=${verdict%% *}
+        verdict=${verdict#* }
+        ;;
+    esac
     if [ "$name" = "$REQUIRED_CHECK_WORKFLOW" ]; then
       found_required=1
       required_verdict=$verdict
+      required_paths=$paths_filter
       continue
     fi
     names+=("$name")
@@ -291,8 +331,28 @@ fm_lint_workflows_pr_gating() {
       "$REQUIRED_CHECK_WORKFLOW" >&2
     return 1
   fi
+  # A paths filter on any other workflow only makes that workflow conditional;
+  # on the required check it means a PR touching no matching file gets no run
+  # of it at all, which reads exactly like a passing required check.
+  if [ -n "$required_paths" ]; then
+    if [ "$required_verdict" = all ]; then
+      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so on every PR base it gates a PR touching no matching file produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "$required_paths" \
+        "$REQUIRED_CHECK_WORKFLOW" >&2
+    else
+      printf 'fm-lint-workflows.sh: %s narrows its pull_request trigger with a %s filter, so PR base(s)%s are only conditionally gated: a PR touching no matching file produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$required_paths" "${required_verdict#bases}" \
+        "$required_paths" "$REQUIRED_CHECK_WORKFLOW" >&2
+    fi
+    return 1
+  fi
   case "$required_verdict" in
     bases*) required_set="${required_verdict#bases} " ;;
+  esac
+  case "$required_verdict" in
+    *[*?]*)
+      glob_note=" Base names are compared literally, so a glob in $REQUIRED_CHECK_WORKFLOW is not expanded here; list each gated base by name."
+      ;;
   esac
 
   i=0
@@ -303,23 +363,28 @@ fm_lint_workflows_pr_gating() {
     [ "$verdict" != none ] || continue
     [ "$required_verdict" != all ] || continue
     if [ "$verdict" = all ]; then
-      printf 'fm-lint-workflows.sh: %s gates every PR base while %s requires checks only on:%s. Drop the base filter in %s or widen it there.\n' \
+      printf 'fm-lint-workflows.sh: %s gates every PR base while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s\n' \
         "$name" "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}" \
-        "$REQUIRED_CHECK_WORKFLOW" >&2
+        "$REQUIRED_CHECK_WORKFLOW" "$glob_note" >&2
       rc=1
       continue
     fi
     missing=''
     # Intentional word split: the classifier emits bases separated by spaces.
+    # Globbing stays off so a base is compared as the literal name it is,
+    # rather than expanded against the working directory.
+    set -f
     for base in ${verdict#bases}; do
       case "$required_set" in
         *" $base "*) ;;
         *) missing="$missing $base" ;;
       esac
     done
+    set +f
     if [ -n "$missing" ]; then
-      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.\n' \
-        "$name" "$missing" "$REQUIRED_CHECK_WORKFLOW" "$REQUIRED_CHECK_WORKFLOW" >&2
+      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.%s\n' \
+        "$name" "$missing" "$REQUIRED_CHECK_WORKFLOW" "$REQUIRED_CHECK_WORKFLOW" \
+        "$glob_note" >&2
       rc=1
     fi
   done
