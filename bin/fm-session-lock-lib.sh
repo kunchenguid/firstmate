@@ -152,6 +152,41 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print the pid of the session the harness itself publishes, or return 1.
+#
+# Ancestry answers "which harness am I running inside" only while the caller is
+# actually a descendant of its session. Claude Code serves tool and hook
+# commands from a per-user worker pool (claude daemon run -> bg-pty-host ->
+# bg-spare) that is reparented to init, so the ancestry of such a call
+# terminates at pid 1 inside the pool and never reaches the interactive session
+# that acquired this home's lock. CLAUDE_PID is exported into every one of those
+# commands and names that session directly, which is why it survives the gap
+# that ancestry cannot cross. Claude Code is the only verified harness that
+# publishes one today; every other harness has no such variable and keeps the
+# ancestry-only behavior below unchanged.
+#
+# The pid is trusted only while it is still a live Claude Code process, so a
+# value inherited from an exited session whose pid has been recycled onto
+# something else - or onto a different harness entirely - proves nothing.
+#
+# Trust boundary. The variable is inherited by any child, so on its own it says
+# "a Claude session named this pid", never "I am that session". That is why
+# callers must use it strictly to WIDEN ownership and never to replace the
+# ancestry test: the only conclusion drawn from it here is that a lock ALREADY
+# recording this exact pid belongs to a live session rather than a competing
+# one, which is true however deep the caller sits below that session. It can
+# therefore never let a caller take a lock away from another session, and never
+# turns an unheld lock into a held one.
+fm_harness_session_pid() {
+  local pid=${CLAUDE_PID:-}
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$pid" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  printf '%s\n' "$pid"
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -160,12 +195,22 @@ fm_harness_pid_alive() {
 # and an inner pid when a harness-named daemon parents the session. A missing
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
+#
+# Membership proves ownership when it holds, but its absence proves nothing: a
+# call served by a reparented worker pool has no ancestry path to its own
+# session at all, so a session that genuinely holds this lock would be refused
+# its own home and forced read-only. The published session pid answers exactly
+# that case and is checked first. It only ever widens acceptance - a lock this
+# session does not already hold is still decided by the ancestry walk below.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid session_pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if session_pid=$(fm_harness_session_pid) && [ "$session_pid" = "$lock_pid" ]; then
+    return 0
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

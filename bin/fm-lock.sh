@@ -34,6 +34,19 @@ if [ "${1:-}" = "status" ]; then
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+# A call served by a reparented worker pool is rooted at pid 1, so the session
+# that acquired this lock is not in the ancestry $me came from and every check
+# below would read this session's own lock as a competing session's. When the
+# harness names its session itself and the lock already records exactly that pid,
+# this IS the owning session: adopt the recorded pid so those checks compare like
+# with like. Ownership is only ever recognized here, never transferred - a lock
+# this session does not already hold leaves $me as the ancestry resolved it.
+if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
+  session_pid=$(fm_harness_session_pid) || session_pid=''
+  if [ -n "$session_pid" ] && [ "$session_pid" = "$(cat "$LOCK" 2>/dev/null || true)" ]; then
+    me=$session_pid
+  fi
+fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

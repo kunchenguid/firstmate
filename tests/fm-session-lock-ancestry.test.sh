@@ -220,6 +220,170 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- unit layer: identity when the call is served by a worker pool -----------
+
+# Claude Code serves tool and hook commands from a per-user worker pool
+# (claude daemon run -> bg-pty-host -> bg-spare) that is reparented to init, so
+# the interactive session that acquired the lock is not an ancestor of the call
+# at all. Pid 700 below is that live session and it appears NOWHERE in the chain
+# the walk can reach; 650 is a second, unrelated live session.
+write_pool_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' claude ;;
+  700:args=) printf '%s\n' 'claude --model opus' ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' 'claude --model opus' ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  660:comm=) printf '%s\n' codex ;;
+  660:args=) printf '%s\n' 'codex' ;;
+  660:ppid=) printf '%s\n' 1 ;;
+  300:comm=) printf '%s\n' claude ;;
+  300:args=) printf '%s\n' 'claude daemon run' ;;
+  300:ppid=) printf '%s\n' 1 ;;
+  310:comm=) printf '%s\n' claude ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host' ;;
+  310:ppid=) printf '%s\n' 300 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' 'claude bg-spare' ;;
+  320:ppid=) printf '%s\n' 310 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-session-start.sh' ;;
+  *:ppid=) printf '%s\n' 320 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+test_pool_served_session_owns_the_lock_it_holds() {
+  local dir fakebin
+  dir="$TMP_ROOT/pool-owned"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+  printf '700\n' > "$dir/state/.lock"
+
+  # The reachable ancestry terminates in the pool at pid 1, so membership alone
+  # cannot see the session and every re-verification would refuse this home.
+  [ "$(lib_eval "$fakebin" 'fm_harness_ancestry_pid')" = 300 ] \
+    || fail "fixture did not reproduce a pool-served call rooted at pid 1"
+  CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a session served by a reparented worker pool could not prove it owns its own lock"
+  pass "session-lock: a session served by a worker pool proves it owns the lock it holds"
+}
+
+test_pool_served_session_never_claims_another_session_lock() {
+  local dir fakebin
+  dir="$TMP_ROOT/pool-foreign"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+
+  # 650 is a different live session. Widening ownership to the published session
+  # pid must not widen it to any other live harness.
+  printf '650\n' > "$dir/state/.lock"
+  if CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a lock held by a different live session was claimed as this session's own"
+  fi
+  pass "session-lock: a pool-served session never claims a lock held by another session"
+}
+
+test_published_session_pid_is_trusted_only_while_it_is_a_live_harness() {
+  local dir fakebin
+  dir="$TMP_ROOT/pool-stale"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+
+  # 999 is not a harness in this table: a stale exported value whose pid has
+  # been recycled onto something else proves nothing and must fail closed.
+  printf '999\n' > "$dir/state/.lock"
+  if CLAUDE_PID=999 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a published session pid that is not a live harness was trusted"
+  fi
+  if CLAUDE_PID=not-a-pid lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a malformed published session pid was trusted"
+  fi
+
+  # 660 is a live harness, but not a Claude one, so the pid cannot be the
+  # session that published this variable - it was recycled or inherited.
+  printf '660\n' > "$dir/state/.lock"
+  if CLAUDE_PID=660 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a published session pid pointing at a different harness was trusted"
+  fi
+  pass "session-lock: a published session pid is trusted only while it is a live Claude session"
+}
+
+# The reported failure is reached through bin/fm-lock.sh, which compares the
+# recorded pid against this call's ancestry and refuses when they differ. The
+# session pid here is a real live process so the script's own kill -0 liveness
+# check runs unstubbed; only ps is shadowed.
+test_lock_acquire_is_not_refused_to_the_session_that_holds_it() {
+  local dir fakebin session_pid out rc
+  dir="$TMP_ROOT/pool-acquire"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  sleep 120 &
+  session_pid=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "$FM_TEST_SESSION_PID:comm=") printf '%s\n' claude ;;
+  "$FM_TEST_SESSION_PID:args=") printf '%s\n' 'claude --model opus' ;;
+  "$FM_TEST_SESSION_PID:ppid=") printf '%s\n' 1 ;;
+  300:comm=) printf '%s\n' claude ;;
+  300:args=) printf '%s\n' 'claude daemon run' ;;
+  300:ppid=) printf '%s\n' 1 ;;
+  310:comm=) printf '%s\n' claude ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host' ;;
+  310:ppid=) printf '%s\n' 300 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' 'claude bg-spare' ;;
+  320:ppid=) printf '%s\n' 310 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 320 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$session_pid" > "$dir/state/.lock"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" CLAUDE_PID="$session_pid" \
+    FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>&1) && rc=0 || rc=$?
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] \
+    || fail "the session holding the lock was refused its own home (rc=$rc): $out"
+  case "$out" in
+    *"another live firstmate session"*)
+      fail "the session holding the lock was told another session holds it: $out" ;;
+  esac
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session_pid" ] \
+    || fail "the lock moved off the session that holds it"
+  pass "session-lock: acquire is not refused to the pool-served session that already holds the lock"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +524,10 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_pool_served_session_owns_the_lock_it_holds
+test_pool_served_session_never_claims_another_session_lock
+test_published_session_pid_is_trusted_only_while_it_is_a_live_harness
+test_lock_acquire_is_not_refused_to_the_session_that_holds_it
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
