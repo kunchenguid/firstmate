@@ -289,9 +289,24 @@ test_backend_timeout_normalizes_to_a_positive_decimal() {
     install_fixture "$home"; append_wake "$home" 1
     FM_WAKE_CONTEXT_BACKEND_TIMEOUT="$value" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
       "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "timeout fixture $value failed"
-    [ "$(cat "$home/backend-timeout")" = "$expected" ] || fail "timeout $value did not normalize to $expected"
+    [ "$(tail -1 "$home/backend-timeout")" = "$expected" ] || fail "timeout $value did not normalize to $expected"
   done
   pass "backend liveness timeout stays strictly positive after normalization"
+}
+
+test_collection_timeout_falls_back_after_crew_state_hang() {
+  local home="$TMP_ROOT/collection-timeout" started finished status=0
+  install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1; : > "$home/hang"
+  started=$(date +%s)
+  FM_CREW_STATE_HANG="$home/hang" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=2 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  finished=$(date +%s); rm -f "$home/hang"
+  [ "$status" -ne 0 ] || fail "une collecte bloquée a produit un paquet"
+  [ $((finished - started)) -le 4 ] || fail "le fallback a dépassé le délai agrégé"
+  grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback canonique manque"
+  grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback a perdu son ACK"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "le timeout a publié un cache"
+  pass "une sonde crew-state bloquée respecte le délai agrégé et le fallback"
 }
 
 test_cursor_merge_follows_live_rotation_without_regression() {
@@ -384,6 +399,7 @@ test_absolute_check_key_maps_to_task
 test_status_only_recovery_uses_zero_ack
 test_post_drain_overflow_falls_back
 test_backend_timeout_normalizes_to_a_positive_decimal
+test_collection_timeout_falls_back_after_crew_state_hang
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor
