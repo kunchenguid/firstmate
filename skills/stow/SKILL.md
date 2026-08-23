@@ -68,7 +68,7 @@ Everything files to a local destination by default; an external system such as a
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
-   Evaluate each dated entry against its tier clocks per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
+   Evaluate each dated entry against its tier clock per the tier contract below, refreshing what current evidence re-validates and archiving what stays stale.
    Archive what is no longer current, including completed chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Prefer one concise current rule, or a pointer to the authoritative source, over duplicate prose.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live on-demand owner or a consolidation merge that preserves the fact.
@@ -93,8 +93,8 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 - `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
 - `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
-- `<!--a:YYYY-MM-DD/N-->` - either dated marker may carry `/N`, the number of passes that evaluated the entry without reinforcing it.
-  An absent `/N` means zero, so an entry you keep exercising costs no counter bytes at all.
+- `<!--a:YYYY-MM-DD/N-->` - only in a file whose header pointer opts in to the pass horizon below: either dated marker may carry `/N`, the number of passes that evaluated the entry without reinforcing it.
+  An absent `/N` means zero, so an entry you keep exercising costs no counter bytes at all, and a file that has not opted in never carries one.
 - `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
 - `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
@@ -108,8 +108,8 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 The tier names say what this skill does with an entry:
 
 - `pinned` - never decays and is never dropped to shorten a file; it changes only when the user or reality changes it.
-- `aging` - must re-prove itself: an entry is stale once it reaches either horizon, whichever comes first - 10 passes that evaluated it without reinforcing it, or 30 days since its last-reinforced date - and a stale entry is re-validated (date refreshed and counter cleared) or archived, never kept by inertia alone.
-- `perishable` - written to be thrown out: an entry is stale once it reaches either horizon, whichever comes first - 3 unreinforced passes, or 7 days since its last-reinforced date - and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
+- `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
+- `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
   An entry that cannot name a checkable condition is `aging`, not `perishable`.
 
 Rules:
@@ -117,14 +117,17 @@ Rules:
 - Unless a file's own header pointer names a different default, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
 - An entry matching its file's `pinned` default carries no marker at all; every `aging` and `perishable` entry always carries its dated marker, whose letter names the tier, so a clock-carrying entry is never ambiguous with unmarked legacy material.
 - Marker and pointer bytes are part of the file's cost, so bookkeeping stays minimal by design.
-- Every governed memory file this skill curates carries at most a one-line header pointer naming this skill as the scheme owner, such as `<!-- memory tiers: see the stow skill -->`, optionally naming that file's default tier when it deviates.
-  The tier semantics, marker spellings, and clocks live only in this skill and are never restated in a file header.
+- Every governed memory file this skill curates carries at most a one-line header pointer naming this skill as the scheme owner, such as `<!-- memory tiers: see the stow skill -->`, optionally naming that file's default tier when it deviates and the pass horizon when that file opts in, as in `<!-- memory tiers: see the stow skill; pass horizon -->`.
+  The tier semantics, marker spellings, and clocks live only in this skill and are never restated in a file header, which names an option but never its numbers.
   During one-time migration, add the pointer even to a default-pinned file that contains only unmarked entries, so every governed file names its scheme owner.
 - Refresh an entry's last-reinforced date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
-  Refreshing that date also clears the entry's unreinforced-pass counter, and nothing else clears it.
-- Increment the unreinforced-pass counter of every dated entry this pass did not reinforce, before judging staleness.
-  That increment is what lets a clock fire where you stow often: admitting findings is a per-pass event, so decay needs a per-pass horizon too, while the date horizon keeps bounding a project you stow rarely.
+- The dates above are the default and only clock, and a file gets exactly them unless its header pointer opts in to the pass horizon.
+  Opt a file in where you stow often enough that the date clock never fires: admitting findings is a per-pass event, so an entry you keep exercising never sits unreinforced for 30 wall-clock days and the file only grows, while a project you stow rarely already passes its date horizon in a single pass and gains nothing.
+  Never add that opt-in on your own initiative; the user chooses it, one file at a time.
+- While a file is opted in, an `aging` entry there is stale at whichever comes first - 10 passes that evaluated it without reinforcing it, or 30 days - and a `perishable` entry at whichever comes first - 3 unreinforced passes, or 7 days.
+  Increment the counter of every dated entry that pass did not reinforce before judging staleness, read a dated marker with no `/N` as counter zero so nothing needs migrating, and clear the counter only by refreshing the date on real evidence.
+  In a file that is not opted in, never write a counter and never read one that is already there.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
 - Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, the unreinforced-pass counter when it carried one, and a one-line reason naming whichever horizon it reached first.
