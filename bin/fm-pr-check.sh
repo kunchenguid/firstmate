@@ -46,7 +46,10 @@ fi
 # both at the new PR while anything still pending on the original (its merge
 # watch, its landed-work check) keeps trusting a value that no longer names it.
 # Refuse rather than overwrite; re-running with the SAME url stays idempotent so
-# the existing re-arm-before-merge flow (bin/fm-pr-merge.sh) is unaffected.
+# the existing re-arm-before-merge flow (bin/fm-pr-merge.sh) is unaffected. This
+# early check is only a fast-path rejection: two concurrent invocations could
+# both read no pr= here, so the authoritative check is repeated under the meta
+# lock immediately before the strip-and-rewrite below.
 EXISTING_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "$URL" ]; then
   echo "REFUSED: task $ID already has pr=$EXISTING_PR recorded; refusing to overwrite it with $URL. Tear down the task or resolve the existing PR before recording a different one." >&2
@@ -118,6 +121,17 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+
+# Re-check under the lock: the pre-lock guard above can race a concurrent
+# invocation that recorded a different pr= in the window between that read and
+# this lock acquisition. This is the boundary where the mutation actually
+# happens, so it is the boundary where the invariant must hold.
+EXISTING_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "$URL" ]; then
+  echo "REFUSED: task $ID already has pr=$EXISTING_PR recorded; refusing to overwrite it with $URL. Tear down the task or resolve the existing PR before recording a different one." >&2
+  exit 1
+fi
+
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
