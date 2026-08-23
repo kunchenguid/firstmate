@@ -63,6 +63,21 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
+#
+# This predicate binds one run at a time, and MORE THAN ONE recorded run can
+# bind to the same worktree at once: a run that died at the worktree's exact
+# commit still binds by the equal-commit rule while its live successor binds by
+# the ancestor rule (observed 2026-08: a crashed validation daemon left a failed
+# run at the worktree's own commit while the live run that replaced it validated
+# a descendant commit on the same branch).
+# When several runs bind, a LIVE run always outranks a terminal one, whichever
+# match rule each one used, because a terminal run can be the corpse of a
+# crashed attempt while the live one is what is actually validating this code.
+# Within one liveness class the selecting caller's existing precedence is
+# unchanged - for the coarse `no-mistakes runs` listing, newest-first row order.
+# fm_nm_run_status_class below classifies a recorded status word for that
+# comparison, and a word it cannot classify keeps the caller's own precedence
+# rather than displacing a known result.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
@@ -70,4 +85,17 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# Liveness class of a recorded run's status word, echoed as "terminal", "live",
+# or "unknown", for the live-over-terminal selection rule above.
+# The coarse `no-mistakes runs` listing emits exactly these four status words;
+# an `axi status` run object reports its terminal result through its own
+# outcome field as well, which the caller reading that object checks directly.
+fm_nm_run_status_class() {  # <status_word>
+  case "${1:-}" in
+    completed|failed|cancelled) printf 'terminal' ;;
+    running)                    printf 'live' ;;
+    *)                          printf 'unknown' ;;
+  esac
 }
