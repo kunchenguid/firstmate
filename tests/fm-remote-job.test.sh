@@ -165,6 +165,30 @@ case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
 esac
 pass "operator PATH resolves the authorized Nix profile bin link"
 
+# Which install of a multi-version tool a remote job resolves is decided by the
+# order these directories land on PATH, so the composition has to be sorted
+# rather than whatever order the filesystem returns. The fixture is created in
+# a deliberately unsorted order, and the expectation is the shell's own
+# pathname expansion - the mechanism the portable-PATH contract in
+# tests/fm-on.test.sh reconstructs.
+MISE_INSTALLS="$ACCOUNT_HOME/.local/share/mise/installs"
+for TOOL_VERSION in node/26.7.0 node/8.1 node/26 bun/1.4 bun/1.3.14 python/3.12.7; do
+  mkdir -p "$MISE_INSTALLS/$TOOL_VERSION/bin"
+done
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+MISE_COMPOSED=$(printf '%s\n' "$FM_REMOTE_JOB_OPERATOR_PATH" | tr ':' '\n' | grep -F "$MISE_INSTALLS/" || true)
+MISE_EXPECTED=$(printf '%s\n' "$MISE_INSTALLS"/*/*/bin)
+[ "$MISE_COMPOSED" = "$MISE_EXPECTED" ] \
+  || fail "the composed operator PATH did not order tool installs like the shell's own expansion"$'\n'"expected: $MISE_EXPECTED"$'\n'"actual:   $MISE_COMPOSED"
+# Bash sorts glob matches in pathexp.c, on the shell's own expansion path only.
+# `compgen -G` reaches glob_filename through pcomplete.c, which does not sort,
+# so on bash 3.2 it yields raw readdir order while the assertion above still
+# passes on a bash whose glob library sorts for both. Pin the mechanism too.
+grep -v '^[[:space:]]*#' "$ROOT/bin/fm-remote-job-lib.sh" | grep -q 'compgen' \
+  && fail "the operator PATH composes glob matches with compgen -G, which is unsorted on bash 3.2"
+rm -rf -- "$ACCOUNT_HOME/.local/share/mise"
+pass "operator PATH orders discovered tool installs deterministically"
+
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
