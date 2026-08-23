@@ -16,14 +16,18 @@
 # INBOX - the default for text to a task recorded in this home. The message is
 # appended as a durable sequenced record under state/<id>.inbox/ (newlines are
 # legal), and the terminal receives only one short constant self-describing
-# doorbell line plus Enter, best-effort. Exit 0 = the steer is durably sent
-# (recorded); nonzero = a real local failure (unresolvable target, an endpoint
-# that cannot be locked and revalidated or that retired or changed, an
-# unwritable record, a failed decision-close append, or pending-reply
-# bookkeeping for which neither the commit nor its recovery marker could be
-# written - the error then
-# says the record is already durable and must not be blindly resent). There is
-# no delivered-unconfirmed
+# doorbell line plus Enter, best-effort. The durable record IS the delivery,
+# so the record's fate alone governs the exit: 0 = the steer is durably sent
+# (recorded); nonzero = nothing was delivered and a resend is appropriate
+# (unresolvable target, an endpoint that cannot be locked and revalidated or
+# that retired or changed, an unwritable record) or a decision-close append
+# failed after delivery (the error then carries the exact manual close).
+# Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
+# nonzero: with the recovery marker stored the watcher reconciles it silently,
+# and with both the commit and the marker lost the send prints a distinct
+# "reply-tracking-degraded (steer delivered, do not resend)" warning instead,
+# because a resend-inviting status there would duplicate a delivered
+# instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously by the
 # worker's acknowledgement move into handled/, with the watcher re-ringing an
@@ -81,7 +85,10 @@
 # expectation. On the inbox plane the durable enqueue IS delivery to the task's
 # record, so the expectation is marked delivered at enqueue time; when that
 # bookkeeping commit fails after its durable recovery marker is stored, the
-# send remains successful and watcher reconciliation owns the repair. Only a
+# send remains successful and watcher reconciliation owns the repair, and when
+# the commit and marker are BOTH lost the send still remains successful with a
+# reply-tracking-degraded warning naming the expectation an operator must
+# inspect (it can no longer reconcile or escalate on its own). Only a
 # failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
 # it armed rather than dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
@@ -683,12 +690,15 @@ else
         if [ "$delivery_commit_status" = 2 ]; then
           echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
         else
-          # Both the commit and its recovery marker failed: no durable owner
-          # is left to reconcile the expectation, so this is a real local
-          # failure. The record itself stays durable, and the error says so -
-          # a caller must inspect, never blindly resend.
-          echo "error: local bookkeeping failed after durable delivery (delivery_durable=yes, retry_safe=no): the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
-          exit 1
+          # Both the commit and its recovery marker failed. The durable inbox
+          # record is what delivers the steer, so the send still SUCCEEDED:
+          # a nonzero here would read as undelivered to every automated caller
+          # and invite a duplicate enqueue - the exact defect this plane
+          # removes. Surface the degradation as its own distinct,
+          # non-resend-inviting condition instead: reply tracking for this
+          # request may not resolve or escalate on its own until an operator
+          # inspects it.
+          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
         fi
       fi
     fi

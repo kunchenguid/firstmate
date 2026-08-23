@@ -269,24 +269,28 @@ SH
   chmod +x "$dir/fakebin/mv"
 
   run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"; rc=$?
-  # When the commit AND its recovery marker both fail, no durable owner is left
-  # to reconcile the expectation, so the send is a loud local failure - while
-  # the error names the already-durable record and forbids a blind resend.
-  [ "$rc" -ne 0 ] || fail "a bookkeeping failure with no surviving recovery marker must exit nonzero"
+  # The durable record IS the delivery: even with the commit AND its recovery
+  # marker both lost, the steer was delivered, so fm-send must not signal a
+  # status that invites a resend (a nonzero would make automated callers
+  # enqueue the same instruction again under a new sequence). The degradation
+  # surfaces as its own distinct do-not-resend condition instead.
+  expect_code 0 "$rc" "a delivered steer must not report a resend-inviting failure over lost bookkeeping"
   rec="$dir/home/state/domain.inbox/001.msg"
   [ -f "$rec" ] || fail "bookkeeping failure test did not durably enqueue the steer"
+  [ "$(find "$dir/home/state/domain.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the delivered steer was duplicated:"$'\n'"$(ls "$dir/home/state/domain.inbox")"
   body=$(record_body _ "$rec")
   case "$body" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
     *) fail "bookkeeping failure test lost the secondmate marker: $body" ;;
   esac
-  assert_contains "$(cat "$err")" "Do not resend" \
-    "post-enqueue bookkeeping failure should give explicit operator recovery guidance"
-  assert_contains "$(cat "$err")" "was recorded at" \
-    "the failure should name the already-durable record so nobody re-enqueues it"
-  assert_contains "$(cat "$err")" "delivery_durable=yes, retry_safe=no" \
-    "the nonzero local-consistency failure should expose an unambiguous no-retry delivery outcome"
-  pass "fm-send inbox: a total bookkeeping failure is loud, names the durable record, and forbids a blind resend"
+  assert_contains "$(cat "$err")" "reply-tracking-degraded" \
+    "lost bookkeeping should surface as its own distinct degraded condition"
+  assert_contains "$(cat "$err")" "do not resend" \
+    "the degraded condition should give explicit do-not-resend guidance"
+  assert_contains "$(cat "$err")" "durably recorded at" \
+    "the degraded condition should name the already-delivered record"
+  pass "fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated"
 }
 
 test_meta_lock_contention_fails_bounded() {
