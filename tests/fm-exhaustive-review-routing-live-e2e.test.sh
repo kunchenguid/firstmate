@@ -30,6 +30,11 @@ CASE_BRIEF=
 CASE_META=
 CASE_TRANSCRIPT=
 CASE_APP_SHA=
+# This value is intentionally not present in the captain prompt or exported to
+# the primary.  The intact fixture adds it only to its checked-out procedure,
+# so the worker boundary can prove that Pi loaded that exact procedure rather
+# than independently reconstructing generic review language.
+ROUTING_SENTINEL="firstmate-routing-policy-${RANDOM}-${RANDOM}-${RANDOM}"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -97,7 +102,17 @@ make_primary_root() {
     git -C "$root" commit -q -m "test: source instruction overlay" \
       || fail "could not commit the primary instruction source overlay"
   fi
-  [ "$mode" = broken ] || return 0
+  case "$mode" in
+    intact)
+      printf '\n## Live E2E routing proof\n\nInclude the unique routing proof marker `%s` in the generated worker brief and launch handoff. This proves the procedure was loaded from this checked-out skill rather than supplied by another skill or a generic route.\n' "$ROUTING_SENTINEL" >> "$skill"
+      git -C "$root" add "$skill"
+      git -C "$root" commit -q -m "test: add routing policy proof marker" \
+        || fail "could not commit the intact routing-policy fixture"
+      return 0
+      ;;
+    broken) ;;
+    *) fail "unknown routing-policy fixture mode: $mode" ;;
+  esac
   cat > "$skill" <<'MD'
 ---
 name: firstmate-exhaustive-review
@@ -141,9 +156,17 @@ MD
 make_launch_boundary() {
   local fakebin=$1
   mkdir -p "$fakebin"
+  printf '%s\n' "$ROUTING_SENTINEL" > "$fakebin/routing-sentinel"
   cat > "$fakebin/pi" <<'SH'
 #!/usr/bin/env bash
 set -eu
+
+ROUTING_SENTINEL=
+IFS= read -r ROUTING_SENTINEL < "$(dirname "$0")/routing-sentinel"
+[ -n "$ROUTING_SENTINEL" ] || {
+  printf '%s\n' 'missing routing-policy proof marker' >&2
+  exit 92
+}
 
 case "${1:-}" in
   -h|--help)
@@ -175,7 +198,8 @@ if ! printf '%s\n' "$prompt" | grep -Fq 'FIRSTMATE_OP: v1 launch-brief:'; then
 fi
 if ! printf '%s\n' "$prompt" | grep -qi 'firstmate-exhaustive-review' \
   || ! printf '%s\n' "$prompt" | grep -Eqi 'immutable.*sha' \
-  || ! printf '%s\n' "$prompt" | grep -Eqi 'canonical.*ledger'; then
+  || ! printf '%s\n' "$prompt" | grep -Eqi 'canonical.*ledger' \
+  || ! printf '%s\n' "$prompt" | grep -Fq "$ROUTING_SENTINEL"; then
   printf 'REJECTED_MISSING_ROUTING_POLICY\n' >> "$log"
   exit 91
 fi
@@ -224,11 +248,23 @@ worker_contract_is_complete() {
     && grep -Fxq 'GSD_REVIEW_HANDOFF' "$CASE_GSD_LOG"
 }
 
-assert_real_route() {
+assert_spawn_boundary() {
   [ -s "$CASE_BRIEF" ] || fail "primary did not create a task brief through fm-brief.sh"
   [ -s "$CASE_META" ] || fail "primary did not create worker metadata through fm-spawn.sh"
   [ -n "$CASE_WORKER" ] && [ -d "$CASE_WORKER" ] || fail "fm-spawn did not create an isolated worker worktree"
   [ "$CASE_WORKER" != "$CASE_APP" ] || fail "fm-spawn routed the worker into the primary project checkout"
+  [ "$(git -C "$CASE_WORKER" rev-parse HEAD)" = "$CASE_APP_SHA" ] \
+    || fail "worker worktree is not at the immutable project baseline"
+  [ -z "$(git -C "$CASE_PRIMARY_ROOT" status --porcelain)" ] \
+    || fail "primary altered its Firstmate instruction checkout"
+  [ -z "$(git -C "$CASE_APP" status --porcelain)" ] \
+    || fail "primary altered the project checkout"
+  [ -z "$(git -C "$CASE_WORKER" status --porcelain)" ] \
+    || fail "worker review altered the project worktree"
+}
+
+assert_real_route() {
+  assert_spawn_boundary
   assert_meta 'harness=pi'
   assert_meta 'model=openai-codex/gpt-5.6-terra'
   assert_meta 'effort=high'
@@ -238,14 +274,8 @@ assert_real_route() {
   grep -Fq 'Delivery contract: mode=direct-PR' "$CASE_BRIEF" \
     || fail "real fm-brief.sh did not preserve the registry delivery contract"
   assert_brief_task_is_filled
-  [ "$(git -C "$CASE_WORKER" rev-parse HEAD)" = "$CASE_APP_SHA" ] \
-    || fail "worker worktree is not at the immutable project baseline"
-  [ -z "$(git -C "$CASE_PRIMARY_ROOT" status --porcelain)" ] \
-    || fail "primary altered its Firstmate instruction checkout"
-  [ -z "$(git -C "$CASE_APP" status --porcelain)" ] \
-    || fail "primary altered the project checkout"
-  [ -z "$(git -C "$CASE_WORKER" status --porcelain)" ] \
-    || fail "worker review altered the project worktree"
+  grep -Fq "$ROUTING_SENTINEL" "$CASE_BRIEF" \
+    || fail "primary did not carry the checked-out procedure's routing proof marker into the worker brief"
 }
 
 run_case() {
@@ -310,7 +340,7 @@ worker_contract_is_complete || fail "worker did not hand off the real project SH
 pass "real Pi primary used fm-brief and fm-spawn to hand off the immutable project SHA from an isolated worker"
 
 run_case red broken
-assert_real_route
+assert_spawn_boundary
 if worker_contract_is_complete; then
   fail "negative control passed after removing the exhaustive-review routing policy"
 fi
