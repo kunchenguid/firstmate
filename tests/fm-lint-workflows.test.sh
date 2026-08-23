@@ -5,6 +5,9 @@
 # in the local/no-mistakes lint path before merge. Regression origin: #2512 put
 # a column-0 heredoc body inside a `run: |` block in ci.yml; there was no
 # workflow YAML lint, and the broken workflow could not report its own breakage.
+#
+# It also covers the PR base gating invariant that same owner checks on its
+# directory-scan path; the section comment above those cases owns the rule.
 set -u
 
 # shellcheck source=tests/lib.sh
