@@ -44,15 +44,16 @@
 #     project hosted elsewhere gets an explicit "cannot verify" refusal rather
 #     than a silent pass, because this check has no other forge's permissions
 #     API wired up yet.
-#   - Check 2's direct-PR detection is a structural grep for a pull_request-
-#     triggered workflow that both reads the PR body (references
-#     "pull_request.body") and checks it for the literal marker no-mistakes
-#     itself writes ("git push no-mistakes"). Requiring the pull_request.body
-#     reference keeps an unrelated comment, doc string, or echo that merely
-#     mentions the phrase from being mistaken for enforcement. It catches the
-#     no-mistakes-required convention (which is what actually blocked
-#     direct-PR on firstmate's own repo); it does not evaluate arbitrary
-#     branch-protection rules.
+#   - Check 2's direct-PR detection is a structural scan for a pull_request-
+#     triggered workflow with a single job that both reads the PR body
+#     (references "pull_request.body") and checks it for the literal marker
+#     no-mistakes itself writes ("git push no-mistakes"). Requiring both
+#     inside the SAME job - not just anywhere in the file - keeps an
+#     unrelated job's PR-body read, or an unrelated job's comment/doc
+#     string/echo that merely mentions the phrase, from being mistaken for
+#     enforcement. It catches the no-mistakes-required convention (which is
+#     what actually blocked direct-PR on firstmate's own repo); it does not
+#     evaluate arbitrary branch-protection rules.
 #   - Check 3 measures quota-axi's own reported state. AGENTS.md section 4
 #     treats missing quota data as "disclosed uncertainty that keeps a
 #     candidate eligible" when CHOOSING among harnesses at intake - a
@@ -208,6 +209,22 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
 
 # --- check 2: delivery path --------------------------------------------------
 
+fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job's block contains both markers
+  local f=$1
+  awk '
+    function reset() { body = 0; marker = 0 }
+    BEGIN { reset(); in_jobs = 0 }
+    /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+    in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
+      if (body && marker) { found = 1; exit }
+      reset()
+    }
+    /pull_request\.body/ { body = 1 }
+    /git push no-mistakes/ { marker = 1 }
+    END { if (body && marker) found = 1; if (found) print "MATCH" }
+  ' "$f" 2>/dev/null | grep -q MATCH
+}
+
 fm_preflight_check_delivery_path() {  # <project-dir> <mode>
   local dir=$1 mode=$2 out f
   case "$mode" in
@@ -229,15 +246,14 @@ fm_preflight_check_delivery_path() {  # <project-dir> <mode>
     direct-PR)
       for f in "$dir"/.github/workflows/*.yml "$dir"/.github/workflows/*.yaml; do
         [ -f "$f" ] || continue
-        # Require all three: a pull_request trigger, an actual read of the PR
-        # body (not just the phrase appearing in a comment/echo/doc string
-        # elsewhere in the file), and the no-mistakes marker text - so an
-        # unrelated mention of "git push no-mistakes" cannot be mistaken for
-        # enforcement.
+        # Require a pull_request trigger AND a single job that both reads
+        # the PR body and checks it for the no-mistakes marker - not just
+        # both phrases appearing anywhere in the file, which would conflate
+        # an unrelated job's PR-body read with a different unrelated job's
+        # incidental mention of "git push no-mistakes".
         if grep -q 'pull_request' "$f" 2>/dev/null \
-          && grep -q 'pull_request\.body' "$f" 2>/dev/null \
-          && grep -qF 'git push no-mistakes' "$f" 2>/dev/null; then
-          FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (checks pull_request.body for the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
+          && fm_preflight_workflow_step_reads_no_mistakes_body "$f"; then
+          FM_PREFLIGHT_FAIL_REASON="$(basename "$f") requires a no-mistakes-produced PR body (a step checks pull_request.body for the 'git push no-mistakes' marker on a pull_request trigger); a hand-opened direct-PR cannot satisfy it"
           return 1
         fi
       done

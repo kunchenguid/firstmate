@@ -256,6 +256,42 @@ YML
   pass "delivery-path does not refuse direct-PR when 'git push no-mistakes' appears only in an unrelated comment, not a PR-body enforcement check"
 }
 
+test_delivery_path_direct_pr_cross_job_conflation_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-crossjob")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # Neither job, on its own, enforces a no-mistakes PR body: one job merely
+  # logs the PR body's length for an unrelated reason, and a completely
+  # different, unrelated job's step happens to mention the marker phrase in a
+  # comment. Matching each phrase anywhere in the file independently would
+  # wrongly conflate these two unrelated steps into an enforcement check.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  log-body-length:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Log PR body length
+        run: echo "body length: ${#PR_BODY}"
+  unrelated:
+    runs-on: ubuntu-latest
+    steps:
+      # Docs: contributions are normally submitted via 'git push no-mistakes'.
+      - run: echo "building"
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-crossjob-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "an unrelated PR-body read in one job plus an unrelated marker mention in another job must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the PR-body read and the marker mention are in different, unrelated steps: $out"
+  pass "delivery-path does not conflate an unrelated job's PR-body read with a different unrelated job's marker mention"
+}
+
 # --- check 3: quota headroom ---------------------------------------------------
 
 test_quota_stale_refuses() {
@@ -470,6 +506,7 @@ test_delivery_path_no_mistakes_uninitialized_refuses
 test_delivery_path_direct_pr_blocked_by_required_workflow_refuses
 test_delivery_path_direct_pr_without_required_workflow_passes
 test_delivery_path_direct_pr_unrelated_mention_does_not_refuse
+test_delivery_path_direct_pr_cross_job_conflation_does_not_refuse
 test_quota_stale_refuses
 test_quota_exhausted_refuses
 test_quota_healthy_passes
