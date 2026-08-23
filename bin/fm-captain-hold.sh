@@ -61,9 +61,11 @@
 # decision. It exists because the only prior ways to shrink the queue were to
 # leave a known duplicate on it or to fabricate a decision the captain never
 # gave; both are worse than an explicit non-decision. `--surviving` names the
-# task that still carries the live question - it must already exist and carry
-# (or have carried, through a close) an actual captain hold, and this
-# command never holds, answers, or otherwise touches it. The retired task's
+# task that still carries the live question - it must already exist, carry
+# (or have carried, through a close) an actual captain hold, and not itself
+# already be retired as a duplicate (that would only chain to a dead end),
+# and this command never holds, answers, or otherwise touches it. The retired
+# task's
 # body records a duplicate-retirement block naming the surviving task and
 # stating plainly that no captain decision was made, so the record stays
 # distinguishable from an `answer` record forever, by reading the body alone:
@@ -625,7 +627,7 @@ command_answer() {
 
 command_retire_duplicate() {
   local id=${1:-} surviving='' show state hold_kind body recorded_surviving
-  local surviving_show surviving_hold_kind
+  local surviving_show surviving_hold_kind surviving_body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -646,6 +648,10 @@ command_retire_duplicate() {
   surviving_hold_kind=$(show_field_value "$surviving_show" hold_kind)
   [ "$surviving_hold_kind" = captain ] \
     || fail "surviving task $surviving was never a captain call; name the real surviving call"
+  surviving_body=$(show_field "$surviving_show" body)
+  if body_has_duplicate_retirement_record "$surviving_body"; then
+    fail "surviving task $surviving was itself retired as a duplicate of $(recorded_surviving_task "$surviving_body" || echo unknown); name that task as the real surviving call instead"
+  fi
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)

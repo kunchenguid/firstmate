@@ -463,7 +463,7 @@ test_retire_duplicate_closes_without_recording_a_decision() {
   printf 'Captain chose north.\n' > "$home/decision.txt"
   run_captain "$home" answer sample-route-call --decision-file "$home/decision.txt" >/dev/null \
     || fail "the surviving task could still be answered normally after the duplicate retired"
-  if run_captain "$home" retire-duplicate sample-route-call --surviving sample-route-call-dup \
+  if run_captain "$home" retire-duplicate sample-route-call --surviving sample-route-call-other \
     > "$home/answered-dup.out" 2> "$home/answered-dup.err"; then
     fail "retire-duplicate closed an already-answered task as if it were an unrecorded duplicate"
   fi
@@ -554,6 +554,41 @@ test_stale_retirement_record_does_not_mask_a_later_answer() {
   run_captain "$home" answer sample-stale-call --decision-file "$home/cut.txt" >/dev/null \
     || fail "replaying the genuine answer was refused as if the task were still retired as a duplicate"
   pass "a stale retirement record underneath a newer answer is not mistaken for the task's current state"
+}
+
+# A retired-duplicate task is a dead end, not a live question: it names the
+# task it points to and never carries a captain decision of its own. Naming
+# an already-retired task as the `--surviving` target would let a chain build
+# up that a later reader has to walk by hand, so it is refused outright.
+test_retire_duplicate_refuses_a_surviving_task_that_is_itself_retired() {
+  local home
+  home=$(make_home retire-duplicate-chain)
+  run_captain "$home" hold sample-chain-call-a \
+    --title "Choose the sample chain outcome" --reason "captain chain choice pending" \
+    --repo sample >/dev/null \
+    || fail "could not register the head captain-held task"
+  run_captain "$home" hold sample-chain-call-b \
+    --title "Choose the sample chain outcome" --reason "captain chain choice pending, dup b" \
+    --repo sample >/dev/null \
+    || fail "could not register the first duplicate captain-held task"
+  run_captain "$home" hold sample-chain-call-d \
+    --title "Choose the sample chain outcome" --reason "captain chain choice pending, dup d" \
+    --repo sample >/dev/null \
+    || fail "could not register the second duplicate captain-held task"
+
+  run_captain "$home" retire-duplicate sample-chain-call-b --surviving sample-chain-call-a >/dev/null \
+    || fail "could not retire the first duplicate against the head call"
+
+  if run_captain "$home" retire-duplicate sample-chain-call-d --surviving sample-chain-call-b \
+    > "$home/chain.out" 2> "$home/chain.err"; then
+    fail "retire-duplicate accepted a surviving task that was itself already retired as a duplicate"
+  fi
+  assert_grep "sample-chain-call-a" "$home/chain.err" \
+    "the refusal did not point at the real chain-head the surviving task itself names"
+
+  run_captain "$home" retire-duplicate sample-chain-call-d --surviving sample-chain-call-a >/dev/null \
+    || fail "retire-duplicate refused a surviving task that genuinely still carries the live question"
+  pass "retire-duplicate refuses a surviving task that is itself already retired as a duplicate"
 }
 
 # Deferral is a date, not a live card: hold --until keeps the task out of
@@ -1357,6 +1392,7 @@ test_release_frees_held_work
 test_retire_duplicate_closes_without_recording_a_decision
 test_retire_duplicate_preserves_completion_durability
 test_stale_retirement_record_does_not_mask_a_later_answer
+test_retire_duplicate_refuses_a_surviving_task_that_is_itself_retired
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
