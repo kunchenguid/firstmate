@@ -745,7 +745,7 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.pr-poll-terminal" "$state_dir/$id.check-trust" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
@@ -2559,7 +2559,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
+  "$STATE/$ID.pr-poll-terminal" "$STATE/.$ID.pause-poll-covered"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

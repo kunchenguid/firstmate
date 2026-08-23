@@ -148,6 +148,8 @@ Classify each wake this way:
 - `signal` or `stale` for a declared wait, either a `paused:` external wait or a verified `captain-held` transfer -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one recheck and resets the pause window.
   That recheck names which human the wait is on: the external dependency for `paused:`, and the captain themself for a `captain-held` transfer, who can answer the held decision or release the hold.
+  A `paused:` external wait whose own armed, validated merge poll already covers it takes no recheck at all: the shared classifier drops it and deliberately leaves the pause window unreset, exactly as the always-on watcher does ([`docs/architecture.md`](../../../docs/architecture.md) owns that rule).
+  A `captain-held` transfer is never dropped that way, because a merge poll says nothing about whether the captain answered.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.

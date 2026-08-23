@@ -89,6 +89,8 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_TERMINAL_ID=
+FM_PR_TERMINAL_URL=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -925,6 +927,95 @@ fm_pr_poll_retirement_recover_one() {
     && [ ! -e "$registration" ] && [ ! -L "$registration" ] \
     && [ ! -e "$data" ] && [ ! -L "$data" ] \
     && [ ! -e "$receipt" ] && [ ! -L "$receipt" ]
+}
+
+# --- positively observed terminal non-merged outcomes -----------------------
+#
+# The poll speaks on a merge and stays silent on every other reading, errors
+# included, so silence alone can never separate "still open" from "closed
+# without merging". A poll run that positively observes the forge's own terminal
+# non-merged state records it here, once, so a later reader can establish that
+# this exact PR will never merge without asking the forge again. Nothing short of
+# that unambiguous observation is ever written: silence, a forge error, an
+# expired credential, an absent CLI, and an unparseable answer all leave no
+# record, which keeps every reader on the fail-toward-the-recheck side.
+#
+# The record is identity-bound to one PR URL rather than to the task alone, so it
+# can only answer for the PR that was actually observed; a poll rearmed at a
+# different PR is not covered by it. The observation is deliberately sticky: a
+# closed PR that is later reopened leaves the record standing, which costs a
+# redundant recheck rather than a lost one.
+# Layout: version tag, task id, canonical PR URL, result.
+fm_pr_poll_terminal_parse() {  # <file>
+  local file=$1 version id url result _extra
+  FM_PR_TERMINAL_ID=
+  FM_PR_TERMINAL_URL=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  exec 8< "$file" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r id <&8 || { exec 8<&-; return 1; }
+  IFS= read -r url <&8 || { exec 8<&-; return 1; }
+  IFS= read -r result <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-terminal-v1 ] || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$result" = closed-unmerged ] || return 1
+  FM_PR_TERMINAL_ID=$id
+  FM_PR_TERMINAL_URL=$FM_PR_URL
+}
+
+# 0 when <state> holds a validated record that <id>'s PR <url> was positively
+# observed to have reached a terminal non-merged state.
+fm_pr_poll_terminal_observed() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3 record state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -n "$url" ] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  record="$state/$id.pr-poll-terminal"
+  [ -e "$record" ] || [ -L "$record" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$record" 600 "$state_device" || return 1
+  fm_pr_poll_terminal_parse "$record" || return 1
+  [ "$FM_PR_TERMINAL_ID" = "$id" ] || return 1
+  [ "$FM_PR_TERMINAL_URL" = "$url" ]
+}
+
+# Record that <id>'s PR <url> was positively observed closed without merging.
+# Idempotent, atomic, and private; refuses anything but a canonical PR URL.
+fm_pr_poll_terminal_publish() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3 record state_device tmp
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_URL" = "$url" ] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  fm_pr_poll_terminal_observed "$state" "$id" "$url" && return 0
+  state_device=$(fm_pr_file_device "$state") || return 1
+  record="$state/$id.pr-poll-terminal"
+  fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" || return 1
+  tmp=$(mktemp "$state/.fm-pr-poll-terminal.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n' fm-pr-poll-terminal-v1 "$id" "$url" closed-unmerged > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" \
+    || ! mv -f -- "$tmp" "$record"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_poll_terminal_observed "$state" "$id" "$url"
+}
+
+# Drop <id>'s terminal record. Called wherever a poll is rearmed or torn down, so
+# an observation never outlives the watch it described.
+fm_pr_poll_terminal_forget() {  # <state> <id>
+  local state=$1 id=$2
+  fm_pr_task_id_valid "$id" || return 1
+  rm -f -- "$state/$id.pr-poll-terminal" || return 1
+  [ ! -e "$state/$id.pr-poll-terminal" ] && [ ! -L "$state/$id.pr-poll-terminal" ]
 }
 
 fm_pr_poll_retirement_recover_all() {

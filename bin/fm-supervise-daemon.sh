@@ -478,6 +478,9 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
+  # A crew that stopped declaring its pause no longer has a recheck suppressed,
+  # so its coverage note must not outlive the wait it described.
+  pause_poll_coverage_forget "$state" "$task"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -1037,6 +1040,17 @@ housekeeping() {  # <state>
   # reset the marker so the window repeats. The digest names WHICH human the wait is
   # on, because the captain is the one reading it: an external dependency for a
   # paused: declaration, and the captain themself for a verified hold transfer.
+  #
+  # The one wait that needs no recheck is one this exact task already polls for: an
+  # armed, validated merge poll wakes on the merge by itself, so the shared
+  # classifier's pause_recheck_covered_by_merge_poll drops the due recheck exactly as
+  # the always-on watcher does. That drop is offered only to the declared
+  # external-wait verb, never to a captain hold, because a merge poll says nothing
+  # about whether the captain answered - the same narrowing the watcher applies,
+  # which is what keeps the two modes agreeing. The marker is deliberately left
+  # un-reset so the ordinary recheck escalates on the next tick if the coverage
+  # lapses - including when the covering PR has been positively observed closed
+  # without merging, which lapses it for good.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1053,6 +1067,13 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    # Narrowed to the declared external-wait verb before the busy probe below, so a
+    # covered wait costs neither the probe nor the digest, while a captain hold -
+    # which a merge poll cannot answer - always falls through to its own recheck.
+    if status_is_paused "$last" && pause_recheck_covered_by_merge_poll "$state" "$task"; then
+      log "self-handle (paused, armed merge poll $FM_CLASSIFY_PAUSE_POLL_URL covers the wait): $win"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1060,12 +1081,14 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
+          pause_poll_coverage_forget "$state" "$task"
           escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
           _now > "$marker"
         elif [ -n "$last" ] && status_is_paused "$last"; then
           escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
           _now > "$marker"
         else
+          pause_poll_coverage_forget "$state" "$task"
           rm -f "$marker"
         fi
         ;;

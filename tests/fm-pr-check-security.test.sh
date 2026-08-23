@@ -730,17 +730,21 @@ test_static_poll_contract() {
   dir=$(make_case poll-contract)
   make_poll_fixture "$dir"
 
-  for state in OPEN CLOSED EMPTY MALFORMED; do
+  for state in OPEN EMPTY MALFORMED; do
     case "$state" in
       EMPTY) value= ;;
       MALFORMED) value='not-a-state' ;;
       *) value=$state ;;
     esac
     out=$(FM_TEST_GH_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "static poll emitted for non-merged state"
+    [ -z "$out" ] || fail "static poll emitted for an inconclusive state"
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  # The forge's own terminal non-merged state is the second, opposite outcome
+  # that ends the watch, and it is reported as distinctly as the merge is.
+  out=$(FM_TEST_GH_STATE=CLOSED run_poll "$dir")
+  [ "$out" = closed-unmerged ] || fail "static poll did not report a PR closed without merging"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -776,7 +780,7 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll speaks only its two terminal outcomes and remains watcher-bounded"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2821,14 +2825,18 @@ gitlab.example
 group/subgroup/project
 7" ] || fail "published GitLab sidecar bytes were not exact"
 
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  # Only an exact merged state wakes firstmate, and only an exact closed state
+  # reports a rejection. Every other reading, including an unreadable merge
+  # request and a changed output format, stays silent.
+  for value in opened locked '' not-a-state MERGED CLOSED merged-but-not closed-ish; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
+    [ -z "$out" ] || fail "GitLab poll emitted for an inconclusive state"
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+  out=$(FM_TEST_GLAB_STATE=closed run_poll "$dir")
+  [ "$out" = closed-unmerged ] \
+    || fail "GitLab poll did not report a merge request closed without merging"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 

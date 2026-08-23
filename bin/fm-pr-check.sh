@@ -136,4 +136,10 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+# A freshly armed watch has observed nothing yet, so any terminal non-merged
+# record left by the poll this one replaces must not answer for it.
+fm_pr_poll_terminal_forget "$STATE" "$ID" || {
+  echo "error: stale terminal PR observation could not be cleared" >&2
+  exit 1
+}
 printf 'armed: state/%s.check.sh\n' "$ID"
