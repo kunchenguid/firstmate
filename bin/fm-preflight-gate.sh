@@ -209,7 +209,7 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
 
 # --- check 2: delivery path --------------------------------------------------
 
-fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job's block contains both markers
+fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job's block enforces both markers
   local f=$1
   awk '
     function reset() { body = 0; marker = 0 }
@@ -218,6 +218,21 @@ fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job'
     in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
       if (body && marker) { found = 1; exit }
       reset()
+    }
+    {
+      # A comment or a bare echo only ever narrates the marker/body - it
+      # never enforces anything - so it must not count as evidence that
+      # this job checks the PR body against the marker. Excluding these
+      # lines is what keeps an unrelated "echo <instructions mentioning
+      # the marker>" step (inline as "run: echo ..." or on its own line
+      # inside a "run: |" block) from being conflated with real
+      # enforcement.
+      trimmed = $0
+      sub(/^[[:space:]]+/, "", trimmed)
+      stripped = trimmed
+      sub(/^- /, "", stripped)
+      sub(/^(run|name):[[:space:]]*/, "", stripped)
+      if (trimmed ~ /^#/ || stripped ~ /^echo[[:space:]]/) next
     }
     /pull_request\.body/ { body = 1 }
     /git push no-mistakes/ { marker = 1 }

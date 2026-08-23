@@ -292,6 +292,40 @@ YML
   pass "delivery-path does not conflate an unrelated job's PR-body read with a different unrelated job's marker mention"
 }
 
+test_delivery_path_direct_pr_same_job_incidental_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-samejob-mention")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # A single job reads pull_request.body for an unrelated purpose (logging its
+  # length) and, in that same job, a different step's echo merely mentions the
+  # marker phrase in passing. Neither step checks the body against the marker,
+  # so this job does not actually enforce a no-mistakes PR body - matching the
+  # two phrases anywhere in the same job would wrongly treat an incidental
+  # echo as enforcement.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Log PR body length
+        run: echo "body length: ${#PR_BODY}"
+      - name: Print contribution instructions
+        run: echo "Contributions are normally submitted via git push no-mistakes."
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-samejob-mention-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "an unrelated PR-body read plus an incidental echo mention in the same job must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker only appears in an unrelated echo, not a PR-body enforcement check: $out"
+  pass "delivery-path does not conflate an unrelated PR-body read with an incidental same-job echo mention of the marker"
+}
+
 # --- check 3: quota headroom ---------------------------------------------------
 
 test_quota_stale_refuses() {
@@ -507,6 +541,7 @@ test_delivery_path_direct_pr_blocked_by_required_workflow_refuses
 test_delivery_path_direct_pr_without_required_workflow_passes
 test_delivery_path_direct_pr_unrelated_mention_does_not_refuse
 test_delivery_path_direct_pr_cross_job_conflation_does_not_refuse
+test_delivery_path_direct_pr_same_job_incidental_mention_does_not_refuse
 test_quota_stale_refuses
 test_quota_exhausted_refuses
 test_quota_healthy_passes
