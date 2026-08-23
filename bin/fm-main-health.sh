@@ -69,7 +69,7 @@ URL="https://github.com/$REPO/commit/$SHA/checks"
 VERDICT=$(printf '%s' "$OUT" | jq -r '
   if (length) == 0 then "none"
   elif any(.[]; (.conclusion // "") as $c
-      | ($c=="failure" or $c=="timed_out" or $c=="cancelled" or $c=="action_required"))
+      | ($c=="failure" or $c=="timed_out" or $c=="cancelled" or $c=="action_required" or $c=="startup_failure"))
     then "failing"
   elif any(.[]; (.status // "") != "completed") then "pending"
   else "passing" end

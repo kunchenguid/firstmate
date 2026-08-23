@@ -83,6 +83,23 @@ test_red_when_any_check_run_failed() {
   pass "a default branch with any failing check run reports RED and exits 1, even when other checks passed"
 }
 
+test_red_when_a_check_run_never_started() {
+  local dir fakebin out rc
+  dir=$(make_repo startupfailure)
+  fakebin=$(fm_fakebin "$TMP_ROOT/startup-failure-case")
+  make_fake_gh "$fakebin" bad5eed '[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"startup_failure"}]'
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$MAIN_HEALTH" "$dir" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a check run that never started (startup_failure) was not reported as exit 1: $out"
+  case "$out" in
+    RED:*bad5eed*) ;;
+    *) fail "the RED verdict did not name the sha: $out" ;;
+  esac
+  pass "a check run that never started (startup_failure) reports RED, not a false GREEN"
+}
+
 test_pending_when_any_check_run_has_not_finished() {
   local dir fakebin out rc
   dir=$(make_repo pending)
@@ -154,6 +171,7 @@ test_unknown_when_no_github_remote() {
 
 test_green_when_every_check_run_succeeded
 test_red_when_any_check_run_failed
+test_red_when_a_check_run_never_started
 test_pending_when_any_check_run_has_not_finished
 test_unrelated_workflow_does_not_hide_a_failing_one
 test_unknown_when_no_check_runs_exist
