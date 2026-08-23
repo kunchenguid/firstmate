@@ -16,9 +16,20 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--recover-missing] [--harness <name>]
+#                                   [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
+#   task's own recorded endpoint and worktree instead of creating either.
+#   --recover-missing is reserved for ship and scout tasks and is used only by
+#   the control plane when the recorded Herdr endpoint is authoritatively gone,
+#   or is agent-free after a failed recovery attempt. This script enforces that
+#   reservation itself: it refuses the flag unless the invoking process is a
+#   live bin/fm-control.sh relaunch holding this task's control lock, or the
+#   recovery-attempt marker from that plane's prior attempt authorizes the
+#   retry. It creates one replacement pane in the recorded workspace when
+#   possible, or the same home's flat workspace, while preserving the task's
+#   existing local copy and validation ownership.
+#   It is never a fresh spawn and never allocates another worktree. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
 #   owns the checkpoint, the progress note, stopping the previous agent, and the
 #   transaction; call fm-control rather than this flag directly unless you are
@@ -27,11 +38,12 @@
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   ordinary relaunch. Ordinary relaunch refuses unless the recorded endpoint
+#   is positively agent-free on a backend with a recovery-grade agent-state
+#   classifier (tmux or herdr) and its shell is sitting in the recorded
+#   worktree. An authorized --recover-missing path accepts only a missing or
+#   agent-free Herdr endpoint, creates one replacement pane, and proves its
+#   shell is in the recorded worktree before arming the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -283,6 +295,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RECOVER_MISSING=0
+RECOVER_MISSING_MARKER_ONLY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -307,6 +321,7 @@ for a in "$@"; do
     --scout) KIND=scout; KIND_SET=1 ;;
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
+    --recover-missing) RECOVER_MISSING=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -354,6 +369,10 @@ esac
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
+if [ "$RECOVER_MISSING" -eq 1 ] && [ "$RELAUNCH" -eq 0 ]; then
+  echo "error: --recover-missing applies only to --relaunch" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
@@ -652,6 +671,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_RECOVERY_ABORT_CLEANUP=0
+HERDR_RECOVERY_ABORT_SESSION=
+HERDR_RECOVERY_ABORT_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -714,6 +736,13 @@ spawn_abort_cleanup() {
           --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
+    fi
+  fi
+  if [ "$HERDR_RECOVERY_ABORT_CLEANUP" = 1 ]; then
+    HERDR_RECOVERY_ABORT_CLEANUP=0
+    if ! fm_backend_herdr_explicit_close_pane_confirmed \
+      "$HERDR_RECOVERY_ABORT_SESSION" "$HERDR_RECOVERY_ABORT_PANE"; then
+      echo "warning: could not remove replacement pane after aborted recovery of $ID" >&2
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -1002,14 +1031,53 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
+  control_relaunch_tx_matches() {
+    local recorded_tx
+    recorded_tx=$(awk -F= '$1 == "relaunch_tx" { value = $2 } END { if (value != "") print value }' \
+      "$STATE/$ID.control-relaunch" 2>/dev/null) || return 1
+    [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] && [ "$recorded_tx" = "$FM_CONTROL_RELAUNCH_TX" ]
   }
+  RECOVER_MISSING_AUTHORIZED=0
+  RECOVER_MISSING_MARKER_ONLY=0
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+     && [ "$(fm_lock_role "$SPAWN_CONTROL_LOCK" 2>/dev/null || true)" = control-relaunch ] \
+     && control_relaunch_tx_matches; then
+    RECOVER_MISSING_AUTHORIZED=1
+  elif [ -f "$STATE/$ID.control-relaunch.recovery-attempt" ]; then
+    RECOVER_MISSING_AUTHORIZED=1
+    RECOVER_MISSING_MARKER_ONLY=1
+  fi
+  if [ "$RECOVER_MISSING" = 1 ] && [ "$RECOVER_MISSING_AUTHORIZED" != 1 ]; then
+    echo "error: --recover-missing is reserved for bin/fm-control.sh $ID relaunch; run the relaunch through the control plane so its live transaction or recorded recovery-attempt marker proves this recovery is fm-control's" >&2
+    exit 1
+  fi
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  if [ "$RECOVER_MISSING" = 1 ]; then
+    # A previous missing-endpoint recovery can leave its replacement pane
+    # structurally present but agent-free after the launch fails. The control
+    # plane authorizes this path only from that recorded recovery journal;
+    # accepting the recovery-grade dead state here is therefore safe and
+    # avoids stranding the same task behind an empty Herdr pane.
+    case "$RELAUNCH_STATE" in
+      missing|dead) ;;
+      *)
+        echo "error: --recover-missing requires the recorded endpoint to be authoritatively missing or agent-free; it reads '$RELAUNCH_STATE'" >&2
+        exit 1
+        ;;
+    esac
+  else
+    [ "$RELAUNCH_STATE" = dead ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ "$RECOVER_MISSING" = 1 ] && [ "$KIND" != ship ] && [ "$KIND" != scout ]; then
+    echo "error: --recover-missing is only supported for ordinary ship or scout tasks; task $ID records kind '$KIND'" >&2
+    exit 1
+  fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -1852,6 +1920,79 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # terminal, no second worktree, and every uncommitted change left exactly
   # where the previous agent left it.
   T=$RELAUNCH_TARGET
+  # A missing endpoint has no target to adopt.  Recover it in the recorded
+  # Herdr session and same home workspace, while preserving the existing copy.
+  if [ "$RECOVER_MISSING" = 1 ]; then
+    [ "$BACKEND" = herdr ] || {
+      echo "error: --recover-missing currently supports only Herdr endpoints" >&2
+      exit 1
+    }
+    HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
+    HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
+    HERDR_TAB_ID=
+    HERDR_PANE_ID=
+    [ -n "$HERDR_SES" ] && [ -n "$HERDR_WORKSPACE_ID" ] || {
+      echo "error: task $ID has incomplete Herdr recovery identity; preserving its record" >&2
+      exit 1
+    }
+    herdr_recovery_endpoint_recheck() {
+      local recovery_state
+      recovery_state=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+      case "$recovery_state" in
+        missing|dead) return 0 ;;
+        alive)
+          echo "error: task $ID's recorded Herdr endpoint became live during recovery; refusing duplicate recovery" >&2
+          ;;
+        *)
+          echo "error: task $ID's recorded Herdr endpoint became '$recovery_state' during recovery; refusing ambiguous recovery" >&2
+          ;;
+      esac
+      return 1
+    }
+    spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+      echo "error: task $ID's Herdr recovery could not acquire its session lock; refusing a concurrent recovery" >&2
+      exit 1
+    }
+    herdr_recovery_endpoint_recheck || exit 1
+    HERDR_CONTAINER="$HERDR_SES:$HERDR_WORKSPACE_ID"
+    # The ordinary relaunch setup assigns WT from the recorded copy only after
+    # this endpoint-adoption block; use the checkpointed path directly here so
+    # a recovered pane is created in the isolated copy rather than the
+    # launcher's home directory.
+    HERDR_CREATE_CWD="$RELAUNCH_WT"
+    HERDR_WORKSPACE_STATE=$(fm_backend_herdr_workspace_presence_state "$HERDR_SES" "$HERDR_WORKSPACE_ID")
+    case "$HERDR_WORKSPACE_STATE" in
+      present)
+        HERDR_SEEDED_DEFAULT_TAB_ID=
+        ;;
+      dead)
+        HERDR_CONTAINER_RAW=$(HERDR_SESSION="$HERDR_SES" FM_HOME="$FM_HOME" \
+          fm_backend_herdr_container_ensure "$HERDR_CREATE_CWD" other-home) || exit 1
+        HERDR_CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+        HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+        HERDR_SES=${HERDR_CONTAINER%%:*}
+        HERDR_WORKSPACE_ID=${HERDR_CONTAINER#*:}
+        ;;
+      *)
+        echo "error: Herdr workspace $HERDR_WORKSPACE_ID in session $HERDR_SES is '$HERDR_WORKSPACE_STATE'; refusing ambiguous recovery" >&2
+        exit 1
+        ;;
+    esac
+    herdr_recovery_endpoint_recheck || exit 1
+    HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$HERDR_CONTAINER" "fm-$ID" "$HERDR_CREATE_CWD" "${HERDR_SEEDED_DEFAULT_TAB_ID:-}") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+    [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || {
+      echo "error: Herdr did not return a replacement pane for $ID" >&2
+      exit 1
+    }
+    HERDR_RECOVERY_ABORT_CLEANUP=1
+    HERDR_RECOVERY_ABORT_SESSION=$HERDR_SES
+    HERDR_RECOVERY_ABORT_PANE=$HERDR_PANE_ID
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    WT_TARGET="$T"
+  fi
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
@@ -2194,7 +2335,34 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RECOVER_MISSING" -eq 1 ]; then
+  # A replacement Herdr tab inherits the provider's current shell directory,
+  # which is not authoritative. Move that agent-free shell into the recorded
+  # copy explicitly, then prove the foreground cwd before launching the agent.
+  relaunch_wt_real=$(real_path_or_raw "$WT")
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
+    echo "error: task $ID's recovery pane could not enter its recorded worktree" >&2
+    exit 1
+  }
+  relaunch_seen=
+  for _ in $(seq 1 20); do
+    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+    # A positive conjunction before break: "[ -z ] || ... && break" groups
+    # left-to-right as "(empty-or-match) && break", so an empty first read -
+    # a pane that has not reported any path yet - would break immediately and
+    # fail a recovery that one more poll would have settled.
+    if [ -n "$relaunch_seen" ] \
+       && [ "$(real_path_or_raw "$relaunch_seen")" = "$relaunch_wt_real" ]; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+    echo "error: task $ID's recovery pane is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'" >&2
+    exit 1
+  fi
+  [ "$KIND" = secondmate ] || validate_spawn_worktree "missing-endpoint recovery" "$T"
+elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
@@ -2691,6 +2859,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
+  HERDR_RECOVERY_ABORT_CLEANUP=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
@@ -2844,6 +3013,28 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     else
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
+  fi
+fi
+
+if [ "$RECOVER_MISSING_MARKER_ONLY" = 1 ]; then
+  recovery_state=
+  recovery_polls=${FM_RECOVER_MISSING_WAIT:-90}
+  case "$recovery_polls" in
+    ''|*[!0-9]*) recovery_polls=90 ;;
+  esac
+  while [ "$recovery_polls" -gt 0 ]; do
+    recovery_state=$(fm_backend_agent_state "$BACKEND" "$T")
+    [ "$recovery_state" = alive ] && break
+    sleep 1
+    recovery_polls=$((recovery_polls - 1))
+  done
+  if [ "$recovery_state" != alive ]; then
+    echo "error: marker-authorized recovery of $ID did not confirm a live replacement endpoint (state: ${recovery_state:-unknown}); preserving the recovery-attempt marker" >&2
+    exit 1
+  fi
+  if ! rm -f "$STATE/$ID.control-relaunch.recovery-attempt"; then
+    echo "error: marker-authorized recovery of $ID is live, but its recovery-attempt marker could not be cleared" >&2
+    exit 1
   fi
 fi
 

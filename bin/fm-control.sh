@@ -46,7 +46,16 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
+#              bin/fm-spawn.sh --relaunch. For ship and scout tasks, when the
+#              recorded Herdr endpoint is authoritatively gone, or reads
+#              agent-free while a durable
+#              recovery-attempt marker proves a prior missing-endpoint recovery
+#              of this task failed here, the launch delegates with
+#              --recover-missing instead (fm-spawn's header owns that contract):
+#              there is nothing left to stop, so the ordinary exit step is
+#              skipped, and an endpoint that turns live or ambiguous between
+#              checks refuses rather than risking a duplicate recovery.
+#              A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
@@ -258,6 +267,10 @@ trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
+if [ "$VERB" = relaunch ]; then
+  fm_lock_set_role "$CONTROL_LOCK" control-relaunch \
+    || die "could not bind task $ID's control lock to fm-control"
+fi
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -495,6 +508,13 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+# The durable recovery-attempt marker: written when this plane commits a
+# relaunch to the missing-endpoint path, removed once the replacement is
+# confirmed alive. Its presence is what authorizes continuing a failed
+# recovery (fm-spawn's --recover-missing gate checks it) and what tells THIS
+# predicate apart from an ordinary failed relaunch, which leaves the same
+# dead-pane journal shape without any marker.
+RECOVERY_ATTEMPT_MARKER="$JOURNAL.recovery-attempt"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -509,6 +529,13 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+
+clear_recovery_attempt_marker() {
+  if [ -e "$RECOVERY_ATTEMPT_MARKER" ] || [ -L "$RECOVERY_ATTEMPT_MARKER" ]; then
+    rm -f "$RECOVERY_ATTEMPT_MARKER" 2>/dev/null \
+      || die "the replacement agent for $ID is alive, but its recovery-attempt marker could not be cleared"
+  fi
+}
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -766,7 +793,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line recover_missing=0
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -795,6 +822,28 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  # Route Herdr endpoints onto the missing-endpoint path - for ship and scout
+  # tasks only, mirroring fm-spawn's own --recover-missing kind reservation, so
+  # an unsupported kind keeps the ordinary path and never persists an attempt
+  # marker its launch could not honor. A missing endpoint recovers directly.
+  # A dead one does so ONLY when this task's durable recovery-attempt marker
+  # proves a prior fm-control recovery committed here: an ordinary relaunch
+  # failure leaves the same dead-pane-plus-failed-journal shape behind, and its
+  # retry must stay on the ordinary same-endpoint path.
+  state=$(agent_state)
+  if [ "$state" = alive ] \
+     && { [ -e "$RECOVERY_ATTEMPT_MARKER" ] || [ -L "$RECOVERY_ATTEMPT_MARKER" ]; }; then
+    clear_recovery_attempt_marker
+  fi
+  case "$KIND" in
+    ship|scout)
+      if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
+        recover_missing=1
+      elif [ "$BACKEND" = herdr ] && [ "$state" = dead ] && [ -f "$RECOVERY_ATTEMPT_MARKER" ]; then
+        recover_missing=1
+      fi
+      ;;
+  esac
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -803,8 +852,18 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  state=$(agent_state)
+  if [ "$recover_missing" = 1 ]; then
+    case "$state" in
+      missing) exit_result=missing-endpoint ;;
+      dead) exit_result=agent-free-recovery-endpoint ;;
+      alive) die "task $ID's recovery endpoint became live before replacement launch; refusing duplicate recovery" ;;
+      *) die "task $ID's recovery endpoint reads '$state'; refusing ambiguous recovery" ;;
+    esac
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -812,6 +871,16 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  if [ "$recover_missing" = 1 ]; then
+    # Persist the recovery-attempt marker BEFORE delegating the launch: from
+    # here on a failed attempt leaves exactly the agent-free replacement state
+    # whose retry must route back through --recover-missing, and the marker is
+    # both that retry's fm-control provenance and this plane's proof that a
+    # dead endpoint here means failed recovery rather than ordinary failure.
+    : > "$RECOVERY_ATTEMPT_MARKER" \
+      || die "could not persist task $ID's recovery-attempt marker before recovery launch"
+    spawn_args+=(--recover-missing)
+  fi
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -823,10 +892,23 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
+  # A recovery moves the endpoint: the rebuilt replacement pane is now the
+  # recorded truth, so adopt it from the just-published record before the
+  # liveness wait and the completion journal name the right place.
+  if [ "$recover_missing" = 1 ]; then
+    T=$(fm_meta_get "$META" window)
+    [ -n "$T" ] || die "task $ID's recovery published no endpoint"
+  fi
+
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
+  # The recovery landed: its attempt marker must not outlive it, or a later
+  # ordinary agent-free relaunch would be misread as a failed recovery retry.
+  if [ "$recover_missing" = 1 ]; then
+    clear_recovery_attempt_marker
+  fi
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
