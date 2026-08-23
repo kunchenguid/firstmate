@@ -4420,6 +4420,77 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# make_streaming_fake_reader: a fake reader that emulates the real
+# herdr-eventwait.py stream phase under a saturated stream: it writes projected
+# event lines continuously (never sleeping, exactly a backlog replay or a
+# fast-flapping agent) for FM_FAKE_STREAM_SECS seconds or until its stdout
+# write blocks, whichever comes first. Combined with a slow consumer on the
+# caller side, this reproduces the 2026-08-21 quiet-fleet incident shape
+# without a real herdr server: the drain must still end within the budget.
+make_streaming_fake_reader() {  # <dir> -> echoes reader path
+  local dir=$1 path="$1/streaming-reader.sh"
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_READER_READY_FILE:-}" ]; then
+  : > "$FM_FAKE_READER_READY_FILE"
+fi
+printf '%s\n' "${FM_FAKE_READER_ACK:-@subscribed}"
+end=$(( $(date +%s) + ${FM_FAKE_STREAM_SECS:-30} ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  printf 'wG:pQ\t\tworking\tclaude\n'
+done
+exit 0
+SH
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
+test_wait_transition_saturated_stream_stays_within_budget() {
+  local dir state agent temp fb reader started elapsed rc
+  dir="$TMP_ROOT/wt-saturated"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_streaming_fake_reader "$dir")
+  # Budget 2s; the stream would run 30s if unbounded. A slow consumer drains at
+  # ~20 lines/s while the reader writes thousands/s, so the FIFO stays full -
+  # exactly the shape that made the old unbounded drain block for hours.
+  started=$(date +%s)
+  rc=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_STREAM_SECS=30 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 2 "$1" sess:wG:pQ >/dev/null 2>&1; echo $?' "$ROOT" "$state")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 8 ] || fail "wait_transition must not outlive its budget under a saturated stream: took ${elapsed}s for a 2s budget"
+  [ "$rc" = 1 ] || [ "$rc" = 2 ] || fail "saturated-stream wait must end as a clean timeout (1) or fallback (2), got $rc"
+  [ -z "$(find "$temp" -mindepth 1 -print -quit)" ] || fail "a saturated-stream wait must still remove its private FIFO directory"
+  pass "fm_backend_herdr_wait_transition: a saturated event stream stays within its wait budget (quiet-fleet crash-loop regression)"
+}
+
+test_wait_transition_always_stops_reader() {
+  local dir state agent temp fb reader lines marker rc leaked
+  dir="$TMP_ROOT/wt-stop-reader"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  # A reader that would stream forever (never hits its own deadline within the
+  # test's patience): the caller MUST stop it itself once the budget expires.
+  reader=$(make_streaming_fake_reader "$dir")
+  leaked=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_STREAM_SECS=300 \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ >/dev/null 2>&1
+      caller_rc=$?
+      # budget (1s) + 2s slack + margin for the caller to stop its reader
+      sleep 4
+      n=$(pgrep -f "$2/streaming-reader.sh" | wc -l | tr -d " ")
+      printf "%s %s" "$caller_rc" "$n"
+    ' "$ROOT" "$state" "$dir")
+  rc=${leaked%% *}; n=${leaked#* }
+  [ "$n" = 0 ] || fail "wait_transition leaked its reader process after the budget expired ($n leaked)"
+  [ "$rc" = 1 ] || [ "$rc" = 2 ] || fail "wait_transition against a never-ending stream must end as clean timeout (1) or fallback (2), got $rc"
+  pass "fm_backend_herdr_wait_transition: stops its reader when the budget expires, never leaking it"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4604,3 +4675,5 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_wait_transition_saturated_stream_stays_within_budget
+test_wait_transition_always_stops_reader
