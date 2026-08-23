@@ -632,6 +632,59 @@ test_unreadable_base_filter_fails_closed() {
   pass "a base filter this gate cannot read fails closed"
 }
 
+# A block sequence may sit at column 0, where its dashes are items of `on:`
+# rather than the next top-level key. Misreading them reported a CI workflow
+# that gates every PR base as having no pull_request trigger at all.
+test_zero_indent_on_sequence_is_pr_triggered() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-flush-on)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '- pull_request'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a column-0 on: sequence gating every PR base passed"$'\n'"$out"
+  assert_contains "$out" "gates every PR base" \
+    "a column-0 on: sequence was not read as pull_request-triggered"
+  assert_contains "$out" "ci.yml" \
+    "the gating failure did not name the unfiltered workflow"
+  pass "an on: block sequence written at column 0 is read as PR-triggered"
+}
+
+# The same rule applies one level down: `branches:` followed by dashes at the
+# key own indent is a legal list, not an empty one.
+test_branches_sequence_at_key_indent_is_read() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-flush-branches)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches:' '    - main'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches:' '    - main' '    - feat/omp-adaptor'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a branches list level with its key must classify, got $rc"$'\n'"$out"
+  assert_contains "$out" "requires checks on: main feat/omp-adaptor" \
+    "a branches list level with its key did not classify its bases"
+  pass "a branches list indented level with its key classifies its bases"
+}
+
+# Deleting the required check must not be indistinguishable from passing it.
+test_missing_required_check_with_pr_workflow_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-absent-required)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a PR-gating set with no required check unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "no-mistakes-required.yml" \
+    "the failure did not name the missing required check"
+  assert_contains "$out" "ci.yml" \
+    "the failure did not name the workflow whose PR bases are unrequired"
+  pass "a PR-triggered workflow set with no required check fails the lint"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -670,4 +723,7 @@ test_required_superset_of_gated_bases_passes
 test_unfiltered_pr_workflow_fails
 test_required_check_without_pr_trigger_fails
 test_unreadable_base_filter_fails_closed
+test_zero_indent_on_sequence_is_pr_triggered
+test_branches_sequence_at_key_indent_is_read
+test_missing_required_check_with_pr_workflow_fails
 test_explicit_path_skips_set_level_gating

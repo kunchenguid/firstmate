@@ -147,6 +147,12 @@ function branch_list() {
     key = unq(substr(line, 1, ci - 1))
     val = trim(substr(line, ci + 1))
   }
+  # YAML lets a block sequence sit at the indent of its parent key, so block
+  # membership rather than raw indent decides where a block ends: a `-` line at
+  # or deeper than the indent of the key it belongs to is an item of that key,
+  # never the next key. A mapping key always carries a `:` and never starts
+  # with `-`, so the two forms never collide.
+  dash = (substr(t, 1, 1) == "-")
   if (mode == 0) {
     if (i == 0 && key == "on") {
       if (substr(val, 1, 1) == "{") emit("unsupported flow-mapping on: value")
@@ -156,51 +162,64 @@ function branch_list() {
     }
     next
   }
-  # A top-level key ends the on: block, so the verdict is whatever we have.
-  if (i == 0) {
-    if (seq) emit(events(ev))
-    if (mode == 1) emit("none")
-    if (mode == 2) emit("all")
-    emit(branch_list())
-  }
-  if (mode == 1) {
-    if (on_indent < 0) {
-      on_indent = i
-      if (substr(t, 1, 1) == "-") seq = 1
-    }
-    if (seq) {
-      if (substr(t, 1, 1) != "-") emit("unsupported mixed sequence in on: block")
-      ev = ev " " unq(trim(substr(t, 2)))
+  if (mode == 3) {
+    if (dash && i >= br_indent) {
+      b = unq(trim(substr(t, 2)))
+      if (b == "") emit("unsupported empty branches entry")
+      bases = bases " " b
       next
     }
+    # Anything that is not an item of this sequence ends the branches list.
+    if (i <= br_indent) emit(branch_list())
+    emit("unsupported non-sequence entry under branches")
+  }
+  if (mode == 1) {
+    # The first member line decides whether on: holds a sequence or a mapping;
+    # under a mapping, deeper `-` lines belong to some other event key.
+    if (on_indent < 0) {
+      on_indent = i
+      if (dash) seq = 1
+    }
+    if (seq) {
+      if (dash && i >= on_indent) {
+        ev = ev " " unq(trim(substr(t, 2)))
+        next
+      }
+      # on: sits at column 0, so only a column-0 key can end its block; a
+      # shallower-but-not-top-level line is mixed content this gate refuses.
+      if (i == 0) emit(events(ev))
+      emit("unsupported mixed sequence in on: block")
+    }
+    # A top-level key ends the on: block, so the verdict is whatever we have.
+    if (i == 0) emit("none")
     if (i != on_indent || key != "pull_request") next
     if (val != "") emit("unsupported inline pull_request value")
     mode = 2
     pr_indent = -1
     next
   }
-  if (mode == 2) {
-    # The pull_request block ended without a branches filter: every base.
-    if (i <= on_indent) emit("all")
-    if (pr_indent < 0) pr_indent = i
-    if (i != pr_indent) next
-    if (key == "branches-ignore") \
-      emit("unsupported branches-ignore under pull_request")
-    if (key != "branches") next
-    if (val == "") { mode = 3; next }
-    if (substr(val, 1, 1) == "[") {
-      if (index(val, "]") == 0) \
-        emit("unsupported multi-line flow sequence under branches")
-      bases = tokens(val)
-      emit(branch_list())
-    }
-    emit("unsupported scalar branches value")
+  # The pull_request block ended without a branches filter: every base.
+  if (i <= on_indent) emit("all")
+  if (pr_indent < 0) {
+    if (dash) emit("unsupported sequence under pull_request")
+    pr_indent = i
   }
-  if (i <= pr_indent) emit(branch_list())
-  if (substr(t, 1, 1) != "-") emit("unsupported non-sequence entry under branches")
-  b = unq(trim(substr(t, 2)))
-  if (b == "") emit("unsupported empty branches entry")
-  bases = bases " " b
+  if (i != pr_indent) next
+  if (key == "branches-ignore") \
+    emit("unsupported branches-ignore under pull_request")
+  if (key != "branches") next
+  if (val == "") {
+    mode = 3
+    br_indent = i
+    next
+  }
+  if (substr(val, 1, 1) == "[") {
+    if (index(val, "]") == 0) \
+      emit("unsupported multi-line flow sequence under branches")
+    bases = tokens(val)
+    emit(branch_list())
+  }
+  emit("unsupported scalar branches value")
 }
 END {
   if (emitted) exit
@@ -244,8 +263,26 @@ fm_lint_workflows_pr_gating() {
     verdicts+=("$verdict")
   done
 
+  n=${#names[@]}
   if [ "$found_required" -eq 0 ]; then
-    printf 'fm-lint-workflows.sh: PR base gating: %s is absent from this workflow set, so base coverage was not compared.\n' \
+    # A deleted required check is exactly the failure this gate exists to catch:
+    # no checks at all reads like passing checks in the pull request UI. Its
+    # absence is only acceptable when nothing in the set gates pull requests.
+    missing=''
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      name=${names[$i]}
+      verdict=${verdicts[$i]}
+      i=$((i + 1))
+      [ "$verdict" != none ] || continue
+      missing="$missing $name"
+    done
+    if [ -n "$missing" ]; then
+      printf 'fm-lint-workflows.sh: %s is absent from this workflow set while%s gate(s) pull requests, so every PR base they gate can merge with no required check. Restore %s with a pull_request trigger covering those bases.\n' \
+        "$REQUIRED_CHECK_WORKFLOW" "$missing" "$REQUIRED_CHECK_WORKFLOW" >&2
+      return 1
+    fi
+    printf 'fm-lint-workflows.sh: PR base gating: no workflow in this set has a pull_request trigger, so %s is not needed here.\n' \
       "$REQUIRED_CHECK_WORKFLOW" >&2
     return 0
   fi
@@ -258,7 +295,6 @@ fm_lint_workflows_pr_gating() {
     bases*) required_set="${required_verdict#bases} " ;;
   esac
 
-  n=${#names[@]}
   i=0
   while [ "$i" -lt "$n" ]; do
     name=${names[$i]}
