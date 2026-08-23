@@ -751,14 +751,15 @@ The real smoke proves socket access, fresh readiness, current-path probing, send
 
 The borderless Claude composer confirmation was verified on 2026-08-09 with cmux 0.64.22 build 102 and Claude Code 2.1.226 on macOS aarch64.
 An isolated real Claude worker rendered a bare `❯` plus U+00A0 row between horizontal rules.
-The cmux classifier returned `empty`, and one `fm-send.sh --resolve-key <key> ALBATROSS` command appended the matching `resolved` event before the worker reported completion.
+The cmux classifier returned `empty`, and one `fm-send.sh --resolve-key <key> ALBATROSS` command - which used the typed path before ordinary task steers moved to the inbox - appended the matching `resolved` event before the worker reported completion.
 The terminal capture contained exactly one submitted `❯ ALBATROSS` row.
-Refresh this harness-dependent proof with an isolated cmux Claude worker before accepting a Claude or cmux upgrade:
+The dated proof used this command:
 
 ```sh
 FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-live-e2e.test.sh
 ```
 
+That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
 ## Codex App host tools
@@ -893,7 +894,7 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` o
 1. the launch delivered its brief positionally and the agent executed it;
 2. `state/<id>.cursor-session` was written with the task worktree;
 3. the transcript fold read `busy` mid-turn and `idle` after it;
-4. `bin/fm-send.sh` delivered a steer and exited 0;
+4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;
 5. `bin/fm-control.sh <id> interrupt` cancelled a running turn;
 6. `bin/fm-control.sh <id> exit` stopped the agent;
 7. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
@@ -905,7 +906,7 @@ Every step ran inside an isolated `fm-lab-` session provisioned by `bin/fm-herdr
 
 **Herdr's native agent state is unusable for Cursor.**
 A 60-sample probe of `agent get` across a full turn reported `agent_status=blocked` in every state - idle, mid-turn, and after.
-The submit path's idle baseline is therefore structurally unreachable for Cursor, and every send falls into the composer branch.
+The typed submit path's idle baseline is therefore structurally unreachable for Cursor, and every typed send falls into the composer branch.
 
 | Pane state | Composer verdict | Rendered footer |
 | --- | --- | --- |
@@ -917,8 +918,8 @@ Herdr draws the composer's rules with the half-block glyphs U+2584 and U+2580 ra
 Before those were taught to the shared edge detector, a bare composer's wrap region ran through its own closing rule and swallowed the model and path footer, so an idle pane read `pending`.
 Measured as an A/B on the same live pane, the pre-fix classifier returned `pending` and the current one returned `empty`.
 
-The idle fix alone did not confirm delivery, because the composer branch reads the mid-turn row instead.
-With the rendered-footer transition in place, `bin/fm-send.sh` exited 0 and the steer executed in the pane; the same send previously exited 1 with `delivery unconfirmed; verdict=pending` on a message that had actually landed.
+The idle fix alone did not confirm typed delivery, because the composer branch reads the mid-turn row instead.
+With the rendered-footer transition in place, a typed-plane `bin/fm-send.sh` invocation exited 0 and the steer executed in the pane; the same send previously exited 1 with `delivery unconfirmed; verdict=pending` on a message that had actually landed.
 
 The rest of the lifecycle was driven end to end on that worker:
 

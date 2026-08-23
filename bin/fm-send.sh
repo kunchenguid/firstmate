@@ -17,9 +17,11 @@
 # appended as a durable sequenced record under state/<id>.inbox/ (newlines are
 # legal), and the terminal receives only one short constant self-describing
 # doorbell line plus Enter, best-effort. Exit 0 = the steer is durably sent
-# (recorded); nonzero = a real local failure (unresolvable target, unwritable
-# record, failed decision-close append, or pending-reply bookkeeping for which
-# neither the commit nor its recovery marker could be written - the error then
+# (recorded); nonzero = a real local failure (unresolvable target, an endpoint
+# that cannot be locked and revalidated or that retired or changed, an
+# unwritable record, a failed decision-close append, or pending-reply
+# bookkeeping for which neither the commit nor its recovery marker could be
+# written - the error then
 # says the record is already durable and must not be blindly resent). There is
 # no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -

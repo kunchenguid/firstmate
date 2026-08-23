@@ -302,7 +302,7 @@ The spawn must resolve a genuine isolated task worktree distinct from the primar
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`).
+Steer a worker with ordinary local text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
 A remote secondmate steer still crosses the typed terminal channel unchanged until the remote inbox leg lands, so keep those messages short and single-line.
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
 `fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
