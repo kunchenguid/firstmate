@@ -302,13 +302,10 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-# One shared string for both crewmate scaffolds (issue #2340): a crewmate
-# destroyed five pooled worktrees, four under live tasks, because "stay inside
-# this worktree" is a rule about files and never reached pool administration.
-# Ship and scout must carry the identical rule, so it is written once here
-# rather than copied into each heredoc where the two could drift apart. The
-# secondmate charter deliberately does not carry it: a secondmate runs its own
-# home and legitimately allocates and returns slots for its own crewmates.
+# One shared string keeps the ship and scout infrastructure rule identical.
+# Rule 2 governs file edits, so it does not prohibit pool administration.
+# The secondmate charter deliberately omits this rule because a secondmate
+# legitimately allocates and returns slots for crewmates in its own home.
 IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 7. Never administer infrastructure that every lane shares. Two things are shared:
    - The `no-mistakes` daemon - one instance serving every lane/home, so stopping, restarting, or

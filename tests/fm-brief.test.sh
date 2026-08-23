@@ -712,12 +712,9 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-# Issue #2340: a crewmate ran a `git worktree remove` loop over the treehouse pool
-# its own worktree came from and destroyed five worktrees, four under live
-# mid-pipeline tasks. Rule 2 ("stay inside this worktree") is a rule about files
-# and never reached the act, so every crewmate scaffold must name pool
-# administration itself. The rule is emitted from ONE shared string so the ship
-# and scout copies cannot drift apart.
+# Rule 2 governs file edits rather than pool administration, so every crewmate
+# scaffold must prohibit the administrative act itself. The rule is emitted from
+# one shared string so the ship and scout copies cannot drift apart.
 test_crewmate_scaffolds_forbid_pool_administration() {
   local home id brief mode ship_rule scout_rule
   home="$TMP_ROOT/pool-admin-home"
