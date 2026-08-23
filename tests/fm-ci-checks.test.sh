@@ -65,6 +65,29 @@ WITH_SUITE="[$(suite Lint SUCCESS),$(bot 'Greptile Review' SUCCESS)]"
   || fail "a passing repository suite alongside a passing bot must be passing"
 pass "a repository-owned suite is what makes an all-green rollup passing"
 
+# The second false-green shape: a repository-owned check that is real, but is
+# not the CI workflow - the PR-body policy check can pass while ci.yml never
+# produced a check at all, and that must read the same as no CI having run.
+other_workflow() {
+  printf '{"__typename":"CheckRun","workflowName":"%s","name":"%s","status":"COMPLETED","conclusion":"%s"}' "$1" "$2" "$3"
+}
+ONLY_OTHER_WORKFLOW="[$(other_workflow 'Require no-mistakes' 'PR must be raised via no-mistakes' SUCCESS)]"
+GOT=$(fm_ci_checks_state "$ONLY_OTHER_WORKFLOW")
+[ "$GOT" = no-repo-ci ] \
+  || fail "a passing check from a repository workflow other than CI must be no-repo-ci, got: $GOT"
+pass "a passing check from an unrelated repository-owned workflow is not CI having run"
+
+# A job that finished SKIPPED, NEUTRAL, or STALE never validated anything, so a
+# workflow that completed with one of those among otherwise-green jobs is a
+# partially-skipped run, not a clean pass.
+[ "$(fm_ci_checks_state "[$(suite Lint SUCCESS),$(suite 'Test coverage guard' SKIPPED)]")" = failing ] \
+  || fail "a skipped CI job among passing ones must refuse a passing verdict"
+[ "$(fm_ci_checks_state "[$(suite Lint NEUTRAL)]")" = failing ] \
+  || fail "a neutral CI job must refuse a passing verdict"
+[ "$(fm_ci_checks_state "[$(suite Lint STALE)]")" = failing ] \
+  || fail "a stale CI job must refuse a passing verdict"
+pass "a partially-skipped CI workflow is refused rather than read as passing"
+
 # The missing-suites diagnosis is decided before red and before waiting, so it
 # is never reported as one of those different problems.
 [ "$(fm_ci_checks_state "[$(bot 'Greptile Review' FAILURE)]")" = no-repo-ci ] \
@@ -96,9 +119,10 @@ pass "an unreadable rollup is refused instead of being classified"
 
 # --- the same question in the workflow-runs shape ----------------------------
 
-# A repository reading its OWN workflow runs at a commit has no producer to tell
-# apart: every run in that list is its own by construction.
+# A repository can own more than one workflow, so this shape still narrows to
+# the CI workflow's own runs by name before judging red, pending, or passing.
 run() { printf '{"id":%s,"name":"CI","status":"%s","conclusion":%s,"event":"push"}' "$1" "$2" "$3"; }
+named_run() { printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s,"event":"push"}' "$1" "$2" "$3" "$4"; }
 
 [ "$(fm_ci_runs_state '[]')" = none ] || fail "no workflow runs must be none"
 [ "$(fm_ci_runs_state "[$(run 1 completed '"success"')]")" = passing ] \
@@ -112,6 +136,23 @@ run() { printf '{"id":%s,"name":"CI","status":"%s","conclusion":%s,"event":"push
 [ "$(fm_ci_runs_state "[$(run 1 completed '"success"'),$(run 2 completed '"failure"')]")" = failing ] \
   || fail "one failed run among successes must be failing"
 pass "fm_ci_runs_state classifies a repository own workflow runs at a commit"
+
+# A successful run of some OTHER repository workflow is not evidence the CI
+# workflow ran - the same false-green shape as the rollup's unrelated check.
+ONLY_OTHER_RUN="[$(named_run 1 'Require no-mistakes' completed '"success"')]"
+[ "$(fm_ci_runs_state "$ONLY_OTHER_RUN")" = none ] \
+  || fail "a passing run of a workflow other than CI must not count as CI having run"
+[ "$(fm_ci_runs_state "[$(named_run 1 'Require no-mistakes' completed '"success"'),$(run 2 completed '"success"')]")" = passing ] \
+  || fail "a passing CI run must still be passing alongside an unrelated workflow's run"
+pass "fm_ci_runs_state ignores runs from workflows other than CI"
+
+# A run that completed with a skipped or neutral conclusion never validated
+# anything and must not be read as a clean pass.
+[ "$(fm_ci_runs_state "[$(run 1 completed '"skipped"')]")" = failing ] \
+  || fail "a skipped CI run must refuse a passing verdict"
+[ "$(fm_ci_runs_state "[$(run 1 completed '"neutral"')]")" = failing ] \
+  || fail "a neutral CI run must refuse a passing verdict"
+pass "fm_ci_runs_state refuses a skipped or neutral CI run"
 
 if fm_ci_runs_state '{"workflow_runs":[]}' >/dev/null 2>&1; then
   fail "a non-array runs payload must be refused, not classified"
