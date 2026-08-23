@@ -26,7 +26,7 @@ machine = int(sys.argv[2])
 header = bytearray(64)
 header[:16] = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
 struct.pack_into("<HHIQQQIHHHHHH", header, 16, 2, machine, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
-path.write_bytes(header + b"fixture-linux-artifact\n")
+path.write_bytes(header + b"fixture-linux-artifact:" + path.name.encode() + b"\n")
 PY
   chmod 755 "$path"
 }
@@ -568,20 +568,31 @@ claude_provider_bundle_contract() {
     || fail "deterministic Claude runtime rebuild failed"
   cmp -s "$first" "$second" \
     || fail "Claude runtime builds were not byte deterministic"
-  python3 - "$first" <<'PY' \
+  python3 - "$first" "$tmp/artifacts/claude" <<'PY' \
     || fail "Claude runtime did not bind its exact provider artifact"
+import hashlib
 import json
+import pathlib
 import sys
 import tarfile
 
 with tarfile.open(sys.argv[1], "r:gz") as archive:
     names = {member.name for member in archive.getmembers()}
     manifest = json.load(archive.extractfile("runtime.json"))
+    contents = {
+        name: archive.extractfile(name).read()
+        for name in ("bin/no-mistakes", "bin/claude", "bin/gh", "bin/node")
+    }
 assert manifest["provider"] == "claude"
 assert manifest["provider_path"] == "bin/claude"
 assert "bin/claude" in names
 assert "bin/codex" not in names
 assert "bin/codex-code-mode-host" not in names
+source = pathlib.Path(sys.argv[2]).read_bytes()
+assert contents["bin/claude"] == source
+assert len({hashlib.sha256(content).digest() for content in contents.values()}) == len(contents)
+declared = {record["path"]: record["digest"] for record in manifest["files"]}
+assert declared["bin/claude"] == "sha256:" + hashlib.sha256(source).hexdigest()
 PY
   pass "Claude runtime production is byte deterministic and binds only the exact Claude provider artifact"
 }
