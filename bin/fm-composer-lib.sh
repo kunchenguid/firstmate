@@ -362,7 +362,12 @@ fm_busy_lines_match() {  # [harness]
         ;;
     esac
   fi
-  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+  # Here-string, not `printf | grep -q`: grep -q closes the pipe on its first
+  # match, and when SIGPIPE is ignored (Node-based harnesses ignore it and their
+  # children inherit that) the writing printf reports "write error: Broken pipe"
+  # instead of dying silently, polluting the watcher poll. A here-string has no
+  # writer process to receive EPIPE. The match verdict is identical.
+  [ -n "$regex" ] && grep -qiE "$regex" <<<"$lines"
 }
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
@@ -470,9 +475,11 @@ EOF
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
+  # Here-string, not `printf | grep -q`: see fm_busy_lines_match for why a piped
+  # writer reports a spurious broken pipe when SIGPIPE is ignored. Verdict identical.
   case "$idle_case" in
-    insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
-    *) printf '%s' "$content" | grep -qE "$idle_re" ;;
+    insensitive) grep -qiE "$idle_re" <<<"$content" ;;
+    *) grep -qE "$idle_re" <<<"$content" ;;
   esac
 }
 

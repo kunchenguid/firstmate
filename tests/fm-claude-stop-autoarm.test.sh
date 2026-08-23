@@ -722,6 +722,36 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
 }
 
+# The same lapse reached the other way: the owner PROCESS is genuinely gone - not
+# a live pid still deciding, not a reused pid - leaving its lock and ledger behind
+# naming a dead pid with a terminal outcome, the exact production wedge report.
+# fm_lock_try_acquire's dead-pid steal path must reclaim it and re-arm rather than
+# deferring to the corpse. The abandoned/reused cases above only ever seed a LIVE
+# owner pid, so this closes the genuinely-dead-pid gap.
+test_dead_owner_claim_is_reclaimed_and_rearms() {
+  local dir out status deadpid
+  dir=$(make_primary_dir "$TMP_ROOT/dead-owner-claim")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  write_arm_fixture "$dir" actionable
+  # A genuinely dead owner pid: reap a short sleep so the recorded pid is gone.
+  sleep 0.1 &
+  deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  ! kill -0 "$deadpid" 2>/dev/null || fail "test setup: owner pid $deadpid is still alive"
+  record_autoarm_owner "$dir" "$deadpid"
+  record_autoarm_epoch "$dir" 530 "$deadpid" rewake
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a dead owner's leftover claim must be reclaimed and re-armed, never deferred to a corpse"
+  [ -e "$dir/state/arm-ran" ] || fail "dead-owner claim left the home unarmed with work in flight"
+  assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
+  [ "$(epoch_field "$dir" epoch)" -gt 530 ] || fail "reclaimed cycle did not advance the frozen ledger: $(epoch_field "$dir" epoch)"
+  [ "$(epoch_field "$dir" owner_pid)" != "$deadpid" ] || fail "reclaimed ledger still names the dead owner"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed cycle did not record its own outcome: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
+  pass "auto-arm: a genuinely dead owner's leftover claim is reclaimed so a lapsed cycle re-arms"
+}
+
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/arming-claim")
@@ -1170,6 +1200,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_dead_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed
