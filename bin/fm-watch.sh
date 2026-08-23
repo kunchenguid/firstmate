@@ -443,7 +443,7 @@ inbox_steer_check() {  # <window> <task>
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  local f base task meta kind w key other matches prev now since now_s seen="" absorb_secs
+  local f base task meta kind w key other matches prev now since now_s seen="" absorb_secs marker age
   local -a churned_keys=()
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   [ "$#" -gt 0 ] || return 1
@@ -485,16 +485,23 @@ signal_turnend_panes_churned() {  # <file> ...
   # surfaces here leaves the staleness backbone's own classification alone.
   now_s=$(date +%s)
   for key in "${churned_keys[@]}"; do
-    since=$(cat "$STATE/.churn-since-$key" 2>/dev/null || true)
-    case "$since" in
-      ''|*[!0-9]*) printf '%s' "$now_s" > "$STATE/.churn-since-$key" || return 1 ;;
-      *)
-        if [ "$((now_s - since))" -ge "$absorb_secs" ]; then
-          rm -f "$STATE/.churn-since-$key"
-          return 1
-        fi
-        ;;
-    esac
+    marker="$STATE/.churn-since-$key"
+    if [ ! -e "$marker" ]; then
+      [ ! -L "$marker" ] || return 1
+      printf '%s' "$now_s" > "$marker" || return 1
+      continue
+    fi
+    since=$(cat "$marker" 2>/dev/null) || return 1
+    [[ $since =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    if [ "${#since}" -gt "${#now_s}" ] \
+      || { [ "${#since}" -eq "${#now_s}" ] && [[ $since > $now_s ]]; }; then
+      return 1
+    fi
+    age=$((10#$now_s - 10#$since))
+    if [ "$age" -ge "$absorb_secs" ]; then
+      rm -f "$marker"
+      return 1
+    fi
   done
   for key in "${churned_keys[@]}"; do
     rm -f "$STATE/.stale-$key" || return 1

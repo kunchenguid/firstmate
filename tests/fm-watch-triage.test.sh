@@ -1115,6 +1115,48 @@ test_turn_ended_invalid_churn_bound_surfaced() {
   pass "an invalid pane-churn bound surfaces the turn-end"
 }
 
+test_turn_ended_invalid_churn_deadline_surfaced() {
+  local variant value dir state fakebin out drain_out capture_file window key marker pid
+  for variant in empty leading-zero nonnumeric future overflow; do
+    dir=$(make_case "turn-ended-invalid-churn-deadline-$variant")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+    window="test:fm-codexdeadline"
+    : > "$state/codexdeadline.turn-ended"
+    printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexdeadline.meta"
+    printf 'rendered after the previous poll' > "$capture_file"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    marker="$state/.churn-since-$key"
+    printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+    printf '0\n' > "$state/.count-$key"
+    case "$variant" in
+      empty)        value='' ;;
+      leading-zero) value=09 ;;
+      nonnumeric)   value=bogus ;;
+      future)       value=$(( $(date +%s) + 600 )) ;;
+      overflow)     value=999999999999999999999999999999999999 ;;
+    esac
+    printf '%s' "$value" > "$marker"
+    export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with a $variant churn deadline"
+    grep -F "signal: $state/codexdeadline.turn-ended" "$out" >/dev/null \
+      || fail "watcher terminated before printing the $variant-deadline turn-end"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+      || fail "drain after the $variant churn deadline failed"
+    grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexdeadline.turn-ended" >/dev/null \
+      || fail "turn-end with a $variant churn deadline was not queued"
+    [ "$(cat "$marker")" = "$value" ] \
+      || fail "the $variant churn deadline was rewritten"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "invalid existing pane-churn deadlines surface without mutation"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3507,6 +3549,7 @@ test_turn_ended_churn_absorb_off_by_default
 test_turn_ended_churn_absorb_bounded
 test_turn_ended_churn_timer_write_failure_surfaced
 test_turn_ended_invalid_churn_bound_surfaced
+test_turn_ended_invalid_churn_deadline_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
