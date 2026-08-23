@@ -292,6 +292,10 @@ for value in ("auth_home_pull","auth_home_push","auth-sync.py","x-ms-file-reques
 assert guest.index("auth_home_pull\n", guest.index("# Overlay")) < guest.index("useradd --system")
 assert guest.index("auth_home_push") < guest.index("OUTCOME=failed")
 assert 'GH_TOKEN_FILE=%s' in guest and 'printf \'%s\' "$GITHUB_TOKEN_VALUE" >"$GITHUB_TOKEN_FILE"' in guest
+assert 'printf \'NM_HOME=%s\\n\' "$NM_HOME"' in guest
+assert 'NO_MISTAKES_HOME' not in guest
+assert '"NM_HOME": str(paths["root"] / "no-mistakes-home")' in host
+assert '"NO_MISTAKES_HOME":' not in host
 assert "GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$REPO" in guest
 assert guest.index("chown -R fmvalidate:fmvalidate") < guest.index("GIT_CONFIG_KEY_0=safe.directory")
 assert '[ "$REPORT" -ef report.md ] || cp "$REPORT" report.md' in guest
@@ -3037,6 +3041,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$FIXTURE_NM_CALLS"
 [ "$1" = axi ] && [ "$2" = status ] && [ "$3" = --run ] \
   && [ "$4" = "$FIXTURE_RUN_ID" ] || exit 92
+[ "$NM_HOME" = "$FIXTURE_DB_HOME" ] && [ -f "$NM_HOME/state.sqlite" ] || exit 93
 if [ "${FIXTURE_INCLUDE_EXACT:-}" = 1 ]; then
   printf 'run:\n  id: %s\n  evidence_id: %s\n  owner_decision_protected: true\n  owner_decision_head: %s\n' \
     "$FIXTURE_RUN_ID" "$FIXTURE_PEER_ID" "$FIXTURE_HISTORY_HEAD"
@@ -3046,7 +3051,7 @@ else
 fi
 SH
   chmod 700 "$work/no-mistakes"
-  : >"$work/cell.env"
+  printf 'NM_HOME=%s\n' "$work" >"$work/cell.env"
   printf '{}\n' >"$work/identity.json"
 
   python3 - "$work/state.sqlite" "$work/request.json" "$work/history-head" <<'PY'
@@ -3106,7 +3111,7 @@ set +e
 SH
   chmod 700 "$work/drive.sh"
 
-  export FIXTURE_NM_CALLS=$work/nm-calls FIXTURE_RUN_ID=$run_id FIXTURE_PEER_ID=$peer_id
+  export FIXTURE_NM_CALLS=$work/nm-calls FIXTURE_RUN_ID=$run_id FIXTURE_PEER_ID=$peer_id FIXTURE_DB_HOME=$work
   export FIXTURE_HISTORY_HEAD
   FIXTURE_HISTORY_HEAD=$(cat "$work/history-head")
   env FIXTURE_INCLUDE_EXACT=1 FM_TEST_WORK="$work" FM_TEST_FAKEBIN="$fakebin" FM_TEST_BLOCK="$block" \
@@ -3129,7 +3134,7 @@ SH
     || fail "a peer ULID replaced a missing protected run identity"
   [ ! -e "$work/state/owner-authority-a1.json" ] \
     || fail "terminal authority was created without the exact protected run identity"
-  unset FIXTURE_NM_CALLS FIXTURE_RUN_ID FIXTURE_PEER_ID FIXTURE_HISTORY_HEAD
+  unset FIXTURE_NM_CALLS FIXTURE_RUN_ID FIXTURE_PEER_ID FIXTURE_DB_HOME FIXTURE_HISTORY_HEAD
   pass "terminal owner authority stays bound to the exact protected run when status contains peer ULIDs"
 }
 
