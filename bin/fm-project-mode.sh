@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 # Resolve a project's delivery mode and yolo flag from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# direct-PR|local-only and yolo is on|off.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
+#   - <name> - <desc> (added <date>)                   -> direct-PR off
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # mode = how a finished change reaches main:
-#   no-mistakes  full pipeline -> PR -> captain merge (default)
-#   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
+#   direct-PR    push + PR via gh-axi, no pipeline (default)
 #   local-only   local branch, no remote/PR -> captain approve -> guarded local merge
+# no-mistakes is not a registry-selected delivery mode. It is an explicit
+# per-task override supplied to fm-brief.sh and fm-spawn.sh only after a user asks.
+# Legacy [no-mistakes] entries normalize to direct-PR so they cannot auto-launch it.
 # yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
 #   ask-user findings, local-only merge approval) without checking the captain - except
 #   anything destructive/irreversible/security-sensitive, which still escalates.
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
-# to stderr, so a typo never silently drops the gate.
+# An unknown/missing project or unknown mode falls back to "direct-PR off" and warns.
+# No fallback may select user-invoked-only no-mistakes.
 # Usage: fm-project-mode.sh <project-name>
 set -eu
 
@@ -29,15 +31,15 @@ REG="$DATA/projects.md"
 NAME=${1:?usage: fm-project-mode.sh <project-name>}
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: no registry at $REG; defaulting $NAME to direct-PR off" >&2
+  echo "direct-PR off"
   exit 0
 fi
 
 # awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="direct-PR"; yolo="off";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
@@ -51,16 +53,20 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: project \"$NAME\" not in registry; defaulting to direct-PR off" >&2
+  echo "direct-PR off"
   exit 0
 fi
 
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  no-mistakes)
+    echo "warn: legacy no-mistakes mode for $NAME normalizes to direct-PR; manual invocation requires an explicit task override" >&2
+    mode=direct-PR
+    ;;
+  direct-PR|local-only) ;;
+  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to direct-PR off" >&2; mode=direct-PR; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 echo "$mode $yolo"

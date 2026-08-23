@@ -104,6 +104,14 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
+No-mistakes is user-invoked-only in Firstmate and never selected from project registry defaults.
+An explicit task is scaffolded and spawned with `--no-mistakes`, and its owning worker drives `bin/fm-no-mistakes.sh` rather than raw AXI commands.
+That executable's header owns the bounded lifecycle mechanics and test hooks.
+The tracked trusted-default-branch configuration pins the pipeline agent to Codex and disables automatic review fixes so the driver alone authorizes at most one review fix and rereview.
+A target repository must canonically set `agent: codex` on its trusted default branch and `auto_fix.review: 0` in the submitted HEAD, matching v1.53.0's trust and merge rules.
+Version 1.53.0 has no per-run override for either value, so the driver refuses rather than silently using another agent or allowing an internal review loop.
+No-mistakes v1.53.0 does not expose run `created_at` through structured AXI, so the hard 20-minute outer deadline starts from a conservative monotonic timestamp captured immediately before `axi run`; startup overhead can only shorten the run.
+At the deadline or review-cycle limit, the driver uses supported `axi abort --run`, requires a structured terminal outcome, then runs guarded `axi sync --recover`; it never operates the shared daemon and reports the preserved branch head with remaining structured findings.
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
@@ -135,8 +143,8 @@ A project-less seed requires no existing project clones or `data/projects.md` en
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
-For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+Secondmate routes cover `direct-PR` projects, including tasks with an explicit manual no-mistakes override; `local-only` projects remain main-firstmate work.
+Seeding never initializes no-mistakes automatically; enabling that capability is a separate explicit captain request.
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.

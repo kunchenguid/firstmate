@@ -36,8 +36,8 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
-# Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# Registry with the two standing delivery modes. No-mistakes is an explicit
+# per-task override and is exercised separately.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
@@ -57,7 +57,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-directdefault-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -68,7 +68,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  id="brief-nomistakes-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --no-mistakes >/dev/null 2>&1 || fail "explicit no-mistakes brief exited non-zero"
+  assert_grep "fm-no-mistakes.sh run $id" "$home/data/$id/brief.md" "explicit no-mistakes brief lost the bounded driver"
+  pass "fm-brief.sh: direct-PR/local-only and explicit no-mistakes briefs generate cleanly"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -101,20 +104,16 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  assert_grep "fm-no-mistakes.sh run $id" "$brief" \
+    "no-mistakes DOD lost its bounded-driver command"
+  assert_grep "Do not invoke \`no-mistakes axi run\`" "$brief" \
+    "no-mistakes DOD permits bypassing the bounded driver"
+  assert_grep "needs-decision [key=nm-$id-<finding-id>]" "$brief" \
+    "no-mistakes DOD lost keyed exact-worker decision routing"
+  pass "fm-brief.sh: explicit no-mistakes DOD uses the bounded lifecycle"
 }
 
 test_ship_project_memory_wording() {
@@ -334,7 +333,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent domain supervisor" "$brief" \
+  assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }

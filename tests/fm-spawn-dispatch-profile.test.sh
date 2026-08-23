@@ -123,6 +123,27 @@ test_no_profile_keeps_claude_launch_unchanged() {
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
 
+test_no_mistakes_mode_requires_explicit_spawn_override() {
+  local rec id out status
+  id=manual-no-mistakes-z10
+  rec=$(make_spawn_case manual-no-mistakes claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "ordinary ship spawn should succeed"
+  assert_contains "$out" "mode=direct-PR" "ordinary spawn did not keep direct-PR default"
+  assert_grep "mode=direct-PR" "$HOME_DIR/state/$id.meta" "ordinary spawn recorded no-mistakes"
+
+  rm -f "$HOME_DIR/state/$id.meta"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --no-mistakes)
+  status=$?
+  expect_code 0 "$status" "explicit no-mistakes spawn should succeed"
+  assert_contains "$out" "mode=no-mistakes" "explicit spawn did not report no-mistakes"
+  assert_grep "mode=no-mistakes" "$HOME_DIR/state/$id.meta" "explicit spawn did not bind bounded-driver mode"
+  pass "spawn records no-mistakes only with the explicit per-task override"
+}
+
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
   id=profile-required-ship-z11
@@ -385,6 +406,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_launch_unchanged
+test_no_mistakes_mode_requires_explicit_spawn_override
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
