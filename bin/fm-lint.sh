@@ -108,7 +108,11 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$SELF"
 }
 
 # Default no-args lint also validates GitHub workflows. Explicit paths stay a

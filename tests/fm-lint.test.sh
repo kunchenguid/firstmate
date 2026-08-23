@@ -151,6 +151,17 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+test_help_reports_the_complete_interface() {
+  local help
+  help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
+  assert_contains "$help" "--telemetry" "fm-lint.sh --help omitted --telemetry"
+  assert_contains "$help" "--required-version" "fm-lint.sh --help omitted --required-version"
+  assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
+  assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
+  assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  pass "fm-lint.sh --help reports the complete executable interface"
+}
+
 test_list_files_reports_the_shell_inventory() {
   local listed expected
   # CI=true forces the full canonical set regardless of the ambient branch or
@@ -956,6 +967,7 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
 test_ci_defaults_to_full_analysis
