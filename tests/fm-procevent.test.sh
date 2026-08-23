@@ -595,6 +595,112 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# --- end-user-aligned regression: a transient poll interruption is not news ---
+# The dogfood defect: a live board listener can answer with exactly
+#     error: Lavish Editor poll response was interrupted
+#     code: SERVER_ERROR
+# while the board's marks remain available. Firstmate registered raw poll output,
+# so the generic runner captured that transient response and woke the whole fleet
+# over what is really an internal retry. Every scenario below runs through the
+# adapter's own arm command and the real runner, so registration, capture, and
+# publication are exercised for real.
+LAVISH_SCRIPTED_BIN=$(fm_fakebin "$TMP_ROOT/lavish-scripted-stub")
+cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>`, scripted per scenario: LAVISH_SCRIPT
+# names the response for each successive poll, one word per poll, and its last
+# word repeats forever. `interrupt` is the exact transient response the server
+# returns while the board's marks stay available.
+n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_COUNT"
+read -r -a plan <<< "$LAVISH_SCRIPT"
+i=$((n - 1))
+[ "$i" -ge "${#plan[@]}" ] && i=$((${#plan[@]} - 1))
+case "${plan[$i]}" in
+  interrupt)
+    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  other-server-error)
+    printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
+  feedback)
+    printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
+esac
+SH
+chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
+export LAVISH_COUNT LAVISH_SCRIPT
+# A bounded test override keeps the retry policy's real bound under test without
+# making the suite wait out the production delay.
+export FM_LAVISH_POLL_RETRY_DELAY=0
+
+# Two interruptions, then the captain's real feedback: the retries are silent and
+# only the feedback becomes a captured result and a check wake.
+HRETRY="$TMP_ROOT/hretry"; new_home "$HRETRY"
+RETRY_ART="$TMP_ROOT/retry-board.html"
+printf '<h1>retry</h1>\n' > "$RETRY_ART"
+retry_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RETRY_ART")
+PE_TRACKED+=("$HRETRY|$retry_id")
+LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
+for _ in $(seq 1 6); do
+  PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
+  sleep 0.3
+done
+[ "$(cat "$LAVISH_COUNT")" = 3 ] \
+  || fail "the interrupted listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
+[ "$(count_results "$HRETRY" "$retry_id")" = 1 ] \
+  || fail "a retried interruption produced $(count_results "$HRETRY" "$retry_id") captured results instead of one"
+[ "$(wake_payloads "$HRETRY" | sort -u | grep -c .)" = 1 ] \
+  || fail "a retried interruption woke the fleet: $(wake_payloads "$HRETRY" | sort -u)"
+assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
+  "feedback arriving after quiet retries is captured and announced"
+assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
+  "the announced result is the captain's feedback, not the interruption"
+pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# Exhaustion is news: after the bounded retries the same exact response is
+# captured and announced normally rather than being swallowed forever.
+HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"
+EXH_ART="$TMP_ROOT/exhaust-board.html"
+printf '<h1>exhaust</h1>\n' > "$EXH_ART"
+exh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$EXH_ART")
+PE_TRACKED+=("$HEXH|$exh_id")
+LAVISH_COUNT="$TMP_ROOT/exhaust-count"; LAVISH_SCRIPT="interrupt"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$EXH_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HEXH" start "$exh_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 13 ] \
+  || fail "the retry bound polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
+[ "$(count_results "$HEXH" "$exh_id")" = 1 ] \
+  || fail "exhaustion produced $(count_results "$HEXH" "$exh_id") captured results instead of one"
+assert_contains "$(wake_payloads "$HEXH")" "procevent lavish $exh_id 1" \
+  "the interruption that survives the bound is announced normally"
+assert_grep 'poll response was interrupted' "$(first_result "$HEXH" "$exh_id")" \
+  "the announced result is the exact interruption the server returned"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$EXH_ART" >/dev/null
+pass "an interruption that outlives the bounded retries is captured and announced"
+
+# A different SERVER_ERROR is a genuine error, never a retry: no fail-open drift
+# from the one exact transient response this adapter owns.
+HOTHER="$TMP_ROOT/hother"; new_home "$HOTHER"
+OTHER_ART="$TMP_ROOT/other-board.html"
+printf '<h1>other</h1>\n' > "$OTHER_ART"
+other_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OTHER_ART")
+PE_TRACKED+=("$HOTHER|$other_id")
+LAVISH_COUNT="$TMP_ROOT/other-count"; LAVISH_SCRIPT="other-server-error"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OTHER_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HOTHER" start "$other_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 1 ] \
+  || fail "an unrelated SERVER_ERROR was retried $(cat "$LAVISH_COUNT") times instead of surfacing at once"
+assert_contains "$(wake_payloads "$HOTHER")" "procevent lavish $other_id 1" \
+  "an unrelated SERVER_ERROR is captured and announced immediately"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$OTHER_ART" >/dev/null
+pass "only the exact interruption is retried; an unrelated SERVER_ERROR still surfaces"
+unset FM_LAVISH_POLL_RETRY_DELAY
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
