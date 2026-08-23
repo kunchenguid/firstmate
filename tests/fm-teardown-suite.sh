@@ -6628,7 +6628,17 @@ if [ -n "$network_operation" ]; then
 fi
 exec "$FM_REAL_GIT" "$@"
 SH
-  chmod +x "$case_dir/fakebin/git"
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "${1:-}" = - ] && [ "${2:-}" = example.com ]; then
+  [ "${FM_ACCOUNT_ROUTING_TEST_LAB:-}" = firstmate-account-routing-test-lab-v1 ] || exit 96
+  [ "${FM_TEARDOWN_TEST_NETWORK_ADDRESSES:-}" = 203.0.113.10 ] || exit 97
+  printf '%s\n' "$FM_TEARDOWN_TEST_NETWORK_ADDRESSES"
+  exit 0
+fi
+exec "${REAL_PYTHON_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/python3"
   : > "$case_dir/pinned-network.log"
   : > "$case_dir/unexpected-network.log"
   set +e
@@ -6648,7 +6658,7 @@ SH
   count=$(wc -l < "$case_dir/pinned-network.log" | tr -d ' ')
   [ "$count" -ge 1 ] || fail \
     "network authority did not exercise its graph probe: $(cat "$case_dir/pinned-network.log"); teardown: $(cat "$case_dir/stderr")"
-  if grep -v $'\thttp.curloptResolve=example.com:443:' "$case_dir/pinned-network.log" >/dev/null; then
+  if grep -v $'\thttp.curloptResolve=example.com:443:203.0.113.10' "$case_dir/pinned-network.log" >/dev/null; then
     fail "network authority re-resolved an unpinned hostname: $(cat "$case_dir/pinned-network.log")"
   fi
   assert_present "$case_dir/wt" "failed pinned authority proof removed the secondmate home"

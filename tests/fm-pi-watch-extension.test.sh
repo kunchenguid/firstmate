@@ -10,6 +10,11 @@ set -u
 fm_test_tmproot_into TMP_ROOT fm-pi-watch-extension
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
+stage_opencode_module() {
+  local source=$1 target=$2
+  cp "$source" "$target" || fail "could not stage OpenCode plugin module: $source"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
@@ -313,7 +318,8 @@ test_opencode_primary_watch_plugin_static_wiring() {
 
 test_opencode_primary_watch_plugin_uses_effective_state_home() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-effective-state-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-effective-state-root"
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
@@ -330,7 +336,7 @@ printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_L
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -367,7 +373,8 @@ EOF
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-effective-config-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-effective-config-root"
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
@@ -381,7 +388,7 @@ printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -416,7 +423,8 @@ EOF
 
 test_opencode_primary_watch_plugin_requires_session_lock() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-lock-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-lock-root"
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
@@ -430,7 +438,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -468,7 +476,8 @@ EOF
 
 test_opencode_watch_arm_coordinator_respects_primary_scope() {
   local plugin base repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-coordinator-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   base="$TMP_ROOT/opencode-coordinator-base"
   repo="$TMP_ROOT/opencode-coordinator-wt"
   home="$TMP_ROOT/opencode-coordinator-home"
@@ -483,7 +492,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -515,7 +524,8 @@ EOF
 
 test_opencode_primary_watch_plugin_rearms_after_wake() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-rearm-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-rearm-root"
   home="$TMP_ROOT/opencode-rearm-home"
   log="$TMP_ROOT/opencode-rearm.log"
@@ -529,7 +539,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'signal: synthetic wake\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -571,8 +581,10 @@ EOF
 
 test_opencode_watch_arm_coordinates_with_turnend_guard() {
   local arm_plugin guard_plugin repo home log guard_log out status
-  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  arm_plugin="$TMP_ROOT/opencode-coordinate-primary.mjs"
+  guard_plugin="$TMP_ROOT/opencode-coordinate-guard.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$arm_plugin"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$guard_plugin"
   repo="$TMP_ROOT/opencode-coordinate-root"
   home="$TMP_ROOT/opencode-coordinate-home"
   log="$TMP_ROOT/opencode-coordinate-arm.log"
@@ -593,7 +605,7 @@ printf 'guard should not run\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -644,8 +656,10 @@ EOF
 
 test_opencode_healthy_arm_output_does_not_suppress_guard() {
   local arm_plugin guard_plugin repo home log guard_log out status
-  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  arm_plugin="$TMP_ROOT/opencode-external-healthy-primary.mjs"
+  guard_plugin="$TMP_ROOT/opencode-external-healthy-guard.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$arm_plugin"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$guard_plugin"
   repo="$TMP_ROOT/opencode-external-healthy-root"
   home="$TMP_ROOT/opencode-external-healthy-home"
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
@@ -666,7 +680,7 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
