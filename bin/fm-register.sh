@@ -93,6 +93,11 @@ extract_tasks() {
       if (match(rest, /\(repo: [^)]*\)/)) repo = substr(rest, RSTART + 7, RLENGTH - 8)
       since = ""
       if (match(rest, /\(since [^)]*\)/)) since = substr(rest, RSTART + 7, RLENGTH - 8)
+      holduntil = ""
+      if (match(rest, / \(hold-until: [^)]*\)$/)) {
+        holduntil = substr(rest, RSTART + 14, RLENGTH - 15)
+        rest = substr(rest, 1, RSTART - 1)
+      }
       holdkind = ""
       if (match(rest, /\(hold-kind: [^)]*\)$/)) holdkind = substr(rest, RSTART + 12, RLENGTH - 13)
       hold = ""
@@ -101,6 +106,7 @@ extract_tasks() {
         if (match(hold, /\) \(hold-kind: /)) hold = substr(hold, 1, RSTART - 1)
         else sub(/\)$/, "", hold)
       }
+      if (holduntil != "") hold = (hold != "" ? hold " - " : "") "Wiedervorlage " holduntil
       gsub(/\|/, "/", title); gsub(/\|/, "/", hold)
       gsub(/\t/, " ", title); gsub(/\t/, " ", hold)
       if (length(hold) > 260) hold = substr(hold, 1, 257) "..."

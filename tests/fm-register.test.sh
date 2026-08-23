@@ -39,6 +39,8 @@ printf 'Kartenwerk\tlensclash testlab\n' > "$HOME_A/config/register-bereiche"
   printf '## Queued\n'
   printf -- '- [ ] frage-1 - Deine offene Frage (repo: lensclash) (since 2026-08-21) (hold: Antwort auf die Torfrage (mit Klammern) noetig) (hold-kind: captain)\n'
   printf -- '- [ ] warte-1 - Externer Posten (repo: testlab) (since 2026-08-19) (hold: wartet auf Anbieter) (hold-kind: external)\n'
+  printf -- '- [ ] termin-1 - Terminposten (repo: testlab) (since 2026-08-22) (hold: Zeitfenster ab 28.08.) (hold-kind: future) (hold-until: 2026-08-28)\n'
+  printf -- '- [ ] wiedervorlage-1 - Dezemberfrage (repo: lensclash) (since 2026-08-22) (hold: Entscheide Dezember) (hold-kind: captain) (hold-until: 2026-12-01)\n'
   printf -- '- [ ] plain-1 - Eingereihter Posten (repo: sonstwo) (since 2026-08-18)\n'
   printf -- '- [ ] betrieb-1 - Betriebsposten (repo: -) (since 2026-08-17)\n'
   printf '## Done\n'
@@ -56,6 +58,12 @@ printf '%s' "$out" | grep -q 'id:lauf-1' && printf '%s' "$out" | grep -q 'LAEUFT
 printf '%s' "$out" | grep -q 'WARTET auf dein Wort: Antwort auf die Torfrage (mit Klammern) noetig' \
   && ok "a captain hold renders verbatim, nested parens intact" || fail "captain-hold rendering broken"
 printf '%s' "$out" | grep -q 'fertig-1' && fail "Done tasks must never render" || ok "Done tasks stay out"
+printf '%s' "$out" | grep -q 'WARTET: Zeitfenster ab 28.08. - Wiedervorlage 2026-08-28' \
+  && ok "a dated future hold renders as WARTET with its resubmission date" \
+  || fail "a hold-until suffix must not demote the row to OFFEN (dated future hold)"
+printf '%s' "$out" | grep -q 'WARTET auf dein Wort: Entscheide Dezember - Wiedervorlage 2026-12-01' \
+  && ok "a dated captain hold keeps its captain state and date" \
+  || fail "a hold-until suffix must not strip the captain hold (dated captain hold)"
 first_row=$(printf '%s' "$out" | awk '/^## Kartenwerk$/{f=1} f && /^\| [0-9-]/ {print; exit}')
 printf '%s' "$first_row" | grep -q 'id:frage-1' && ok "the captain-held row sorts first in its area" \
   || fail "captain-held rows must sort first (got: $first_row)"
