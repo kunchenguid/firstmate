@@ -511,7 +511,7 @@ fm_lock_orphan_steal_blocks_create() {  # <lock-path>
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir ln_err ln_rc=0
   # Anything that does not positively identify itself as contention is a refused
   # primitive, so a genuinely full or read-only filesystem is never talked out
   # of its own diagnosis by a later, unrelated change to the lock path.
@@ -527,7 +527,8 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null; then
+  ln_err=$(LC_ALL=C ln -s "$ownerdir" "$lockdir" 2>&1) || ln_rc=$?
+  if [ "$ln_rc" -eq 0 ]; then
     # The link went in, so the filesystem has refused nothing so far, and the
     # path is a useless witness to what happens next: a reclaimer renaming our
     # fresh link away leaves it as absent as ENOSPC would. Contention is the
@@ -546,15 +547,49 @@ fm_lock_try_create() {
     fi
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   else
-    # The link was refused. Someone else's lock already sitting there is
-    # contention; a path as empty as it was found means the filesystem refused.
-    if fm_lock_path_exists "$lockdir"; then
-      FM_LOCK_CREATE_FAILURE=contended
-    fi
+    # The link was refused, and only the failing primitive itself can say why.
+    # The lock path is a useless witness: the racer that beat us to it is free
+    # to release before we look, and reading the cause off an absent path
+    # reports an ordinary lost EEXIST race as a full or read-only volume. Both
+    # BSD and GNU userland name that case "File exists" under LC_ALL=C, so ln's
+    # own message is the discriminator, with the path kept only as a fallback
+    # for an ln whose wording we do not recognise.
+    case "$ln_err" in
+      *'File exists'*|*'file exists'*)
+        FM_LOCK_CREATE_FAILURE=contended
+        ;;
+      *)
+        if fm_lock_path_exists "$lockdir"; then
+          FM_LOCK_CREATE_FAILURE=contended
+        fi
+        ;;
+    esac
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
+}
+
+# Create the lock, retrying once when the only thing that stood in the way is
+# already gone.
+#
+# fm_lock_try_create reports "contended" both for a path that was already there
+# and for a racer that pulled our own fresh link out from under us. When that
+# path is absent by the time we look, nobody holds this lock: the other process
+# finished and moved on, and the next attempt is the one that wins. Reporting a
+# holder whose pid cannot even be named instead is what leaves a caller such as
+# the ".watch.lock" handoff believing in a supervisor that does not exist.
+#
+# Deliberately ONE retry, because an unbounded one is the shape of issue #2787.
+# A refused primitive keeps returning immediately and refusing, a path that is
+# still present is left to the reclaim path to reason about, and one more create
+# can never add a ".steal" level. The path test is only a fast path out of the
+# busy-wait poll; the retry's own create is what actually settles the outcome.
+fm_lock_create_retrying_vanished() {  # <lock-path> [allowed-steal-owner]
+  fm_lock_try_create "$1" "${2:-}" && return 0
+  [ "${FM_LOCK_CREATE_FAILURE:-unavailable}" = contended ] || return 1
+  fm_lock_path_exists "$1" && return 1
+  fm_lock_try_create "$1" "${2:-}"
 }
 
 fm_lock_remove_path() {
@@ -1004,7 +1039,7 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
 
   fm_lock_clear_legacy_steal_chain "$lockdir"
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_create_retrying_vanished "$lockdir"; then
     return 0
   fi
   fm_lock_after_failed_create "$lockdir" || return 1
@@ -1016,7 +1051,7 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
     # An interrupting trap abandoned the frame that held it; see the same case
     # in fm_lock_try_acquire.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
+    if fm_lock_create_retrying_vanished "$lockdir"; then
       FM_LOCK_FAIL_REASON=
       return 0
     fi
@@ -1052,7 +1087,7 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_create_retrying_vanished "$lockdir"; then
     # shellcheck disable=SC2034 # Read by sourcing callers after acquisition.
     FM_LOCK_RECOVERED_PID=$pid
     FM_LOCK_FAIL_REASON=
@@ -1077,7 +1112,7 @@ fm_lock_try_acquire() {
   FM_LOCK_RECOVERED_PID=
   FM_LOCK_FAIL_REASON=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_create_retrying_vanished "$lockdir"; then
     return 0
   fi
   # An absent path after a refused primitive has no stale owner to recover, and
@@ -1101,7 +1136,7 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
+    if fm_lock_create_retrying_vanished "$lockdir"; then
       FM_LOCK_FAIL_REASON=
       return 0
     fi

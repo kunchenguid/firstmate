@@ -1246,6 +1246,98 @@ test_lock_claim_racer_removed_owner_is_contention_not_unavailable() {
   pass "a claim whose owner directory a racer removed is contention, not a refusing filesystem"
 }
 
+# The lock path is no evidence of why ln refused it. A racer that put a link
+# there inside this process's owner-preparation window is free to take it away
+# again before this process looks, so reading the cause off the empty path
+# reports a perfectly healthy volume as out of space. The window is real: a
+# claimant whose pid write was refused discards its owner directory while its
+# own link is still published, leaving a dangling <lock> that ln rejects with
+# EEXIST, and unlinks it one statement later. Creating that dangling link from
+# inside fm_lock_prepare_owner and removing it the instant ln has failed
+# reproduces both halves at the statements they happen at, with no two real
+# processes and no timing to lose.
+test_lock_lost_eexist_race_is_contention_not_unavailable() {
+  local dir state lockdir out
+  dir=$(make_case lock-eexist-race)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    LOCKPATH=$2
+    WINNER="$LOCKPATH.winner-owner"
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      command ln -s "$WINNER" "$LOCKPATH" 2>/dev/null || return 1
+      return 0
+    }
+    ln() {
+      local rc=0
+      command ln "$@" || rc=$?
+      [ "$rc" -eq 0 ] || rm -f "$LOCKPATH"
+      return "$rc"
+    }
+    if fm_lock_try_acquire "$LOCKPATH"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"reason=unavailable"*)
+      fail "a lost EEXIST race was blamed on the filesystem: $out" ;;
+    *"reason=held"*) ;;
+    *) fail "a lost EEXIST race was misreported: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "an EEXIST race whose winner then releases is contention, not a refusing filesystem"
+}
+
+# A contended create whose lock is gone by the time the caller looks has no
+# holder to name: the winner released inside the loser's own cleanup window.
+# Reporting "held" with an empty FM_LOCK_HELD_PID there is what let a watcher
+# arm announce a supervisor that does not exist, so the next attempt has to run.
+# Releasing the winner's lock from inside fm_lock_discard_owner puts that
+# release exactly in the window the create's failure path spends forks in.
+test_lock_contended_then_vanished_is_acquired() {
+  local dir state lockdir live out
+  dir=$(make_case lock-vanished-contention)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    LOCKPATH=$2
+    RELEASED="$3"
+    . "$1"
+    eval "fm_lock_discard_owner_real() $(declare -f fm_lock_discard_owner | tail -n +2)"
+    fm_lock_discard_owner() {
+      if [ ! -e "$RELEASED" ]; then
+        : > "$RELEASED"
+        rm -rf "$LOCKPATH"
+      fi
+      fm_lock_discard_owner_real "$@"
+    }
+    if fm_lock_try_acquire "$LOCKPATH"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s] pid=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-none}" "${FM_LOCK_HELD_PID:-}" \
+      "$(cat "$LOCKPATH/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" "$dir/released" 2> "$dir/acquire.err")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0 "*) ;;
+    *"held=[]"*)
+      fail "a lock whose contender vanished was reported as held by nobody: $out" ;;
+    *) fail "a lock whose contender vanished was not acquired: $out" ;;
+  esac
+  case "$out" in
+    *"pid=[]"*) fail "the acquired lock recorded no pid: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "a contended lock that vanished before the caller looked is acquired, not reported as held"
+}
+
 # A watcher whose lock the filesystem refuses has no lock, no recorded pid and
 # no peer process: reporting the ordinary singleton message and exiting 0 there
 # tells an operator a supervisor exists when none does.
@@ -1659,6 +1751,8 @@ test_lock_refuses_when_the_filesystem_cannot_create
 test_lock_failure_reason_separates_held_from_unavailable
 test_lock_claim_pid_write_refusal_is_unavailable_not_held
 test_lock_claim_racer_removed_owner_is_contention_not_unavailable
+test_lock_lost_eexist_race_is_contention_not_unavailable
+test_lock_contended_then_vanished_is_acquired
 test_watch_refuses_when_lock_cannot_be_created
 test_lock_steal_is_bounded_to_one_level
 test_lock_clears_legacy_steal_chains

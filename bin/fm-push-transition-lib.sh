@@ -40,12 +40,25 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+# A delivery lock a peer holds is worth retrying: it will be released and the
+# row lands. A delivery lock the filesystem refused outright never will be, so
+# every retry is wasted and the record is lost for good. The record is
+# diagnostic and stdout carries the wake payload, so the cause goes to stderr
+# and the wake itself is left alone.
+watch_delivery_refused() {  # <lock-path>
+  [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ] || return 1
+  printf 'watcher: cannot create %s - the filesystem refused the operation (out of space, read-only, or not writable); the delivery record was NOT written.\n' \
+    "$1" >&2
+  return 0
+}
+
 watch_delivery_publish() {
   local reason=$1 i size tmp raw
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
   [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
+    watch_delivery_refused "$WATCH_DELIVERY_LOCK" && return 1
     [ "$i" -lt 20 ] || return 0
     sleep 0.02
     i=$((i + 1))
