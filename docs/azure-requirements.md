@@ -1074,8 +1074,8 @@ message.
 
 ## C1. Crosscheck completes in 20 to 30 minutes
 
-Status: REMEDIATION IMPLEMENTED; LIVE ACCEPTANCE PENDING; NOT MET.
-C1 remains NOT MET until a fresh post-merge adversarial review from clean public `main` completes in 20 to 30 minutes and retains its phase breakdown.
+Status: REMEDIATION IMPLEMENTED; LIVE ACCEPTANCE PENDING; NOT ACCEPTED.
+C1 remains NOT ACCEPTED until a fresh post-merge adversarial review from clean public `main` completes in 20 to 30 minutes and retains its phase breakdown.
 The two accepted baseline measurements remain misses: 35m33s and 44m25s total, with 99.7 percent and 99.6 percent respectively inside `reviewer`.
 
 ### Measured critical path
