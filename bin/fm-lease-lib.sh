@@ -45,9 +45,11 @@
 # ACCIDENTAL override fails loudly inside the branch's own shell as well.
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
-#     refuses with exit FM_LEASE_REFUSE_EXIT. A home without the current Pi
-#     session lock cannot have a live lease, so the guard is a no-op there -
-#     non-Pi behavior is unchanged by construction.
+#     refuses with exit FM_LEASE_REFUSE_EXIT. In a Pi supervision context the
+#     guard retains the lease-command lock until fm_lease_guard_release, so the
+#     other actor cannot claim between the check and the guarded mutation. A
+#     home without the current Pi session lock cannot have a live lease, so
+#     the guard is a no-op there - non-Pi behavior is unchanged by construction.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers - refuse the
 #     branch actor outright, lease or no lease.
@@ -66,6 +68,7 @@
 # this task right now - retry after the lease clears".
 FM_LEASE_REFUSE_EXIT=6
 FM_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_LEASE_GUARD_LOCK=
 
 fm_lease_lock_helpers() {
   command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
@@ -158,26 +161,49 @@ fm_lease_clear_stale() {
 }
 
 # fm_lease_guard <task> <action-label>: refuse (exit FM_LEASE_REFUSE_EXIT) when
-# a live lease held by the OTHER actor exists for <task>. Passes silently
-# otherwise. Call after the task id is resolved and before the first mutation.
+# a live lease held by the OTHER actor exists for <task>. In a Pi supervision
+# context, a successful guard retains the command lock across the caller's
+# mutation; the caller must invoke fm_lease_guard_release from its EXIT cleanup.
+# This closes the check/use race with a concurrent claim. Outside Pi, stale
+# records are still cleaned but the lock is released before returning.
 fm_lease_guard() {
-  local task=$1 action=$2 actor lock lease_actor
+  local task=$1 action=$2 actor lock lease_actor active=0
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  [ -e "$(fm_lease_path "$task")" ] || return 0
+  case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
+    true:*|*:main|*:branch) active=1 ;;
+  esac
+  [ "$active" = 1 ] || [ -e "$(fm_lease_path "$task")" ] || return 0
   fm_lease_lock_helpers
   lock="$STATE/.fm-lease-command.lock"
-  fm_lock_acquire_wait "$lock"
+  # A caller with more than one guarded phase already excludes claims until
+  # its shared cleanup; do not recursively acquire the non-reentrant lock.
+  if [ "$FM_LEASE_GUARD_LOCK" != "$lock" ]; then
+    fm_lock_acquire_wait "$lock"
+    FM_LEASE_GUARD_LOCK=$lock
+  fi
   if ! fm_lease_live "$task"; then
-    fm_lease_clear_stale "$task" || { fm_lock_release "$lock"; return 1; }
-    fm_lock_release "$lock"
+    fm_lease_clear_stale "$task" || { fm_lease_guard_release; return 1; }
+    if [ "$active" != 1 ]; then
+      fm_lease_guard_release
+    fi
     return 0
   fi
   lease_actor=$FM_LEASE_ACTOR
+  if [ "$lease_actor" != "$actor" ]; then
+    fm_lease_guard_release
+    echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
+}
+
+# Release the claim/guard serialization lock retained by fm_lease_guard.
+# Idempotent so callers can use it unconditionally from existing EXIT cleanup.
+fm_lease_guard_release() {
+  local lock=$FM_LEASE_GUARD_LOCK
+  [ -n "$lock" ] || return 0
+  FM_LEASE_GUARD_LOCK=
   fm_lock_release "$lock"
-  [ "$lease_actor" != "$actor" ] || return 0
-  echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
-  exit "$FM_LEASE_REFUSE_EXIT"
 }
 
 # fm_lease_forbid_branch <action-label>: refuse (exit FM_LEASE_REFUSE_EXIT)

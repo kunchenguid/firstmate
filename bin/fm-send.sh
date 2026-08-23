@@ -391,7 +391,10 @@ shift
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
-  [ -z "$LEASE_GUARD_TASK" ] || fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+  if [ -n "$LEASE_GUARD_TASK" ]; then
+    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    trap 'fm_lease_guard_release' EXIT
+  fi
 fi
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They

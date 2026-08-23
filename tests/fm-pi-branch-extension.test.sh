@@ -15,6 +15,8 @@ TMP_ROOT=$(fm_test_tmproot fm-pi-branch-extension)
 EXT="$ROOT/.pi/extensions/fm-branch-supervision.ts"
 export NODE_NO_WARNINGS=1
 
+# Keep JavaScript heredocs outside command substitutions. Stock macOS Bash
+# 3.2 reparses quotes and template literals inside that combination.
 install_pi_branch_extension_fixture() {
   local repo=$1
   mkdir -p \
@@ -251,8 +253,8 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
   home="$TMP_ROOT/dispatch-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
 const { fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
@@ -353,8 +355,8 @@ const rendered = renderers.get("fm-branch-merge")({ content: "note body" }, { ex
 if (rendered.text !== "note body") throw new Error("merge-note renderer dropped the note");
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "branch dispatch, prefix contract, and two-stage filter must hold: $out"
   case "$out" in
     CACHE_KEY=fm-branch-*) ;;
@@ -410,8 +412,8 @@ echo "synthetic generator failure" >&2
 exit 1
 SH
   chmod +x "$broken/bin/fm-branch-prompt.sh"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_SKIP_BRANCH_GRANT=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_SKIP_BRANCH_GRANT=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home }; })()`);
 const { dispatch, fire, settle, home } = globalThis.__t;
@@ -442,12 +444,12 @@ if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "config and afk gating must bind: $out"
 
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages }; })()`);
 const { dispatch, settle, mainUserMessages } = globalThis.__t;
@@ -464,8 +466,8 @@ if (mainUserMessages[0].options.deliverAs !== "followUp") throw new Error("fallb
 if (dispatch("signal: second wake").accepted) throw new Error("broken branch kept accepting wakes");
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch fallback must return wakes to main: $out"
   pass "branch gating (config, afk) binds and a broken branch falls back to main"
 }
@@ -476,8 +478,8 @@ test_branch_mirror_filters_order_and_cursor() {
   home="$TMP_ROOT/mirror-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home }; })()`);
 const { fire, dispatch, settle, home } = globalThis.__t;
@@ -549,8 +551,8 @@ if (fresh.message.content !== "[captain] fresh session standing order") {
 }
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "mirror filtering, ordering, and cursor must hold: $out"
   pass "dialog mirror filters tool and operational traffic, lands before wakes, and keeps a durable cursor"
 }
@@ -606,10 +608,10 @@ fi
 exec "$FM_TEST_REAL_BASH" "$@"
 SH
   chmod +x "$fakebin/bash"
-  out=$(PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_REAL_BASH="$real_bash" FM_TEST_LEASE_SCRIPT="$ROOT/bin/fm-lease.sh" \
     FM_TEST_FAIL_MARKER="$home/state/release-failed-once" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
-    node --input-type=module 2>&1 <<'EOF'
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, realRoot }; })()`);
 const { fire, dispatch, settle, home } = globalThis.__t;
@@ -625,8 +627,8 @@ if (existsSync(`${home}/state/.lease-task-old`)) throw new Error("replacement ac
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-retry wake prompt");
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "replacement activation must clean leases and retry failures: $out"
   pass "replacement activation cleans old branch leases and retries failed cleanup"
 }
@@ -637,8 +639,8 @@ test_cold_start_activates_after_lock_acquisition() {
   home="$TMP_ROOT/coldstart-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home }; })()`);
 const { dispatch, settle, home } = globalThis.__t;
@@ -659,8 +661,8 @@ if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
 }
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "cold-start lazy lock-ownership activation must hold: $out"
   pass "branch activates on a cold start once the lock is acquired, never before"
 }
@@ -671,8 +673,8 @@ test_queued_actions_recheck_lock_ownership() {
   home="$TMP_ROOT/queued-ownership-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainUserMessages }; })()`);
 const { fire, dispatch, settle, home, mainUserMessages } = globalThis.__t;
@@ -699,8 +701,8 @@ if (session.ops.some((op) => op.kind === "custom")) throw new Error("queued mirr
 if (existsSync(`${home}/state/.branch-mirror-cursor`)) throw new Error("queued mirror advanced its cursor after lock ownership was lost");
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "queued branch actions must recheck lock ownership: $out"
   pass "queued wakes and mirrors stop mutating branch state after lock ownership is lost"
 }
@@ -711,8 +713,8 @@ test_stale_generation_boundaries_are_side_effect_free() {
   home="$TMP_ROOT/stale-boundaries-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, sentToMain }; })()`);
 const { fire, dispatch, settle, home, sentToMain } = globalThis.__t;
@@ -775,8 +777,8 @@ if (cursor.file !== `${home}/new-main.jsonl` || cursor.index !== 1) {
 }
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "stale branch boundaries must perform no side effects: $out"
   pass "stale reports, shells, mirrors, cursors, leases, and prompts perform no side effects"
 }
@@ -793,8 +795,8 @@ test_secondary_session_stays_inert() {
   sleep 60 &
   foreign_pid=$!
   printf 'branch\t%s\t123\n' "$foreign_pid" > "$home/state/.lease-task-x"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_SKIP_LOCK=1 FM_TEST_LOCK_PID=$foreign_pid DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_SKIP_LOCK=1 FM_TEST_LOCK_PID=$foreign_pid DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, home }; })()`);
 const { dispatch, home } = globalThis.__t;
@@ -809,8 +811,8 @@ if (!existsSync(`${home}/state/.lease-task-x`)) {
 }
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   kill "$foreign_pid" 2>/dev/null || true
   expect_code 0 "$status" "a secondary session must stay inert: $out"
   pass "a Pi session that does not own the lock accepts nothing and mutates no branch state"
@@ -822,8 +824,8 @@ test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
   home="$TMP_ROOT/rebind-home"
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home }; })()`);
 const { fire, home } = globalThis.__t;
@@ -889,8 +891,8 @@ if (!mirrors.includes("[captain] standing order: never merge task-7")) {
 }
 process.exit(0);
 EOF
-  )
   status=$?
+  out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "rebind must re-mirror undelivered dialog from the durable cursor: $out"
   pass "an extension rebind re-mirrors undelivered dialog instead of dropping it"
 }

@@ -45,8 +45,10 @@ ln -s "$PI_PACKAGE_DIR" "$repo/node_modules/@earendil-works/pi-coding-agent"
 ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$repo/node_modules/@earendil-works/pi-tui"
 ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 
-out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-  PI_CODING_AGENT_DIR="$agentdir" node --input-type=module 2>&1 <<'EOF'
+# Stock macOS Bash 3.2 cannot reliably parse JavaScript template literals in a
+# heredoc nested inside command substitution, so capture through a file.
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$agentdir" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -131,8 +133,8 @@ if (!existsSync(`${home}/state/branch-session`)) {
 console.log("LIVE_OK");
 process.exit(0);
 EOF
-)
 status=$?
+out=$(cat "$TMP_ROOT/node-output")
 if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi

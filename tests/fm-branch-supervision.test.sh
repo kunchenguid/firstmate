@@ -398,6 +398,39 @@ SH
   pass "guard stale cleanup cannot race with or delete a newer lease claim"
 }
 
+test_guard_holds_exclusivity_through_mutation() {
+  local home operation_pid claim_pid claim_status
+  home="$TMP_ROOT/guard-mutation-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  PI_CODING_AGENT=true STATE="$home/state" FM_TEST_READY="$home/operation-ready" \
+    FM_TEST_RELEASE="$home/operation-release" bash -c '
+      . "$1"
+      fm_lease_guard task-race "probe"
+      trap "fm_lease_guard_release" EXIT
+      : > "$FM_TEST_READY"
+      while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.01; done
+    ' _ "$ROOT/bin/fm-lease-lib.sh" &
+  operation_pid=$!
+  while [ ! -e "$home/operation-ready" ]; do sleep 0.01; done
+
+  PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-race --actor branch >/dev/null 2>&1 &
+  claim_pid=$!
+  sleep 0.2
+  kill -0 "$claim_pid" 2>/dev/null \
+    || fail "the other actor claimed while the guarded mutation was still running"
+  [ ! -e "$home/state/.lease-task-race" ] \
+    || fail "the concurrent claim published a lease before the guarded mutation ended"
+
+  : > "$home/operation-release"
+  wait "$operation_pid" || fail "guarded mutation fixture failed"
+  wait "$claim_pid"; claim_status=$?
+  [ "$claim_status" -eq 0 ] || fail "claim did not proceed after guarded mutation ended: $claim_status"
+  pass "lease guard excludes a concurrent actor for the complete mutation"
+}
+
 test_claim_refuses_the_other_actors_name_loudly() {
   local home out status
   home="$TMP_ROOT/claim-guard-home"
@@ -480,6 +513,7 @@ test_home_without_branch_is_untouched
 test_lease_liveness_binds_to_the_session_lock
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
+test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch

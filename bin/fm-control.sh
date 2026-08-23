@@ -161,6 +161,9 @@ control_cleanup() {
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
   fi
+  if declare -F fm_lease_guard_release >/dev/null 2>&1; then
+    fm_lease_guard_release || true
+  fi
   return "$status"
 }
 
