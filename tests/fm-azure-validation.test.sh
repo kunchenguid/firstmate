@@ -76,6 +76,8 @@ manifest={
     "schema":"fm.azure-validation-runtime/v1",
     "provider":sys.argv[2],
     "no_mistakes_version":"1.41.2",
+    "no_mistakes_source_commit":"1111111111111111111111111111111111111111",
+    "owner_decision_protocol":"fm.azure-validation-owner-decision/v1",
     "no_mistakes_path":"bin/no-mistakes",
     "provider_path":"bin/"+sys.argv[2],
     "gh_path":"bin/gh",
@@ -92,6 +94,54 @@ manifest={
 (root/"runtime.json").write_text(json.dumps(manifest,separators=(",",":"))+"\n")
 PY
   COPYFILE_DISABLE=1 tar -czf "$root/runtime.tar.gz" -C "$root/runtime" runtime.json bin gh-axi
+  cat >"$root/owner-signer" <<'PY'
+#!/usr/bin/env python3
+import base64
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+args=sys.argv[1:]
+def value(name):
+    return args[args.index(name)+1]
+if args == ["--version"]:
+    print("no-mistakes version 1.41.2 (1111111111111111111111111111111111111111) fixture")
+    raise SystemExit(0)
+if args[:3] == ["axi","owner-decision","keygen"]:
+    private=pathlib.Path(value("--private-key"))
+    public=pathlib.Path(value("--public-key"))
+    private.write_text(base64.b64encode(b"K"*64).decode()+"\n")
+    public.write_text(base64.b64encode(b"P"*32).decode()+"\n")
+    os.chmod(private,0o600); os.chmod(public,0o644)
+    print("private_key: {}\npublic_key: {}".format(private,public))
+    raise SystemExit(0)
+if args[:3] == ["axi","owner-decision","sign"]:
+    challenge=json.loads(pathlib.Path(value("--challenge-file")).read_text())
+    response={"action":value("--action")}
+    if "--findings" in args:
+        response["finding_ids"]=[item for item in value("--findings").split(",") if item]
+    if "--instructions" in args:
+        response["instructions"]={item:"fixture guidance" for item in response.get("finding_ids",[])}
+    if "--add-finding" in args:
+        response["added_findings"]=[json.loads(value("--add-finding"))]
+    envelope={
+        "schema":"no-mistakes.owner-decision-envelope/v1",
+        "challenge":challenge,
+        "response":response,
+        "signature":base64.b64encode(b"S"*64).decode(),
+    }
+    output=pathlib.Path(value("--out"))
+    output.write_text(json.dumps(envelope,indent=2)+"\n")
+    os.chmod(output,0o644)
+    digest=hashlib.sha256(json.dumps(envelope,separators=(",", ":")).encode()).hexdigest()
+    next_head=hashlib.sha256((challenge["previous_head"]+"\n"+digest+"\n").encode()).hexdigest()
+    print("decision: {}\nnext_head: {}".format(output,next_head))
+    raise SystemExit(0)
+raise SystemExit(2)
+PY
+  chmod 755 "$root/owner-signer"
 }
 
 make_credentials() {
@@ -110,6 +160,9 @@ JSON
 validation() {
   local home=$1
   shift
+  if [ "${1:-}" = submit ]; then
+    set -- "$@" --owner-decision-signer "$(dirname "$home")/owner-signer"
+  fi
   FM_HOME="$home" FM_AZURE_DEPLOYMENT_GENERATION=gen-one \
     FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_NAMING_PREFIX=fmtest "$VALIDATION" "$@"
 }
@@ -220,7 +273,7 @@ assert "container and auth-share grants" in host
 assert '"imageId": {"value": os.environ.get("FM_AZURE_VM_IMAGE_ID", "")}' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
     assert value in guest
-for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','GITHUB_TOKEN_VALUE=${github_token:-}','AUTH_SHARE=${auth_share:-fm-auth-home}','unset input_url output_url response github_token'):
+for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','GITHUB_TOKEN_VALUE=${github_token:-}','AUTH_SHARE=${auth_share:-fm-auth-home}','unset input_url output_url github_token'):
     assert value in guest
 # Plain ext4 worktree: format only a fresh start-mode disk, mount everything
 # else, refuse foreign filesystems. No encryption layer remains.
@@ -246,10 +299,29 @@ assert "launch diagnostics (exit" in guest
 assert "code: recover_custody" in guest
 assert guest.count('cd "$3" && exec "$2" axi status') == 2
 assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in bridge
-assert "awaiting[_ -]approval" in guest
-assert "status:[[:space:]]*awaiting[_ -](approval|user)" in guest
-assert 'tail -n +"$((last_awaiting + 1))" "$RUN_LOG"' in guest
-assert guest.index("status:[[:space:]]*awaiting[_ -](approval|user)") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
+for value in (
+    "fm.azure-validation-owner-decision/v1",
+    "no-mistakes.owner-decision-challenge/v1",
+    "--owner-decision-public-key",
+    "adjudicate_protected_gates() {",
+    "publish_gate_challenge() {",
+    "fetch_gate_decision() {",
+    "control/owner-decision/a",
+    '"$NM_BIN" axi respond --decision-file "$decision"',
+    "protected owner decision expired without a signed controller envelope",
+    'chmod 0444 "$OWNER_PUBLIC_KEY"',
+):
+    assert value in guest
+assert '"$GITHUB_TOKEN_FILE" "$OWNER_PUBLIC_KEY"' not in guest
+for absent in (
+    "control/gate-response-a",
+    "adjudicate_gates() {",
+    "fetch_gate_response() {",
+    '"$NM_BIN" axi respond "$@"',
+    "last_awaiting=",
+    "gate_parked=",
+):
+    assert absent not in guest
 assert "cell worktree is detached and no declared branch identity is present" in bridge
 assert "refusing to move it" not in bridge
 assert "does not fast-forward to the snapshot HEAD" in bridge
@@ -261,21 +333,12 @@ assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"reattaching", "collected")' in host
 assert "retain-failure owns only failed outcomes" in host
-assert '"$NM_BIN" axi respond <"$RESPONSE_FILE"' not in guest
-assert '"$NM_BIN" axi respond "$@"' in guest
-respond_block=guest[guest.index("    respond)"):guest.index('*) exit 125 ;;')]
-assert respond_block.index('"$NM_BIN" axi run') < respond_block.index('axi respond "$@"')
-assert '|| true' in respond_block
-assert "adjudicate_gates() {" in guest
-assert "fetch_gate_response() {" in guest
-assert "control/gate-response-a" in guest
-assert guest.index("esac") < guest.index("  adjudicate_gates")
-assert '"$gates" -gt "$responded"' in guest
 assert "FM_AZURE_VALIDATION_GATE_WAIT_SECONDS" in guest
-assert 'while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do' in guest
-assert guest.index("set --") < guest.index('"$NM_BIN" axi respond "$@"')
+assert guest.index("esac") < guest.index("  adjudicate_protected_gates")
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
+assert "no-mistakes runtime version/source identity mismatch" in guest
+assert '[sys.argv[3], "--version"]' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.name' in guest
 assert 'runuser -u fmvalidate -- git -C "$REPO" config user.email' in guest
@@ -290,6 +353,15 @@ assert '"$FM_AZURE_VALIDATION_SHARD_BRIDGE" lint' in nm
 assert "no-mistakes daemon start" not in host
 assert "no-mistakes daemon stop" not in host
 assert "no-mistakes daemon restart" not in host
+for value in (
+    "def provision_owner_decision",
+    "def validate_owner_challenge",
+    "def sign_owner_decision",
+    "def exact_live_run_command",
+    "owner-decision signer bytes changed",
+    "protected owner-decision runs cannot cross a VM/daemon replacement boundary",
+):
+    assert value in host
 PY
   pass "cell template and trusted bridge preserve private per-run compute, plain-disk isolation, auth-home sync, and cgroup limits"
 }
@@ -491,11 +563,11 @@ token_path=os.path.join(token_dir,"github-token")
 open(token_path,"w").write("fixture-injected-token\n")
 os.environ["FM_AZURE_GITHUB_TOKEN_FILE"]=token_path
 m.az_command=lambda *_args,**_kwargs:(None,0,"")
-m.read_resource=lambda _env,rid,_kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}})
+m.read_resource=lambda _env,rid,_kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64,"attempt":"1"},"properties":captured["properties"]})
 m.save_state=lambda *_args:None
 m.expected_tags=lambda *_args:{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}
 state={"cell":"azv-aaaaaaaaaaaa","attempt":1,"input_digest":"sha256:"+"i"*64,"request_digest":"sha256:"+"r"*64,"allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},"request":{"fence":"sha256:"+"f"*64,"protocol":{"guest_digest":m.sha256_file(m.GUEST)},"limits":{"wall_seconds":60},"credentials":{"provider":"codex","github_token_file":"/nonexistent-descriptor-path","bundle_digest":"sha256:"+"c"*64}},"resources":{"vm_id":"/vm","vm_instance_id":"vm-instance","worktree_disk_id":"/work","identity_client_id":"client","run_commands":[]},"staging":{"container":"container"}}
-m.create_run_command({"storage":"storage","owner":"owner"},state,"start")
+m.create_run_command({"storage":"storage","owner":"owner"},state,"start",input_url="https://input",output_url="https://output")
 protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
 # Boot-time injection: the env-file override wins and the token value flows
 # only through the run-command parameter list.
@@ -506,9 +578,23 @@ del os.environ["FM_AZURE_GITHUB_TOKEN_FILE"]
 # The descriptor's recorded token path is the default source.
 state["request"]["credentials"]["github_token_file"]=token_path
 captured.clear()
-m.create_run_command({"storage":"storage","owner":"owner"},state,"reattach")
+m.create_run_command({"storage":"storage","owner":"owner"},state,"reattach",output_url="https://output")
 protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
 assert protected["github_token"]=="fixture-injected-token"
+m.run_command_status_resource_for_id=lambda _env,rid:(
+    "Running",{},m.read_resource(_env,rid,"run-command")[1]
+)
+m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+original_source=captured["properties"]["source"]["script"]
+captured["properties"]["source"]["script"]="foreign source"
+try: m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+except m.ValidationError as exc: assert "source/parameter binding changed" in str(exc)
+else: raise AssertionError("a same-id/tag Running command with foreign source was accepted")
+captured["properties"]["source"]["script"]=original_source
+captured["properties"]["parameters"][0]["value"]="foreign-mode"
+try: m.exact_live_run_command({"storage":"storage","owner":"owner"},state)
+except m.ValidationError as exc: assert "source/parameter binding changed" in str(exc)
+else: raise AssertionError("a same-id/tag Running command with foreign parameters was accepted")
 # Replacement mode selection is run-id driven only.
 assert m.replacement_run_mode({"phase":"failed-retained"})=="start"
 assert m.replacement_run_mode({"phase":"running","run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA"})=="reattach"
@@ -526,6 +612,7 @@ PY2
 replacement_runtime_hydration_contract() {
   python3 - "$HOST" <<'PY' || fail "replacement runtime hydration contract failed"
 import contextlib
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -1726,6 +1813,7 @@ operator_documentation_contract() {
     'Run a real no-mistakes pipeline through review, test' \
     'actual cost' \
     'idle VM count is zero' \
+    'full 40-hex source commit' \
     'Remote Herdr is not part of this path.'; do
     assert_grep "$text" "$DOC" "operator documentation is missing: $text"
   done
@@ -1767,6 +1855,7 @@ shard_receipt_demotion_contract() {
   }
   write_request 8
   printf '{"worktree_disk_id":"wd","run_id":"nm-run"}\n' >"$work/identity.json"
+  printf '{"owner_decision_protected":true,"owner_decision_key_id":"%064d","owner_decision_repo_id":"repo","owner_decision_genesis_head":"%064d","owner_decision_head":"%064d","owner_decision_source_commit":"%040d"}\n' 0 0 0 0 >"$work/owner-authority.json"
 
   cat >"$work/drive.sh" <<'DRIVER'
 set -euo pipefail
@@ -1787,7 +1876,8 @@ VM_INSTANCE_ID=vmi
 START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
 START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
 PR=https://github.com/o/r/pull/1
-CHECKS_GREEN=false
+  CHECKS_GREEN=false
+  OWNER_AUTHORITY=$FM_TEST_WORK/owner-authority.json
 case "$OUTCOME" in passed|checks-passed) CHECKS_GREEN=true ;; esac
 . "$FM_TEST_BLOCK"
 DRIVER
@@ -1912,7 +2002,8 @@ terminal_classifier_optional_matches_contract() {
 
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
-      "RUN_LOG=\$1" "STATUS_LOG=\$2" "STATUS_RC=\$3" "RUN_EXIT=\$4"
+      "RUN_LOG=\$1" "STATUS_LOG=\$2" "STATUS_RC=\$3" "RUN_EXIT=\$4" \
+      "OWNER_PROTECTED=false" "OWNER_AUTHORITY=\$STATUS_LOG.owner"
     awk '/^OUTCOME=failed$/{found=1} found{if(/^SHARD_RECEIPTS=/) exit; print}' "$GUEST"
     printf '%s\n' "printf '%s\\t%s\\t%s\\n' \"\$OUTCOME\" \"\$CHECKS_GREEN\" \"\$PR\""
   } >"$snippet"
@@ -1935,10 +2026,10 @@ terminal_classifier_optional_matches_contract() {
   printf '%s\n' 'status: awaiting_approval' >"$work/gate.log"
   output=$(bash "$snippet" "$work/gate.log" "$work/status.log" 0 1) \
     || fail "the terminal classifier aborted on an actual awaiting gate"
-  [ "$output" = "needs-decision"$'\t'"false"$'\t' ] \
-    || fail "the terminal classifier did not preserve an actual awaiting gate: $output"
+  [ "$output" = "failed"$'\t'"false"$'\t' ] \
+    || fail "the terminal classifier exposed a dead protected gate as respondable: $output"
 
-  pass "terminal result classification tolerates optional no-match fields and still finds a real gate"
+  pass "terminal result classification tolerates optional no-match fields and fails a dead protected gate closed"
 }
 
 receipt_chain_close_contract() {
@@ -2015,6 +2106,7 @@ request={
 open(sys.argv[1],"w").write(json.dumps(request)+"\n")
 PY
   printf '{"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7"}\n' >"$work/identity.json"
+  printf '{"owner_decision_protected":true,"owner_decision_key_id":"%064d","owner_decision_repo_id":"repo","owner_decision_genesis_head":"%064d","owner_decision_head":"%064d","owner_decision_source_commit":"%040d"}\n' 0 0 0 0 >"$work/owner-authority.json"
   cat >"$work/drive.sh" <<'DRIVER'
 set -euo pipefail
 SHARD_EXCHANGE=$FM_TEST_WORK/exchange
@@ -2035,6 +2127,7 @@ START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
 START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
 PR=https://github.com/o/r/pull/7
 CHECKS_GREEN=true
+OWNER_AUTHORITY=$FM_TEST_WORK/owner-authority.json
 . "$FM_TEST_BLOCK"
 DRIVER
   env FM_TEST_BLOCK="$block" FM_TEST_WORK="$work" FM_TEST_HEAD="$head" FM_TEST_TREE="$tree" \
@@ -2137,461 +2230,421 @@ PY
   pass "the real bridge emits the receipt set, the guest carries it, and the real collect and close gates accept it end to end, bound to this cell's own shard round"
 }
 
-gate_answer_binding_contract() {
-  local tmp work head tree block marker_block
-  fm_test_tmproot_into tmp fm-azure-validation-gate-answer
-  work=$tmp/work
-  mkdir -p "$work/exchange" "$work/state" "$work/evidence/attempt-1" "$work/evidence/attempt-2" "$tmp/home"
-  make_repo "$tmp/project"
-  head=$(git -C "$tmp/project/repo" rev-parse HEAD)
-  tree=$(git -C "$tmp/project/repo" rev-parse 'HEAD^{tree}')
-  printf '[]\n' >"$work/exchange/receipts.json"
+owner_decision_protocol_contract() {
+  local tmp
+  fm_test_tmproot_into tmp fm-azure-validation-owner-decision
+  make_runtime "$tmp"
+  python3 - "$HOST" "$tmp" <<'PY' || fail "protected owner-decision controller protocol failed"
+import base64
+import copy
+import hashlib
+import importlib.util
+import json
+import pathlib
+import sys
+import time
+import types
 
-  # 1. The REAL guest result-assembly region must stamp the attempt that
-  # produced the result, and the REAL marker line must name it too. Without
-  # both, nothing a control-plane read can see separates one attempt of a
-  # resumed run from another: same VM, same boot id, same run id.
-  block=$work/emit.sh
-  awk '/^SHARD_RECEIPTS=\$SHARD_EXCHANGE/,/^RESULT_ARCHIVE=/' "$GUEST" \
-    | grep -v '^install -d\|^cp \|^RESULT_ARCHIVE=' >"$block"
-  [ -s "$block" ] || fail "the guest result-emission region was not found"
-  # shellcheck disable=SC2016  # The pattern is literal guest text, not an expansion.
-  sed -i.bak 's#\$(cat /proc/sys/kernel/random/boot_id)#44444444-4444-4444-8444-444444444444#' "$block" && rm -f "$block.bak"
-  marker_block=$work/marker.sh
-  grep '^printf .FM_AZURE_VALIDATION_RESULT' "$GUEST" >"$marker_block"
-  [ -s "$marker_block" ] || fail "the guest result marker line was not found"
-
-  python3 - "$work/request.json" "$head" <<'PY'
-import json,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[2]); home=root/"home"
+env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub","storage":"stor"}
+m.ensure_dirs(env)
+cell="azv-aaaaaaaaaaaa"; commit="1"*40
+provisioned=m.provision_owner_decision(env,cell,root/"owner-signer",commit,"1.41.2")
+foreign=root/"foreign-signer"
+foreign.write_text((root/"owner-signer").read_text().replace(
+    "(1111111111111111111111111111111111111111)",
+    "(2222222222222222222222222222222222222222)"
+))
+foreign.chmod(0o755)
+try: m.provision_owner_decision(env,"azv-bbbbbbbbbbbb",foreign,commit,"1.41.2")
+except m.ValidationError as exc: assert "version/source identity mismatch" in str(exc)
+else: raise AssertionError("a signer from a foreign source identity was accepted")
+assert not m.owner_decision_directory(env,"azv-bbbbbbbbbbbb").exists()
+short=root/"short-signer"
+short.write_text((root/"owner-signer").read_text().replace(
+    "(1111111111111111111111111111111111111111)", "(1111111)"
+))
+short.chmod(0o755)
+try: m.provision_owner_decision(env,"azv-cccccccccccc",short,commit,"1.41.2")
+except m.ValidationError as exc: assert "version/source identity mismatch" in str(exc)
+else: raise AssertionError("a short artifact revision was accepted as exact source identity")
+assert not m.owner_decision_directory(env,"azv-cccccccccccc").exists()
+request_owner={key:provisioned[key] for key in (
+    "schema","public_key","key_id","source_commit","challenge_schema","envelope_schema"
+)}
+head="a"*40; tree="b"*40; run_id="01HZX7YQ7EJQH8C9G3N4M5P6R7"; repo_id="repo-1"
 request={
-  "limits":{"behavior_shards":0},
-  "protocol":{"result_schema":"fm.azure-validation-result/v1"},
-  "request_digest":"sha256:"+"1"*64,"cell":"azv-aaaaaaaaaaaa",
-  "home_binding":"sha256:"+"2"*64,"task":"task","task_generation":"gen",
-  "validation_generation":"val","fence":"sha256:"+"3"*64,
-  "repository":{"branch":"fm/fixture","head":sys.argv[2],"slug":"o/r"},
-}
-open(sys.argv[1],"w").write(json.dumps(request)+"\n")
-PY
-  printf '{"worktree_disk_id":"/work","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7"}\n' >"$work/identity.json"
-  cat >"$work/drive.sh" <<'DRIVER'
-set -euo pipefail
-SHARD_EXCHANGE=$FM_TEST_WORK/exchange
-REQUEST=$FM_TEST_WORK/request.json
-IDENTITY=$FM_TEST_WORK/identity.json
-STATE=$FM_TEST_WORK/state
-EVIDENCE=$FM_TEST_WORK/evidence
-ATTEMPT=$FM_TEST_ATTEMPT
-CELL=azv-aaaaaaaaaaaa
-OUTCOME=needs-decision
-CURRENT_HEAD=$FM_TEST_HEAD
-CURRENT_TREE=$FM_TEST_TREE
-REMOTE_HEAD=$FM_TEST_HEAD
-RUN_ID=01HZX7YQ7EJQH8C9G3N4M5P6R7
-VM_RESOURCE_ID=/vm
-VM_INSTANCE_ID=vm-instance
-START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
-START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
-PR=
-CHECKS_GREEN=false
-. "$FM_TEST_BLOCK"
-RESULT_DIGEST=sha256:$(printf '%064d' "$FM_TEST_DIGEST_SEED")
-BOOT_ID=44444444-4444-4444-8444-444444444444
-. "$FM_TEST_MARKER" >"$STATE/marker-a$ATTEMPT.txt"
-DRIVER
-  for attempt in 1 2; do
-    env FM_TEST_BLOCK="$block" FM_TEST_MARKER="$marker_block" FM_TEST_WORK="$work" \
-      FM_TEST_HEAD="$head" FM_TEST_TREE="$tree" FM_TEST_ATTEMPT="$attempt" FM_TEST_DIGEST_SEED=7 \
-      bash "$work/drive.sh" >/dev/null 2>&1 \
-      || fail "guest result assembly failed for attempt $attempt"
-  done
-
-  # The two attempts differ ONLY in the attempt field, which is exactly the
-  # live shape: same run id, same outcome, same gate, same heads.
-  python3 - "$work/state/result-a1.json" "$work/state/result-a2.json" \
-    "$work/state/marker-a1.txt" "$work/state/marker-a2.txt" "$HOST" <<'PY' \
-    || fail "the guest does not bind its published result and marker to the attempt"
-import importlib.util,json,pathlib,sys
-one=json.load(open(sys.argv[1])); two=json.load(open(sys.argv[2]))
-assert one.get("attempt")==1, "result.json does not carry its attempt: "+repr(one.get("attempt"))
-assert two.get("attempt")==2, "result.json does not carry its attempt: "+repr(two.get("attempt"))
-stripped_one=dict(one); stripped_one.pop("attempt")
-stripped_two=dict(two); stripped_two.pop("attempt")
-assert stripped_one==stripped_two, "the fixture must differ only by attempt to prove the binding is load-bearing"
-spec=importlib.util.spec_from_file_location("validation",sys.argv[5])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-for index,expected in ((3,1),(4,2)):
-    line=pathlib.Path(sys.argv[index]).read_text()
-    found=m.MARKER.search(line)
-    assert found, "the guest marker is not accepted by the controller reader: "+line
-    assert int(found.group(4))==expected, "the marker names attempt "+found.group(4)
-PY
-
-  # 2. The REAL observe gate against the exact live shapes.
-  python3 - "$HOST" "$tmp/home" "$work/state/result-a1.json" "$work/state/result-a2.json" <<'PY' \
-    || fail "observe did not bind the control view to the attempt it is observing"
-import importlib.util,json,pathlib,sys,types
-spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-home=pathlib.Path(sys.argv[2])
-env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub"}
-m.ensure_dirs(env)
-args=types.SimpleNamespace(cell="azv-aaaaaaaaaaaa")
-digest_one="sha256:"+"a"*64
-digest_two="sha256:"+"b"*64
-boot="44444444-4444-4444-8444-444444444444"
-
-def marker(digest,attempt,outcome="needs-decision"):
-    return "FM_AZURE_VALIDATION_RESULT {} boot={} outcome={} attempt={}\n".format(digest,boot,outcome,attempt)
-
-def seed(phase="responding",attempt=2,**extra):
-    state={
-      "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":phase,"attempt":attempt,
-      "request_digest":"sha256:"+"1"*64,
-      "request":{"repository":{"head":"0"*40,"branch":"fm/fixture","slug":"o/r"},
-                 "task":"task","task_generation":"gen","validation_generation":"val",
-                 "limits":{"behavior_shards":0}},
-      "resources":{"run_command_id":"/vm/runCommands/respond-a2"},
-      "guest_stamps_attempt":True,
-      "events":[],
-    }
-    state.update(extra)
-    if state.get("guest_stamps_attempt") is None:
-        state.pop("guest_stamps_attempt",None)
-    (env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(state))
-    return state
-
-def view(output="",error="",execution="Failed"):
-    m.run_command_status=lambda _env,_state:(execution,{"output":output,"error":error})
-
-def phase():
-    return json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())["phase"]
-
-# 2a. Terminal control state with NO marker: the live azv-36b2 shape, read
-# nine seconds after the respond Run Command was created while the attempt
-# was still executing. It must not strand the cell on the first read.
-seed()
-view(error="validation guest: auth-home push failed\n")
-m.observe(env,args)
-assert phase()=="responding", "an unbound terminal view stranded the cell on its first read: "+phase()
-
-# The same ambiguity, persisted past the settling window, IS believed: the
-# guard delays a destructive decision, it never abandons it.
-import os
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed()
-view(error="validation guest: auth-home push failed\n")
-try:
-    m.observe(env,args)
-except m.ValidationError as exc:
-    assert "authenticated result" in str(exc), str(exc)
-else:
-    raise AssertionError("a settled unbound terminal view was never believed")
-assert phase()=="failed-retained", phase()
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2b. The previous attempt's own marker is not this attempt's answer. Every
-# other field it carries (digest, boot, outcome) is legitimate.
-seed()
-view(output=marker(digest_one,1))
-m.observe(env,args)
-assert phase()=="responding", "attempt 1's marker was accepted as attempt 2's answer"
-
-# 2c. This attempt's marker republishing the previous attempt's exact bytes
-# is a NON-ANSWER and must say so, not surface as a generic failure.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_one,2))
-try:
-    m.observe(env,args)
-except m.ValidationError as exc:
-    assert "non-answer" in str(exc) and "byte-identical" in str(exc), str(exc)
-else:
-    raise AssertionError("an unchanged republished result was accepted as a verdict")
-assert phase()=="failed-retained", phase()
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert "republished" in recorded["events"][-1]["note"], recorded["events"][-1]["note"]
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2d. A genuinely new attempt result is accepted and recorded per attempt.
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_two,2))
-m.observe(env,args)
-assert phase()=="needs-decision", phase()
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert recorded["attempt_result_digests"]=={"1":digest_one,"2":digest_two}, recorded["attempt_result_digests"]
-assert recorded["expected_result_digest"]==digest_two
-# The NORMAL path must record the strict binding. Pinning only the legacy case
-# leaves "every observation binds legacy" green while disabling the attempt
-# check for every modern cell.
-assert recorded["result_binding"]=="attempt", recorded.get("result_binding")
-observed_binding=recorded["result_binding"]
-
-# 2e. TWO markers in one output: the current attempt's is accepted wherever it
-# sits, and the FIRST marker no longer wins.
-seed(attempt_result_digests={"1":digest_one})
-view(output=marker(digest_one,1)+"noise\n"+marker(digest_two,2))
-m.observe(env,args)
-assert phase()=="needs-decision", "a later marker naming this attempt was not accepted: "+phase()
-assert json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())["expected_result_digest"]==digest_two
-
-# 2f. Two DIFFERENT results claiming one attempt is not an answer.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed()
-view(output=marker(digest_one,2)+marker(digest_two,2))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("two conflicting results for one attempt were accepted")
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2g. LEGACY: a cell whose sealed guest predates the attempt stamp publishes an
-# UNSTAMPED marker. The request is digest-sealed so that guest can never be
-# changed; refusing to read it would retain a cell on a fully published result
-# and leave expected_result_digest unset, making the result unreachable.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-seed(guest_stamps_attempt=False)
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision\n".format(digest_two,boot))
-m.observe(env,args)
-recorded=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert phase()=="needs-decision", "a legacy cell was stranded by the attempt binding: "+phase()
-assert recorded["expected_result_digest"]==digest_two, "legacy result is unreachable"
-assert recorded["result_binding"]=="legacy", recorded.get("result_binding")
-# A STAMPED marker naming another attempt must NOT take the legacy path.
-seed()
-view(output=marker(digest_two,1))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("a stamped marker for another attempt fell through to the legacy path")
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 2h. A guest that CAN stamp never buys the pre-stamp contract with a malformed
-# marker. LEGACY_MARKER is MARKER minus the attempt group, so every one of these
-# satisfies "no stamped marker matched"; the binding must come from the sealed
-# guest instead. The marker is the guest's LAST line by design, which is exactly
-# where an output cap lands, so this is a live shape rather than a theoretical one.
-os.environ["FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS"]="0"
-malformed={
-  "truncated inside the attempt word":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attem".format(digest_two,boot),
-  "truncated right after attempt=":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=".format(digest_two,boot),
-  "empty attempt value":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=\n".format(digest_two,boot),
-  "non-numeric attempt value":
-    "FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=two\n".format(digest_two,boot),
-}
-for label,output in malformed.items():
-    seed()
-    view(output=output)
-    try:
-        m.observe(env,args)
-    except m.ValidationError:
-        pass
-    else:
-        raise AssertionError("a stamping guest fell back to the legacy contract on "+label)
-    after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-    assert after.get("expected_result_digest") is None, \
-        "a malformed marker still published a digest on "+label
-    assert after.get("result_binding")!="legacy", \
-        "a stamping guest was bound legacy on "+label
-
-# 2h-bis. A state that cannot answer "can this guest stamp" - no recorded flag,
-# no staged payload to derive it from - takes the STRICT contract. Falling back
-# to the weaker one would let exactly the states we know least about skip the
-# attempt check.
-seed(guest_stamps_attempt=None)
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision\n".format(digest_two,boot))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("an underivable stamping answer bought the weaker legacy contract")
-after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert after.get("result_binding")!="legacy", after.get("result_binding")
-
-# 2i. The composed shape, which is the silent false verdict this PR exists to
-# close, re-entered through the parse-failure path: observing attempt 2, the
-# output carries attempt 1's own marker truncated inside its attempt field. If
-# legacy bound here, the expected digest would become attempt 1's, the blob
-# still holds attempt 1's archive so the digest check passes, and the attempt
-# check is skipped.
-seed(attempt_result_digests={"1":digest_one})
-view(output="FM_AZURE_VALIDATION_RESULT {} boot={} outcome=needs-decision attempt=".format(digest_one,boot))
-try:
-    m.observe(env,args)
-except m.ValidationError:
-    pass
-else:
-    raise AssertionError("a truncated stale attempt-1 marker was accepted as attempt 2's answer")
-after=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert after.get("expected_result_digest")!=digest_one, \
-    "attempt 1's digest became attempt 2's expected result"
-os.environ.pop("FM_AZURE_VALIDATION_MARKER_SETTLE_SECONDS")
-
-# 3. The REAL result-identity gate refuses a result from another attempt and
-# refuses one that does not declare its attempt at all.
-result=json.load(open(sys.argv[4]))
-state={
-  "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":"needs-decision","attempt":2,
-  "request_digest":result["request_digest"],
-  "request":{
-    "home_binding":result["home_binding"],"task":"task","task_generation":"gen",
-    "validation_generation":"val","fence":result["fence"],
-    "repository":{"slug":"o/r","branch":"fm/fixture","head":result["submitted_head"]},
+    "owner_decision":request_owner,
+    "repository":{"slug":"o/r","branch":"fm/fixture","head":head},
+    "home_binding":"sha256:"+"2"*64,"task":"task","task_generation":"gen",
+    "validation_generation":"val","fence":"sha256:"+"3"*64,
     "limits":{"behavior_shards":0},
-  },
-  "resources":{"worktree_disk_id":"/work","vm_id":"/vm","vm_instance_id":"vm-instance"},
-  "expected_boot_id":boot,
-  # Taken from what observe RECORDED, not asserted by hand: producer and
-  # consumer of this binding have to be pinned together or neither is pinned.
-  "result_binding":observed_binding,
 }
-assert state["result_binding"]=="attempt"
-m.verify_result_identity(state,result)
-older=json.load(open(sys.argv[3]))
-try:
-    m.verify_result_identity(state,older)
-except m.ValidationError as exc:
-    assert "produced by attempt 1" in str(exc), str(exc)
-else:
-    raise AssertionError("attempt 1's result passed the identity gate for attempt 2")
-undeclared=dict(result); undeclared.pop("attempt")
-try:
-    m.verify_result_identity(state,undeclared)
-except m.ValidationError as exc:
-    assert "does not declare the attempt" in str(exc), str(exc)
-else:
-    raise AssertionError("a result that declares no attempt was assumed to be the current one")
-# ...but a LEGACY-bound observation holds that same result to the pre-stamp
-# contract instead of refusing it, or the sealed cell can never collect.
-legacy_state=dict(state); legacy_state["result_binding"]="legacy"
-m.verify_result_identity(legacy_state,undeclared)
+state={
+    "schema":m.SCHEMA,"cell":cell,"phase":"running","attempt":1,
+    "request_digest":"sha256:"+"1"*64,"request":request,
+    "staging":{"container":"private"},"resources":{},"events":[],
+    "owner_decision":{
+        "schema":m.OWNER_DECISION_SCHEMA,"key_id":provisioned["key_id"],
+        "source_commit":commit,"signer_digest":provisioned["signer_digest"],
+        "signer_version":provisioned["signer_version"],
+        "history_head":None,"repo_id":None,"responded_gates":[],
+    },
+}
+genesis=m.owner_genesis_head(state,repo_id)
+now=int(time.time())
+challenge={
+    "schema":m.OWNER_CHALLENGE_SCHEMA,"purpose":"respond","run_id":run_id,
+    "repo_id":repo_id,"branch":"fm/fixture","head_sha":head,"gate_head_sha":head,
+    "step":"review","step_result_id":"step-1","round_id":"round-1",
+    "findings_digest":"4"*64,"previous_head":genesis,
+    "nonce":"respond:round-1:"+genesis,"issued_at":now-1,"expires_at":now+600,
+}
+identity=m.validate_owner_challenge(state,challenge)
+assert identity=={"run_id":run_id,"repo_id":repo_id,"genesis_head":genesis}
+for label,mutate in {
+    "foreign branch":lambda c:c.__setitem__("branch","peer"),
+    "foreign submitted head":lambda c:c.__setitem__("head_sha","f"*40),
+    "history rollback":lambda c:c.__setitem__("previous_head","9"*64),
+    "copyable nonce":lambda c:c.__setitem__("nonce","respond:peer:"+genesis),
+    "boolean timestamp":lambda c:c.__setitem__("issued_at",True),
+    "oversized lifetime":lambda c:c.__setitem__("expires_at",c["issued_at"]+901),
+}.items():
+    hostile=copy.deepcopy(challenge); mutate(hostile)
+    try: m.validate_owner_challenge(state,hostile)
+    except m.ValidationError: pass
+    else: raise AssertionError(label+" challenge passed")
+
+response=root/"response.txt"; response.write_text("--action\napprove\n"); response.chmod(0o600)
+lines,parsed=m.parse_owner_response(response)
+assert lines==["--action","approve"] and parsed=={"action":"approve"}
+response.chmod(0o644)
+try: m.parse_owner_response(response)
+except m.ValidationError as exc: assert "mode 0600" in str(exc)
+else: raise AssertionError("a non-owner-only response file was accepted")
+response.chmod(0o600)
+link=root/"response-link"; link.symlink_to(response)
+try: m.parse_owner_response(link)
+except m.ValidationError: pass
+else: raise AssertionError("a symlinked response file was accepted")
+for content in (
+    "--yes\ntrue\n", "--step\nreview\n--action\napprove\n",
+    "--action\napprove\n--action\nskip\n", "--action\nskip\n--findings\nF1\n",
+):
+    response.write_text(content)
+    try: m.parse_owner_response(response)
+    except m.ValidationError: pass
+    else: raise AssertionError("forbidden response argv passed: "+repr(content))
+
+challenge_blob="control/owner-decision/a1/gate-1.challenge.json"
+decision_blob="control/owner-decision/a1/gate-1.decision.json"
+blobs={challenge_blob:m.go_json_bytes(challenge)+b"\n"}
+crash={"before_upload":False}
+def names(_env,_state,prefix="shards/"):
+    return sorted(name for name in blobs if name.startswith(prefix))
+def download(_env,name,path,container=None):
+    pathlib.Path(path).write_bytes(blobs[name])
+def upload(_env,path,name,overwrite=False,container=None):
+    if crash["before_upload"]:
+        crash["before_upload"]=False
+        raise RuntimeError("simulated controller crash before envelope upload")
+    if name in blobs and not overwrite:
+        raise m.ValidationError("exists")
+    blobs[name]=pathlib.Path(path).read_bytes()
+m.list_cell_blobs=names; m.storage_download=download; m.storage_upload=upload
+(env["state_dir"]/(cell+".json")).write_text(json.dumps(state))
+loaded=m.load_state(env,cell)
+gate=m.discover_owner_gate(env,loaded)
+assert gate["gate_index"]==1 and loaded["phase"]=="needs-decision"
+assert loaded["run_id"]==run_id and loaded["owner_decision"]["history_head"]==genesis
+m.exact_live_run_command=lambda _env,_state: ({}, {})
+response.write_text("--action\napprove\n")
+crash["before_upload"]=True
+try: m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+except RuntimeError as exc: assert "simulated controller crash" in str(exc)
+else: raise AssertionError("the controller upload seam did not crash")
+pending=m.load_state(env,cell)
+assert pending["phase"]=="needs-decision"
+assert pending["owner_decision"]["history_head"]!=genesis
+assert pending["owner_decision"]["pending_decision"]["next_head"]==pending["owner_decision"]["history_head"]
+response.write_text("--action\nskip\n")
+try: m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+except m.ValidationError as exc: assert "recovery identity changed" in str(exc)
+else: raise AssertionError("a different response replaced the retained controller decision")
+response.write_text("--action\napprove\n")
+m.respond(env,types.SimpleNamespace(cell=cell,response_file=str(response)))
+after=m.load_state(env,cell)
+assert after["phase"]=="running" and after["attempt"]==1
+assert len(after["owner_decision"]["responded_gates"])==0
+assert after["owner_decision"]["pending_decision"]["next_head"]==after["owner_decision"]["history_head"]
+assert after["owner_decision"]["history_head"]!=genesis
+assert decision_blob in blobs
+decision=json.loads(blobs[decision_blob])
+assert decision["challenge"]==challenge and decision["response"]=={"action":"approve"}
+serialized=json.dumps(after)
+assert "owner.key" not in serialized and "K"*32 not in serialized
+# A second daemon challenge carrying the signed next head acknowledges that
+# gate 1 was appended, then becomes the only gate the controller may answer.
+challenge2=copy.deepcopy(challenge)
+challenge2.update({
+    "step":"document","step_result_id":"step-2","round_id":"round-2",
+    "findings_digest":"5"*64,"previous_head":after["owner_decision"]["history_head"],
+    "nonce":"respond:round-2:"+after["owner_decision"]["history_head"],
+    "issued_at":int(time.time())-1,"expires_at":int(time.time())+600,
+})
+challenge2_blob="control/owner-decision/a1/gate-2.challenge.json"
+blobs[challenge2_blob]=m.go_json_bytes(challenge2)+b"\n"
+advanced_state=copy.deepcopy(after)
+next_gate=m.discover_owner_gate(env,advanced_state)
+assert next_gate["gate_index"]==2 and next_gate["challenge"]==challenge2
+assert len(advanced_state["owner_decision"]["responded_gates"])==1
+assert advanced_state["owner_decision"]["responded_gates"][0]["next_head"]==after["owner_decision"]["history_head"]
+
+# A cell-created response cannot be adopted as controller authority, and a
+# challenge identity mutation is rejected before signing or upload.
+fresh=copy.deepcopy(state); fresh["owner_decision"]["responded_gates"]=[]
+blobs.clear(); blobs[challenge_blob]=m.go_json_bytes(challenge)+b"\n"; blobs[decision_blob]=b"{}\n"
+try: m.discover_owner_gate(env,fresh)
+except m.ValidationError as exc: assert "without controller authority" in str(exc)
+else: raise AssertionError("precreated decision blob was accepted")
+blobs.clear(); hostile=copy.deepcopy(challenge); hostile["branch"]="peer"
+blobs[challenge_blob]=m.go_json_bytes(hostile)+b"\n"
+try: m.discover_owner_gate(env,fresh)
+except m.ValidationError: pass
+else: raise AssertionError("foreign challenge reached signing")
+
+# Final result identity binds the daemon-verified journal and exact run. A
+# no-gate run is valid only at the recomputed public-key/run genesis.
+result={
+    "schema":m.RESULT_SCHEMA,"request_digest":state["request_digest"],"cell":cell,
+    "home_binding":request["home_binding"],"task":"task","task_generation":"gen",
+    "validation_generation":"val","fence":request["fence"],"branch":"fm/fixture",
+    "submitted_head":head,"current_head":head,"current_tree":tree,"remote_head":head,
+    "worktree_disk_id":"/work","run_id":run_id,"vm_resource_id":"/vm",
+    "vm_instance_id":"vm-instance","boot_id":"44444444-4444-4444-8444-444444444444",
+    "attempt":1,"outcome":"failed","checks_green":False,"pr_url":None,"behavior_shards":[],
+    "owner_decision_protected":True,"owner_decision_key_id":request_owner["key_id"],
+    "owner_decision_repo_id":repo_id,"owner_decision_genesis_head":genesis,
+    "owner_decision_head":genesis,"owner_decision_source_commit":commit,
+}
+result_state=copy.deepcopy(state)
+result_state["resources"]={"worktree_disk_id":"/work","vm_id":"/vm","vm_instance_id":"vm-instance"}
+result_state["expected_boot_id"]=result["boot_id"]
+m.verify_result_identity(result_state,result)
+pending_result_state=copy.deepcopy(pending)
+pending_result_state["resources"]=copy.deepcopy(result_state["resources"])
+pending_result_state["expected_boot_id"]=result["boot_id"]
+pending_result=copy.deepcopy(result)
+pending_result["owner_decision_head"]=pending["owner_decision"]["history_head"]
+for label,mutate in (
+    ("foreign retained previous head", lambda record: record.__setitem__("previous_head","8"*64)),
+    ("extra retained field", lambda record: record.__setitem__("foreign",True)),
+):
+    hostile_state=copy.deepcopy(pending_result_state)
+    mutate(hostile_state["owner_decision"]["pending_decision"])
+    try: m.verify_result_identity(hostile_state,copy.deepcopy(pending_result))
+    except m.ValidationError: pass
+    else: raise AssertionError(label+" passed pending result recovery")
+hostile_state=copy.deepcopy(pending_result_state)
+record=hostile_state["owner_decision"]["pending_decision"]
+hostile_envelope=json.loads(base64.b64decode(record["decision_base64"]))
+hostile_envelope["response"]={"action":"skip"}
+hostile_bytes=m.go_json_bytes(hostile_envelope)
+record["decision_base64"]=base64.b64encode(hostile_bytes).decode("ascii")
+record["decision_digest"]=m.sha256_bytes(hostile_bytes)
+try: m.verify_result_identity(hostile_state,copy.deepcopy(pending_result))
+except m.ValidationError: pass
+else: raise AssertionError("a rehashed foreign envelope passed pending result recovery")
+m.verify_result_identity(pending_result_state,pending_result)
+assert "pending_decision" not in pending_result_state["owner_decision"]
+assert len(pending_result_state["owner_decision"]["responded_gates"])==1
+# If the original Run Command terminates after a controller crash or after the
+# blob upload but before daemon append, its exact protected result proves the
+# old head. That failed result is collectible, and the unused envelope is
+# durably abandoned instead of stranding paid evidence or authorizing reuse.
+unconsumed_state=copy.deepcopy(after)
+unconsumed_state["resources"]=copy.deepcopy(result_state["resources"])
+unconsumed_state["expected_boot_id"]=result["boot_id"]
+unconsumed_result=copy.deepcopy(result)
+original_time=m.time.time
+m.time.time=lambda: challenge["expires_at"]+1
+try: m.verify_result_identity(unconsumed_state,unconsumed_result)
+finally: m.time.time=original_time
+assert unconsumed_state["owner_decision"]["history_head"]==genesis
+assert "pending_decision" not in unconsumed_state["owner_decision"]
+assert len(unconsumed_state["owner_decision"]["abandoned_decisions"])==1
+assert unconsumed_state["owner_decision"]["abandoned_decisions"][0]["unconsumed_head"]==after["owner_decision"]["history_head"]
+false_success=copy.deepcopy(unconsumed_result)
+false_success["outcome"]="passed"; false_success["checks_green"]=True
+false_success["pr_url"]="https://github.com/o/r/pull/1"; false_success["behavior_shards"]=[]
+try: m.verify_result_identity(copy.deepcopy(after) | {
+    "resources":copy.deepcopy(result_state["resources"]),
+    "expected_boot_id":result["boot_id"],
+},false_success)
+except m.ValidationError: pass
+else: raise AssertionError("an unconsumed old-head envelope produced a successful result")
+for field,value in (
+    ("owner_decision_key_id","9"*64),("owner_decision_head","8"*64),
+    ("owner_decision_repo_id","peer"),("owner_decision_source_commit","2"*40),
+    ("run_id","01AAAAAAAAAAAAAAAAAAAAAAAA"),
+):
+    bad=copy.deepcopy(result); bad[field]=value
+    try: m.verify_result_identity(copy.deepcopy(result_state),bad)
+    except m.ValidationError: pass
+    else: raise AssertionError("foreign result field passed: "+field)
+
+protected=copy.deepcopy(state)
+allowed,reason=m.replacement_allowed(protected,"absent-proven")
+assert not allowed and "cannot cross" in reason
+m.destroy_owner_decision_material(env,cell)
+assert not m.owner_decision_directory(env,cell).exists()
 PY
+  pass "host-only keys, exact live challenges, signed same-attempt responses, final history, and replacement fences bind owner authority"
+}
 
-  # 4. The REAL create_run_command: a guest edit must never brick a cell that is
-  # already in flight, and every new attempt must re-arm its own settle window.
-  python3 - "$HOST" "$tmp/home2" <<'PY' \
-    || fail "create_run_command did not preserve resume across a guest edit and re-arm the window"
-import hashlib,importlib.util,json,pathlib,sys,types
-spec=importlib.util.spec_from_file_location("validation",sys.argv[1])
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-home=pathlib.Path(sys.argv[2])
-env={"home":home,"state_dir":home/"state"/"azure-validation","subscription":"sub",
-     "storage":"stor","resource_group":"rg","owner":"owner","deployment_generation":"gen-1"}
-m.ensure_dirs(env)
+owner_decision_guest_launcher_contract() {
+  local tmp launcher repo fakebin nm env_file intent run_log public_key
+  fm_test_tmproot_into tmp fm-azure-validation-owner-guest
+  launcher="$tmp/launch.sh"
+  awk '
+    /^cat >"\$LAUNCH" <<'"'"'SH'"'"'$/ { capture=1; next }
+    capture && /^SH$/ { exit }
+    capture { print }
+  ' "$GUEST" >"$launcher"
+  chmod 700 "$launcher"
+  assert_contains "$(head -n 1 "$launcher")" "#!/usr/bin/env bash" \
+    "the exact owner-decision launcher heredoc was not extracted"
 
-# The sealed guest is the one staged beside the request at submit. Its bytes
-# deliberately DIFFER from the working tree, which is the shape this PR creates:
-# the tree's guest is edited while cells sealed on the old one are still live.
-sealed_text="#!/usr/bin/env bash\n# sealed guest for this cell\nexit 0\n"
-sealed_digest="sha256:"+hashlib.sha256(sealed_text.encode()).hexdigest()
-assert sealed_digest != m.sha256_file(m.GUEST), "fixture must differ from the working tree"
-payload=env["state_dir"]/"payloads"/"azv-aaaaaaaaaaaa"
-payload.mkdir(parents=True,exist_ok=True)
-(payload/"guest.sh").write_text(sealed_text)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo" "$fakebin" "$tmp/nm-state" "$tmp/transport"
+  nm="$tmp/no-mistakes"
+  cat >"$nm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$FIXTURE_NM_CALLS"
+case "$*" in
+  init) exit 0 ;;
+  "axi run "*)
+    [[ "$*" == *"--owner-decision-public-key $FIXTURE_PUBLIC_KEY"* ]] || exit 81
+    exit 0
+    ;;
+  axi\ status*)
+    if [ -e "$FIXTURE_RESPONDED" ]; then
+      count=0
+      [ ! -f "$FIXTURE_STATUS_COUNT" ] || count=$(cat "$FIXTURE_STATUS_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$FIXTURE_STATUS_COUNT"
+      if [ "$count" -ge 3 ]; then
+        printf 'run:\n  id: %s\n  status: completed\noutcome: passed\n' '01HZX7YQ7EJQH8C9G3N4M5P6R7'
+        exit 0
+      fi
+    fi
+    printf 'run:\n  id: %s\n  status: running\n' '01HZX7YQ7EJQH8C9G3N4M5P6R7'
+    exit 0
+    ;;
+  "axi owner-decision challenge "*)
+    [ ! -e "$FIXTURE_RESPONDED" ] || exit 1
+    args=("$@")
+    for ((index=0; index<${#args[@]}; index++)); do
+      if [ "${args[$index]}" = --out ]; then
+        cp "$FIXTURE_CHALLENGE" "${args[$((index+1))]}"
+        exit 0
+      fi
+    done
+    exit 82
+    ;;
+  "axi respond --decision-file "*)
+    cmp -s "$FIXTURE_DECISION" "$4" || exit 83
+    touch "$FIXTURE_RESPONDED"
+    exit 0
+    ;;
+  *) exit 84 ;;
+esac
+SH
+  chmod 700 "$nm"
+  cat >"$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >>"$FIXTURE_CURL_CALLS"
+printf '\n' >>"$FIXTURE_CURL_CALLS"
+upload="" output="" method="" url=""
+args=("$@")
+for ((index=0; index<${#args[@]}; index++)); do
+  case "${args[$index]}" in
+    --upload-file) upload=${args[$((index+1))]} ;;
+    --output) output=${args[$((index+1))]} ;;
+    --request) method=${args[$((index+1))]} ;;
+    http://*|https://*) url=${args[$index]} ;;
+  esac
+done
+if [[ "$url" == http://169.254.169.254/* ]]; then
+  printf '{"access_token":"fixture-token"}\n'
+elif [ "$method" = PUT ]; then
+  cp "$upload" "$FIXTURE_PUBLISHED_CHALLENGE"
+elif [ -n "$output" ]; then
+  [ "${FIXTURE_DECISION_MODE:-present}" = present ] || exit 22
+  cp "$FIXTURE_DECISION" "$output"
+else
+  exit 85
+fi
+SH
+  chmod 700 "$fakebin/curl"
 
-fence="sha256:"+"3"*64
-def seed(**extra):
-    state={
-      "schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","phase":"needs-decision","attempt":2,
-      "input_digest":"sha256:"+"4"*64,"request_digest":"sha256:"+"5"*64,
-      "staging":{"container":"c","result_blob":"control/result.tar.gz"},
-      "allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},
-      "request":{
-        "protocol":{"guest_digest":sealed_digest},
-        "deployment_generation":"gen-1","home_binding":"sha256:"+"2"*64,
-        "task":"task","task_generation":"tg","validation_generation":"vg","fence":fence,
-        "resource_class":"validation-standard",
-        "repository":{"branch":"fm/fixture","head":"a"*40,"slug":"o/r"},
-        "limits":{"behavior_shards":4,"wall_seconds":10800,"reserved_vcpus":24},
-      },
-      "resources":{"vm_id":"/subs/x/vm","vm_instance_id":"vm-i","worktree_disk_id":"/disk",
-                   "identity_client_id":"cid"},
-      "events":[],
-    }
-    state.update(extra)
-    (env["state_dir"]/"azv-aaaaaaaaaaaa.json").write_text(json.dumps(state))
-    return state
+  public_key="$tmp/owner.pub"
+  intent="$tmp/intent.txt"
+  env_file="$tmp/cell.env"
+  printf 'fixture public key\n' >"$public_key"
+  printf 'validate protected run\n' >"$intent"
+  cat >"$tmp/challenge.json" <<'JSON'
+{"schema":"no-mistakes.owner-decision-challenge/v1","purpose":"respond","run_id":"01HZX7YQ7EJQH8C9G3N4M5P6R7","repo_id":"repo-1","branch":"fm/fixture","head_sha":"1111111111111111111111111111111111111111","gate_head_sha":"1111111111111111111111111111111111111111","step":"review","step_result_id":"step-1","round_id":"round-1","findings_digest":"4444444444444444444444444444444444444444444444444444444444444444","previous_head":"5555555555555555555555555555555555555555555555555555555555555555","nonce":"respond:round-1:5555555555555555555555555555555555555555555555555555555555555555","issued_at":1,"expires_at":2}
+JSON
+  printf '{"schema":"no-mistakes.owner-decision-envelope/v1","challenge":{},"response":{"action":"approve"},"signature":"fixture"}\n' \
+    >"$tmp/decision.json"
+  printf 'fixture-token\n' >"$tmp/github-token"
+  cat >"$env_file" <<EOF
+FM_AZURE_VALIDATION_RUNTIME_PATH=$fakebin
+GH_TOKEN_FILE=$tmp/github-token
+FM_AZURE_VALIDATION_IDENTITY_CLIENT_ID=identity
+FM_AZURE_VALIDATION_STORAGE_ACCOUNT=storage
+FM_AZURE_VALIDATION_STORAGE_CONTAINER=container
+FM_AZURE_VALIDATION_ATTEMPT=1
+EOF
+  export FIXTURE_NM_CALLS="$tmp/nm-calls" FIXTURE_CURL_CALLS="$tmp/curl-calls"
+  export FIXTURE_PUBLIC_KEY="$public_key" FIXTURE_CHALLENGE="$tmp/challenge.json"
+  export FIXTURE_DECISION="$tmp/decision.json" FIXTURE_RESPONDED="$tmp/responded"
+  export FIXTURE_STATUS_COUNT="$tmp/status-count"
+  export FIXTURE_PUBLISHED_CHALLENGE="$tmp/published-challenge.json"
+  export FIXTURE_DECISION_MODE=present
+  run_log="$tmp/run.log"
+  TMPDIR="$tmp/transport" "$launcher" "$env_file" "$repo" "$nm" start \
+    "$intent" "$run_log" "$public_key"
+  [ "$(cat "$run_log.exit")" = 0 ] || fail "the signed same-attempt guest loop did not finish"
+  [ "$(grep -c '^axi run ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the guest started more than one run"
+  [ "$(grep -c '^axi respond --decision-file ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the guest did not apply exactly one signed decision"
+  [ "$(cat "$FIXTURE_STATUS_COUNT")" = 3 ] || fail "the guest did not keep the original Run Command alive through protected completion"
+  cmp -s "$FIXTURE_CHALLENGE" "$FIXTURE_PUBLISHED_CHALLENGE" || fail "the guest changed the daemon challenge"
+  assert_contains "$(cat "$FIXTURE_CURL_CALLS")" "If-None-Match:" \
+    "the guest challenge upload was not create-only"
+  assert_not_contains "$(cat "$FIXTURE_NM_CALLS")" "--yes" \
+    "the protected guest invoked an unsigned auto-response"
 
-sent={}
-def fake_az(env_,argv,**kw):
-    for index,item in enumerate(argv):
-        if item=="--body":
-            sent["body"]=json.loads(pathlib.Path(argv[index+1][1:]).read_text())
-    return {}
-m.az_command=fake_az
-m.read_github_token=lambda state:"gh-token"
-m.read_resource=lambda env_,rid,kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":fence}})
-m.immutable_identity=lambda resource,kind:{"id":resource.get("id","")}
-
-# F1: the sealed cell resumes, and it runs the SEALED bytes, not the tree's.
-state=seed(unbound_view_since="2020-01-01T00:00:00Z")
-m.create_run_command(env,state,"respond",output_url="https://o",response="--action\napprove")
-assert sent["body"]["properties"]["source"]["script"]==sealed_text, \
-    "a resumed attempt did not run the guest its request was sealed with"
-
-# F3: the settle window is re-armed per attempt. Without this the window is
-# keyed per CELL: a stamp written on attempt 1 makes attempt 2 look ancient the
-# moment it is observed, and a one-second-old attempt is retained.
-saved=json.loads((env["state_dir"]/"azv-aaaaaaaaaaaa.json").read_text())
-assert "unbound_view_since" not in saved, \
-    "a new attempt inherited the previous attempt's settle stamp"
-
-# N-2: the bytes VERIFIED must be the bytes RETURNED. Digesting one read and
-# returning a second read is a TOCTOU: a writer landing between them passes the
-# check while different content is handed back, and that content is uploaded as
-# the Run Command script and executes as root on the cell. A race cannot be
-# observed by waiting for it, so the second read is instrumented to differ - if
-# the implementation reads twice, it returns the instrumented bytes.
-saved_read_text=m.Path.read_text
-m.Path.read_text=lambda self,*a,**k:"#!/bin/sh\nEVIL\n"
-try:
-    returned=m.sealed_guest_text(env,seed())
-finally:
-    m.Path.read_text=saved_read_text
-assert returned==sealed_text, \
-    "sealed_guest_text returned bytes it never verified: "+repr(returned)
-
-# The recorded stamping flag comes from the bytes that are about to run.
-assert saved["guest_stamps_attempt"] is False, saved.get("guest_stamps_attempt")
-stamping=sealed_text+"printf 'FM_AZURE_VALIDATION_RESULT %s boot=%s outcome=%s attempt=%s\\n'\n"
-assert m.guest_text_stamps_attempt(stamping) is True
-assert m.guest_text_stamps_attempt(sealed_text) is False
-
-# A symlinked payload copy is refused even when it points at correct bytes:
-# the guest is uploaded and executed as root, so its supply path is held to the
-# same standard as credential material.
-real=payload/"real-guest.sh"; real.write_text(sealed_text)
-(payload/"guest.sh").unlink()
-(payload/"guest.sh").symlink_to(real)
-state=seed()
-try:
-    m.create_run_command(env,state,"respond",output_url="https://o",response="x")
-except m.ValidationError as exc:
-    assert "sealed request digest" in str(exc), str(exc)
-else:
-    raise AssertionError("a symlinked guest supply path was accepted")
-(payload/"guest.sh").unlink()
-
-# The seal itself still binds: no source carrying the sealed digest refuses.
-(payload/"guest.sh").write_text("#!/usr/bin/env bash\ntampered\n")
-state=seed()
-try:
-    m.create_run_command(env,state,"respond",output_url="https://o",response="x")
-except m.ValidationError as exc:
-    assert "sealed request digest" in str(exc), str(exc)
-else:
-    raise AssertionError("a guest that matches no sealed digest was executed")
-PY
-
-  pass "an attempt's published result is bound to that attempt, a guest edit never bricks a sealed in-flight cell, an unbound control view never strands a running cell, and an unchanged republished result is refused as a non-answer"
+  rm -f "$FIXTURE_RESPONDED" "$FIXTURE_NM_CALLS" "$FIXTURE_CURL_CALLS" "$FIXTURE_STATUS_COUNT"
+  export FIXTURE_DECISION_MODE=absent FM_AZURE_VALIDATION_GATE_WAIT_SECONDS=0
+  run_log="$tmp/timeout.log"
+  TMPDIR="$tmp/transport" "$launcher" "$env_file" "$repo" "$nm" start \
+    "$intent" "$run_log" "$public_key"
+  [ "$(cat "$run_log.exit")" = 125 ] || fail "a protected decision timeout was not terminal"
+  assert_contains "$(cat "$run_log")" "expired without a signed controller envelope" \
+    "the protected timeout was not explicit"
+  [ "$(grep -c '^axi run ' "$FIXTURE_NM_CALLS")" = 1 ] || fail "the timeout retried the run"
+  ! grep -q '^axi respond ' "$FIXTURE_NM_CALLS" || fail "the timeout applied a response"
+  unset FIXTURE_NM_CALLS FIXTURE_CURL_CALLS FIXTURE_PUBLIC_KEY FIXTURE_CHALLENGE
+  unset FIXTURE_DECISION FIXTURE_RESPONDED FIXTURE_PUBLISHED_CHALLENGE
+  unset FIXTURE_STATUS_COUNT FIXTURE_DECISION_MODE FM_AZURE_VALIDATION_GATE_WAIT_SECONDS
+  pass "the exact shipped guest keeps signed gates in one Run Command and fails a missing envelope terminally"
 }
 
 static_contract
@@ -2614,4 +2667,5 @@ shard_receipt_demotion_contract
 receipt_run_scope_contract
 terminal_classifier_optional_matches_contract
 receipt_chain_close_contract
-gate_answer_binding_contract
+owner_decision_protocol_contract
+owner_decision_guest_launcher_contract

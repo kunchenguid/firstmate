@@ -32,8 +32,8 @@ It never executes lint, tests, review commands, fixes, no-mistakes, a model prov
 A queued request is non-billable and creates no Azure resource.
 
 One admitted cell owns one no-mistakes run or a deliberately bounded continuation of that exact run.
-It has its own VM, boot identity, systemd cgroup, process namespace, no-mistakes daemon and database, home, temp root, cache root, logs, encrypted durable worktree disk, credential-lease disk, cell storage identity, and private shard container.
-No cell mounts `FM_HOME`, another task worktree, another credential lease, or another cell container.
+It has its own VM, boot identity, systemd cgroup, process namespace, no-mistakes daemon and database, home, temp root, cache root, logs, private durable worktree disk, cell storage identity, and private shard container.
+No cell mounts `FM_HOME`, another task worktree, another task's auth home, or another cell container.
 No operation stops, starts, updates, or inspects a local legacy no-mistakes daemon.
 
 Remote Herdr is not part of this path.
@@ -76,7 +76,6 @@ Budget pressure stops only new admission and never terminates active work, a pen
 
 Cells and shard VMs are created only on demand.
 A safely closed run deletes its control VM, Managed Run Command, NIC, OS disk, worktree disk, private cell container, direct role assignments, and cell identity after collecting the exact report and evidence.
-The task-owned credential disk is detached and returned to its lease owner rather than deleted.
 The expected idle VM count is zero.
 
 ## Run identity
@@ -90,28 +89,29 @@ Its digest binds all of these identities before queueing:
 - Foundation deployment generation.
 - Cell id and random fence.
 - Exact GitHub repository, named branch, pushed head, tree, and Git-bundle digest.
-- Exact deterministic control VM, encrypted worktree disk, credential disk, cell identity, and private-container resource bindings.
+- Exact deterministic control VM, plain private worktree disk, cell identity, and private-container resource bindings.
 - Captain intent passed unchanged to no-mistakes.
 - Resource class, resource limits, and requested shard count.
-- Secret-free credential lease descriptor and its digest.
+- Secret-free credential descriptor plus the exact persistent auth-home and injected GitHub-token paths.
 - Credential-free runtime bundle manifest and digest.
+- Per-cell protected owner-decision public key, key id, protocol schemas, and exact no-mistakes source commit.
 - Trusted guest and shard-bridge digests.
 
-Azure tags repeat the non-secret home, task, generation, validation, cell, fence, branch, head, worktree, credential-lease, SKU-family, processor-reservation, and cost-attribution bindings.
+Azure tags repeat the non-secret home, task, generation, validation, cell, fence, branch, head, worktree, SKU-family, processor-reservation, and cost-attribution bindings.
 The host records every resource id, every ETag Azure returns, VM instance id, NIC `resourceGuid`, disk `uniqueId`, identity client/principal id, and guest boot id before accepting a result or deleting anything.
 Where Azure returns an ETag, it guards the current mutation, while stable VM/NIC/disk identities remain authoritative across legitimate attach, detach, and power-state ETag changes.
 Managed-disk GETs can omit an ETag from both the body and response headers, so the disk `uniqueId` is stored in the identity record's `etag` compatibility field and sent through the existing `If-Match` deletion path.
 The pinned Azure Compute [`2023-10-02` Disk Delete contract](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/compute/resource-manager/Microsoft.Compute/Compute/stable/2023-10-02/disk.json) declares no `If-Match` parameter, so this fallback is a stable identity pin and not a claim of provider-enforced atomic ETag compare-and-swap.
 A successful delete with that extra header proves only that Azure accepted the request, not that it compared the value instead of ignoring it.
-The guest independently re-reads IMDS and requires the exact VM instance plus worktree and credential disk ids before unlocking either disk.
-The credential disk's recorded LUKS UUID is checked after unlock.
-The newly created worktree LUKS UUID is retained in the durable run identity, re-proved on every response or replacement, and repeated in every result.
+The guest independently re-reads IMDS and requires the exact VM instance plus worktree disk id before mounting the private ext4 volume.
+The worktree disk unique id is retained in durable run identity and repeated in every result.
 
-A result schema `fm.azure-validation-result/v1` repeats the home, task, task generation, validation generation, cell, fence, branch, submitted head, current head, remote head, worktree disk, credential lease, no-mistakes run, VM, instance, and boot identities.
+A result schema `fm.azure-validation-result/v1` repeats the home, task, task generation, validation generation, cell, fence, branch, submitted head, current head, remote head, worktree disk, no-mistakes run, VM, instance, and boot identities.
+Protected results additionally repeat the key id, repository id, public-key/run-bound genesis, final signed history head, and exact no-mistakes source commit.
 A passed result additionally requires a full PR URL, CI-green marker, exact remote-current head, and the complete independent behavior-shard receipt set.
 The guest enforces the receipt *count* before it assembles the result: a `passed` or `checks-passed` run whose receipt count does not match the requested shard count, or whose count cannot be read as an integer at either end, is demoted to `failed` in the cell with the expected and observed values in the report.
 The controller's own receipt gate is wider, covering receipt shape, per-shard independence, round, head ancestry, and tree, and it stays the authority for all of those; the guest replicates only the count.
-Receipts are run-scoped, not attempt-scoped: the in-cell bridge writes them in the one attempt whose test step actually executes, and a resumed attempt (reattach or respond) continues the same run without re-executing an already-green test step, so the round's receipts on the durable shard exchange survive into the final attempt's result.
+Receipts are run-scoped, not attempt-scoped: the in-cell bridge writes them in the attempt whose test step executes. A legacy reattach continues that run, while a protected signed response resumes inside the original attempt and Run Command; neither re-executes an already-green test step, so the round's receipts on the durable shard exchange survive into the final result.
 Only a start boot - a fresh run - begins from no receipts.
 An earlier per-attempt wipe made every multi-attempt run assemble its final result with zero receipts and demote to failed, which is exactly the stranding the demotion was built to make legible; binding safety stays with the controller gate, which accepts a receipt head only as the published head or a verified ancestor with its tree bound.
 What the demotion buys is legibility, not storage. A result refused as malformed never reaches `collected`, so the reason lives only in a controller error about a malformed field; `retain-failure` still accepts a `result-published` cell and still strips its compute either way.
@@ -140,72 +140,19 @@ Because a successful push clears the owed marker, an earlier skipped write-back 
 Every marker write is best-effort: the guest runs under `set -euo pipefail`, and a note to the operator must never abort a run that has already been paid for.
 The cell report surfaces the surviving marker the same way it surfaces `auth-needed`, so a stale share is an operator signal rather than a stderr line that died with the guest.
 
-## Credential lease
+## Credential descriptor and injection
 
-Credential bytes never enter the repository bundle, runtime bundle, request JSON, local state JSON, Azure tags, ARM parameters, snapshots, reports, command logs, shard requests, shard responses, or identity-less command VMs.
-They live only on a task-owned LUKS2 credential disk attached as data LUN 1 with `deleteOption: Detach`.
-The disk denies public and export network access and is not snapshotted, cloned, imaged, or backed up.
-The LUKS unlock value is read from an owner-only local file and supplied only as an Azure protected parameter.
-The host state stores no unlock value or unlock-file path.
-
-The secret-free lease descriptor uses schema `fm.azure-credential-lease/v1` and must itself be mode 0600.
-It binds exactly one task and generation, provider adapter, provider-account identity hash, credential-disk content hash, disk id, ETag, LUKS UUID, zone, expiry, provider-home relative path, account-binding marker path, GitHub-token relative path, and GitHub authority.
-The descriptor rejects keys named like tokens, secrets, passwords, private keys, credentials, or authorization values.
-
-The GitHub authority must declare exactly one repository and exactly these operations:
-
-- `contents:write`
-- `pull_requests:write`
-- `checks:read`, or its fine-grained-UI successor pair `actions:read` plus `statuses:read`
-
-The authority kind must be a fine-grained token or GitHub App installation token.
-The guest gives the coordinator the exact token file and installs a repository-local Git credential helper that reads only that file.
-No token value is printed.
-The credential lease remains attached until the exact run is closed, including through ask-user gates and VM replacement.
-
-A descriptor has this secret-free shape:
-
-```json
-{
-  "schema": "fm.azure-credential-lease/v1",
-  "lease_id": "lease-task-generation",
-  "task": "task-id",
-  "task_generation": "generation-id",
-  "provider": "codex",
-  "provider_account_binding": "sha256:<64 hex>",
-  "disk_content_binding": "sha256:<64 hex>",
-  "disk": {
-    "id": "/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/disks/<name>",
-    "etag": "<exact Azure ETag>",
-    "luks_uuid": "<exact UUID>",
-    "zone": "1"
-  },
-  "paths": {
-    "provider_home": "provider",
-    "account_binding": "provider/.firstmate-account-binding",
-    "github_token": "github/token"
-  },
-  "github_authority": {
-    "kind": "fine-grained-token",
-    "repository": "owner/repository",
-    "permissions": ["contents:write", "pull_requests:write", "checks:read"]
-  },
-  "expires_at": "2026-08-13T12:00:00Z"
-}
-```
-
-The provider home, account marker, and GitHub token path must be distinct, bounded disk-relative paths, with the marker inside the provider home.
-The marker contains only the exact non-secret `provider_account_binding` value.
-After LUKS unlock, the guest rejects links, non-regular files, hard links, and every file outside the provider home plus exact GitHub token.
-It recomputes `disk_content_binding` as SHA-256 over the sorted regular-file inventory, framing each credential-root-relative path, file-content SHA-256, and size; this proves the exact task-owned provider/GitHub content without recording credential bytes.
-The disk must be detached and carry the exact `credential-lease` tag before admission.
-A shared account disk, attached disk, expired lease, broad GitHub declaration, unreadable account binding, or wrong task/generation fails before VM creation.
+The secret-free `fm.azure-validation-credentials/v1` descriptor names one verified provider, one home-shaped local auth directory, and one GitHub token file.
+Provider credentials are packed only into the private input object and overlaid by the `fm-auth-home` share on boot.
+The GitHub token is read at dispatch and supplied only through the Managed Run Command protected-parameter collection.
+Neither credential value enters request JSON, local state JSON, Azure tags, runtime manifests, reports, or shard requests.
+The guest writes the token to an owner-only file, configures a repository-local credential helper that reads only that file, and never prints the token.
 
 ## Runtime bundle
 
 The cell image is pinned Ubuntu 24.04, but no ambient installed provider or no-mistakes version is trusted.
 Submission requires a credential-free `runtime.tar.gz` with a `runtime.json` manifest using schema `fm.azure-validation-runtime/v1`.
-The manifest binds the exact provider, no-mistakes semantic version, fixed executable paths, bundled Node interpreter, fixed `gh-axi` wrapper and `gh-axi/dist/bin/gh-axi.js` entrypoint, the producer-recomputed reachable package/module closure, and SHA-256 digest of every regular runtime file.
+The manifest binds the exact provider, no-mistakes semantic version and 40-hex source commit, protected owner-decision protocol, fixed executable paths, bundled Node interpreter, fixed `gh-axi` wrapper and `gh-axi/dist/bin/gh-axi.js` entrypoint, the producer-recomputed reachable package/module closure, and SHA-256 digest of every regular runtime file. Before starting a run, the guest also executes the sealed no-mistakes artifact's bounded `--version` probe and requires both the manifest version and the exact full source revision.
 Its JSON is recursively duplicate-key-free, and its root fields and every `{path,digest}` file record are closed schemas; duplicate or unknown fields, including token- or secret-named additions, are refused before anything can persist into `request.runtime`.
 Every declared executable must carry the expected basename and executable mode.
 The outer bundle and every producer input must be a regular file with exactly one filesystem link.
@@ -244,6 +191,7 @@ bin/fm-azure-validation.sh build-runtime-bundle \
   --node '<linux-x86-64-node>' \
   --gh-axi-package '<prepared-gh-axi-package-directory>' \
   --no-mistakes-version '<exact-no-mistakes-version>' \
+  --no-mistakes-source-commit '<exact-40-hex-source-commit>' \
   --output '<runtime.tar.gz>'
 ```
 
@@ -254,6 +202,8 @@ A minimal manifest shape is:
   "schema": "fm.azure-validation-runtime/v1",
   "provider": "codex",
   "no_mistakes_version": "1.41.2",
+  "no_mistakes_source_commit": "<40 hex>",
+  "owner_decision_protocol": "fm.azure-validation-owner-decision/v1",
   "no_mistakes_path": "bin/no-mistakes",
   "provider_path": "bin/codex",
   "gh_path": "bin/gh",
@@ -284,15 +234,15 @@ Credential renewal or login is never performed by the dispatcher.
 
 The cell template has no public IP, password, SSH key, inbound listener, load balancer, or public storage path.
 It installs both a guest shutdown timer and an independently inventoried Azure-native `ComputeVmShutdownTask`; cleanup retains that schedule until exact VM absence and detached disposable capacity are proven.
-It uses the foundation's private `snet-validation` subnet, isolated NSG, NAT egress, Trusted Launch, Secure Boot, vTPM, encryption at host, a disposable OS disk, a retained worktree disk, and an externally leased credential disk.
+It uses the foundation's private `snet-validation` subnet, isolated NSG, NAT egress, a disposable OS disk, and a retained private worktree disk.
 The VM receives one user-assigned identity created for that cell.
 That identity and the exact local operator receive Blob Data Contributor only on the cell's unique private container.
 The identity receives no subscription, resource-group, VM, network, Key Vault, sibling-container, or general validation-shards authority.
 
-The guest creates or opens the LUKS2 worktree volume and opens the independently encrypted credential lease.
+The guest creates a fresh ext4 worktree volume only for a start boot or opens the exact retained ext4 volume for a legacy reattach.
 No-mistakes state, SQLite database, repository, temp, cache, logs, evidence, report, and shard exchange live on the worktree volume.
-A replacement VM attaches that same volume.
-The provider and GitHub lease live on the separate credential volume.
+A legacy replacement VM attaches that same volume; protected owner-decision runs refuse VM or daemon replacement.
+The provider home is overlaid from the dedicated auth share, and the GitHub token exists only in the guest's owner-only token file.
 
 No-mistakes runs under one transient systemd cgroup with a 700-percent CPU cap, class-specific memory maximum, zero swap, bounded tasks, bounded wall time, control-group kill mode, private temp/devices, no new privileges, strict system/home/kernel/control-group protection, empty capability bounding set, and a cell-specific writable-path allowlist.
 The no-mistakes database and daemon never share a restart boundary or connection with another cell or local home.
@@ -333,7 +283,7 @@ No behavior test process runs in the credentialed cell or on the Mac.
 A missing, duplicate, failed, wrong-head, wrong-command, reused-boot, or reused-VM shard fails the no-mistakes test step with exact failure attribution.
 
 The same bridge sends lint through one identity-less runner VM.
-Repository command children receive no provider home, GitHub token, cell identity capability, control home, credential disk, or sibling staging path.
+Repository command children receive no provider home, GitHub token, cell identity capability, control home, or sibling staging path.
 
 ## Queue and admission
 
@@ -342,7 +292,7 @@ It requires those identity values but does not contact Azure or run a repository
 The default local queue depth bound is 128.
 
 `dispatch` requires `--confirm-dispatch` and an exact subscription confirmation.
-Before creating capacity it proves the tenant/subscription, the released runner's exact private foundation and controller-identity contract, its own cell subnet, the credential disk, and a live-capable reviewed control SKU, then hands the complete shape to the released shared allocator, whose atomic admission owns the shared East US 128-vCPU admission ceiling, exact-family arithmetic, the 40-vCPU specialized envelope, and cumulative actual/forecast budget pressure.
+Before creating capacity it proves the tenant/subscription, the released runner's exact private foundation and controller-identity contract, its own cell subnet, and a live-capable reviewed control SKU, then hands the complete shape to the released shared allocator, whose atomic admission owns the shared East US 128-vCPU admission ceiling, exact-family arithmetic, the 40-vCPU specialized envelope, and cumulative actual/forecast budget pressure.
 A renewable blob lease in `validation-shards/validation-cells/admission.lock` still serializes count-and-create dispatch across Firstmate homes; it is a mutual-exclusion lock only, never a capacity authority.
 The lease is rechecked immediately before the cell starts.
 
@@ -351,12 +301,7 @@ The dispatcher does not spin, overcommit, evict active work, change the ambient 
 
 ## Submit and operate
 
-Set the already reviewed foundation values from [`docs/azure-pilot.md`](azure-pilot.md), plus owner-only disk key files:
-
-```sh
-export FM_AZURE_VALIDATION_WORKTREE_KEY_FILE='<owner-only LUKS key file>'
-export FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE='<owner-only LUKS key file>'
-```
+Set the already reviewed foundation values from [`docs/azure-pilot.md`](azure-pilot.md).
 
 Queue without Azure mutation:
 
@@ -366,8 +311,9 @@ bin/fm-azure-validation.sh submit \
   --task-generation '<task-generation>' \
   --validation-generation '<validation-generation>' \
   --intent-file '<intent.txt>' \
-  --credential-lease '<lease.json>' \
+  --credential-lease '<credentials.json>' \
   --runtime-bundle '<runtime.tar.gz>' \
+  --owner-decision-signer '<host-no-mistakes>' \
   --resource-class validation-heavy \
   --repo '<exact task worktree>'
 ```
@@ -396,7 +342,21 @@ bin/fm-azure-validation.sh observe --cell '<azv-id>'
 bin/fm-azure-validation.sh collect --cell '<azv-id>'
 ```
 
-When no-mistakes owns an ask-user gate, write the exact response to an owner-only file and send it through a protected run command:
+Each submission also requires a host-native no-mistakes binary built from the same reviewed source revision as the Linux runtime:
+
+```sh
+bin/fm-azure-validation.sh submit \
+  ... \
+  --owner-decision-signer '<host-no-mistakes>'
+```
+
+Submission copies that signer into an owner-only per-cell directory, creates a fresh Ed25519 key pair there, and seals only the public key and key id into the request.
+Before key generation and every signature, the copied signer must report the manifest's exact semantic version and full 40-hex source commit; its complete bytes and reported version remain pinned in controller state.
+The private key never enters the VM, runtime archive, storage container, state JSON, logs, or Azure parameters.
+
+When no-mistakes parks at a protected ask-user gate, the still-running guest exports the daemon's exact canonical challenge and publishes it create-only under the current attempt.
+`drive` validates the immutable run, repository, submitted head, current gate head, round, findings digest, prior controller history, nonce, and bounded lifetime before exposing `needs-decision`.
+Write the exact response as nonblank option/value lines in an owner-only file:
 
 ```sh
 bin/fm-azure-validation.sh respond \
@@ -404,9 +364,13 @@ bin/fm-azure-validation.sh respond \
   --response-file '<response.txt>'
 ```
 
-The response command first re-proves the exact VM instance.
-The guest re-proves the cell, request, branch, current head, worktree disk, credential lease, stored no-mistakes run id, and database status before `axi respond` or reattach.
-No new intent is supplied during reattach.
+Allowed actions are `approve`, `fix`, and `skip`; `fix` may add `--findings`, `--instructions`, or one `--add-finding` JSON object.
+`--yes`, step overrides, duplicate options, and unsigned responses are refused.
+The response command proves the exact original Managed Run Command is still `Running` with unchanged source bytes, ordinary parameters, protected-parameter names, tags, VM identity, and attempt both before and after offline signing.
+It durably retains the independently derived next history head before publishing the create-only signed envelope.
+The same no-mistakes daemon verifies and appends that envelope before resuming the same run; no second Run Command or new intent exists. The controller keeps the envelope pending until either a successor challenge or the terminal protected result acknowledges its history head.
+A controller crash can delay or terminally fail the cell, but cannot roll the retained history head back after the daemon consumed a decision. If the exact terminal daemon history instead proves that the envelope was never appended, a non-success result restores the prior head, records the signed envelope as abandoned, and remains collectible; that envelope and key can never authorize another run.
+An unanswered challenge expires in the same attempt as an explicit terminal failure and is never converted into a cross-attempt response opportunity.
 
 After an exact passed result is collected and the remote branch still resolves to the result head, close with that explicit head:
 
@@ -421,15 +385,19 @@ bin/fm-azure-validation.sh close \
 ## Failure and replacement
 
 A missing pane, terminal, process, Run Command, or VM never authorizes a duplicate no-mistakes run.
-`replace` first requires an exact Azure inventory to prove the old VM absent, the retained worktree disk present with its recorded id and ETag, the credential lease unchanged and detached, and a recoverable phase.
-It creates a new fenced VM/boot attempt but reuses the same cell identity, private container, encrypted worktree, no-mistakes home/database, credential lease, task, branch, and validation generation.
+Protected owner-decision runs categorically refuse `replace`: moving a protected database to another daemon requires a fresh signed recovery checkpoint, and Azure validation intentionally does not expose that recovery path.
+The exact cell must instead finish in its original Managed Run Command or fail-retained and purge.
+
+Legacy cells created before protected owner decisions retain their prior replacement contract.
+`replace` first requires an exact Azure inventory to prove the old VM absent, the retained worktree disk present with its recorded id and ETag, and a recoverable legacy phase.
+It creates a new fenced VM/boot attempt but reuses the same cell identity, private container, worktree, no-mistakes home/database, task, branch, and validation generation.
 
 The runtime and shard bridge live on the disposable OS disk, so a retained-run replacement hydrates them before reattach.
 A separate current-controller Run Command reads only the original private input object, verifies its original input and request digests, every sealed artifact digest, the new VM identity, and the retained worktree-disk binding, then restores only the exact runtime and shard bridge under `/opt`.
 The controller requires one digest-complete hydration marker before it launches the cell's unchanged digest-sealed guest.
 Hydration never replaces the retained repository, no-mistakes database, or agent home, and replacement remains `reattach`; it does not submit fresh intent or restart the test run.
 
-The replacement guest refuses unless the retained identity file matches the request, branch, current head, worktree disk, credential lease, and exact no-mistakes run id.
+The legacy replacement guest refuses unless the retained identity file matches the request, branch, current head, worktree disk, and exact no-mistakes run id.
 It then requires `no-mistakes axi status` from the retained database to contain that exact run id before invoking `no-mistakes axi run` without an intent.
 A missing or ambiguous proof retains both disks and starts nothing.
 
@@ -442,8 +410,8 @@ bin/fm-azure-validation.sh replace \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
 ```
 
-If a run fails or its result is ambiguous, remove only its exact disposable compute while retaining the encrypted worktree, lease, private container, and evidence for diagnosis.
-The retained transition is published only after both durable disks are present, stably identical, and detached from the removed VM:
+If a run fails or its result is ambiguous, remove only its exact disposable compute while retaining the private worktree, private container, and evidence for diagnosis.
+The retained transition is published only after the worktree disk is present, stably identical, and detached from the removed VM:
 
 ```sh
 bin/fm-azure-validation.sh retain-failure \
@@ -452,7 +420,8 @@ bin/fm-azure-validation.sh retain-failure \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
 ```
 
-No failure path deletes a worktree disk, credential disk, private container, or result object.
+No ordinary failure path deletes a worktree disk, private container, or result object.
+`retain-failure` deletes the local private signing key after compute is absent because a failed-retained protected run can never respond or replace.
 No command names or deletes a resource group, subnet, foundation identity, another cell, another shard, another task prefix, or a local daemon.
 
 ### Explicit retained-failure purge
@@ -501,15 +470,13 @@ It removes resources in this exact scope and order:
 3. The exact NIC.
 4. The disposable OS disk.
 5. The Azure-native shutdown schedule, only after exact VM/NIC/OS-disk absence.
-6. The credential disk is proved detached with the same stable disk identity and is returned to its exact lease.
-7. The exact encrypted worktree disk.
-8. The two exact Blob Data Contributor role assignments on the cell's private container after proving their complete principal and role inventory.
-9. The exact private container.
-10. The exact cell identity.
-11. Local transient payloads after the durable result is retained.
+6. The exact private worktree disk.
+7. The exact direct role assignments on the cell's private container and auth-share scope after proving their complete principal and role inventory.
+8. The exact private container.
+9. The exact cell identity.
+10. The owner-only local signing key and transient payloads after the durable result is retained.
 
-The credential disk is detached and returned to the lease owner only after that exact close.
-Before role or container mutation, close persists the exact container ETag and two role-assignment ids.
+Before role or container mutation, close persists the exact container ETag and direct role-assignment ids.
 A retry accepts only the remaining subset of that plan, so a crash between role removal, container removal, and identity removal resumes idempotently instead of requiring deleted authority to reappear.
 A missing ETag, changed instance, foreign tag, foreign principal, extra role assignment, partial delete, unreadable absence, wrong head, failed run, pending decision, or incomplete result changes the state to retained cleanup and stops.
 
@@ -522,20 +489,20 @@ After this stack is released to public main and the operator has explicit billab
 1. Record Mac wall time, CPU, memory, swap, process count, and interactive latency before admission.
 2. Queue more work than the configured processor/concurrency limit and prove saturation remains queued with no oversubscription.
 3. Admit multiple no-mistakes runs concurrently and prove bounded status responses without the previous shared singleton timeout.
-4. Prove every run has a different daemon home, database, temp root, cache root, VM instance, boot, worktree disk, credential lease, container, and cgroup.
+4. Prove every run has a different daemon home, database, temp root, cache root, VM instance, boot, worktree disk, container, signing key, and cgroup.
 5. Run all eight behavior shards on eight separate Azure VMs and prove every manifest passes the existing completeness guard without the documented single-host lock or SIGKILL failure.
 6. Include positive liveness controls for every cell and shard while active.
 7. Kill one exact cell VM and prove peer cells, all shard VMs, the local supervisor, and an unrelated local task remain healthy.
-8. Replace the killed cell and prove exact no-mistakes run reattach from the retained database and worktree.
-9. Submit wrong head, run id, request digest, worktree disk, credential disk, VM instance, boot id, and shard receipt fixtures and prove every one refuses.
+8. Prove a protected run refuses VM/daemon replacement before cleanup or new allocation, then retire it through the retained-failure purge path.
+9. Submit wrong head, run id, request digest, worktree disk, owner-decision history, VM instance, boot id, and shard receipt fixtures and prove every one refuses.
 10. Drive actual-cost, forecast-cost, active-cell, shared author/review demand, regional-quota, and family-quota saturation and prove each blocks only new admission; prove review demand may exceed 64 vCPUs when author demand is low but the next complete shape always queues before 128.
-11. Prove no credential byte appears in snapshots, runtime bundles, input/result archives, state JSON, tags, ARM parameter files, logs, reports, shard VMs, or uncredentialed process environments.
-12. Prove one cell cannot read or write a sibling container, disk, credential lease, home, or VM.
+11. Prove no credential byte appears in snapshots, runtime bundles, result archives, state JSON, tags, ordinary ARM parameters, logs, reports, shard VMs, or uncredentialed process environments.
+12. Prove one cell cannot read or write a sibling container, disk, home, or VM, and cannot apply an unsigned owner decision to its own protected daemon.
 13. Prove a failed shard is attributed to its exact VM/boot/request and is never replayed locally.
 14. Run a real no-mistakes pipeline through review, test, at least one pipeline-owned fix when naturally required, push, PR creation/update, CI-green return, report publication, and cleanup entirely on the Azure validation plane.
 15. Prove the local supervisor remains responsive throughout the real run and has no child process for review, lint, tests, fixes, push, or CI monitoring.
 16. Record before/after wall time, cell and shard queue latency, per-cell and per-shard duration, Mac and Azure CPU/memory, actual cost, estimated cost, and cleanup latency.
-17. Prove every validation VM, shard VM, NIC, OS disk, worktree disk, Run Command, cell identity, role assignment, and private cell container reaches zero after safe close while the credential lease is returned exactly once.
+17. Prove every validation VM, shard VM, NIC, OS disk, worktree disk, Run Command, cell identity, role assignment, and private cell container reaches zero after safe close, and prove the local private signing key is absent.
 18. Prove the Mac rollback path remains reachable.
 
 A failed acceptance leg means Azure validation is not the default and does not authorize local fallback, weakened identity proof, shared daemon use, retained-cost deletion, or credential broadening.

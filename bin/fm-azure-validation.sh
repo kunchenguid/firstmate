@@ -31,11 +31,13 @@
 #     [--provider-extra <linux-x86-64-path>]... --gh <linux-x86-64-path> \
 #     --node <linux-x86-64-path> --gh-axi-package <directory> \
 #     --no-mistakes-version <exact-version> \
+#     --no-mistakes-source-commit <exact-40-hex-source-commit> \
 #     --output <runtime.tar.gz>
 #   The Codex provider requires a provider-extra named codex-code-mode-host.
 #   fm-azure-validation.sh submit --task <id> --task-generation <id> \
 #     --validation-generation <id> --intent-file <path> \
 #     --credential-lease <credentials.json> --runtime-bundle <runtime.tar.gz> \
+#     --owner-decision-signer <host-native-no-mistakes> \
 #     [--resource-class validation-heavy|validation-standard] [--repo <path>]
 #   fm-azure-validation.sh dispatch --confirm-dispatch \
 #     --confirm-subscription <exact-id>

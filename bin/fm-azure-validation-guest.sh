@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Trusted root-side payload for one isolated Azure no-mistakes cell.
 #
-# Azure Managed Run Command supplies the GitHub token and optional gate
-# response as run-command parameters at boot time; nothing durable carries
-# credentials. The worktree data disk is a plain ext4 filesystem. Repository
+# Azure Managed Run Command supplies the GitHub token at boot time; nothing
+# durable carries credentials. Owner decisions arrive only as Ed25519-signed
+# envelopes verified inside the no-mistakes daemon. The worktree data disk is
+# a plain ext4 filesystem. Repository
 # commands are not run here: the trusted no-mistakes command seam delegates
 # lint/test and requested behavior parallelism to identity-less Azure shard
 # VMs through the shard exchange.
@@ -26,12 +27,11 @@ IDENTITY_CLIENT_ID=${identity_client_id:-}
 AUTH_SHARE=${auth_share:-fm-auth-home}
 INPUT_URL=${input_url:-}
 OUTPUT_URL=${output_url:-}
-RESPONSE=${response:-}
 GITHUB_TOKEN_VALUE=${github_token:-}
 HYDRATOR_DIGEST=${hydrator_digest:-}
 unset mode input_digest request_digest cell attempt vm_resource_id vm_instance_id
 unset worktree_disk_id storage_account storage_container identity_client_id auth_share
-unset input_url output_url response github_token hydrator_digest
+unset input_url output_url github_token hydrator_digest
 case "$MODE" in
   start)
     [ -n "$INPUT_URL" ] && [ -n "$OUTPUT_URL" ] || { echo "validation guest: start capability is absent" >&2; exit 125; }
@@ -42,9 +42,6 @@ case "$MODE" in
   hydrate)
     [ -n "$INPUT_URL" ] || { echo "validation guest: hydration capability is absent" >&2; exit 125; }
     case "$HYDRATOR_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: hydrator digest is malformed" >&2; exit 125 ;; esac
-    ;;
-  respond)
-    [ -n "$RESPONSE" ] || { echo "validation guest: response is absent" >&2; exit 125; }
     ;;
   *)
     echo "validation guest: unsupported mode" >&2
@@ -509,6 +506,7 @@ if manifest != request.get("runtime"):
     raise SystemExit("validation guest: runtime manifest differs from the sealed request")
 manifest_fields = {
     "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+    "no_mistakes_source_commit", "owner_decision_protocol",
     "provider_path", "gh_path", "node_path", "gh_axi_path",
     "gh_axi_entrypoint", "gh_axi_closure", "files",
 }
@@ -777,6 +775,54 @@ GH_AXI_BIN=$RUNTIME/$(jq -r '.runtime.gh_axi_path' "$REQUEST")
 for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$NODE_BIN" "$GH_AXI_BIN"; do
   [ -x "$executable" ] || { echo "validation guest: exact runtime executable is absent" >&2; exit 125; }
 done
+OWNER_PUBLIC_KEY=$STATE/owner-decision.pub
+OWNER_KEY_ID=$(jq -er '.owner_decision.key_id | select(test("^[0-9a-f]{64}$"))' "$REQUEST")
+OWNER_SOURCE_COMMIT=$(jq -er '.owner_decision.source_commit | select(test("^[0-9a-f]{40}$"))' "$REQUEST")
+jq -er '.owner_decision.public_key | select(type=="string" and length>0 and length<256)' "$REQUEST" >"$OWNER_PUBLIC_KEY"
+chmod 0444 "$OWNER_PUBLIC_KEY"
+python3 - "$REQUEST" "$OWNER_PUBLIC_KEY" "$NM_BIN" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+request = json.load(open(sys.argv[1], encoding="utf-8"))
+owner = request.get("owner_decision", {})
+runtime = request.get("runtime", {})
+try:
+    public = base64.b64decode(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip(), validate=True)
+except Exception as exc:
+    raise SystemExit("validation guest: owner-decision public key is malformed") from exc
+if len(public) != 32 or hashlib.sha256(public).hexdigest() != owner.get("key_id"):
+    raise SystemExit("validation guest: owner-decision public-key identity mismatch")
+if (
+    owner.get("schema") != "fm.azure-validation-owner-decision/v1"
+    or owner.get("challenge_schema") != "no-mistakes.owner-decision-challenge/v1"
+    or owner.get("envelope_schema") != "no-mistakes.owner-decision-envelope/v1"
+    or runtime.get("owner_decision_protocol") != owner.get("schema")
+    or runtime.get("no_mistakes_source_commit") != owner.get("source_commit")
+):
+    raise SystemExit("validation guest: runtime owner-decision protocol binding mismatch")
+try:
+    completed = subprocess.run(
+        [sys.argv[3], "--version"], check=True, capture_output=True, text=True,
+        timeout=30, env={"HOME": "/nonexistent", "PATH": "/usr/local/bin:/usr/bin:/bin"},
+    )
+except (OSError, subprocess.SubprocessError) as exc:
+    raise SystemExit("validation guest: no-mistakes runtime version is unreadable") from exc
+version = completed.stdout.strip()
+source_revisions = re.findall(r"\(([0-9a-f]{40})\)", version)
+if (
+    not version
+    or len(version.encode("utf-8")) > 512
+    or runtime.get("no_mistakes_version") not in version.split()
+    or source_revisions != [runtime.get("no_mistakes_source_commit")]
+):
+    raise SystemExit("validation guest: no-mistakes runtime version/source identity mismatch")
+PY
 PROVIDER=$(jq -r '.credentials.provider' "$REQUEST")
 # Receipts are run-scoped, not attempt-scoped. The bridge writes them in the
 # one attempt whose test step actually executes, and a resumed attempt
@@ -806,6 +852,7 @@ ENV_FILE=$STATE/cell.env
   printf 'TMPDIR=%s\n' "$TMP"
   printf 'FM_AZURE_VALIDATION_CELL=1\n'
   printf 'FM_AZURE_VALIDATION_CELL_ID=%s\n' "$CELL"
+  printf 'FM_AZURE_VALIDATION_ATTEMPT=%s\n' "$ATTEMPT"
   printf 'FM_AZURE_VALIDATION_SHARD_BRIDGE=%s/shard-bridge.py\n' "$TRUSTED_ROOT"
   printf 'FM_AZURE_VALIDATION_SHARD_EXCHANGE=%s\n' "$SHARD_EXCHANGE"
   printf 'FM_AZURE_VALIDATION_SHARD_COUNT=%s\n' "$(jq -r '.limits.behavior_shards' "$REQUEST")"
@@ -872,14 +919,16 @@ if [ "$MODE" = start ]; then
   jq -n \
     --arg cell "$CELL" --arg request "$REQUEST_DIGEST" --arg branch "$BRANCH" \
     --arg head "$CURRENT_HEAD" --arg worktree "$WORKTREE_DISK_ID" \
-    '{cell:$cell,request_digest:$request,branch:$branch,current_head:$head,worktree_disk_id:$worktree,run_id:null}' \
+    --arg owner_key "$OWNER_KEY_ID" --arg owner_source "$OWNER_SOURCE_COMMIT" \
+    '{cell:$cell,request_digest:$request,branch:$branch,current_head:$head,worktree_disk_id:$worktree,run_id:null,owner_decision_key_id:$owner_key,owner_decision_source_commit:$owner_source,owner_decision_repo_id:null,owner_decision_genesis_head:null,owner_decision_head:null}' \
     >"$IDENTITY"
   chmod 0600 "$IDENTITY"
 else
   [ -f "$IDENTITY" ] || { echo "validation guest: retained run identity is absent" >&2; exit 125; }
   jq -e --arg cell "$CELL" --arg request "$REQUEST_DIGEST" --arg branch "$BRANCH" \
-    --arg head "$CURRENT_HEAD" --arg worktree "$WORKTREE_DISK_ID" \
-    '.cell==$cell and .request_digest==$request and .branch==$branch and .current_head==$head and .worktree_disk_id==$worktree and (.run_id|type=="string")' \
+    --arg head "$CURRENT_HEAD" --arg worktree "$WORKTREE_DISK_ID" --arg owner_key "$OWNER_KEY_ID" \
+    --arg owner_source "$OWNER_SOURCE_COMMIT" \
+    '.cell==$cell and .request_digest==$request and .branch==$branch and .current_head==$head and .worktree_disk_id==$worktree and (.run_id|type=="string") and .owner_decision_key_id==$owner_key and .owner_decision_source_commit==$owner_source and (.owner_decision_head|type=="string")' \
     "$IDENTITY" >/dev/null || { echo "validation guest: exact retained run identity refused reattach" >&2; exit 125; }
   RUN_ID=$(jq -r '.run_id' "$IDENTITY")
   STATUS_PROOF=$LOGS/reattach-status-a$ATTEMPT.log
@@ -897,13 +946,6 @@ else
 fi
 
 RUN_LOG=$LOGS/run-a$ATTEMPT.log
-RESPONSE_FILE=$STATE/response-a$ATTEMPT.txt
-if [ "$MODE" = respond ]; then
-  printf '%s' "$RESPONSE" >"$RESPONSE_FILE"
-  unset RESPONSE
-  chown fmvalidate:fmvalidate "$RESPONSE_FILE"
-  chmod 0600 "$RESPONSE_FILE"
-fi
 
 # Build an argv-only launcher so run inputs never enter the unit definition or
 # process environment. The unit's cgroup is this cell's only restart boundary.
@@ -916,8 +958,8 @@ REPO=$2
 NM_BIN=$3
 MODE=$4
 INTENT_FILE=$5
-RESPONSE_FILE=$6
-RUN_LOG=$7
+RUN_LOG=$6
+OWNER_PUBLIC_KEY=$7
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -926,10 +968,24 @@ export PATH="$FM_AZURE_VALIDATION_RUNTIME_PATH:/usr/local/sbin:/usr/local/bin:/u
 export GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
 cd "$REPO"
 
-ATTEMPT_NUMBER=$(basename "$RESPONSE_FILE" | sed -n 's/^response-a\([0-9][0-9]*\)\.txt$/\1/p')
-[ -n "$ATTEMPT_NUMBER" ] || ATTEMPT_NUMBER=1
+storage_token() {
+  curl --fail --silent --noproxy '*' --connect-timeout 5 --max-time 15 -H Metadata:true \
+    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id=$FM_AZURE_VALIDATION_IDENTITY_CLIENT_ID" \
+    | jq -er .access_token
+}
 
-fetch_gate_response() {
+publish_gate_challenge() {
+  source=$1
+  gate_index=$2
+  gate_token=$(storage_token) || return 1
+  curl --fail --silent --show-error --noproxy '*' --connect-timeout 10 --max-time 60 \
+    --request PUT --upload-file "$source" \
+    -H "Authorization: Bearer $gate_token" \
+    -H 'x-ms-version: 2023-11-03' -H 'x-ms-blob-type: BlockBlob' -H 'If-None-Match: *' \
+    "https://${FM_AZURE_VALIDATION_STORAGE_ACCOUNT}.blob.core.windows.net/${FM_AZURE_VALIDATION_STORAGE_CONTAINER}/control/owner-decision/a${FM_AZURE_VALIDATION_ATTEMPT}/gate-${gate_index}.challenge.json"
+}
+
+fetch_gate_decision() {
   gate_index=$1
   destination=$2
   gate_token=$(curl --fail --silent --noproxy '*' --connect-timeout 5 --max-time 15 -H Metadata:true \
@@ -938,34 +994,79 @@ fetch_gate_response() {
   curl --fail --silent --noproxy '*' --connect-timeout 10 --max-time 60 \
     -H "Authorization: Bearer $gate_token" -H 'x-ms-version: 2023-11-03' \
     --output "$destination" \
-    "https://${FM_AZURE_VALIDATION_STORAGE_ACCOUNT}.blob.core.windows.net/${FM_AZURE_VALIDATION_STORAGE_CONTAINER}/control/gate-response-a${ATTEMPT_NUMBER}-${gate_index}.txt"
+    "https://${FM_AZURE_VALIDATION_STORAGE_ACCOUNT}.blob.core.windows.net/${FM_AZURE_VALIDATION_STORAGE_CONTAINER}/control/owner-decision/a${FM_AZURE_VALIDATION_ATTEMPT}/gate-${gate_index}.decision.json"
 }
 
-adjudicate_gates() {
-  # Runs are daemon-scoped: a parked gate can only be answered while this
-  # unit's daemon owns it, so the operator's decision arrives through the
-  # cell exchange and is applied here in place. Each parking prints exactly
-  # one structured gate block, so an unanswered gate is a gate count above
-  # the responses applied. Without a response inside the patience window
-  # the attempt still ends needs-decision for the operator.
-  responded=0
-  gate_deadline=$((SECONDS + ${FM_AZURE_VALIDATION_GATE_WAIT_SECONDS:-5400}))
+adjudicate_protected_gates() {
+  gate_index=1
+  protected_run_id=
   while :; do
-    gates=$(grep -c '^gate:' "$RUN_LOG" 2>/dev/null || printf 0)
-    [ "$gates" -gt "$responded" ] || break
-    [ "$SECONDS" -lt "$gate_deadline" ] || break
-    next_response=$RESPONSE_FILE.gate$((responded + 1))
-    if fetch_gate_response "$((responded + 1))" "$next_response"; then
-      set --
-      while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do
-        set -- "$@" "$respond_arg"
-      done <"$next_response"
-      "$NM_BIN" axi respond "$@" >>"$RUN_LOG" 2>&1 && "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
-      rc=$?
-      responded=$((responded + 1))
+    status_probe=$TMPDIR/owner-status-a${FM_AZURE_VALIDATION_ATTEMPT}-g${gate_index}.toon
+    if [ -n "$protected_run_id" ]; then
+      "$NM_BIN" axi status --run "$protected_run_id" >"$status_probe" 2>>"$RUN_LOG" || {
+        echo 'validation guest: protected run status became unreadable' >>"$RUN_LOG"
+        rc=125
+        return 0
+      }
     else
-      sleep 30
+      "$NM_BIN" axi status >"$status_probe" 2>>"$RUN_LOG" || {
+        echo 'validation guest: protected run status is unreadable' >>"$RUN_LOG"
+        rc=125
+        return 0
+      }
     fi
+    run_ids=$(grep -Eo '[0-9A-HJKMNP-TV-Z]{26}' "$status_probe" | sort -u)
+    [ "$(printf '%s\n' "$run_ids" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || {
+      echo 'validation guest: protected run status did not identify exactly one run' >>"$RUN_LOG"
+      rc=125
+      return 0
+    }
+    run_id=$(printf '%s\n' "$run_ids" | sed -n '1p')
+    if [ -n "$protected_run_id" ] && [ "$run_id" != "$protected_run_id" ]; then
+      echo 'validation guest: protected run identity changed while awaiting completion' >>"$RUN_LOG"
+      rc=125
+      return 0
+    fi
+    protected_run_id=$run_id
+    if grep -Eq '^[[:space:]]*outcome:[[:space:]]*(passed|checks-passed|failed|cancelled|canceled)[[:space:]]*$' "$status_probe"; then
+      return 0
+    fi
+    challenge=$TMPDIR/owner-challenge-a${FM_AZURE_VALIDATION_ATTEMPT}-g${gate_index}.json
+    rm -f "$challenge"
+    if ! "$NM_BIN" axi owner-decision challenge --run "$run_id" --purpose respond --out "$challenge" >>"$RUN_LOG" 2>&1; then
+      sleep 2
+      continue
+    fi
+    [ -s "$challenge" ] && [ "$(wc -c <"$challenge")" -le 65536 ] || {
+      echo 'validation guest: owner-decision challenge is missing or oversized' >>"$RUN_LOG"
+      rc=125
+      return 0
+    }
+    if ! publish_gate_challenge "$challenge" "$gate_index" >>"$RUN_LOG" 2>&1; then
+      echo 'validation guest: owner-decision challenge publication failed' >>"$RUN_LOG"
+      rc=125
+      return 0
+    fi
+    decision=$TMPDIR/owner-decision-a${FM_AZURE_VALIDATION_ATTEMPT}-g${gate_index}.json
+    rm -f "$decision"
+    gate_deadline=$((SECONDS + ${FM_AZURE_VALIDATION_GATE_WAIT_SECONDS:-840}))
+    while ! fetch_gate_decision "$gate_index" "$decision" >>"$RUN_LOG" 2>&1; do
+      if [ "$SECONDS" -ge "$gate_deadline" ]; then
+        echo 'validation guest: protected owner decision expired without a signed controller envelope' >>"$RUN_LOG"
+        rc=125
+        return 0
+      fi
+      sleep 5
+    done
+    [ -s "$decision" ] && [ "$(wc -c <"$decision")" -le 65536 ] || {
+      echo 'validation guest: owner-decision envelope is missing or oversized' >>"$RUN_LOG"
+      rc=125
+      return 0
+    }
+    "$NM_BIN" axi respond --decision-file "$decision" >>"$RUN_LOG" 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] || return 0
+    gate_index=$((gate_index + 1))
   done
 }
 
@@ -978,34 +1079,12 @@ set +e
 rc=$?
 if [ "$rc" -eq 0 ]; then
   case "$MODE" in
-    start) "$NM_BIN" axi run --intent "$(cat "$INTENT_FILE")" >>"$RUN_LOG" 2>&1 ;;
-    reattach) "$NM_BIN" axi run >>"$RUN_LOG" 2>&1 ;;
-    respond)
-      # The gated run was owned by the previous attempt's daemon, which died
-      # with that attempt's unit; a reattaching axi run resurfaces the parked
-      # gate for this fresh daemon before any respond can address it. The
-      # reattach stops at the gate, so its exit status is not consulted.
-      "$NM_BIN" axi run >>"$RUN_LOG" 2>&1 || true
-      # axi respond takes its decision as required argv flags and reads
-      # nothing from stdin, so the response file carries one argument per
-      # line (e.g. "--action" / "fix" / "--findings" / "review-1"); values
-      # must not contain newlines.
-      set --
-      while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do
-        set -- "$@" "$respond_arg"
-      done <"$RESPONSE_FILE"
-      "$NM_BIN" axi respond "$@" >>"$RUN_LOG" 2>&1
-      response_rc=$?
-      if [ "$response_rc" -eq 0 ]; then
-        "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
-      else
-        false
-      fi
-      ;;
+    start) "$NM_BIN" axi run --intent "$(cat "$INTENT_FILE")" --owner-decision-public-key "$OWNER_PUBLIC_KEY" >>"$RUN_LOG" 2>&1 ;;
+    reattach) echo 'validation guest: protected runs refuse VM/daemon reattach' >>"$RUN_LOG"; false ;;
     *) exit 125 ;;
   esac
   rc=$?
-  adjudicate_gates
+  adjudicate_protected_gates
 fi
 if [ "$rc" -ne 0 ] && grep -q 'code: recover_custody' "$RUN_LOG"; then
   # A terminal run can complete with outcome passed while preserving
@@ -1070,7 +1149,7 @@ systemd-run --quiet --wait --collect --unit "$UNIT" \
   --property=LockPersonality=yes \
   --property=CapabilityBoundingSet= \
   --property="ReadWritePaths=$CELL_ROOT" \
-  "$LAUNCH" "$ENV_FILE" "$REPO" "$NM_BIN" "$MODE" "$INTENT_FILE" "$RESPONSE_FILE" "$RUN_LOG"
+  "$LAUNCH" "$ENV_FILE" "$REPO" "$NM_BIN" "$MODE" "$INTENT_FILE" "$RUN_LOG" "$OWNER_PUBLIC_KEY"
 
 END_EPOCH=$(date +%s)
 END_LOAD=$(cat /proc/loadavg)
@@ -1088,10 +1167,87 @@ runuser -u fmvalidate -- /bin/bash -c \
   validation-status "$ENV_FILE" "$NM_BIN" "$REPO" >"$STATUS_LOG" 2>&1
 STATUS_RC=$?
 set -e
-RUN_ID=$(grep -hEo '[0-9A-HJKMNP-TV-Z]{26}' "$STATUS_LOG" "$RUN_LOG" | tail -n 1 || true)
-if [ -n "$RUN_ID" ]; then
+RUN_IDS=$(grep -hEo '[0-9A-HJKMNP-TV-Z]{26}' "$STATUS_LOG" | sort -u || true)
+if [ "$(printf '%s\n' "$RUN_IDS" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ]; then
+  RUN_ID=$(printf '%s\n' "$RUN_IDS" | sed -n '1p')
   tmp=$IDENTITY.tmp
   jq --arg run "$RUN_ID" '.run_id=$run' "$IDENTITY" >"$tmp"
+  mv "$tmp" "$IDENTITY"
+else
+  RUN_ID=""
+fi
+OWNER_PROTECTED=false
+OWNER_HEAD=""
+if [ "$STATUS_RC" -eq 0 ] && [ "$(grep -Ec '^[[:space:]]*owner_decision_protected:[[:space:]]*true[[:space:]]*$' "$STATUS_LOG" || true)" = 1 ]; then
+  OWNER_PROTECTED=true
+fi
+OWNER_HEADS=$(sed -nE 's/^[[:space:]]*owner_decision_head:[[:space:]]*([0-9a-f]{64})[[:space:]]*$/\1/p' "$STATUS_LOG" | sort -u)
+if [ "$(printf '%s\n' "$OWNER_HEADS" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ]; then
+  OWNER_HEAD=$(printf '%s\n' "$OWNER_HEADS" | sed -n '1p')
+fi
+OWNER_AUTHORITY=$STATE/owner-authority-a$ATTEMPT.json
+if [ -n "$RUN_ID" ] && [ "$OWNER_PROTECTED" = true ] && [ -n "$OWNER_HEAD" ]; then
+  python3 - "$NM_HOME/state.sqlite" "$RUN_ID" "$REQUEST" "$OWNER_HEAD" "$OWNER_AUTHORITY" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import sqlite3
+import sys
+
+database, run_id, request_path, history_head, output_path = sys.argv[1:]
+request = json.load(open(request_path, encoding="utf-8"))
+owner = request["owner_decision"]
+connection = sqlite3.connect("file:{}?mode=ro".format(database), uri=True)
+try:
+    rows = connection.execute(
+        "SELECT public_key,key_id,repo_id,branch,initial_head_sha,genesis_head "
+        "FROM owner_decision_authorities WHERE run_id=?",
+        (run_id,),
+    ).fetchall()
+finally:
+    connection.close()
+if len(rows) != 1:
+    raise SystemExit("validation guest: protected run authority is absent or duplicated")
+public, key_id, repo_id, branch, initial_head, genesis = rows[0]
+if not isinstance(public, bytes):
+    public = bytes(public)
+encoded = base64.b64encode(public).decode("ascii")
+derived_key = hashlib.sha256(public).hexdigest()
+derived_genesis = hashlib.sha256((
+    "no-mistakes.owner-decision-history/v1\n"
+    "key:{}\nrepo:{}\nbranch:{}\ninitial-head:{}\n".format(
+        derived_key, repo_id, branch, initial_head
+    )
+).encode()).hexdigest()
+if (
+    encoded != owner["public_key"]
+    or key_id != owner["key_id"]
+    or derived_key != key_id
+    or branch != request["repository"]["branch"]
+    or initial_head != request["repository"]["head"]
+    or genesis != derived_genesis
+    or not isinstance(history_head, str)
+    or len(history_head) != 64
+):
+    raise SystemExit("validation guest: protected run authority identity mismatch")
+value = {
+    "owner_decision_protected": True,
+    "owner_decision_key_id": key_id,
+    "owner_decision_repo_id": repo_id,
+    "owner_decision_genesis_head": genesis,
+    "owner_decision_head": history_head,
+    "owner_decision_source_commit": owner["source_commit"],
+}
+pathlib.Path(output_path).write_text(
+    json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+  tmp=$IDENTITY.tmp
+  jq --slurpfile owner "$OWNER_AUTHORITY" \
+    '.owner_decision_repo_id=$owner[0].owner_decision_repo_id | .owner_decision_genesis_head=$owner[0].owner_decision_genesis_head | .owner_decision_head=$owner[0].owner_decision_head' \
+    "$IDENTITY" >"$tmp"
   mv "$tmp" "$IDENTITY"
 fi
 # The pipeline daemon owns the branch and advances it past this checkout
@@ -1121,38 +1277,16 @@ mv "$tmp" "$IDENTITY"
 # persistent auth share so the next boot anywhere starts authenticated.
 auth_home_push
 
-# The durable no-mistakes database view, not free-form run output or intent,
-# owns terminal outcome classification.
+# The durable no-mistakes database view and its verified signed owner history,
+# not free-form run output or a same-UID gate marker, own terminal outcome
+# classification. A protected gate that times out is an explicit failure; it
+# is never exposed as a terminal cross-attempt response opportunity.
 OUTCOME=failed
-# A run that parked at a gate is a decision, not a failure, and the unit
-# teardown kills the in-unit daemon before the status read, so the aborted
-# post-mortem status can never say so. The run log's structured gate block
-# is authoritative for gate detection; the status read stays authoritative
-# for completed outcomes.
-# A run parked at a gate when the unit tore down is a decision, not a
-# failure - but the daemon marks the run failed on shutdown, so the durable
-# status cannot say so (generation 047 ground truth: a rebase-conflict gate
-# classified failed). Conversely, an ALREADY-ANSWERED gate leaves awaiting
-# lines mid-log while the run continues to a genuine terminal failure
-# (generation 041 ground truth: a failed push classified needs-decision).
-# The discriminator is whether the run log ENDS parked: after the last
-# awaiting line, a still-parked run shows only gate findings and help text,
-# while an answered gate is followed by later step rows or terminal lines.
-gate_parked=0
-last_awaiting=$(grep -nEi 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1 || true)
-# A refused respond attempt prints an error line while the gate stays
-# parked, so error lines cannot terminate the parked window; only later
-# step-progress rows or a rendered run outcome prove the gate was answered.
-if [ -n "$last_awaiting" ] && ! tail -n +"$((last_awaiting + 1))" "$RUN_LOG" | grep -Eq ',(completed|failed),|^outcome:'; then
-  gate_parked=1
-fi
-if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
-  OUTCOME=needs-decision
-elif [ "$gate_parked" = 1 ]; then
-  OUTCOME=needs-decision
-elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
+if [ "$OWNER_PROTECTED" = true ] && [ -s "$OWNER_AUTHORITY" ] \
+  && [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
   OUTCOME=checks-passed
-elif [ "$RUN_EXIT" -eq 0 ] && [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*passed' "$STATUS_LOG"; then
+elif [ "$OWNER_PROTECTED" = true ] && [ -s "$OWNER_AUTHORITY" ] \
+  && [ "$RUN_EXIT" -eq 0 ] && [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*passed' "$STATUS_LOG"; then
   OUTCOME=passed
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*failed' "$STATUS_LOG"; then
   # The ci step turns green and then stays running to monitor until merge,
@@ -1235,7 +1369,7 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps(value, sort_keys=True, separator
 PY
 RESULT=$STATE/result-a$ATTEMPT.json
 python3 - "$REQUEST" "$IDENTITY" "$RESULT" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" \
-  "$(cat /proc/sys/kernel/random/boot_id)" "$OUTCOME" "$CURRENT_HEAD" "$CURRENT_TREE" "$REMOTE_HEAD" "$PR" "$CHECKS_GREEN" "$SHARD_RECEIPTS" "$ATTEMPT" <<'PY'
+  "$(cat /proc/sys/kernel/random/boot_id)" "$OUTCOME" "$CURRENT_HEAD" "$CURRENT_TREE" "$REMOTE_HEAD" "$PR" "$CHECKS_GREEN" "$SHARD_RECEIPTS" "$ATTEMPT" "$OWNER_AUTHORITY" <<'PY'
 import json
 import pathlib
 import sys
@@ -1245,6 +1379,7 @@ try:
     shards = json.load(open(sys.argv[13], encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
     shards = []
+owner = json.load(open(sys.argv[15], encoding="utf-8"))
 result = {
     "schema": request["protocol"]["result_schema"],
     "request_digest": request["request_digest"],
@@ -1269,6 +1404,7 @@ result = {
     "pr_url": sys.argv[11] or None,
     "checks_green": sys.argv[12] == "true",
     "behavior_shards": shards,
+    **owner,
 }
 path = pathlib.Path(sys.argv[3])
 path.write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")

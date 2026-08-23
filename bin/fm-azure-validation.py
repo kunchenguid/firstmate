@@ -8,6 +8,8 @@ The durable contract is documented in docs/azure-validation.md.
 """
 
 import argparse
+import base64
+import binascii
 import contextlib
 import datetime as dt
 import fcntl
@@ -43,8 +45,19 @@ PURGE_SCHEMA = "fm.azure-validation-purge/v1"
 RESULT_SCHEMA = "fm.azure-validation-result/v1"
 CREDENTIALS_SCHEMA = "fm.azure-validation-credentials/v1"
 RUNTIME_SCHEMA = "fm.azure-validation-runtime/v1"
+OWNER_DECISION_SCHEMA = "fm.azure-validation-owner-decision/v1"
+OWNER_CHALLENGE_SCHEMA = "no-mistakes.owner-decision-challenge/v1"
+OWNER_ENVELOPE_SCHEMA = "no-mistakes.owner-decision-envelope/v1"
+OWNER_DECISION_SOURCE_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+OWNER_HISTORY_HEAD = re.compile(r"^[0-9a-f]{64}$")
+OWNER_CHALLENGE_FIELDS = (
+    "schema", "purpose", "run_id", "repo_id", "branch", "head_sha",
+    "gate_head_sha", "step", "step_result_id", "round_id",
+    "findings_digest", "previous_head", "nonce", "issued_at", "expires_at",
+)
 RUNTIME_MANIFEST_FIELDS = frozenset({
     "schema", "provider", "no_mistakes_version", "no_mistakes_path",
+    "no_mistakes_source_commit", "owner_decision_protocol",
     "provider_path", "gh_path", "node_path", "gh_axi_path",
     "gh_axi_entrypoint", "gh_axi_closure", "files",
 })
@@ -981,6 +994,10 @@ def build_runtime_bundle(args):
         raise ValidationError(
             "--no-mistakes-version must be the exact artifact version"
         )
+    if not OWNER_DECISION_SOURCE_COMMIT.fullmatch(args.no_mistakes_source_commit):
+        raise ValidationError(
+            "--no-mistakes-source-commit must be the exact 40-hex source revision"
+        )
     output = Path(args.output).expanduser()
     if not output.name:
         raise ValidationError("runtime bundle output must name a file")
@@ -1047,6 +1064,8 @@ def build_runtime_bundle(args):
         "schema": RUNTIME_SCHEMA,
         "provider": args.provider,
         "no_mistakes_version": args.no_mistakes_version,
+        "no_mistakes_source_commit": args.no_mistakes_source_commit,
+        "owner_decision_protocol": OWNER_DECISION_SCHEMA,
         "no_mistakes_path": "bin/no-mistakes",
         "provider_path": "bin/" + args.provider,
         "gh_path": "bin/gh",
@@ -1317,6 +1336,125 @@ def ensure_dirs(env):
         os.chmod(path, 0o700)
 
 
+def owner_decision_directory(env, cell):
+    return env["state_dir"] / "owner-decision" / require_cell(cell)
+
+
+def owner_decision_paths(env, cell):
+    root = owner_decision_directory(env, cell)
+    return {
+        "root": root,
+        "tool": root / "no-mistakes-signer",
+        "private": root / "owner.key",
+        "public": root / "owner.pub",
+    }
+
+
+def bounded_regular_file(path, label, mode, maximum_bytes):
+    path = Path(path)
+    try:
+        value = os.lstat(str(path))
+    except OSError as exc:
+        raise ValidationError("{} is unreadable: {}".format(label, exc))
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or value.st_nlink != 1
+        or value.st_uid != os.getuid()
+        or stat.S_IMODE(value.st_mode) != mode
+        or value.st_size < 1
+        or value.st_size > maximum_bytes
+    ):
+        raise ValidationError(
+            "{} must be a one-link current-owner regular file with mode {:04o} and bounded bytes".format(
+                label, mode
+            )
+        )
+    return value
+
+
+def provision_owner_decision(env, cell, signer_source, source_commit, expected_version):
+    if not OWNER_DECISION_SOURCE_COMMIT.fullmatch(str(source_commit or "")):
+        raise ValidationError("owner-decision source commit is malformed")
+    paths = owner_decision_paths(env, cell)
+    parent = paths["root"].parent
+    if not os.path.lexists(str(parent)):
+        parent.mkdir(parents=True, mode=0o700)
+    parent_stat = os.lstat(str(parent))
+    if (
+        not stat.S_ISDIR(parent_stat.st_mode)
+        or stat.S_ISLNK(parent_stat.st_mode)
+        or parent_stat.st_uid != os.getuid()
+    ):
+        raise ValidationError("owner-decision parent is not an exact current-owner directory")
+    os.chmod(parent, 0o700)
+    try:
+        paths["root"].mkdir(mode=0o700)
+        tool_digest = copy_identity_pinned_runtime(
+            signer_source, paths["tool"], "owner-decision signer", None
+        )
+        os.chmod(paths["tool"], 0o500)
+        bounded_regular_file(paths["tool"], "owner-decision signer", 0o500, 512 * 1024**2)
+        isolated = {
+            "HOME": str(paths["root"]),
+            "NO_MISTAKES_HOME": str(paths["root"] / "no-mistakes-home"),
+            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+        }
+        version = run([str(paths["tool"]), "--version"], timeout=30, env=isolated).stdout.strip()
+        source_revisions = re.findall(r"\(([0-9a-f]{40})\)", version)
+        if (
+            not version
+            or str(expected_version) not in version.split()
+            or source_revisions != [source_commit]
+            or len(version.encode("utf-8")) > 512
+        ):
+            raise ValidationError("owner-decision signer version/source identity mismatch")
+        run([
+            str(paths["tool"]), "axi", "owner-decision", "keygen",
+            "--private-key", str(paths["private"]),
+            "--public-key", str(paths["public"]),
+        ], timeout=60, env=isolated)
+        bounded_regular_file(paths["private"], "owner-decision private key", 0o600, 4096)
+        bounded_regular_file(paths["public"], "owner-decision public key", 0o644, 4096)
+        public_text = paths["public"].read_text(encoding="utf-8").strip()
+        try:
+            public_bytes = base64.b64decode(public_text, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValidationError("owner-decision public key is not canonical base64")
+        if len(public_bytes) != 32:
+            raise ValidationError("owner-decision public key is not Ed25519")
+        key_id = sha256_hex(public_bytes)
+        return {
+            "schema": OWNER_DECISION_SCHEMA,
+            "public_key": public_text,
+            "key_id": key_id,
+            "source_commit": source_commit,
+            "signer_digest": tool_digest,
+            "signer_version": version,
+            "challenge_schema": OWNER_CHALLENGE_SCHEMA,
+            "envelope_schema": OWNER_ENVELOPE_SCHEMA,
+        }
+    except Exception:
+        shutil.rmtree(paths["root"], ignore_errors=True)
+        raise
+
+
+def destroy_owner_decision_material(env, cell):
+    root = owner_decision_directory(env, cell)
+    if not os.path.lexists(str(root)):
+        return
+    try:
+        observed = os.lstat(str(root))
+        if not stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode):
+            raise ValidationError("owner-decision material root is not an exact directory")
+        shutil.rmtree(root)
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError("owner-decision material cleanup failed: {}".format(exc))
+    if os.path.lexists(str(root)):
+        raise ValidationError("owner-decision material remains after cleanup")
+
+
 @contextlib.contextmanager
 def lock(env, name="queue"):
     ensure_dirs(env)
@@ -1575,6 +1713,15 @@ def validate_runtime_bundle(path, provider):
                 ):
                     raise ValidationError(
                         "runtime manifest has no exact no-mistakes version"
+                    )
+                if (
+                    not OWNER_DECISION_SOURCE_COMMIT.fullmatch(
+                        str(manifest.get("no_mistakes_source_commit", ""))
+                    )
+                    or manifest.get("owner_decision_protocol") != OWNER_DECISION_SCHEMA
+                ):
+                    raise ValidationError(
+                        "runtime manifest does not bind the protected owner-decision source"
                     )
                 declared = manifest.get("files")
                 if not isinstance(declared, list) or not declared:
@@ -1855,6 +2002,11 @@ def submit_staged(env, args, runtime_source):
         fence = sha256_bytes(os.urandom(32))
         limits = dict(RESOURCE_CLASSES[resource_class])
         limits["reserved_vcpus"] = limits["vcpus"] + limits["behavior_shards"] * 4
+        owner_decision = provision_owner_decision(
+            env, cell, args.owner_decision_signer,
+            runtime["no_mistakes_source_commit"],
+            runtime["no_mistakes_version"],
+        )
         request = {
             "schema": SCHEMA,
             "cell": cell,
@@ -1886,6 +2038,13 @@ def submit_staged(env, args, runtime_source):
             },
             "runtime": runtime,
             "runtime_digest": runtime_digest,
+            "owner_decision": {
+                key: owner_decision[key]
+                for key in (
+                    "schema", "public_key", "key_id", "source_commit",
+                    "challenge_schema", "envelope_schema",
+                )
+            },
             "resource_class": resource_class,
             "limits": limits,
             "protocol": {
@@ -1915,10 +2074,24 @@ def submit_staged(env, args, runtime_source):
                 "lineage_prefix": staging_prefix,
             },
             "resources": resources,
+            "owner_decision": {
+                "schema": OWNER_DECISION_SCHEMA,
+                "key_id": owner_decision["key_id"],
+                "source_commit": owner_decision["source_commit"],
+                "signer_digest": owner_decision["signer_digest"],
+                "signer_version": owner_decision["signer_version"],
+                "history_head": None,
+                "repo_id": None,
+                "responded_gates": [],
+            },
             "events": [{"at": iso_utc(), "phase": "preparing", "note": "queue identity reserved"}],
         }
         ensure_dirs(env)
-        save_state(env, state, create=True)
+        try:
+            save_state(env, state, create=True)
+        except Exception:
+            destroy_owner_decision_material(env, cell)
+            raise
         try:
             prepare_payload(
                 env, state, runtime_source, runtime_digest,
@@ -1929,6 +2102,7 @@ def submit_staged(env, args, runtime_source):
             with contextlib.suppress(OSError):
                 state_path(env, cell).unlink()
             shutil.rmtree(env["state_dir"] / "payloads" / cell, ignore_errors=True)
+            destroy_owner_decision_material(env, cell)
             raise
     print("AZURE VALIDATION QUEUED cell={} task={} head={} class={} shards={}".format(
         cell, task, head, resource_class, limits["behavior_shards"]
@@ -2920,21 +3094,16 @@ def guest_stamps_attempt(env, state):
         return True
 
 
-def create_run_command(env, state, mode, input_url=None, output_url=None, response=None):
+def expected_run_command_arguments(env, state, mode):
+    if mode not in ("start", "reattach"):
+        raise ValidationError("validation Run Command mode is unsupported")
     resources = state["resources"]
-    guest_text = sealed_guest_text(env, state)
-    # Recorded from the bytes that are about to run, so observe never has to
-    # guess it from output that may be truncated.
-    state["guest_stamps_attempt"] = guest_text_stamps_attempt(guest_text)
-    attempt = state["attempt"]
-    name = "{}-a{}".format(mode, attempt)
-    run_id = resources["vm_id"] + "/runCommands/" + name
-    arguments = [
+    return [
         {"name": "mode", "value": mode},
         {"name": "input_digest", "value": state["input_digest"]},
         {"name": "request_digest", "value": state["request_digest"]},
         {"name": "cell", "value": state["cell"]},
-        {"name": "attempt", "value": str(attempt)},
+        {"name": "attempt", "value": str(state["attempt"])},
         {"name": "vm_resource_id", "value": resources["vm_id"]},
         {"name": "vm_instance_id", "value": resources["vm_instance_id"]},
         {"name": "worktree_disk_id", "value": resources["worktree_disk_id"]},
@@ -2943,13 +3112,69 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         {"name": "identity_client_id", "value": resources["identity_client_id"]},
         {"name": "auth_share", "value": auth_share_name()},
     ]
+
+
+def expected_run_command_protected_names(mode):
+    if mode == "start":
+        return ["input_url", "output_url", "github_token"]
+    if mode == "reattach":
+        return ["output_url", "github_token"]
+    raise ValidationError("validation Run Command mode is unsupported")
+
+
+def run_command_binding_matches(resource, guest_text, arguments, protected_names):
+    properties = resource.get("properties") or {}
+    source = properties.get("source") or {}
+    if source.get("script") != guest_text:
+        return False
+    observed = properties.get("parameters")
+    if not isinstance(observed, list):
+        return False
+    expected_by_name = {item["name"]: str(item["value"]) for item in arguments}
+    observed_by_name = {
+        item.get("name"): str(item.get("value"))
+        for item in observed
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if (
+        len(expected_by_name) != len(arguments)
+        or len(observed_by_name) != len(observed)
+        or observed_by_name != expected_by_name
+    ):
+        return False
+    protected = properties.get("protectedParameters")
+    if protected is not None:
+        if not isinstance(protected, list):
+            return False
+        observed_names = [
+            item.get("name")
+            for item in protected
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+        if observed_names != protected_names:
+            return False
+    return True
+
+
+def create_run_command(env, state, mode, input_url=None, output_url=None):
+    if mode == "start" and (not input_url or not output_url):
+        raise ValidationError("start Run Command requires exact input and output URLs")
+    if mode == "reattach" and (input_url or not output_url):
+        raise ValidationError("reattach Run Command requires only the exact output URL")
+    resources = state["resources"]
+    guest_text = sealed_guest_text(env, state)
+    # Recorded from the bytes that are about to run, so observe never has to
+    # guess it from output that may be truncated.
+    state["guest_stamps_attempt"] = guest_text_stamps_attempt(guest_text)
+    attempt = state["attempt"]
+    name = "{}-a{}".format(mode, attempt)
+    run_id = resources["vm_id"] + "/runCommands/" + name
+    arguments = expected_run_command_arguments(env, state, mode)
     protected = []
     if input_url:
         protected.append({"name": "input_url", "value": input_url})
     if output_url:
         protected.append({"name": "output_url", "value": output_url})
-    if response is not None:
-        protected.append({"name": "response", "value": response})
     # Boot-time credential injection: the token reaches the guest as a
     # run-command parameter and never lands in durable state files.
     protected.append({"name": "github_token", "value": read_github_token(state)})
@@ -2987,6 +3212,11 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
     tags = run_command.get("tags") or {}
     if tags.get("validation-cell") != state["cell"] or tags.get("fence") != state["request"]["fence"]:
         raise ValidationError("created validation Run Command has foreign identity")
+    protected_names = expected_run_command_protected_names(mode)
+    if not run_command_binding_matches(
+        run_command, guest_text, arguments, protected_names
+    ):
+        raise ValidationError("created validation Run Command binding changed before adoption")
     resources["run_command_name"] = name
     resources["run_command_id"] = run_id
     # Every attempt starts its own settling window: a stamp left by the
@@ -2996,6 +3226,13 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         "id": run_id,
         "identity": immutable_identity(run_command, "run-command"),
     })
+    resources["active_run_command"] = {
+        "id": run_id,
+        "mode": mode,
+        "source_digest": sha256_bytes(guest_text.encode("utf-8")),
+        "parameters_digest": sha256_bytes(canonical_bytes(arguments)),
+        "protected_names": protected_names,
+    }
     save_state(env, state)
 
 
@@ -3315,14 +3552,21 @@ def dispatch(env, args):
         ))
 
 
-def run_command_status_for_id(env, run_id):
+def run_command_status_resource_for_id(env, run_id):
     url = "https://management.azure.com{}?api-version={}&$expand=instanceView".format(run_id, RESOURCE_API["run-command"])
     value, rc, stderr = az_command(env, ["rest", "--method", "get", "--url", url], check=False)
     if rc != 0:
-        return "unreadable", stderr
+        return "unreadable", stderr, None
+    if not isinstance(value, dict) or not isinstance(value.get("properties"), dict):
+        return "unreadable", "managed Run Command response is malformed", None
     properties = value.get("properties", {})
     view = properties.get("instanceView") or {}
     execution = str(view.get("executionState", "Unknown"))
+    return execution, view, value
+
+
+def run_command_status_for_id(env, run_id):
+    execution, view, _ = run_command_status_resource_for_id(env, run_id)
     return execution, view
 
 
@@ -3350,6 +3594,53 @@ def run_command_status(env, state):
     if not run_id:
         return "missing", None
     return run_command_status_for_id(env, run_id)
+
+
+def exact_live_run_command(env, state):
+    binding = state.get("resources", {}).get("active_run_command") or {}
+    run_id = state.get("resources", {}).get("run_command_id")
+    if binding.get("id") != run_id or binding.get("mode") not in ("start", "reattach"):
+        raise ValidationError("active validation Run Command binding is absent")
+    execution, view, resource = run_command_status_resource_for_id(env, run_id)
+    if resource is None:
+        raise ValidationError("active validation Run Command is unreadable")
+    recorded = next(
+        (
+            item.get("identity")
+            for item in reversed(state.get("resources", {}).get("run_commands", []))
+            if item.get("id") == run_id
+        ),
+        None,
+    )
+    if not same_stable_identity(
+        recorded, immutable_identity(resource, "run-command"), "run-command"
+    ):
+        raise ValidationError("active validation Run Command identity changed")
+    tags = resource.get("tags") or {}
+    if (
+        tags.get("validation-cell") != state["cell"]
+        or tags.get("fence") != state["request"]["fence"]
+        or tags.get("attempt") != str(state["attempt"])
+    ):
+        raise ValidationError("active validation Run Command tags changed")
+    arguments = expected_run_command_arguments(env, state, binding["mode"])
+    protected_names = expected_run_command_protected_names(binding["mode"])
+    if (
+        binding.get("source_digest") != state["request"]["protocol"]["guest_digest"]
+        or binding.get("parameters_digest") != sha256_bytes(canonical_bytes(arguments))
+        or binding.get("protected_names") != protected_names
+        or not run_command_binding_matches(
+            resource, sealed_guest_text(env, state), arguments, protected_names
+        )
+    ):
+        raise ValidationError("active validation Run Command source/parameter binding changed")
+    if execution != "Running":
+        raise ValidationError(
+            "owner decision requires the exact original Run Command to remain Running; observed {}".format(
+                execution
+            )
+        )
+    return resource, view
 
 
 def observe(env, args):
@@ -3537,6 +3828,65 @@ def verify_result_identity(state, result):
     run_id = result.get("run_id")
     if not isinstance(run_id, str) or not NM_RUN_ID.match(run_id):
         raise ValidationError("validation result lacks the exact no-mistakes run id")
+    if state.get("run_id") is not None and state["run_id"] != run_id:
+        raise ValidationError("validation result changed the exact no-mistakes run id")
+    request_owner = state.get("request", {}).get("owner_decision") or {}
+    if request_owner.get("schema") == OWNER_DECISION_SCHEMA:
+        owner_result = {
+            "protected": result.get("owner_decision_protected"),
+            "key_id": result.get("owner_decision_key_id"),
+            "repo_id": result.get("owner_decision_repo_id"),
+            "genesis_head": result.get("owner_decision_genesis_head"),
+            "history_head": result.get("owner_decision_head"),
+            "source_commit": result.get("owner_decision_source_commit"),
+        }
+        genesis = owner_genesis_head(state, owner_result["repo_id"])
+        owner_state = state.get("owner_decision") or {}
+        if (
+            owner_result["protected"] is not True
+            or owner_result["key_id"] != request_owner["key_id"]
+            or owner_result["genesis_head"] != genesis
+            or owner_result["source_commit"] != request_owner["source_commit"]
+        ):
+            raise ValidationError("validation result lacks the exact protected owner-decision history")
+        if owner_state.get("repo_id") not in (None, owner_result["repo_id"]):
+            raise ValidationError("validation result changed the owner-decision repository identity")
+        expected_history = owner_state.get("history_head") or genesis
+        pending = owner_state.get("pending_decision")
+        gate = owner_state.get("pending_gate")
+        if pending is not None:
+            _, envelope, _, _ = validate_pending_owner_decision(
+                state, gate, pending, expected_history
+            )
+            if owner_result["history_head"] == pending["next_head"]:
+                record_responded_owner_decision(owner_state, gate, pending, envelope)
+            elif (
+                owner_result["history_head"] == pending["previous_head"]
+                and result.get("outcome") not in ("passed", "checks-passed")
+            ):
+                owner_state.setdefault("abandoned_decisions", []).append({
+                    "gate_index": gate["gate_index"],
+                    "challenge_digest": gate["challenge_digest"],
+                    "decision_digest": pending["decision_digest"],
+                    "previous_head": pending["previous_head"],
+                    "unconsumed_head": pending["next_head"],
+                    "action": envelope["response"].get("action"),
+                    "reason": "terminal daemon history proved the signed envelope was not appended",
+                })
+                owner_state.pop("pending_gate", None)
+                owner_state.pop("pending_decision", None)
+                owner_state["history_head"] = pending["previous_head"]
+            else:
+                raise ValidationError(
+                    "validation result does not acknowledge or terminally abandon the pending owner decision"
+                )
+        elif owner_result["history_head"] != expected_history:
+            raise ValidationError("validation result lacks the exact protected owner-decision history")
+        owner_state["repo_id"] = owner_result["repo_id"]
+        owner_state["genesis_head"] = genesis
+        owner_state["history_head"] = owner_result["history_head"]
+        state["owner_decision"] = owner_state
+        state["run_id"] = run_id
     if result.get("outcome") in ("passed", "checks-passed"):
         expected_pr_prefix = "https://github.com/{}/pull/".format(state["request"]["repository"]["slug"])
         if (
@@ -3676,39 +4026,455 @@ def collect(env, args):
     print_status(state)
 
 
-def respond(env, args):
-    with lock(env, require_cell(args.cell)):
-        state = load_state(env, args.cell)
-        if state["phase"] != "needs-decision":
-            raise ValidationError("cell is not waiting on an ask-user decision")
-        try:
-            response = Path(args.response_file).read_text(encoding="utf-8")
-        except OSError as exc:
-            raise ValidationError("response file is unreadable: {}".format(exc))
-        if not response.strip() or len(response.encode("utf-8")) > 64 * 1024:
-            raise ValidationError("response must contain 1-65536 bytes")
-        exists, vm = read_resource(env, state["resources"]["vm_id"], "vm")
-        if (
-            not exists
-            or not same_stable_identity(
-                state["resources"]["identities"]["vm"], immutable_identity(vm, "vm"), "vm"
-            )
-        ):
-            raise ValidationError("exact cell VM identity is absent or changed; response retained")
-        state["attempt"] += 1
-        output_url = blob_sas(
-            env, state["staging"]["result_blob"], "cw",
-            container=state["staging"]["container"],
+def owner_public_key_bytes(state):
+    encoded = state.get("request", {}).get("owner_decision", {}).get("public_key")
+    try:
+        value = base64.b64decode(str(encoded or ""), validate=True)
+    except (ValueError, binascii.Error):
+        raise ValidationError("sealed owner-decision public key is malformed")
+    if len(value) != 32:
+        raise ValidationError("sealed owner-decision public key is not Ed25519")
+    key_id = sha256_hex(value)
+    if state["request"]["owner_decision"].get("key_id") != key_id:
+        raise ValidationError("sealed owner-decision public-key identity changed")
+    return value
+
+
+def owner_genesis_head(state, repo_id):
+    owner_public_key_bytes(state)
+    key_id = state["request"]["owner_decision"]["key_id"]
+    branch = state["request"]["repository"]["branch"]
+    submitted = state["request"]["repository"]["head"]
+    if not isinstance(repo_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", repo_id):
+        raise ValidationError("owner-decision repository identity is malformed")
+    return sha256_hex((
+        "no-mistakes.owner-decision-history/v1\n"
+        "key:{}\nrepo:{}\nbranch:{}\ninitial-head:{}\n".format(
+            key_id, repo_id, branch, submitted
         )
-        create_run_command(env, state, "respond", output_url=output_url, response=response)
-        transition(env, state, "responding", "exact ask-user run received a protected response")
-    print("AZURE VALIDATION RESPONDED cell={} attempt={}".format(state["cell"], state["attempt"]))
+    ).encode("utf-8"))
+
+
+def validate_pending_owner_decision(state, gate, pending, expected_history, expected_response=None):
+    required = {
+        "gate_index", "challenge_digest", "decision_blob",
+        "decision_digest", "decision_base64", "previous_head", "next_head",
+    }
+    if (
+        not isinstance(gate, dict)
+        or not isinstance(pending, dict)
+        or set(pending) != required
+    ):
+        raise ValidationError("pending owner-decision recovery record is malformed")
+    try:
+        decision_bytes = base64.b64decode(
+            pending["decision_base64"], validate=True
+        )
+        envelope = strict_json_loads(
+            decision_bytes.decode("utf-8"), "pending owner-decision envelope"
+        )
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        raise ValidationError("pending owner-decision bytes are malformed")
+    signature = envelope.get("signature") if isinstance(envelope, dict) else None
+    try:
+        signature_bytes = base64.b64decode(str(signature or ""), validate=True)
+    except (ValueError, binascii.Error):
+        signature_bytes = b""
+    challenge = gate.get("challenge")
+    response = envelope.get("response") if isinstance(envelope, dict) else None
+    envelope_schema = envelope.get("schema") if isinstance(envelope, dict) else None
+    envelope_challenge = envelope.get("challenge") if isinstance(envelope, dict) else None
+    canonical_challenge = {
+        key: challenge.get(key)
+        for key in OWNER_CHALLENGE_FIELDS
+    } if isinstance(challenge, dict) else {}
+    canonical_envelope = {
+        "schema": envelope.get("schema") if isinstance(envelope, dict) else None,
+        "challenge": canonical_challenge,
+        "response": response,
+        "signature": signature,
+    }
+    recovered_digest = sha256_hex(go_json_bytes(canonical_envelope))
+    previous_head = challenge.get("previous_head") if isinstance(challenge, dict) else None
+    recovered_head = sha256_hex((
+        str(previous_head or "") + "\n" + recovered_digest + "\n"
+    ).encode("utf-8"))
+    issues = []
+    checks = (
+        (pending["gate_index"] == gate.get("gate_index"), "gate index"),
+        (pending["challenge_digest"] == gate.get("challenge_digest"), "challenge digest"),
+        (pending["decision_blob"] == gate.get("decision_blob"), "decision blob"),
+        (pending["decision_digest"] == sha256_bytes(decision_bytes), "decision digest"),
+        (pending["previous_head"] == previous_head, "previous head"),
+        (bool(OWNER_HISTORY_HEAD.fullmatch(str(pending["next_head"]))), "next-head shape"),
+        (pending["next_head"] == expected_history, "controller history"),
+        (isinstance(envelope, dict), "envelope object"),
+        (isinstance(envelope, dict) and list(envelope) == ["schema", "challenge", "response", "signature"], "envelope fields"),
+        (envelope_schema == state["request"]["owner_decision"]["envelope_schema"], "envelope schema"),
+        (isinstance(challenge, dict) and set(challenge) == set(OWNER_CHALLENGE_FIELDS), "challenge fields"),
+        (envelope_challenge == challenge, "envelope challenge"),
+        (isinstance(response, dict), "response object"),
+        (expected_response is None or response == expected_response, "response identity"),
+        (len(signature_bytes) == 64, "signature"),
+        (recovered_head == pending["next_head"], "derived history"),
+    )
+    issues.extend(label for passed, label in checks if not passed)
+    if issues:
+        raise ValidationError(
+            "pending owner-decision recovery identity changed: {}".format(", ".join(issues))
+        )
+    return decision_bytes, envelope, pending["next_head"], pending["decision_digest"]
+
+
+def record_responded_owner_decision(owner, gate, pending, envelope):
+    record = {
+        "gate_index": gate["gate_index"],
+        "challenge_blob": gate["challenge_blob"],
+        "challenge_digest": gate["challenge_digest"],
+        "decision_blob": pending["decision_blob"],
+        "decision_digest": pending["decision_digest"],
+        "previous_head": pending["previous_head"],
+        "next_head": pending["next_head"],
+        "action": envelope["response"].get("action"),
+    }
+    existing = [
+        item for item in owner.get("responded_gates", [])
+        if item.get("gate_index") == record["gate_index"]
+    ]
+    if existing and existing != [record]:
+        raise ValidationError("owner-decision response history changed")
+    if not existing:
+        owner.setdefault("responded_gates", []).append(record)
+    owner.pop("pending_gate", None)
+    owner.pop("pending_decision", None)
+    owner["history_head"] = record["next_head"]
+    return record
+
+
+def validate_owner_challenge(state, challenge, expected_previous=None):
+    if not isinstance(challenge, dict) or tuple(challenge) != OWNER_CHALLENGE_FIELDS:
+        raise ValidationError("owner-decision challenge fields are not the exact schema")
+    request_owner = state["request"]["owner_decision"]
+    if (
+        challenge.get("schema") != request_owner["challenge_schema"]
+        or challenge.get("purpose") != "respond"
+        or challenge.get("branch") != state["request"]["repository"]["branch"]
+        or challenge.get("head_sha") != state["request"]["repository"]["head"]
+    ):
+        raise ValidationError("owner-decision challenge immutable identity mismatch")
+    run_id = challenge.get("run_id")
+    if not isinstance(run_id, str) or not NM_RUN_ID.fullmatch(run_id):
+        raise ValidationError("owner-decision challenge run id is malformed")
+    if state.get("run_id") is not None and state["run_id"] != run_id:
+        raise ValidationError("owner-decision challenge changed the exact run id")
+    if not isinstance(challenge.get("gate_head_sha"), str) or not HEX_OBJECT.fullmatch(
+        challenge["gate_head_sha"]
+    ):
+        raise ValidationError("owner-decision challenge gate head is malformed")
+    for field in ("step", "step_result_id", "round_id"):
+        value = challenge.get(field)
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValidationError("owner-decision challenge {} is malformed".format(field))
+    for field in ("findings_digest", "previous_head"):
+        if not isinstance(challenge.get(field), str) or not OWNER_HISTORY_HEAD.fullmatch(
+            challenge[field]
+        ):
+            raise ValidationError("owner-decision challenge {} is malformed".format(field))
+    repo_id = challenge.get("repo_id")
+    genesis = owner_genesis_head(state, repo_id)
+    owner = state.get("owner_decision") or {}
+    if owner.get("repo_id") not in (None, repo_id):
+        raise ValidationError("owner-decision challenge repository identity changed")
+    wanted_previous = expected_previous or owner.get("history_head") or genesis
+    if challenge["previous_head"] != wanted_previous:
+        raise ValidationError("owner-decision challenge history head rolled back or diverged")
+    if challenge.get("nonce") != "respond:{}:{}".format(
+        challenge["round_id"], challenge["previous_head"]
+    ):
+        raise ValidationError("owner-decision challenge nonce is not gate-bound")
+    issued = challenge.get("issued_at")
+    expires = challenge.get("expires_at")
+    if (
+        not isinstance(issued, int) or isinstance(issued, bool)
+        or not isinstance(expires, int) or isinstance(expires, bool)
+        or expires <= issued or expires - issued > 900
+    ):
+        raise ValidationError("owner-decision challenge validity window is malformed")
+    now = int(time.time())
+    if issued > now + 30 or expires <= now + 30:
+        raise ValidationError("owner-decision challenge is future-issued or expired")
+    return {"run_id": run_id, "repo_id": repo_id, "genesis_head": genesis}
+
+
+def parse_owner_response(path):
+    observed = bounded_regular_file(path, "owner response", 0o600, 64 * 1024)
+    try:
+        with open_runtime_source(Path(path), runtime_source_identity(observed)) as handle:
+            raw = handle.read(64 * 1024 + 1)
+    except OSError as exc:
+        raise ValidationError("response file is unreadable: {}".format(exc))
+    if not 1 <= len(raw) <= 64 * 1024 or b"\x00" in raw:
+        raise ValidationError("response must contain 1-65536 non-NUL bytes")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValidationError("response file is not UTF-8: {}".format(exc))
+    if not lines or any(not line for line in lines) or len(lines) % 2:
+        raise ValidationError("response must contain one nonblank option/value pair per two lines")
+    allowed = {"--action", "--findings", "--instructions", "--add-finding"}
+    values = {}
+    for index in range(0, len(lines), 2):
+        option, value = lines[index:index + 2]
+        if option not in allowed or option in values:
+            raise ValidationError("response contains a forbidden or duplicate option")
+        values[option] = value
+    action = values.get("--action", "").strip()
+    if action not in ("approve", "fix", "skip"):
+        raise ValidationError("response requires exactly one approve, fix, or skip action")
+    if action != "fix" and set(values) != {"--action"}:
+        raise ValidationError("only a fix response may select findings or guidance")
+    response = {"action": action}
+    if action == "fix":
+        finding_ids = [
+            item.strip()
+            for item in values.get("--findings", "").split(",")
+            if item.strip()
+        ]
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ValidationError("fix response contains a duplicate finding id")
+        if finding_ids:
+            response["finding_ids"] = finding_ids
+        note = values.get("--instructions", "").strip()
+        if note:
+            if not finding_ids:
+                raise ValidationError("fix instructions require selected finding ids")
+            response["instructions"] = {
+                item: note for item in sorted(finding_ids)
+            }
+        if "--add-finding" in values:
+            finding = strict_json_loads(values["--add-finding"], "added finding")
+            allowed = {
+                "id", "severity", "file", "line", "description", "action",
+                "source", "user_instructions", "review_scope", "category",
+            }
+            if not isinstance(finding, dict) or not set(finding).issubset(allowed):
+                raise ValidationError("added finding fields are not the exact schema")
+            strings = allowed - {"line"}
+            if any(key in finding and not isinstance(finding[key], str) for key in strings):
+                raise ValidationError("added finding string field is malformed")
+            line = finding.get("line", 0)
+            if not isinstance(line, int) or isinstance(line, bool):
+                raise ValidationError("added finding line is malformed")
+            if not str(finding.get("description", "")).strip():
+                raise ValidationError("added finding description is required")
+            normalized = {}
+            for key in (
+                "id", "severity", "file", "line", "description", "action",
+                "source", "user_instructions", "review_scope", "category",
+            ):
+                value = finding.get(key, 0 if key == "line" else "")
+                if key in ("severity", "description", "action") or value not in ("", 0):
+                    normalized[key] = value
+            response["added_findings"] = [normalized]
+        if not finding_ids and "added_findings" not in response:
+            raise ValidationError("fix response requires selected or added findings")
+    return lines, response
+
+
+def go_json_bytes(value):
+    """Encode the protocol subset exactly like Go's encoding/json Marshal."""
+    text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return (
+        text.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+        .encode("utf-8")
+    )
+
+
+def owner_signer_environment(root):
+    return {
+        "HOME": str(root),
+        "NO_MISTAKES_HOME": str(root / "no-mistakes-home"),
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+    }
+
+
+def sign_owner_decision(env, state, challenge, response_lines, expected_response):
+    paths = owner_decision_paths(env, state["cell"])
+    bounded_regular_file(paths["tool"], "owner-decision signer", 0o500, 512 * 1024**2)
+    bounded_regular_file(paths["private"], "owner-decision private key", 0o600, 4096)
+    bounded_regular_file(paths["public"], "owner-decision public key", 0o644, 4096)
+    if sha256_file(paths["tool"]) != state["owner_decision"].get("signer_digest"):
+        raise ValidationError("owner-decision signer bytes changed")
+    version = run(
+        [str(paths["tool"]), "--version"], timeout=30,
+        env=owner_signer_environment(paths["root"]),
+    ).stdout.strip()
+    if version != state["owner_decision"].get("signer_version"):
+        raise ValidationError("owner-decision signer version identity changed")
+    if paths["public"].read_text(encoding="utf-8").strip() != state["request"]["owner_decision"]["public_key"]:
+        raise ValidationError("owner-decision public key file changed")
+    work = Path(tempfile.mkdtemp(prefix="decision.", dir=str(paths["root"])))
+    os.chmod(work, 0o700)
+    challenge_path = work / "challenge.json"
+    decision_path = work / "decision.json"
+    try:
+        challenge_path.write_bytes(go_json_bytes(challenge) + b"\n")
+        os.chmod(challenge_path, 0o600)
+        command = [
+            str(paths["tool"]), "axi", "owner-decision", "sign",
+            "--challenge-file", str(challenge_path),
+            "--private-key", str(paths["private"]),
+        ] + response_lines + ["--out", str(decision_path)]
+        result = run(
+            command, timeout=60, env=owner_signer_environment(paths["root"])
+        )
+        bounded_regular_file(decision_path, "owner-decision envelope", 0o644, 64 * 1024)
+        encoded = decision_path.read_bytes()
+        envelope = strict_json_loads(encoded.decode("utf-8"), "owner-decision envelope")
+        signature = envelope.get("signature") if isinstance(envelope, dict) else None
+        try:
+            signature_bytes = base64.b64decode(str(signature or ""), validate=True)
+        except (ValueError, binascii.Error):
+            signature_bytes = b""
+        if (
+            not isinstance(envelope, dict)
+            or list(envelope) != ["schema", "challenge", "response", "signature"]
+            or envelope.get("schema") != state["request"]["owner_decision"]["envelope_schema"]
+            or envelope.get("challenge") != challenge
+            or envelope.get("response") != expected_response
+            or len(signature_bytes) != 64
+        ):
+            raise ValidationError("owner-decision signer returned a foreign envelope")
+        canonical_envelope = {
+            "schema": envelope["schema"],
+            "challenge": challenge,
+            "response": expected_response,
+            "signature": signature,
+        }
+        envelope_digest = sha256_hex(
+            go_json_bytes(canonical_envelope)
+        )
+        next_head = sha256_hex((
+            challenge["previous_head"] + "\n" + envelope_digest + "\n"
+        ).encode("utf-8"))
+        reported = re.findall(r"(?m)^next_head: ([0-9a-f]{64})$", result.stdout or "")
+        if reported != [next_head]:
+            raise ValidationError("owner-decision signer reported a mismatched next history head")
+        return encoded, envelope, next_head
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def respond(env, args):
+    cell = require_cell(args.cell)
+    with lock(env, cell):
+        state = load_state(env, cell)
+        if state["phase"] != "needs-decision":
+            raise ValidationError("cell is not waiting on a live protected owner decision")
+        gate = (state.get("owner_decision") or {}).get("pending_gate")
+        if not isinstance(gate, dict):
+            raise ValidationError("cell has no exact pending owner-decision challenge")
+        response_lines, expected_response = parse_owner_response(args.response_file)
+        exact_live_run_command(env, state)
+        temporary = write_private_json(env, ".owner-challenge-", {"placeholder": True})
+        try:
+            storage_download(
+                env, gate["challenge_blob"], temporary,
+                container=state["staging"]["container"],
+            )
+            encoded_challenge = temporary.read_bytes()
+        finally:
+            temporary.unlink(missing_ok=True)
+        if sha256_bytes(encoded_challenge) != gate.get("challenge_digest"):
+            raise ValidationError("pending owner-decision challenge bytes changed")
+        challenge = strict_json_loads(
+            encoded_challenge.decode("utf-8"), "owner-decision challenge"
+        )
+        owner = state["owner_decision"]
+        pending = owner.get("pending_decision")
+        pending_previous = pending.get("previous_head") if isinstance(pending, dict) else None
+        identity = validate_owner_challenge(
+            state, challenge, expected_previous=pending_previous
+        )
+        if challenge != gate.get("challenge"):
+            raise ValidationError("pending owner-decision challenge state changed")
+        decision_blob = gate["decision_blob"]
+        if pending is None:
+            decision_bytes, envelope, next_head = sign_owner_decision(
+                env, state, challenge, response_lines, expected_response
+            )
+            exact_live_run_command(env, state)
+            decision_digest = sha256_bytes(decision_bytes)
+            owner["pending_decision"] = {
+                "gate_index": gate["gate_index"],
+                "challenge_digest": gate["challenge_digest"],
+                "decision_blob": decision_blob,
+                "decision_digest": decision_digest,
+                "decision_base64": base64.b64encode(decision_bytes).decode("ascii"),
+                "previous_head": challenge["previous_head"],
+                "next_head": next_head,
+            }
+            # The external controller retains its independently derived head
+            # before the envelope leaves controller authority. A crash can
+            # therefore strand the cell, but can never roll controller history
+            # back after the daemon has consumed a decision.
+            owner["history_head"] = next_head
+            save_state(env, state)
+            pending = owner["pending_decision"]
+        else:
+            decision_bytes, envelope, next_head, decision_digest = (
+                validate_pending_owner_decision(
+                    state, gate, pending, owner.get("history_head"), expected_response
+                )
+            )
+        exact_live_run_command(env, state)
+        decision_path = write_private_json(env, ".owner-decision-", {"placeholder": True})
+        try:
+            decision_path.write_bytes(decision_bytes)
+            os.chmod(decision_path, 0o600)
+            try:
+                storage_upload(
+                    env, decision_path, decision_blob, overwrite=False,
+                    container=state["staging"]["container"],
+                )
+            except ValidationError:
+                readback = decision_path.with_name(decision_path.name + ".readback")
+                try:
+                    storage_download(
+                        env, decision_blob, readback,
+                        container=state["staging"]["container"],
+                    )
+                    if readback.read_bytes() != decision_bytes:
+                        raise ValidationError(
+                            "owner-decision blob already exists with foreign bytes"
+                        )
+                finally:
+                    readback.unlink(missing_ok=True)
+        finally:
+            decision_path.unlink(missing_ok=True)
+        owner["repo_id"] = identity["repo_id"]
+        owner["genesis_head"] = identity["genesis_head"]
+        transition(
+            env, state, "running",
+            "controller-signed owner decision published; daemon history acknowledgement remains pending",
+        )
+    print(
+        "AZURE VALIDATION RESPONDED cell={} attempt={} gate={} head={}".format(
+            state["cell"], state["attempt"], gate["gate_index"], next_head
+        )
+    )
 
 
 def replacement_allowed(state, vm_presence):
     """Minimum absence fence: VM gone plus a phase that owns recoverable work."""
     if vm_presence != "absent-proven":
         return False, "old VM absence is not proven"
+    if (state.get("request") or {}).get("owner_decision", {}).get("schema") == OWNER_DECISION_SCHEMA:
+        return False, "protected owner-decision runs cannot cross a VM/daemon replacement boundary"
     if state.get("phase") not in ("running", "needs-decision", "failed-retained", "responding", "reattaching"):
         return False, "cell phase does not own recoverable work"
     return True, "replacement admitted"
@@ -4030,6 +4796,7 @@ def close(env, args):
                 for entry in admission.get("shard_plan", []):
                     if entry["invocation"] not in dispatched:
                         release_shape_constituent(env, state, entry["invocation"], "shard-never-dispatched")
+            destroy_owner_decision_material(env, state["cell"])
         except ValidationError as exc:
             transition(env, state, "cleanup-retained", "exact close was partial or ambiguous: {}".format(str(exc)[:300]))
             raise
@@ -4053,6 +4820,7 @@ def fail_retain(env, args):
             env, state["resources"]["worktree_disk_id"],
             state["resources"]["identities"]["worktree"], "validation worktree",
         )
+        destroy_owner_decision_material(env, state["cell"])
         transition(env, state, "failed-retained", "exact disposable compute removed; worktree retained")
     print("AZURE VALIDATION RETAINED cell={} compute=zero worktree=retained".format(state["cell"]))
 
@@ -4906,6 +5674,7 @@ def purge_retained(env, args):
                 raise ValidationError("purge-retained owns only an exact failed-retained cell or its purge retry")
             try:
                 execute_purge_plan(env, state, purge)
+                destroy_owner_decision_material(env, cell)
             except ValidationError as exc:
                 state.setdefault("events", []).append({
                     "at": iso_utc(), "phase": "purging",
@@ -4929,6 +5698,133 @@ def list_cell_blobs(env, state, prefix="shards/"):
         "--container-name", state["staging"]["container"], "--prefix", prefix,
     ])
     return [item.get("name") for item in values if isinstance(item, dict) and isinstance(item.get("name"), str)]
+
+
+def discover_owner_gate(env, state):
+    owner = state.get("owner_decision") or {}
+    prefix = "control/owner-decision/a{}/".format(state["attempt"])
+    names = sorted(list_cell_blobs(env, state, prefix=prefix))
+    pattern = re.compile(
+        r"^{}gate-([1-9][0-9]*)\.(challenge|decision)\.json$".format(
+            re.escape(prefix)
+        )
+    )
+    parsed = {}
+    for name in names:
+        match = pattern.fullmatch(name)
+        if match is None:
+            raise ValidationError("owner-decision exchange contains an undeclared blob")
+        index = int(match.group(1))
+        kind = match.group(2)
+        if kind in parsed.setdefault(index, {}):
+            raise ValidationError("owner-decision exchange contains a duplicate blob")
+        parsed[index][kind] = name
+    pending_gate = owner.get("pending_gate")
+    pending = owner.get("pending_decision")
+    if (pending_gate is None) != (pending is None):
+        raise ValidationError("owner-decision pending state is incomplete")
+    if pending is not None:
+        decision_bytes, envelope, _, _ = validate_pending_owner_decision(
+            state, pending_gate, pending, owner.get("history_head")
+        )
+        index = pending_gate["gate_index"]
+        current = parsed.get(index, {})
+        if current.get("challenge") != pending_gate.get("challenge_blob"):
+            raise ValidationError("owner-decision exchange lost the pending challenge")
+        decision_blob = current.get("decision")
+        if decision_blob is None:
+            return pending_gate
+        if decision_blob != pending.get("decision_blob"):
+            raise ValidationError("owner-decision exchange changed the pending decision path")
+        temporary = write_private_json(env, ".owner-decision-readback-", {"placeholder": True})
+        try:
+            storage_download(
+                env, decision_blob, temporary,
+                container=state["staging"]["container"],
+            )
+            if temporary.read_bytes() != decision_bytes:
+                raise ValidationError("owner-decision exchange changed the signed envelope bytes")
+        finally:
+            temporary.unlink(missing_ok=True)
+        successor = parsed.get(index + 1, {}).get("challenge")
+        if successor is None:
+            return pending_gate
+        successor_path = write_private_json(env, ".owner-successor-", {"placeholder": True})
+        try:
+            storage_download(
+                env, successor, successor_path,
+                container=state["staging"]["container"],
+            )
+            if successor_path.stat().st_size > 64 * 1024:
+                raise ValidationError("owner-decision successor challenge exceeds 64 KiB")
+            successor_challenge = strict_json_loads(
+                successor_path.read_text(encoding="utf-8"),
+                "owner-decision successor challenge",
+            )
+        finally:
+            successor_path.unlink(missing_ok=True)
+        validate_owner_challenge(
+            state, successor_challenge, expected_previous=pending["next_head"]
+        )
+        record_responded_owner_decision(owner, pending_gate, pending, envelope)
+    responded = owner.get("responded_gates") or []
+    next_index = len(responded) + 1
+    next_entries = parsed.get(next_index, {})
+    if "decision" in next_entries:
+        raise ValidationError("an owner-decision response appeared without controller authority")
+    expected_history = list(range(1, len(responded) + 1))
+    observed_history = sorted(
+        index for index, entries in parsed.items() if "decision" in entries
+    )
+    if observed_history != expected_history:
+        raise ValidationError("owner-decision exchange history differs from controller state")
+    for record in responded:
+        index = record.get("gate_index")
+        entries = parsed.get(index, {})
+        if (
+            entries.get("challenge") != record.get("challenge_blob")
+            or entries.get("decision") != record.get("decision_blob")
+        ):
+            raise ValidationError("owner-decision exchange lost a recorded gate")
+    future = [index for index in parsed if index > next_index]
+    if future:
+        raise ValidationError("owner-decision exchange skipped a gate sequence")
+    entries = next_entries
+    challenge_blob = entries.get("challenge")
+    if challenge_blob is None:
+        return None
+    temporary = write_private_json(env, ".owner-gate-", {"placeholder": True})
+    try:
+        storage_download(
+            env, challenge_blob, temporary,
+            container=state["staging"]["container"],
+        )
+        if temporary.stat().st_size > 64 * 1024:
+            raise ValidationError("owner-decision challenge exceeds 64 KiB")
+        encoded = temporary.read_bytes()
+    finally:
+        temporary.unlink(missing_ok=True)
+    challenge = strict_json_loads(encoded.decode("utf-8"), "owner-decision challenge")
+    identity = validate_owner_challenge(state, challenge)
+    state["run_id"] = identity["run_id"]
+    owner["repo_id"] = identity["repo_id"]
+    owner["genesis_head"] = identity["genesis_head"]
+    if owner.get("history_head") is None:
+        owner["history_head"] = identity["genesis_head"]
+    gate = {
+        "gate_index": next_index,
+        "challenge_blob": challenge_blob,
+        "decision_blob": "{}gate-{}.decision.json".format(prefix, next_index),
+        "challenge_digest": sha256_bytes(encoded),
+        "challenge": challenge,
+        "discovered_at": iso_utc(),
+    }
+    owner["pending_gate"] = gate
+    transition(
+        env, state, "needs-decision",
+        "exact live protected owner-decision challenge discovered",
+    )
+    return gate
 
 
 def extract_shard_request(archive_path, destination):
@@ -5328,6 +6224,24 @@ def drive(env, args):
                 if state["phase"] not in ("running", "responding", "reattaching", "needs-decision"):
                     print_status(state)
                     return
+                gate = discover_owner_gate(env, state)
+                if gate is not None:
+                    if (state.get("owner_decision") or {}).get("pending_decision"):
+                        print(
+                            "AZURE VALIDATION OWNER DECISION PENDING cell={} attempt={} gate={} head={}".format(
+                                cell, state["attempt"], gate["gate_index"],
+                                state["owner_decision"]["history_head"],
+                            )
+                        )
+                    else:
+                        print(
+                            "AZURE VALIDATION OWNER DECISION cell={} attempt={} gate={} step={} head={}".format(
+                                cell, state["attempt"], gate["gate_index"],
+                                gate["challenge"]["step"],
+                                gate["challenge"]["gate_head_sha"],
+                            )
+                        )
+                    return
                 names = list_cell_blobs(env, state)
                 requests = [name for name in names if re.match(r"^shards/round-[a-z0-9]{12}/request-[1-8]\.tar\.gz$", name)]
                 pending = []
@@ -5487,6 +6401,7 @@ def parser():
     build_parser.add_argument("--node", required=True)
     build_parser.add_argument("--gh-axi-package", required=True)
     build_parser.add_argument("--no-mistakes-version", required=True)
+    build_parser.add_argument("--no-mistakes-source-commit", required=True)
     build_parser.add_argument("--output", required=True)
     submit_parser = commands.add_parser("submit")
     submit_parser.add_argument("--repo")
@@ -5496,6 +6411,7 @@ def parser():
     submit_parser.add_argument("--intent-file", required=True)
     submit_parser.add_argument("--credential-lease", required=True)
     submit_parser.add_argument("--runtime-bundle", required=True)
+    submit_parser.add_argument("--owner-decision-signer", required=True)
     submit_parser.add_argument("--resource-class", choices=sorted(RESOURCE_CLASSES))
     dispatch_parser = commands.add_parser("dispatch")
     dispatch_parser.add_argument("--confirm-dispatch", action="store_true")
