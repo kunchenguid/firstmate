@@ -121,7 +121,7 @@ test_shipped_deactivated() {
 }
 
 test_enabled_sweep_refuses_the_spawn() {
-  local rec id out status
+  local rec id out status retention
   id='sweep-wiring-enabled-r2'
   rec=$(make_case enabled-refusal "$id")
   read_case_record "$rec"
@@ -136,6 +136,16 @@ test_enabled_sweep_refuses_the_spawn() {
     "spawn did not report the sweep's unreachable-HEAD verdict"
   assert_contains "$out" "config/worktree-pool-sweep" \
     "the refusal did not tell the operator where to disable the sweep"
+  # Returning the slot here would discard the very work the sweep refused over,
+  # so the hold is deliberate. The operator has to be told, or an acquired slot
+  # sitting on unsafe state reads as a leak.
+  retention=$(printf '%s\n' "$out" | grep 'stays held' | tail -n 1)
+  [ -n "$retention" ] \
+    || fail "the refusal did not tell the operator the pool slot is deliberately retained"
+  assert_contains "$retention" "$POOL_DIR" \
+    "the retention notice did not name the held worktree"
+  assert_contains "$retention" "window" \
+    "the retention notice did not point at the task window left open for inspection"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ORPHAN_SHA" ] \
     || fail "spawn moved the pooled worktree off the unreachable work it refused"
   assert_grep 'abandoned lane work' "$POOL_DIR/abandoned.txt" \

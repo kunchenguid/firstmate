@@ -137,10 +137,13 @@ When active, `bin/fm-spawn.sh` runs `bin/fm-treehouse-pool-sweep.sh` against the
 
 - Dirty worktree: tracked modifications, staged changes, or untracked non-ignored files.
 - HEAD contains commits not reachable from an approved durable ref: local branches (`refs/heads/*`), tags (`refs/tags/*`), or rescue refs (`refs/firstmate/rescue/*`). Reflogs are not refs, so a commit reachable only from a reflog is unreferenced.
+  The branch HEAD is attached to is not one of those durable refs: the spawn path hard-resets it onto origin's default branch right after acquisition, so a commit held only by that branch is about to be discarded rather than preserved.
 
 It also fails closed when git cannot answer a probe - an unreadable HEAD, a corrupt ref database, an unreadable object - refusing under the same exit code as the negative answer it resembles but with its own diagnostic.
 
-A refusal aborts the spawn with an error naming the worktree, the sweep exit code, and this config file; the exit codes, diagnostics, and the remote-tracking-ref reachability rules are owned by `bin/fm-treehouse-pool-sweep.sh`'s header (`bin/fm-treehouse-pool-sweep.sh --help`).
+A refusal aborts the spawn with an error naming the worktree, the sweep exit code, and this config file.
+The refused pool slot stays held and its task window stays open, and the error says so: the sweep refuses precisely when the worktree may hold work nothing else references, so returning the slot there would discard exactly that work.
+An operator returns it by hand once its work is safe; the exit codes, diagnostics, and the remote-tracking-ref reachability rules are owned by `bin/fm-treehouse-pool-sweep.sh`'s header (`bin/fm-treehouse-pool-sweep.sh --help`).
 
 This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant that no consumer can reuse an unsafe worktree.
 Two structural gaps it cannot close: a direct `treehouse get` by anything other than firstmate bypasses the sweep, and another firstmate home can race between sweep and acquire.

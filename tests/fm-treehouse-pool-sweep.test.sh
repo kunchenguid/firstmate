@@ -206,6 +206,10 @@ test_allows_stat_dirty_but_clean_worktree() {
   printf 'content\n' > file.txt
   git add file.txt
   git commit -m "initial" 2>/dev/null
+  # A tag, so HEAD is durably reachable independently of the branch it is
+  # attached to (which the sweep discounts). Without it the case would exit on
+  # the reachability verdict and prove nothing about the dirty probe.
+  git tag pool-base 2>/dev/null
   touch -t 203001010101 file.txt
   [ -z "$(git status --porcelain)" ] \
     || fail "stat-dirty: fixture is genuinely dirty, not merely stat-dirty"
@@ -320,6 +324,41 @@ test_allows_detached_head_fully_in_main() {
   rc=$?
   [ "$rc" -eq 0 ] || fail "detached in main: expected exit 0, got $rc"
   pass "allows detached HEAD fully contained in main"
+}
+
+# The pool worktree is still sitting on the lane branch that carries its only
+# copy of some committed work. That branch is not protection: the spawn path
+# hard-resets it onto origin's default branch moments later, so counting it
+# would green-light discarding the work.
+test_refuses_head_held_only_by_the_checked_out_branch() {
+  local tmp config_dir rc err lane_commit
+  tmp=$(fm_test_tmproot sweep-attached-branch)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_bare_repo "$tmp/origin"
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  git remote add origin "$tmp/origin"
+  touch file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  git push -u origin main 2>/dev/null
+  git checkout -b fm/lane 2>/dev/null
+  printf 'unlanded\n' > lane.txt
+  git add lane.txt
+  git commit -m "lane work" 2>/dev/null
+  lane_commit=$(git rev-parse HEAD)
+  [ "$(git rev-parse --abbrev-ref HEAD)" = "fm/lane" ] \
+    || fail "attached branch: fixture is not checked out on the lane branch"
+  [ -n "$lane_commit" ] || fail "attached branch: fixture has no lane commit"
+
+  err=$(FM_HOME="$tmp" "$SWEEP" "$tmp/repo" 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "attached branch: expected exit 2, got $rc"
+  assert_contains "$err" "not reachable from durable refs" \
+    "attached branch: missing the unreachable-HEAD diagnostic"
+  pass "refuses HEAD whose only ref is the branch about to be hard-reset"
 }
 
 test_refuses_reflog_only_reachability() {
@@ -580,6 +619,7 @@ test_refuses_untracked_files
 test_allows_branch_reachable_head
 test_allows_tag_reachable_head
 test_allows_detached_head_fully_in_main
+test_refuses_head_held_only_by_the_checked_out_branch
 test_refuses_reflog_only_reachability
 test_historical_reproduction
 test_refuses_remote_only_refs

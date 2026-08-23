@@ -17,6 +17,12 @@
 #      - refs/tags/* (tags)
 #      - refs/firstmate/rescue/* (reserved rescue namespace)
 #
+# The branch HEAD is attached to does NOT count as one of those durable refs.
+# fm-spawn.sh's freshen_spawn_worktree_base hard-resets the checked-out branch
+# onto origin's default branch immediately after acquisition, so a commit held
+# only by that branch is about to be discarded, not preserved: counting it would
+# green-light exactly the unlanded lane work this sweep exists to protect.
+#
 # Reflogs are NOT refs. A commit reachable only from a reflog is unreferenced.
 #
 # A question git cannot answer - an unreadable HEAD, a corrupt ref database, an
@@ -143,6 +149,36 @@ count_refs() {
   git -C "$wt" for-each-ref --format='%(refname)' "$pattern" 2>/dev/null | wc -l
 }
 
+# The full ref name of the branch HEAD is attached to; empty output when HEAD is
+# detached. Returns 2 when git cannot answer the question.
+attached_branch_ref() {
+  local wt=$1 out rc=0
+  out=$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null) || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$out" ;;
+    1) : ;;
+    *) return 2 ;;
+  esac
+}
+
+# Every ref that would still hold HEAD's commits after the checked-out branch is
+# hard-reset, printed as rev-list exclusions. Remote-tracking refs are included
+# (the reset target itself lives there); the attached branch is not.
+protecting_refs() {
+  local wt=$1 attached=$2 all ref
+  all=$(git -C "$wt" for-each-ref --format='%(refname)' \
+    refs/heads refs/tags refs/firstmate/rescue refs/remotes 2>/dev/null) || return 2
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    if [ -n "$attached" ] && [ "$ref" = "$attached" ]; then
+      continue
+    fi
+    printf '^%s\n' "$ref"
+  done <<EOF
+$all
+EOF
+}
+
 has_durable_refs() {
   local wt=$1
   local ns count total=0
@@ -169,7 +205,7 @@ head_covered_by_remotes() {
 
 check_head_reachable() {
   local wt=$1
-  local unique_count durable_rc=0 remote_rc=0
+  local attached excludes unique_count durable_rc=0 remote_rc=0
 
   has_durable_refs "$wt" || durable_rc=$?
   if [ "$durable_rc" -eq 2 ]; then
@@ -186,8 +222,14 @@ check_head_reachable() {
     return 2
   fi
 
-  unique_count=$(git -C "$wt" rev-list --count HEAD --not --branches --tags \
-    --glob='refs/firstmate/rescue/*' 2>/dev/null) || return 5
+  attached=$(attached_branch_ref "$wt") || return 5
+  excludes=$(protecting_refs "$wt" "$attached") || return 5
+  if [ -n "$excludes" ]; then
+    unique_count=$(printf '%s\n' "$excludes" \
+      | git -C "$wt" rev-list --count --stdin HEAD 2>/dev/null) || return 5
+  else
+    unique_count=$(git -C "$wt" rev-list --count HEAD 2>/dev/null) || return 5
+  fi
   case "$unique_count" in
     '' | *[!0-9]*) return 5 ;;
   esac

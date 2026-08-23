@@ -2265,7 +2265,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-treehouse-pool-sweep.sh" "$WT" || sweep_rc=$?
     if [ "$sweep_rc" -ne 0 ]; then
+      # The refusal deliberately keeps the acquired slot: the sweep refuses
+      # precisely when the worktree may hold work nothing else references, and
+      # returning it here would discard exactly that. The slot stays held, and
+      # window $T stays open, until an operator has looked at the state; say so
+      # rather than leaving the hold to look like a leak.
       echo "error: worktree pool sweep refused worktree $WT (exit $sweep_rc); inspect unsafe state or disable sweep in config/worktree-pool-sweep" >&2
+      echo "error: the pool slot for $WT stays held and window $T stays open so its unsafe state is preserved for inspection; return it by hand once its work is safe" >&2
       exit 1
     fi
   fi
