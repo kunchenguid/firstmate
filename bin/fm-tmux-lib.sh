@@ -189,6 +189,27 @@ EOF
   return 1
 }
 
+# fm_tmux_pane_foreground_pid: the PID of the pane's live FOREGROUND process
+# group leader - the same pgid=tpgid scoping fm_tmux_composer_identity and
+# fm_tmux_pane_is_cursor already use to find the process actually running in
+# the pane right now, generalized beyond matching one harness's name or
+# identity. Prints a bare PID; returns 1 when the pane has no readable tty or
+# no foreground process (e.g. it exited to a shell prompt).
+fm_tmux_pane_foreground_pid() {  # <target>
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    printf '%s' "$pid"
+    return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
+}
+
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
 # text, ambiguous structure, unreadable state, and future verdicts all defer.
 fm_pane_input_pending() {  # <target>

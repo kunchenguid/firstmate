@@ -274,6 +274,94 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
 }
+
+# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
+# PAUSE set: which key(s), if any, currently hold an unresolved paused: or
+# captain-held: declaration. A DIFFERENT rule from _fm_decision_fold_line's
+# needs-decision/blocked-open, resolved/captain-held-close contract, because
+# here captain-held ITSELF is the thing that stays open (the crew idling on a
+# verified hold) rather than a verb that closes something else:
+#   paused | captain-held  -> (re)opens THIS line's key with this verb.
+#   resolved                -> closes the SAME key only. A `resolved [key=<k>]`
+#                              naming some OTHER, still-irrelevant key is a
+#                              no-op here - firstmate's own "resolved [key=<k>]:
+#                              answered: ..." line (fm-send's --resolve-key,
+#                              bin/fm-send.sh header) for an unrelated, earlier
+#                              decision must never read as ending a pause that
+#                              has nothing to do with it.
+#   anything else            -> a plain unkeyed (default-bucket) declaration -
+#                              working, done, failed, or a bare/default-keyed
+#                              resolved above - is the crew's own general
+#                              report of what it is doing now, so it closes only
+#                              the unkeyed "default" slot (bin/fm-brief.sh rule
+#                              6: a worker reports an undeclared wait clearing
+#                              this way as it resumes). It never touches a
+#                              SPECIFICALLY keyed captain-held hold, which is a
+#                              verified backlog transfer (fm-captain-hold.sh)
+#                              that only its own matching resolve can end.
+_fm_pause_fold_line() {  # <open-set> <status-line> <pause-verb> <held-verb> <resolve-verb>
+  local open=$1 line=$2 pause=$3 held=$4 resolve=$5 verb key note stripped
+  stripped=${line//[[:space:]]/}
+  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
+  verb=$(status_line_verb "$line")
+  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  case "$verb" in
+    "$pause"|"$held")
+      note=$(status_line_note "$line")
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      ;;
+    "$resolve")
+      open=$(_fm_decision_drop "$open" "$key")
+      ;;
+    *)
+      [ "$key" != default ] || open=$(_fm_decision_drop "$open" default)
+      ;;
+  esac
+  printf '%s' "$open"
+}
+
+# The status line that actually speaks to the crew's own current pause/hold
+# state, folding the WHOLE stream through _fm_pause_fold_line rather than
+# trusting last_status_line's literal last byte. last_status_line alone cannot
+# represent "an unrelated keyed decision closed after a pause was declared": a
+# `resolved [key=<k>]` line firstmate appends to answer some OTHER, earlier
+# decision becomes the new literal last line and would silently read as "no
+# longer paused" to any caller that trusted it, even though nothing about the
+# declared external wait changed (see _fm_pause_fold_line for the exact rule
+# and bin/fm-classify-lib.sh's status_open_decisions for the sibling fold this
+# mirrors). Falls back to the plain last_status_line when nothing is open, so
+# a task with no pause/hold in play reads exactly as before.
+last_general_status_line() {  # <status-file>
+  local f=$1 pause held resolve line open='' key verb note
+  [ -f "$f" ] || { printf ''; return 0; }
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    open=$(_fm_pause_fold_line "$open" "$line" "$pause" "$held" "$resolve")
+  done < "$f"
+  if [ -n "$open" ]; then
+    while IFS=$'\t' read -r key verb note; do
+      [ "$verb" = "$held" ] && { printf '%s [key=%s]: %s' "$verb" "$key" "$note"; return 0; }
+    done <<EOF
+$open
+EOF
+    while IFS=$'\t' read -r key verb note; do
+      if [ "$key" = default ]; then
+        printf '%s: %s' "$verb" "$note"
+      else
+        printf '%s [key=%s]: %s' "$verb" "$key" "$note"
+      fi
+      return 0
+    done <<EOF
+$open
+EOF
+  fi
+  last_status_line "$f"
+}
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>

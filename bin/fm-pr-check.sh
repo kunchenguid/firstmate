@@ -41,6 +41,18 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+# A task's pr= is a claim about which PR this worktree's merge watch and teardown
+# safety check are bound to. Overwriting it with a different PR silently re-aims
+# both at the new PR while anything still pending on the original (its merge
+# watch, its landed-work check) keeps trusting a value that no longer names it.
+# Refuse rather than overwrite; re-running with the SAME url stays idempotent so
+# the existing re-arm-before-merge flow (bin/fm-pr-merge.sh) is unaffected.
+EXISTING_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "$URL" ]; then
+  echo "REFUSED: task $ID already has pr=$EXISTING_PR recorded; refusing to overwrite it with $URL. Tear down the task or resolve the existing PR before recording a different one." >&2
+  exit 1
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
