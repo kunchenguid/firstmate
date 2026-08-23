@@ -72,6 +72,14 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT:-}" ]; then
+      count=$(cat "$FM_FAKE_TMUX_CAPTURE_COUNT" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_TMUX_CAPTURE_COUNT"
+      if [ "$count" -ge 2 ] && [ -f "${FM_FAKE_TMUX_ACK_RECORD:-}" ]; then
+        mv "$FM_FAKE_TMUX_ACK_RECORD" "${FM_FAKE_TMUX_ACK_RECORD%/*}/handled/"
+      fi
+    fi
     if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
       cat "$FM_FAKE_TMUX_CAPTURE"
     else
@@ -180,22 +188,6 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
-test_action_commit_orders_with_ack() {
-  local state rec claim
-  state="$TMP_ROOT/action-ack/state"; mkdir -p "$state"
-  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first")
-  claim=$(inbox_lib "$state" fm_task_inbox_action_claim "$rec") \
-    || fail "an unhandled record should allow an action commitment"
-  mv "$rec" "$state/t1.inbox/handled/"
-  inbox_lib "$state" fm_task_inbox_action_release "$claim"
-  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second")
-  mv "$rec" "$state/t1.inbox/handled/"
-  if inbox_lib "$state" fm_task_inbox_action_claim "$rec" >/dev/null; then
-    fail "an acknowledgement that wins the race must prevent the watcher action"
-  fi
-  pass "inbox: watcher actions and acknowledgement moves have atomic ordering"
-}
-
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -282,6 +274,26 @@ test_watcher_rerings_idle_pane_quietly() {
   pass "watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it"
 }
 
+test_watcher_ack_during_ring_check_stays_quiet() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case ack-race)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  : > "$dir/capture.count"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "already handled")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_TMUX_CAPTURE_COUNT="$dir/capture.count" FM_FAKE_TMUX_ACK_RECORD="$rec" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 3
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ -f "$state/t1.inbox/handled/001.msg" ] || fail "the worker acknowledgement did not win the ring race"
+  [ ! -s "$log" ] || fail "the watcher rang after the record was acknowledged:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] || fail "the acknowledgement race queued a wake"
+  pass "watcher: an acknowledgement during final ring checks stays silent"
+}
+
 test_watcher_waits_on_busy_pane() {
   local dir state out log pid rec
   dir=$(setup_watch_case busywait)
@@ -344,9 +356,9 @@ test_watcher_escalates_once_after_budget() {
 test_write_is_durable_and_exact
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
-test_action_commit_orders_with_ack
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
+test_watcher_ack_during_ring_check_stays_quiet
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_escalates_once_after_budget

@@ -623,7 +623,13 @@ else
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
-    fm_lock_acquire_wait "$INBOX_META_LOCK" || exit 1
+    if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
+      exit 1
+    fi
     CURRENT_INBOX_TARGET=
     CURRENT_INBOX_BACKEND=
     if [ -f "$TARGET_META" ]; then

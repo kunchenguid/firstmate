@@ -247,6 +247,33 @@ test_secondmate_marker_and_enqueue_delivery() {
   pass "fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue"
 }
 
+test_meta_lock_contention_fails_bounded() {
+  local dir err rc holder marker lock i
+  dir=$(setup_case meta-lock); err="$dir/send.err"
+  marker="$dir/meta-lock-held"
+  lock="$dir/home/state/.meta-t1.lock"
+  bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$marker" &
+  holder=$!
+  i=0
+  while [ ! -e "$marker" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$marker" ] || { kill "$holder" 2>/dev/null; fail "the metadata lock holder did not start"; }
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "must not hang"; rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ "$rc" -ne 0 ] || fail "metadata lock contention should fail after the bounded wait"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a lock refusal must not enqueue a record"
+  assert_contains "$(cat "$err")" "metadata could not be locked" \
+    "the bounded metadata lock refusal should be explicit"
+  pass "fm-send inbox: metadata lock contention fails bounded without enqueue"
+}
+
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable); err="$dir/send.err"
@@ -271,4 +298,5 @@ test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
+test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
