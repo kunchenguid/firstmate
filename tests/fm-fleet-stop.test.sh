@@ -71,9 +71,11 @@ ok "all four mutating network sweeps stand down under the flag"
 
 # --- 4. Banner and divergence without the flag -----------------------------
 banner_on=$(FM_HOME="$HOME_A" FM_BOOTSTRAP_DETECT_ONLY=1 "$REPO/bin/fm-bootstrap.sh" 2>&1)
-printf '%s\n' "$banner_on" | grep -q '^FLEET_STOP: active since ' \
-  && ok "detect-only run prints the FLEET_STOP banner" \
-  || fail "detect-only run must print the FLEET_STOP banner"
+if printf '%s\n' "$banner_on" | grep -q '^FLEET_STOP: active since '; then
+  ok "detect-only run prints the FLEET_STOP banner"
+else
+  fail "detect-only run must print the FLEET_STOP banner"
+fi
 
 FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" lift >/dev/null || fail "lift must succeed"
 [ ! -f "$FLAG" ] || fail "lift must remove the flag"
