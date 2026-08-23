@@ -113,7 +113,7 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 }
 
 test_write_is_durable_and_exact() {
-  local state rec rec2 doorbell expected actual expected2 actual2 text
+  local state rec rec2 doorbell doorbell2 expected actual expected2 actual2 text
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
   text=$'line one\nline two with  spaces\n/slash body\n\n'
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
@@ -140,7 +140,11 @@ test_write_is_durable_and_exact() {
   cmp -s "$expected2" "$actual2" \
     || fail "record body added a trailing newline"
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
-  assert_contains "$doorbell" "$state/t1.inbox/001.msg" "doorbell should name the record"
+  doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
+  [ "$doorbell" = "$doorbell2" ] \
+    || fail "every record in one inbox should ring the same drain-all doorbell"
+  assert_contains "$doorbell" "$state/t1.inbox/*.msg" "doorbell should name all unhandled records"
+  assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
   assert_contains "$doorbell" "$state/t1.inbox/handled/" "doorbell should name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
@@ -277,7 +281,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: read $rec" "$log" \
+  grep -qF "Firstmate instruction waiting: list $state/t1.inbox/*.msg" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"

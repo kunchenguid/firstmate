@@ -169,14 +169,14 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
-# The constant self-describing doorbell line for one record. Self-describing
-# on purpose: a worker whose brief predates the inbox contract still receives
-# the complete instruction in the line itself.
+# The constant self-describing doorbell line for the inbox containing a record.
+# Self-describing on purpose: a worker whose brief predates the inbox contract
+# still receives the complete instruction in the line itself.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local rec=$1 dir=${1%/*} abs
+  local dir=${1%/*} abs
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: read %s/%s, act on it, then mv it to %s/handled/.' \
-    "$abs" "${rec##*/}" "$abs"
+  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
+    "$abs" "$abs"
 }
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
