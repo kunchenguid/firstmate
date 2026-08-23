@@ -10,6 +10,11 @@ set -u
 fm_test_tmproot_into TMP_ROOT fm-pi-watch-extension
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
+stage_opencode_module() {
+  local source=$1 target=$2
+  cp "$source" "$target" || fail "could not stage OpenCode plugin module: $source"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
@@ -295,25 +300,10 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
-test_opencode_primary_watch_plugin_static_wiring() {
-  local plugin text
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  assert_present "$plugin" "OpenCode primary watch plugin missing"
-  text=$(cat "$plugin")
-  assert_contains "$text" "session.idle" "OpenCode plugin does not listen for session.idle"
-  assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
-  assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
-  assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
-  assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
-  assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
-  assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
-  assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
-  pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
-}
-
 test_opencode_primary_watch_plugin_uses_effective_state_home() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-effective-state-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-effective-state-root"
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
@@ -330,7 +320,7 @@ printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_L
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -367,7 +357,8 @@ EOF
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-effective-config-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-effective-config-root"
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
@@ -381,7 +372,7 @@ printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -416,7 +407,8 @@ EOF
 
 test_opencode_primary_watch_plugin_requires_session_lock() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-lock-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-lock-root"
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
@@ -430,7 +422,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -467,29 +459,54 @@ EOF
 }
 
 test_opencode_watch_arm_coordinator_respects_primary_scope() {
-  local plugin base repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  base="$TMP_ROOT/opencode-coordinator-base"
-  repo="$TMP_ROOT/opencode-coordinator-wt"
-  home="$TMP_ROOT/opencode-coordinator-home"
-  log="$TMP_ROOT/opencode-coordinator.log"
-  fm_git_worktree "$base" "$repo" fm/opencode-coordinator
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
-  : > "$repo/AGENTS.md"
-  : > "$home/state/task.meta"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+  local plugin guard_plugin kind base repo home log guard_log out status
+  plugin="$TMP_ROOT/opencode-coordinator-primary.mjs"
+  guard_plugin="$TMP_ROOT/opencode-coordinator-guard.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$guard_plugin"
+  for kind in crew scout; do
+    base="$TMP_ROOT/opencode-coordinator-$kind-base"
+    repo="$TMP_ROOT/opencode-coordinator-$kind-wt"
+    home="$TMP_ROOT/opencode-coordinator-$kind-home"
+    log="$TMP_ROOT/opencode-coordinator-$kind.log"
+    guard_log="$TMP_ROOT/opencode-coordinator-$kind-guard.log"
+    fm_git_worktree "$base" "$repo" "fm/opencode-coordinator-$kind"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    : > "$repo/AGENTS.md"
+    printf 'sm-opencode-parent\n' > "$home/.fm-secondmate-home"
+    : > "$home/state/task.meta"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+    cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+printf 'child guard requested follow-up\n' >&2
+exit 2
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
+    out=$(PLUGIN="$plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
+const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
 await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const guardHooks = await guardMod.FmPrimaryTurnendGuard({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -502,20 +519,143 @@ if (status !== "not-primary") {
   process.exit(1);
 }
 if (existsSync(process.env.FM_ARM_LOG)) {
-  console.error("coordinator armed from a linked worktree");
+  console.error("coordinator armed from an unmarked child worktree");
+  process.exit(1);
+}
+await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!existsSync(process.env.FM_GUARD_LOG)) {
+  console.error("turn-end guard did not run in the child worktree");
+  process.exit(1);
+}
+if (!promptBody.includes("TURN WOULD END BLIND")) {
+  console.error(`missing child guard follow-up: ${promptBody}`);
   process.exit(1);
 }
 EOF
-)
-  status=$?
-  expect_code 0 "$status" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"
-  [ -z "$out" ] || fail "OpenCode coordinator-scope test printed output: $out"
-  pass "OpenCode watcher coordinator respects primary scope"
+    )
+    status=$?
+    expect_code 0 "$status" "OpenCode watch coordinator must stay silent in an unmarked $kind worktree while leaving the turn-end guard active"
+    [ -z "$out" ] || fail "OpenCode $kind coordinator-scope test printed output: $out"
+  done
+  pass "OpenCode watcher stays silent in child crew/scout worktrees without suppressing their turn-end guard"
+}
+
+test_opencode_watch_arm_includes_secondmate_own_home() {
+  local plugin topology base repo log out status git_dir common_dir
+  plugin="$TMP_ROOT/opencode-secondmate-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  for topology in plain linked; do
+    repo="$TMP_ROOT/opencode-secondmate-$topology"
+    log="$TMP_ROOT/opencode-secondmate-$topology.log"
+    if [ "$topology" = linked ]; then
+      base="$TMP_ROOT/opencode-secondmate-linked-base"
+      fm_git_worktree "$base" "$repo" fm/opencode-secondmate-linked
+      git_dir=$(git -C "$repo" rev-parse --git-dir)
+      common_dir=$(git -C "$repo" rev-parse --git-common-dir)
+      [ "$git_dir" != "$common_dir" ] || fail "linked secondmate fixture is not a linked worktree"
+    else
+      git init -q "$repo"
+    fi
+    mkdir -p "$repo/bin" "$repo/state" "$repo/config"
+    : > "$repo/AGENTS.md"
+    printf 'sm-opencode-%s\n' "$topology" > "$repo/.fm-secondmate-home"
+    : > "$repo/state/task.meta"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=1 (beacon fresh)\n'
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (status !== "armed") {
+  console.error(`expected armed, got ${status}`);
+  process.exit(1);
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run in the secondmate home");
+  process.exit(1);
+}
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "OpenCode watcher must arm in a marked $topology secondmate home"
+    [ -z "$out" ] || fail "OpenCode $topology secondmate-home test printed output: $out"
+  done
+  pass "OpenCode watcher arms in a marked secondmate's plain and linked own home"
+}
+
+test_opencode_watch_arm_rejects_spoofed_secondmate_markers() {
+  local plugin marker_kind base repo marker_target log out status
+  plugin="$TMP_ROOT/opencode-spoofed-marker-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  for marker_kind in empty symlink; do
+    base="$TMP_ROOT/opencode-spoofed-$marker_kind-base"
+    repo="$TMP_ROOT/opencode-spoofed-$marker_kind-wt"
+    log="$TMP_ROOT/opencode-spoofed-$marker_kind.log"
+    fm_git_worktree "$base" "$repo" "fm/opencode-spoofed-$marker_kind"
+    mkdir -p "$repo/bin" "$repo/state" "$repo/config"
+    : > "$repo/AGENTS.md"
+    : > "$repo/state/task.meta"
+    if [ "$marker_kind" = symlink ]; then
+      marker_target="$TMP_ROOT/opencode-spoofed-marker-target"
+      printf 'sm-opencode-spoof\n' > "$marker_target"
+      ln -s "$marker_target" "$repo/.fm-secondmate-home"
+    else
+      : > "$repo/.fm-secondmate-home"
+    fi
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=1 (beacon fresh)\n'
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (status !== "not-primary") {
+  console.error(`expected not-primary, got ${status}`);
+  process.exit(1);
+}
+await new Promise((resolve) => setTimeout(resolve, 120));
+if (existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm trusted a spoofed secondmate marker");
+  process.exit(1);
+}
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "OpenCode watcher must reject a linked worktree's $marker_kind secondmate marker"
+    [ -z "$out" ] || fail "OpenCode $marker_kind marker-spoof test printed output: $out"
+  done
+  pass "OpenCode watcher rejects empty and symlinked secondmate marker spoofs"
 }
 
 test_opencode_primary_watch_plugin_rearms_after_wake() {
   local plugin repo home log out status
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  plugin="$TMP_ROOT/opencode-rearm-primary.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   repo="$TMP_ROOT/opencode-rearm-root"
   home="$TMP_ROOT/opencode-rearm-home"
   log="$TMP_ROOT/opencode-rearm.log"
@@ -529,7 +669,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'signal: synthetic wake\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -571,8 +711,10 @@ EOF
 
 test_opencode_watch_arm_coordinates_with_turnend_guard() {
   local arm_plugin guard_plugin repo home log guard_log out status
-  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  arm_plugin="$TMP_ROOT/opencode-coordinate-primary.mjs"
+  guard_plugin="$TMP_ROOT/opencode-coordinate-guard.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$arm_plugin"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$guard_plugin"
   repo="$TMP_ROOT/opencode-coordinate-root"
   home="$TMP_ROOT/opencode-coordinate-home"
   log="$TMP_ROOT/opencode-coordinate-arm.log"
@@ -593,7 +735,7 @@ printf 'guard should not run\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -644,8 +786,10 @@ EOF
 
 test_opencode_healthy_arm_output_does_not_suppress_guard() {
   local arm_plugin guard_plugin repo home log guard_log out status
-  arm_plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  guard_plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  arm_plugin="$TMP_ROOT/opencode-external-healthy-primary.mjs"
+  guard_plugin="$TMP_ROOT/opencode-external-healthy-guard.mjs"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$arm_plugin"
+  stage_opencode_module "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" "$guard_plugin"
   repo="$TMP_ROOT/opencode-external-healthy-root"
   home="$TMP_ROOT/opencode-external-healthy-home"
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
@@ -666,7 +810,7 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -725,11 +869,12 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
-test_opencode_primary_watch_plugin_static_wiring
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
+test_opencode_watch_arm_includes_secondmate_own_home
+test_opencode_watch_arm_rejects_spoofed_secondmate_markers
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
