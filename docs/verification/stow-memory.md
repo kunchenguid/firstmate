@@ -215,3 +215,40 @@ The first pass preserved current preferences, shared-memory and safety authority
 The secondmate fixture passed the production home validator before the existing inheritance owner installed the main-authoritative file read-only.
 Both secondmate passes preserved its unique local preference and learning while leaving those inherited bytes and mode untouched.
 This verifies the real instruction path consolidates to budget, reports truthful deltas, preserves the primary-owned shared boundary, and does not grow on an identical second pass.
+
+## External cadence lab
+
+The unarmed one-shot cadence lab was verified on 2026-08-22 with Bash behavior fixtures and Pi 0.84.2 command discovery.
+The behavior fixture uses two distinct locally bound homes, a fake endpoint probe, and a fake `fm-send.sh` boundary without starting a scheduler, daemon, or model turn.
+Before the lab existed, the new behavior fixture distinguished the missing mechanism with this RED result:
+
+```text
+./tests/fm-stow-cadence-lab.test.sh: line 82: /home/fm/.treehouse/fm-home-118330/15/fm-home/bin/fm-stow-cadence-lab.sh: No such file or directory
+not ok - a semantically busy target must defer: expected exit 3, got 127
+```
+
+The exact focused command was:
+
+```bash
+env -u FM_ROOT_OVERRIDE -u FM_HOME \
+  ./bin/fm-test-run.sh tests/fm-stow-cadence-lab.test.sh
+```
+
+Real Claude, Codex, Pi, and Pi Signed prompt hooks do not expose an origin identity that can distinguish an externally submitted stow invocation from simultaneous identical manual input.
+The sender-owned identity capability therefore remains unsupported and the lab fails closed before sending; the opt-in live guard cannot produce correlated success until an adapter exposes that proof.
+
+Bounded output:
+
+```text
+ok - stow cadence lab defers a semantically busy home without sending
+ok - success receipt ordering is due-before-send-before-success and suppresses duplicates
+ok - sender permission refusal is deferred and recorded durably
+ok - secondmate captain-shared bytes and read-only mode are guarded at success
+ok - dead targets defer before any invocation and leave a failure receipt
+ok - Claude, Codex, Pi, and Pi Signed use only verified stow commands while Cursor defers
+ok - the lab refuses same-home self-injection without an authorized separate agent
+ok - the same lab path covers a parent primary through its authorized secondmate
+```
+
+Pi's exact skill namespace was checked without a model turn by running its offline RPC `get_commands` operation from the Firstmate root.
+The Pi 0.84.2 response exposed `skill:stow` from `.agents/skills/stow/SKILL.md`, matching the installed Pi documentation's `/skill:<name>` invocation contract.

@@ -72,6 +72,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
+STOW_HARNESS=
+STOW_CONTINUATION=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -79,9 +81,10 @@ case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
-for arg in "$@"; do
-  case "$arg" in
-    --claude) CLAUDE_MODE=1 ;;
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --claude) CLAUDE_MODE=1; shift ;;
+    --stow-harness) [ "$#" -ge 2 ] || { echo "usage: $(basename "$0") [--claude] [--stow-harness <harness>]" >&2; exit 2; }; STOW_HARNESS=$2; shift 2 ;;
     *) echo "usage: $(basename "$0") [--claude]" >&2; exit 2 ;;
   esac
 done
@@ -110,10 +113,6 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
-fi
-
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
 # force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
@@ -127,6 +126,23 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# shellcheck disable=SC2329 # Invoked indirectly through the EXIT trap below.
+publish_stow_settlement() {
+  local rc=$? activity=idle
+  trap - EXIT
+  if [ "$rc" -eq 2 ] || [ "$STOW_CONTINUATION" -eq 1 ]; then activity=busy; fi
+  if [ -n "$STOW_HARNESS" ]; then
+    FM_HOME="$FM_HOME" "${FM_STOW_ACTIVITY_BIN:-$SCRIPT_DIR/fm-stow-cadence-lab.sh}" \
+      activity "$activity" --harness "$STOW_HARNESS" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+trap publish_stow_settlement EXIT
+
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  exit 0
+fi
 
 # --- non-blocking captain-facing reply warning -------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
@@ -721,6 +737,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || guard_exit 2
     fi
+    STOW_CONTINUATION=1
     guard_exit 0
   fi
   sleep 0.1
@@ -730,6 +747,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || guard_exit 2
   fi
+  STOW_CONTINUATION=1
   guard_exit 0
 fi
 

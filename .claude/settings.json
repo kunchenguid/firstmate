@@ -44,12 +44,22 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "payload=$(cat 2>/dev/null || true); prompt=$(printf \"%s\" \"$payload\" | jq -r 'if (.prompt | type) == \"string\" then .prompt else empty end' 2>/dev/null); printf \"%s\\n\" \"$prompt\" | \"$CLAUDE_PROJECT_DIR\"/bin/fm-stow-cadence-lab.sh activity busy --harness claude --invocation-stdin"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
+            "command": "[ -z \"${GROK_AGENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude --stow-harness claude"
           },
           {
             "type": "command",

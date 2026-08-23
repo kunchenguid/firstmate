@@ -334,6 +334,14 @@ Memory writes use inspect-then-update: read the current destination first, then 
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
+The unarmed external-stow lab is a one-shot caller of the existing `fm-send.sh` transport, not a scheduler or a second control plane.
+It requires two distinct locally related Firstmate homes, a semantic idle lifecycle receipt, and activity newer than the last successful stow receipt before sending the adapter-specific skill command.
+Claude, Codex, Pi, and Pi Signed primary lifecycle adapters publish the lab's per-home activity state, but their prompt hooks do not expose an origin identity that distinguishes an external submission from identical manual input.
+The existing sender therefore reports identity-bound stow submission as unsupported, and `run` fails closed before publishing a due receipt or sending until an adapter can supply that proof through the sender-owned capability boundary.
+Cursor primary and secondmate scheduling remains excluded because its skill invocation is not verified.
+The exact due, success, failure, authorization, invocation, and read-only shared-memory mechanics are owned by `bin/fm-stow-cadence-lab.sh`.
+Production lifecycle adapters publish only the `activity` receipts; no production path schedules or invokes the lab's `run` subcommand.
+
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.

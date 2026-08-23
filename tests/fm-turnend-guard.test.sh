@@ -10,6 +10,9 @@
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
+# Fixtures must not inherit the live firstmate home or checkout overrides.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -238,6 +241,41 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock() {
   expect_code 2 "$status" "hook must block when a fresh beacon has no live watcher lock"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks when a fresh beacon has no live watcher lock"
+}
+
+test_hook_publishes_continuation_aware_stow_state() {
+  local dir activity log out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-stow-settlement")
+  activity="$dir/bin/fake-stow-activity"
+  log="$dir/stow-activity.log"
+  cat > "$activity" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_STOW_ACTIVITY_LOG:?}"
+SH
+  chmod +x "$activity"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" \
+    FM_STOW_ACTIVITY_BIN="$activity" FM_STOW_ACTIVITY_LOG="$log" \
+    bash "$dir/bin/fm-turnend-guard.sh" --stow-harness codex 2>&1); status=$?
+  expect_code 0 "$status" "a final settlement should remain allowed"
+  [ "$(cat "$log")" = 'activity idle --harness codex' ] \
+    || fail "final settlement did not publish idle through the guard: $(cat "$log")"
+  : > "$log"
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" \
+    FM_STOW_ACTIVITY_BIN="$activity" FM_STOW_ACTIVITY_LOG="$log" \
+    bash "$dir/bin/fm-turnend-guard.sh" --stow-harness codex 2>&1); status=$?
+  expect_code 2 "$status" "a guard continuation should remain blocking"
+  [ "$(cat "$log")" = 'activity busy --harness codex' ] \
+    || fail "guard continuation exposed an idle receipt: $(cat "$log")"
+  : > "$log"
+  out=$(printf '%s' '{"stop_hook_active":true}' | FM_HOME="$dir" \
+    FM_STOW_ACTIVITY_BIN="$activity" FM_STOW_ACTIVITY_LOG="$log" \
+    bash "$dir/bin/fm-turnend-guard.sh" --stow-harness codex 2>&1); status=$?
+  expect_code 0 "$status" "the bounded continuation stop should settle"
+  [ "$(cat "$log")" = 'activity idle --harness codex' ] \
+    || fail "bounded continuation never returned Codex to idle: $(cat "$log")"
+  pass "fm-turnend-guard publishes idle only at final settlement"
 }
 
 test_hook_blocks_source_only_home() {
@@ -2316,6 +2354,7 @@ test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
+test_hook_publishes_continuation_aware_stow_state
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon

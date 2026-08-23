@@ -66,7 +66,8 @@ function runSessionstartNudge(): string {
 
 function runGuard(payload: Record<string, unknown>): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+    const harness = process.env.FM_PI_HARNESS === "pi-signed" ? "pi-signed" : "pi";
+    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, ["--stow-harness", harness], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -144,6 +145,16 @@ function bannerOnly(stderr: string): string {
     .split("\n")
     .filter((line) => line.startsWith("\u25cf"))
     .join("\n");
+}
+
+function recordStowCadenceActivity(activity: "busy" | "idle", invocation?: string): void {
+  const harness = process.env.FM_PI_HARNESS === "pi-signed" ? "pi-signed" : "pi";
+  const args = ["activity", activity, "--harness", harness];
+  if (invocation !== undefined) args.push("--invocation-stdin");
+  spawnSync(`${root}/bin/fm-stow-cadence-lab.sh`, args, {
+    input: invocation,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
@@ -224,9 +235,14 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
+  pi.on("before_agent_start", (event) => {
+    recordStowCadenceActivity("busy", event.prompt);
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
+      recordStowCadenceActivity("idle");
       return;
     }
 
@@ -245,6 +261,7 @@ export default function (pi: ExtensionAPI) {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;
+      recordStowCadenceActivity("idle");
     }
   });
 

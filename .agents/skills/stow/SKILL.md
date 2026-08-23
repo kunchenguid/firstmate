@@ -68,6 +68,11 @@ Never describe the session as reset-safe while the memory total is over budget o
 
 ## Completion receipt
 
+After the complete curation pass succeeds, run `bin/fm-stow-cadence-lab.sh complete` before giving the receipt below.
+The command is a no-op when this was a manual `/stow` with no active cadence due receipt.
+If it refuses because inherited shared memory changed or cadence state is inconsistent, report that concrete exception and do not call the session reset-safe.
+This acknowledgment records only cadence completion mechanics; this skill remains the sole owner of every curation, routing, and captain-facing receipt decision.
+
 Report the outcome in plain captain-facing language with all of these facts:
 
 - effective startup-memory budget and total estimated tokens before and after;

@@ -7,6 +7,7 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
+# Capability probe: fm-send.sh --stow-submission-identity-capability
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -67,6 +68,11 @@ fi
 if [ ! -d "$STATE" ]; then
   echo "error: state dir '$STATE' is missing; fm-send cannot resolve targets for FM_HOME '$FM_HOME'" >&2
   exit 1
+fi
+
+if [ "${1:-}" = --stow-submission-identity-capability ]; then
+  echo "unsupported: current sender adapters cannot bind a submitted stow prompt to its target lifecycle event" >&2
+  exit 3
 fi
 
 # shellcheck source=bin/fm-backend.sh

@@ -208,7 +208,7 @@ family_for_basename() {
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|\
-    fm-model-catalog-inheritance.test.sh|\
+    fm-model-catalog-inheritance.test.sh|fm-stow-cadence-lab.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
@@ -223,7 +223,8 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
-    fm-turnend-captain-comms-live-e2e.test.sh)
+    fm-turnend-captain-comms-live-e2e.test.sh|\
+    fm-stow-cadence-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -967,6 +968,11 @@ families_for_changed_path() {
     bin/fm-watch*|bin/fm-wake*|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-stow-cadence-lab.sh|.claude/settings.json|.codex/hooks.json|\
+    .pi/extensions/fm-primary-turnend-guard.ts)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-afk*)
       printf '%s\n' afk

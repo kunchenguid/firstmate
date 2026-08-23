@@ -165,7 +165,7 @@ Full architecture - the supervision engine, task isolation, secondmates, dispatc
 ## Built-in skills
 
 Firstmate ships these user-invocable built-in skills.
-Claude and grok use the slash form shown here; codex uses the same names with `$`, such as `$afk`.
+Claude and grok use the slash form shown here; Codex uses the same names with `$`, such as `$afk`, and Pi uses `/skill:<name>`, such as `/skill:stow`.
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
