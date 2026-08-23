@@ -1,48 +1,37 @@
 #!/usr/bin/env bash
-# fm-afk-launch.sh - the single owner of the away-mode daemon TERMINAL lifecycle:
-# launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
-# tear it down by that exact id, and reconcile a leaked one after a crash.
+# fm-afk-launch.sh - own the away-mode daemon terminal lifecycle by exact id.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
-# bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
-# script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
-# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+# Harness-native background jobs have no verified survival contract across
+# their own session/task teardown, so `start-native` refuses. This launcher
+# creates a non-visible Herdr workspace or detached tmux session without
+# splitting the captain's active pane or using shell `&`.
 #
-# Correct supervisor targeting: the daemon finds the captain pane to inject into
-# from its OWN inherited env (discover_supervisor_target). Running it in a
-# separate terminal would make it discover its OWN pane, so this captures the
-# captain pane FIRST (from the pane this script runs in) and passes it in as
-# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+# The launcher captures the captain target before creating the daemon terminal
+# and passes FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly so the daemon
+# injects into the captain rather than discovering its own new pane.
 #
 # Usage:
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
-#                              is already running) launch the daemon in a fresh
-#                              non-visible terminal for the detected backend and
-#                              record it. Idempotent: an already-running daemon
-#                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#                              is already running in a verified live Herdr/tmux
+#                              terminal) launch and record a fresh non-visible
+#                              terminal; reconcile a recorded dead terminal first.
 #   fm-afk-launch.sh start-native
-#                              Prepare lifecycle state for a harness-native
-#                              background job and record that no terminal exists.
+#                              REFUSES; use `start` for every harness.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last.
+#                              id, and clear state/.afk last; persist unexpected
+#                              prior daemon death for return catch-up.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
+# See docs/herdr-backend.md "Away-mode supervisor support" for the contract and
+# its linked dated verification evidence.
 #
-# Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
-# terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
-# placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
-# override the captured captain pane/backend (an isolated lab pane in tests).
+# Test seam: FM_AFK_LAUNCH_ENTRY replaces the detached command for topology tests.
+# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND override the captured captain target.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -167,6 +156,17 @@ fm_afk_launch_flag_write() {
   fm_afk_flag_write "$FM_AFK_LAUNCH_STATE"
 }
 
+fm_afk_launch_record_unexpected_death() {
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk-daemon-died-unexpectedly" ]; then
+    return 0
+  fi
+  if ! : > "$FM_AFK_LAUNCH_STATE/.afk-daemon-died-unexpectedly"; then
+    fm_afk_launch_log "failed to record the unexpected daemon exit"
+    return 1
+  fi
+  fm_afk_launch_log "away-mode daemon was not running while away mode was active; away mode may have been unsupervised since it exited"
+}
+
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
 # field (a herdr workspace id, kept for the record's own documentation) is not
 # needed to close by id, so it is discarded. Returns 1 when no record exists.
@@ -190,11 +190,22 @@ fm_afk_launch_record_read() {
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
 }
 
-fm_afk_launch_record_validate_if_present() {
+fm_afk_launch_refresh_terminal_valid() {
   local result
   fm_afk_launch_record_read
   result=$?
-  [ "$result" -ne 2 ]
+  if [ "$result" -eq 0 ]; then
+    case "$FM_AFK_REC_BACKEND" in
+      herdr|tmux)
+        if fm_backend_source "$FM_AFK_REC_BACKEND" \
+          && fm_afk_launch_terminal_alive "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET"; then
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fm_afk_launch_log "live away-mode daemon is not backed by a verified herdr/tmux terminal; run 'bin/fm-afk-launch.sh stop' and then 'bin/fm-afk-launch.sh start'"
+  return 1
 }
 
 # Close a recorded terminal by EXACT id (never a broad sweep). The
@@ -277,19 +288,31 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
   esac
 }
 
-fm_afk_launch_wait_ready() {  # <backend> <target>
+fm_afk_launch_wait_recorded_daemon() {  # <backend> <target>
   local backend=$1 target=$2 attempt=0
+  case "$backend" in
+    herdr|tmux) fm_backend_source "$backend" || true ;;
+    none) ;;
+    *) return 1 ;;
+  esac
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    daemon_lock_held_by_live_daemon && return 0
+    if ! fm_afk_launch_terminal_alive "$backend" "$target"; then
+      fm_afk_launch_terminal_absent "$backend" "$target" && return 1
+    fi
+    sleep 0.05
+  done
+  daemon_lock_held_by_live_daemon
+}
+
+fm_afk_launch_wait_ready() {  # <backend> <target>
+  local backend=$1 target=$2
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
     fm_afk_launch_terminal_alive "$backend" "$target"
     return
   fi
-  while [ "$attempt" -lt 100 ]; do
-    attempt=$((attempt + 1))
-    daemon_lock_held_by_live_daemon && return 0
-    fm_afk_launch_terminal_alive "$backend" "$target" || return 1
-    sleep 0.05
-  done
-  return 1
+  fm_afk_launch_wait_recorded_daemon "$backend" "$target"
 }
 
 fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorded]
@@ -414,7 +437,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+  cmd=$(printf 'exec env FM_AFK_STATE_PREPARED=0 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
@@ -441,7 +464,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+  cmd=$(printf 'exec env FM_AFK_STATE_PREPARED=0 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
@@ -458,33 +481,60 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
+fm_afk_launch_refresh_active_daemon() {
+  fm_afk_launch_refresh_terminal_valid || return 1
+  if ! fm_afk_launch_flag_write; then
+    fm_afk_launch_log "failed to refresh away-mode flag"
+    return 1
+  fi
+  daemon_lock_held_by_live_daemon || return 2
+  fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
+}
+
 fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
+  local captain_target captain_backend backup artifact had_afk=0 result read_result
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  # Capture the captain pane FIRST, before creating anything.
+  mkdir -p "$FM_AFK_LAUNCH_STATE"
+
+  if daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_refresh_active_daemon
+    result=$?
+    case "$result" in
+      0) return 0 ;;
+      2) ;;
+      *) return 1 ;;
+    esac
+  fi
+
+  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    had_afk=1
+    fm_afk_launch_record_read
+    read_result=$?
+    if [ "$read_result" -eq 0 ]; then
+      fm_afk_launch_wait_recorded_daemon "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+      if daemon_lock_held_by_live_daemon; then
+        fm_afk_launch_refresh_active_daemon
+        result=$?
+        case "$result" in
+          0) return 0 ;;
+          2) ;;
+          *) return 1 ;;
+        esac
+      fi
+    fi
+    fm_afk_launch_record_unexpected_death || return 1
+  fi
+
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
 
-  mkdir -p "$FM_AFK_LAUNCH_STATE"
-
-  if daemon_lock_held_by_live_daemon; then
-    fm_afk_launch_record_validate_if_present || return 1
-    if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to refresh away-mode flag"
-      return 1
-    fi
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
-    return 0
-  fi
-
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-    had_afk=1
+  if [ "$had_afk" -eq 1 ]; then
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
@@ -527,54 +577,24 @@ fm_afk_launch_start() {
   return "$result"
 }
 
+# fm_afk_launch_start_native: ALWAYS refuses under the support contract in
+# docs/herdr-backend.md "Away-mode supervisor support". `start` is the one
+# verified path for every harness; refusal makes no state change, and the daemon
+# entry separately requires the detached launcher's explicit environment proof.
 fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
-  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
-    return 1
-  fi
-  if daemon_lock_held_by_live_daemon; then
-    fm_afk_launch_record_validate_if_present || return 1
-    fm_afk_launch_flag_write || return 1
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
-    return 0
-  fi
-  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-    had_afk=1
-    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
-  fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
-      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
-    fi
-  done
-  fm_afk_launch_reconcile || result=1
-  if [ "$result" -eq 0 ]; then
-    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
-      result=1
-    elif ! fm_afk_launch_flag_write; then
-      result=1
-    fi
-  fi
-  if [ "$result" -eq 0 ]; then
-    fm_afk_launch_record_write none - native || result=1
-  fi
-  if [ "$result" -ne 0 ]; then
-    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
-  else
-    rm -rf "$backup" || result=1
-  fi
-  return "$result"
+  fm_afk_launch_log "start-native is refused: no harness's in-pane background tool is verified to survive session/task teardown (the daemon can be SIGTERM'd silently) - run 'bin/fm-afk-launch.sh start' instead, for every harness"
+  return 1
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result afk_was_active=0
+  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && afk_was_active=1
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
+    if [ "$afk_was_active" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
+      fm_afk_launch_record_unexpected_death || true
+    fi
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
     return 1
   fi
@@ -583,15 +603,38 @@ fm_afk_launch_stop() {
   # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
   pid_identity=""
+  if [ "$afk_was_active" -eq 1 ] && [ "$read_result" -eq 0 ] \
+    && ! daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_wait_recorded_daemon "$FM_AFK_REC_BACKEND" "$FM_AFK_REC_TARGET" || true
+  fi
   if daemon_lock_held_by_live_daemon; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  elif [ "$afk_was_active" -eq 1 ]; then
+    # Away mode was active but no live process holds this home's daemon lock,
+    # so the daemon exited before this stop. Record that distinct durable fact
+    # rather than treating "nothing to stop" as a successful ordinary stop;
+    # bin/fm-afk-return.sh surfaces the unsupervised stretch during catch-up.
+    fm_afk_launch_record_unexpected_death || return 1
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
-      result=1
+      current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || current_identity=""
+      if [ -n "$current_identity" ] && [ "$current_identity" = "$pid_identity" ]; then
+        fm_afk_launch_log "failed to signal live away-mode daemon pid=$pid; preserving lifecycle state"
+        return 1
+      fi
+      if [ -z "$current_identity" ] && fm_pid_alive "$pid"; then
+        fm_afk_launch_log "failed to signal away-mode daemon pid=$pid and could not revalidate its identity; preserving lifecycle state"
+        return 1
+      fi
+      if [ "$afk_was_active" -eq 1 ]; then
+        fm_afk_launch_record_unexpected_death || return 1
+      fi
+      pid=""
     fi
+  fi
+  if [ -n "$pid" ]; then
     for _ in $(seq 1 40); do
       fm_pid_alive "$pid" || break
       sleep 0.25

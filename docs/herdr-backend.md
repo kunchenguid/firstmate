@@ -290,13 +290,15 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
-Pi has no such mechanism.
-`bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+No harness has verification evidence that its own native tracked-background execution survives that harness's own session/task teardown, so direct `bin/fm-afk-start.sh` entry and `bin/fm-afk-launch.sh start-native` refuse for every harness; the dated reproduction and regression entry points live in [`verification/runtime-backends.md`](verification/runtime-backends.md#native-in-pane-background-daemon-launch-is-not-verified-and-is-refused).
+`bin/fm-afk-launch.sh start` therefore creates a dedicated unfocused Herdr workspace, for every harness, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
+A live daemon without a verified live Herdr or tmux terminal record is not accepted as a safe refresh; the launcher leaves it running and instructs the operator to run `stop` and then `start` to migrate it.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
+Before classifying a missing daemon as an unexpected death, start and stop allow a recorded live terminal a bounded readiness window to publish this home's daemon lock.
+If no home-scoped daemon appears within the applicable readiness boundary, even when the terminal record is malformed, the launcher preserves `state/.afk-daemon-died-unexpectedly`; return catch-up reports that unsupervised interval and consumes the marker only after its evidence is published or durably gated for retry.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
 ## Destructive lab safety

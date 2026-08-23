@@ -1,32 +1,29 @@
 #!/usr/bin/env bash
-# Enter away mode and run the sub-supervisor daemon in a harness-tracked
-# foreground process when one is not already alive.
+# Launcher-only entry that runs the sub-supervisor daemon in the foreground of
+# its detached terminal when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   Sets state/.afk, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
-#       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
-#       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
-#       already cleared transactionally by bin/fm-afk-launch.sh.
+#       (fm_afk_clear_stale_artifacts), then execs bin/fm-supervise-daemon.sh
+#       in the foreground.
+#   FM_AFK_STATE_PREPARED=0 is required as proof that bin/fm-afk-launch.sh
+#   created the detached terminal. Every other entry context refuses through
+#   fm_afk_start_refuse_native below. Always launch through
+#   bin/fm-afk-launch.sh start.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
 # enables nounset and errexit; callers that need different shell options must
 # restore them explicitly.
 #
-# This is the COMMON daemon entry for every backend. HOW it becomes a tracked
-# background process differs by harness/backend and is owned elsewhere:
-#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
-#     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
-#     backend (herdr tab/workspace, tmux detached session) and passes the
-#     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the
-#     daemon's own new pane.
+# This is the COMMON daemon entry for every backend. bin/fm-afk-launch.sh is the
+# single owner of HOW it becomes a tracked background process: it creates a
+# non-visible tracked terminal per backend (herdr tab/workspace, tmux detached
+# session) and passes the captain pane in as FM_SUPERVISOR_TARGET so injection
+# targets it, not the daemon's own new pane.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -43,7 +40,18 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# fm_afk_start_refuse_native: an entry without the launcher's explicit
+# FM_AFK_STATE_PREPARED=0 proof (including a harness's own in-pane
+# tracked-background tool, e.g. Claude's or Grok's background-bash/task
+# feature) is refused rather than accepted without a verified survival
+# contract. The detached-launch requirement and evidence are owned by
+# docs/herdr-backend.md "Away-mode supervisor support" and its linked
+# maintainer-verification record.
+fm_afk_start_refuse_native() {
+  echo "afk: refusing a direct/native background entry without FM_AFK_STATE_PREPARED=0 from the supported launcher - it is not verified to survive the harness's own session/task teardown and the daemon can be SIGTERM'd silently; run bin/fm-afk-launch.sh start instead, which launches a detached terminal that outlives this session" >&2
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -89,9 +97,18 @@ daemon_pid_matches() {
     [ "$current" = "$identity" ]
     return
   fi
+  # No identity recorded (a legacy or partially-written lock): fall back to the
+  # command line, but only the THIS-HOME absolute daemon path ($FM_AFK_DAEMON,
+  # derived from this home's own bin/ directory). A bare script-name match
+  # (e.g. "*fm-supervise-daemon.sh*") is deliberately NOT accepted here: every
+  # secondmate home runs its own daemon under that same basename, so a bare
+  # match is a false positive across homes (equivalent to `pgrep -f
+  # fm-supervise-daemon` answering for a sibling home's process, not this
+  # home's). See docs/verification/runtime-backends.md "Native in-pane
+  # background daemon launch is not verified, and is refused".
   command=$(ps -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
+    *"$FM_AFK_DAEMON"*) return 0 ;;
   esac
   return 1
 }
@@ -137,12 +154,13 @@ fm_afk_start_main() {
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
-  mkdir -p "$FM_AFK_STATE"
-  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
-    [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
-  else
-    fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
+  if [ "${FM_AFK_STATE_PREPARED:-}" != 0 ]; then
+    fm_afk_start_refuse_native
+    return 1
   fi
+
+  mkdir -p "$FM_AFK_STATE"
+  fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
 
   local pid
   pid=$(daemon_lock_pid 2>/dev/null || true)
@@ -157,9 +175,7 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
-    fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
-  fi
+  fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
   exec "$FM_AFK_DAEMON"

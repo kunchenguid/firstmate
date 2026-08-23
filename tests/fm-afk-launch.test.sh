@@ -123,7 +123,7 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock
+  local st sleep_pid lock out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -136,8 +136,10 @@ unit_fresh_vs_refresh() {
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=0 "$START" 2>&1)
+  if [ -e "$st/state/.subsuper-escalations" ] \
+    && [ -e "$st/state/.subsuper-inject-wedged" ] \
+    && printf '%s\n' "$out" | grep -F 'daemon already running' >/dev/null; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
@@ -227,6 +229,252 @@ unit_failed_start_rolls_back_state() {
     pass "failed start: away flag and delivery artifacts roll back"
   else
     fail "failed start: left false away state or discarded delivery artifacts"
+  fi
+  rm -rf "$st"
+}
+
+unit_restart_records_unexpected_daemon_death() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restart-after-death.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  printf 'current-session escalation\n' > "$st/state/.subsuper-escalations"
+
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    fail "restart after death: unsupported replacement unexpectedly succeeded"
+  elif [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations")" = 'current-session escalation' ]; then
+    pass "restart after death: unsupervised interval and session evidence survive replacement rollback"
+  else
+    fail "restart after death: replacement attempt lost death or session evidence"
+  fi
+  rm -rf "$st"
+}
+
+unit_start_waits_for_recorded_terminal_readiness() {
+  local st fake_bin daemon_pid daemon_identity publisher status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-start-readiness.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  : > "$st/state/.afk"
+  printf 'tmux\tstarting-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
+  printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && { : > "$FM_HOME/terminal-probed"; exit 0; }\nexit 1\n' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+
+  sleep 30 &
+  daemon_pid=$!
+  daemon_identity=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" 2>/dev/null )
+  (
+    sleep 0.15
+    mkdir -p "$st/state/.supervise-daemon.lock"
+    printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+    printf '%s' "$daemon_identity" > "$st/state/.supervise-daemon.lock/pid-identity"
+  ) &
+  publisher=$!
+
+  PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=unsupported \
+    "$LAUNCH" start >/dev/null 2>&1
+  status=$?
+  wait "$publisher" 2>/dev/null || true
+  if [ "$status" -eq 0 ] \
+    && [ -e "$st/terminal-probed" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "start readiness: live recorded terminal can publish its daemon lock before death is declared"
+  else
+    fail "start readiness: in-progress detached launch was reported as an unexpected death"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_refresh_revalidates_daemon_before_success() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-revalidate.XXXXXX")
+  mkdir -p "$st/state"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      printf "tmux\trefresh-session\towned\n" > "$FM_AFK_LAUNCH_RECORD"
+      fm_backend_source() { return 0; }
+      tmux() {
+        case "$1" in
+          has-session)
+            if fm_pid_alive "$daemon_pid"; then
+              return 0
+            fi
+            printf "%s" "can'"'"'t find session: refresh-session" >&2
+            return 1
+            ;;
+          kill-session) return 0 ;;
+        esac
+        return 1
+      }
+      fm_afk_launch_flag_write() {
+        fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" || return 1
+        command kill -TERM "$daemon_pid" 2>/dev/null || true
+        wait "$daemon_pid" 2>/dev/null || true
+      }
+      ! fm_afk_launch_start
+    ' _ "$LAUNCH" \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ -e "$st/state/.afk" ]; then
+    pass "refresh revalidation: daemon death continues through durable recovery instead of reporting success"
+  else
+    fail "refresh revalidation: daemon death during refresh was silently accepted"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_confirms_recorded_terminal_absence_before_death() {
+  local st fake_bin status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-readiness.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  : > "$st/state/.afk"
+  printf 'tmux\tabsent-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "$1" = has-session ]; then' \
+    '  if [ ! -e "$FM_HOME/first-terminal-probe" ]; then' \
+    '    : > "$FM_HOME/first-terminal-probe"' \
+    '    [ ! -e "$FM_HOME/state/.afk-daemon-died-unexpectedly" ] || : > "$FM_HOME/death-before-first-probe"' \
+    '  fi' \
+    '  printf "%s" "can'"'"'t find session: absent-session" >&2' \
+    '  exit 1' \
+    'fi' \
+    'exit 1' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+
+  PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    "$LAUNCH" stop >/dev/null 2>&1
+  status=$?
+  if [ "$status" -eq 0 ] \
+    && [ -e "$st/first-terminal-probe" ] \
+    && [ ! -e "$st/death-before-first-probe" ] \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ]; then
+    pass "stop readiness: recorded terminal absence is confirmed before death is declared"
+  else
+    fail "stop readiness: death was declared without first excluding terminal startup"
+  fi
+  rm -rf "$st"
+}
+
+unit_wait_sources_herdr_before_terminal_probe() {
+  local st sourced slept
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-wait-source.XXXXXX")
+  sourced="$st/sourced"
+  slept="$st/slept"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" SOURCED="$sourced" SLEPT="$slept" bash -c '
+      . "$1"
+      daemon_lock_held_by_live_daemon() { return 1; }
+      fm_backend_source() {
+        [ "$1" = herdr ] || return 1
+        : > "$SOURCED"
+        fm_backend_herdr_cli() {
+          printf "%s" "{\"error\":{\"code\":\"pane_not_found\"}}"
+          return 1
+        }
+      }
+      sleep() { : > "$SLEPT"; }
+      ! fm_afk_launch_wait_recorded_daemon herdr lab:pane
+    ' _ "$LAUNCH" \
+    && [ -e "$sourced" ] \
+    && [ ! -e "$slept" ]; then
+    pass "Herdr readiness: adapter loads before confirming recorded terminal absence"
+  else
+    fail "Herdr readiness: absent terminal was probed before its adapter loaded"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_classifies_death_during_failed_signal() {
+  local st live_st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-signal-race.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      kill() {
+        if [ "$1" = -TERM ]; then
+          command kill -TERM "$2" 2>/dev/null || true
+          wait "$2" 2>/dev/null || true
+          return 1
+        fi
+        command kill "$@"
+      }
+      fm_afk_launch_stop
+    ' _ "$LAUNCH" \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop signal race: disappeared daemon is classified before lifecycle cleanup"
+  else
+    fail "stop signal race: failed signal lost the concurrent daemon death"
+  fi
+  rm -rf "$st"
+
+  live_st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-signal-live.XXXXXX")
+  mkdir -p "$live_st/state"
+  : > "$live_st/state/.afk"
+  printf 'none\t-\tnative\n' > "$live_st/state/.afk-daemon-terminal"
+  if FM_HOME="$live_st" FM_STATE_OVERRIDE="$live_st/state" bash -c '
+      . "$1"
+      sleep 30 &
+      daemon_pid=$!
+      mkdir -p "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
+      printf "%s" "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid"
+      fm_pid_identity "$daemon_pid" > "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid-identity"
+      kill() {
+        [ "$1" != -TERM ] || return 1
+        command kill "$@"
+      }
+      ! fm_afk_launch_stop
+      alive=0
+      command kill -0 "$daemon_pid" 2>/dev/null && alive=1
+      command kill -TERM "$daemon_pid" 2>/dev/null || true
+      wait "$daemon_pid" 2>/dev/null || true
+      [ "$alive" -eq 1 ]
+    ' _ "$LAUNCH" \
+    && [ -e "$live_st/state/.afk" ] \
+    && [ -e "$live_st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$live_st/state/.afk-daemon-died-unexpectedly" ]; then
+    pass "stop signal failure: still-live daemon preserves lifecycle state"
+  else
+    fail "stop signal failure: live daemon was misclassified or lifecycle state was cleared"
+  fi
+  rm -rf "$live_st"
+}
+
+unit_unexpected_death_record_failure_preserves_away_state() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-record-failure.XXXXXX")
+  mkdir -p "$st/state/.afk-daemon-died-unexpectedly"
+  date '+%s' > "$st/state/.afk"
+
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1; then
+    fail "death record failure: stop unexpectedly succeeded"
+  elif [ -e "$st/state/.afk" ]; then
+    pass "death record failure: away state remains retryable until evidence is durable"
+  else
+    fail "death record failure: stop cleared away state without durable death evidence"
   fi
   rm -rf "$st"
 }
@@ -483,43 +731,190 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
-unit_native_lifecycle() {
-  local st
+unit_native_start_refused() {
+  local st out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
-    && [ -e "$st/state/.afk" ] \
-    && [ ! -e "$st/state/.subsuper-escalations" ]; then
-    pass "native lifecycle: launcher owns state with no terminal"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
+    pass "native start: start-native refuses, names the verified path, and writes no state"
   else
-    fail "native lifecycle: state preparation or no-terminal record failed"
-  fi
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "native lifecycle: uniform stop clears state without closing a terminal"
-  else
-    fail "native lifecycle: uniform stop retained state"
+    fail "native start: start-native did not refuse cleanly (status=$status; output: $out)"
   fi
   rm -rf "$st"
 }
 
-unit_native_entry_preserves_prepared_state() {
-  local st
+unit_native_entry_refused() {
+  local st out status sentinel
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
   mkdir -p "$st/state"
-  : > "$st/state/.afk"
-  : > "$st/state/.subsuper-escalations"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 bash -c '
+  for sentinel in unset 1 invalid; do
+    if [ "$sentinel" = unset ]; then
+      out=$(env -u FM_AFK_STATE_PREPARED FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+        FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
+    else
+      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED="$sentinel" \
+        FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
+    fi
+    status=$?
+    if [ "$status" -ne 0 ] \
+      && [ ! -e "$st/state/.afk" ] \
+      && printf '%s' "$out" | grep -q 'bin/fm-afk-launch.sh start'; then
+      pass "native entry: sentinel '$sentinel' refuses and names the verified path"
+    else
+      fail "native entry: sentinel '$sentinel' did not refuse cleanly (status=$status; output: $out)"
+      rm -f "$st/state/.afk"
+    fi
+  done
+  rm -rf "$st"
+}
+
+unit_detached_entries_clear_native_sentinel() {
+  local st entry
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-detached-env.XXXXXX")
+  mkdir -p "$st/state"
+  entry="$st/entry.sh"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_AFK_STATE_PREPARED:-unset}" > "$FM_HOME/prepared-value"\n' > "$entry"
+  chmod +x "$entry"
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 FM_AFK_LAUNCH_ENTRY="$entry" bash -c '
     . "$1"
-    FM_AFK_DAEMON=/bin/true
-    fm_afk_start_main
-  ' _ "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "native entry: launcher-prepared lifecycle state is not rewritten"
+    tmux() {
+      case "$1" in
+        new-session) bash -c "$5" ;;
+        has-session) return 0 ;;
+        *) return 0 ;;
+      esac
+    }
+    fm_afk_launch_create_tmux captain:0 tmux
+  ' _ "$LAUNCH"
+  if [ "$(cat "$st/prepared-value" 2>/dev/null || true)" = 0 ]; then
+    pass "tmux launch: detached entry clears an inherited native-path sentinel"
   else
-    fail "native entry: launcher-prepared lifecycle state was mutated"
+    fail "tmux launch: detached entry inherited FM_AFK_STATE_PREPARED=1"
+  fi
+
+  rm -f "$st/prepared-value" "$st/state/.afk-daemon-terminal"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 FM_AFK_LAUNCH_ENTRY="$entry" bash -c '
+    . "$1"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf "%s\n" "{\"result\":{\"workspace\":{\"workspace_id\":\"ws\"},\"root_pane\":{\"pane_id\":\"pane\"}}}"
+      elif [ "$2 $3" = "pane run" ]; then
+        bash -c "$5"
+      fi
+    }
+    fm_afk_launch_create_herdr captain:0 herdr
+  ' _ "$LAUNCH"
+  if [ "$(cat "$st/prepared-value" 2>/dev/null || true)" = 0 ]; then
+    pass "Herdr launch: detached entry clears an inherited native-path sentinel"
+  else
+    fail "Herdr launch: detached entry inherited FM_AFK_STATE_PREPARED=1"
+  fi
+  rm -rf "$st"
+}
+
+# The reproduced false positive: a bare basename match on the daemon script
+# ("*fm-supervise-daemon.sh*", equivalent to `pgrep -f fm-supervise-daemon`)
+# says "alive" for ANY home's daemon process, not just this home's. A fake
+# daemon under a DIFFERENT bin/ directory (a stand-in for a sibling
+# secondmate's own checkout) is alive and matches that bare pattern, but must
+# not satisfy this home's liveness check when its lock has no recorded
+# identity (the fallback path in daemon_pid_matches).
+unit_daemon_liveness_is_home_scoped() {
+  local st other_bin other_daemon other_pid old_style_verdict
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-home-scope.XXXXXX")
+  other_bin=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-other-home-bin.XXXXXX")
+  mkdir -p "$st/state" "$other_bin"
+  other_daemon="$other_bin/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nwhile :; do sleep 0.2; done\n' > "$other_daemon"
+  chmod +x "$other_daemon"
+  "$other_daemon" &
+  other_pid=$!
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  printf '%s' "$other_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # No pid-identity file: this home's lock never recorded one, forcing the
+  # command-line fallback daemon_pid_matches uses.
+  old_style_verdict=0
+  case "$(ps -p "$other_pid" -o command= 2>/dev/null || true)" in
+    *"fm-supervise-daemon.sh"*) old_style_verdict=1 ;;
+  esac
+  if [ "$old_style_verdict" -eq 1 ] && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    ! daemon_lock_held_by_live_daemon
+  ' _ "$START"; then
+    pass "daemon liveness: home-scoped check rejects a live same-basename process from another home's bin/"
+  else
+    fail "daemon liveness: a foreign home's same-named daemon satisfied this home's liveness check"
+  fi
+  kill "$other_pid" 2>/dev/null || true
+  wait "$other_pid" 2>/dev/null || true
+  rm -rf "$st" "$other_bin"
+}
+
+# fm_afk_launch_stop must not treat "the daemon already exited on its own" the
+# same as "I successfully stopped a running daemon" - the away-mode flag was
+# active with nobody supervising it, and that must stay visible even though
+# nothing is left alive to report it directly (the reproduced defect this
+# brief fixes: a native-launched daemon SIGTERM'd by its own harness leaves
+# exactly this state).
+unit_stop_records_unexpected_daemon_death() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-unexpected-death.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ -e "$st/state/.afk-daemon-died-unexpectedly" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "stop: away mode active with no lock at all is recorded, not silently accepted"
+  else
+    fail "stop: away mode active with no lock at all left no durable record"
+  fi
+  rm -rf "$st"
+}
+
+# Stronger than the fixture above: a REAL daemon-shaped process is registered
+# in this home's lock exactly like fm-supervise-daemon.sh registers itself,
+# then killed by SIGTERM entirely OUT OF BAND - never through
+# bin/fm-afk-launch.sh stop - with no trap of its own, the same default
+# disposition a harness's own background-task teardown produces (the
+# reproduced 2026-08-23 failure this brief fixes). Only after it has actually
+# exited does this call stop, the same order the captain's return produces
+# hours later. This proves the signal fires for a daemon that truly died, not
+# only for a fixture where no lock ever existed.
+unit_stop_records_death_of_a_really_killed_daemon() {
+  local st lock daemon_pid registered
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-real-death.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  bash -c 'while :; do sleep 0.2; done' &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; daemon_lock_held_by_live_daemon' _ "$START"; then
+    registered=1
+  else
+    registered=0
+  fi
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  if [ "$registered" -ne 1 ]; then
+    fail "real death setup: the fixture daemon never registered as this home's live daemon (test proves nothing)"
+  elif FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; daemon_lock_held_by_live_daemon' _ "$START"; then
+    fail "real death setup: the fixture daemon is somehow still alive after SIGTERM+wait (test proves nothing)"
+  elif FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "stop: a daemon truly killed out-of-band (SIGTERM, no fm-afk-launch.sh involvement) is recorded on the next stop"
+  else
+    fail "stop: a daemon truly killed out-of-band left no durable record on the next stop"
   fi
   rm -rf "$st"
 }
@@ -582,18 +977,21 @@ unit_malformed_record_fails_closed() {
 }
 
 unit_stop_malformed_record_fails_closed() {
-  local st
+  local st out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    ! fm_afk_launch_stop
-  ' _ "$LAUNCH" && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "stop: malformed terminal record preserves away state and fails closed"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ] \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ] \
+    && [ -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && printf '%s\n' "$out" | grep -F 'malformed daemon terminal record' >/dev/null; then
+    pass "stop: malformed terminal metadata preserves state and cannot suppress independent death evidence"
   else
-    fail "stop: malformed terminal record cleared protected lifecycle state"
+    fail "stop: malformed terminal metadata suppressed death evidence or changed protected state (status=$status; output: $out)"
   fi
   rm -rf "$st"
 }
@@ -656,7 +1054,9 @@ unit_stop_validates_before_signal() {
   printf '%s' "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
-  if kill -0 "$sleeper_pid" 2>/dev/null && [ -e "$st/state/.afk" ]; then
+  if kill -0 "$sleeper_pid" 2>/dev/null \
+    && [ -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ]; then
     pass "stop validation: malformed record causes no daemon or state side effects"
   else
     fail "stop validation: malformed record signaled daemon or cleared state"
@@ -743,7 +1143,7 @@ unit_refresh_validates_record() {
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=tmux bash -c '
       . "$1"
-      ! fm_afk_launch_start && ! fm_afk_launch_start_native
+      ! fm_afk_launch_start
     ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ]; then
     pass "refresh record: malformed terminal identity fails closed"
   else
@@ -754,21 +1154,63 @@ unit_refresh_validates_record() {
   rm -rf "$st"
 }
 
-unit_clear_failure_aborts_entry() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
-  mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    fm_afk_launch_reconcile() { return 0; }
-    fm_afk_clear_stale_artifacts() { return 1; }
-    ! fm_afk_launch_start_native
-  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "clear failure: native entry aborts and restores prior state"
+unit_refresh_requires_supported_live_terminal() {
+  local mode st daemon_pid lock out status fake_bin
+  for mode in none absent; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-unsupported.XXXXXX")
+    mkdir -p "$st/state"
+    : > "$st/state/.afk"
+    if [ "$mode" = none ]; then
+      printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+    fi
+    sleep 30 &
+    daemon_pid=$!
+    lock="$st/state/.supervise-daemon.lock"
+    mkdir -p "$lock"
+    printf '%s' "$daemon_pid" > "$lock/pid"
+    ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" )
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1)
+    status=$?
+    # shellcheck disable=SC2031 # The loop variable remains in this shell; only the launch is substituted.
+    if [ "$status" -ne 0 ] \
+      && kill -0 "$daemon_pid" 2>/dev/null \
+      && [ -e "$st/state/.afk" ] \
+      && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+      && printf '%s\n' "$out" | grep -F "bin/fm-afk-launch.sh stop" >/dev/null \
+      && printf '%s\n' "$out" | grep -F "bin/fm-afk-launch.sh start" >/dev/null; then
+      pass "refresh terminal: live daemon with '$mode' ownership is rejected without false death evidence"
+    else
+      fail "refresh terminal: live daemon with '$mode' ownership was accepted or misclassified"
+    fi
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -rf "$st"
+  done
+
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-supported.XXXXXX")
+  fake_bin="$st/bin"
+  mkdir -p "$st/state" "$fake_bin"
+  printf 'tmux\tsupported-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables when executed.
+  printf '#!/usr/bin/env bash\n[ "$1" = has-session ] && exit 0\n[ "$1" != new-session ] || : > "$FM_HOME/unexpected-new-terminal"\nexit 1\n' > "$fake_bin/tmux"
+  chmod +x "$fake_bin/tmux"
+  sleep 30 &
+  daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" )
+  if PATH="$fake_bin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$st/state/.afk-daemon-died-unexpectedly" ] \
+    && [ ! -e "$st/unexpected-new-terminal" ]; then
+    pass "refresh terminal: verified live tmux ownership refreshes without replacement"
   else
-    fail "clear failure: native entry proceeded or lost prior state"
+    fail "refresh terminal: verified live tmux ownership did not refresh safely"
   fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
   rm -rf "$st"
 }
 
@@ -812,10 +1254,11 @@ unit_flag_write_failure_aborts() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=tmux bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
-    ! fm_afk_launch_start_native
+    ! fm_afk_launch_start
   ' _ "$LAUNCH"
   if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "flag failure: lifecycle aborts without active state"
@@ -929,6 +1372,13 @@ unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
+unit_restart_records_unexpected_daemon_death
+unit_start_waits_for_recorded_terminal_readiness
+unit_refresh_revalidates_daemon_before_success
+unit_stop_confirms_recorded_terminal_absence_before_death
+unit_wait_sources_herdr_before_terminal_probe
+unit_stop_classifies_death_during_failed_signal
+unit_unexpected_death_record_failure_preserves_away_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
@@ -939,8 +1389,12 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
-unit_native_lifecycle
-unit_native_entry_preserves_prepared_state
+unit_native_start_refused
+unit_native_entry_refused
+unit_detached_entries_clear_native_sentinel
+unit_daemon_liveness_is_home_scoped
+unit_stop_records_unexpected_daemon_death
+unit_stop_records_death_of_a_really_killed_daemon
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
@@ -951,7 +1405,7 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_refresh_validates_record
-unit_clear_failure_aborts_entry
+unit_refresh_requires_supported_live_terminal
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts

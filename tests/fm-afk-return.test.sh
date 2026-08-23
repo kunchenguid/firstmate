@@ -36,6 +36,10 @@ SH
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 file="$FM_HOME/state/.fake-drain"
+if [ -e "$FM_HOME/state/.block-drain" ]; then
+  : > "$FM_HOME/state/.drain-started"
+  while [ -e "$FM_HOME/state/.block-drain" ]; do sleep 0.02; done
+fi
 if [ "${1:-}" = --ack-through ]; then
   [ "${3:-}" = --recovery-generation ] && [ "${4:-}" = fixture-generation ] || exit 2
   printf '%s\n' "$2" >> "$FM_HOME/state/.fake-drain-acks"
@@ -241,7 +245,7 @@ test_away_reentry_refuses_pending_return_gate() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "away re-entry succeeded while return catch-up was pending"
@@ -275,9 +279,124 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+test_daemon_died_unexpectedly_surfaces_without_blocking() {
+  local dir out rc
+  dir="$TMP_ROOT/daemon-died-unexpectedly"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  # Simulates a launcher death-detection boundary having recorded that the
+  # daemon exited before the captain returned. Marker presence is what
+  # fm-afk-return.sh reacts to, regardless of which launcher path wrote it.
+  : > "$dir/home/state/.afk-daemon-died-unexpectedly"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "an already-dead daemon should not block catch-up the way a live blocker does (rc=$rc): $out"
+  assert_contains "$out" 'catch-up clear' "ordinary work was not cleared to proceed"
+  assert_contains "$out" 'catch-up unsupervised: the away-mode daemon exited on its own before this return' \
+    "the unexpected daemon death was not surfaced in the catch-up digest"
+  [ ! -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] || fail "the unexpected-death marker was not consumed after being surfaced"
+  pass "an unexpectedly-dead away-mode daemon is surfaced as catch-up evidence without gating ordinary work"
+}
+
+test_daemon_death_marker_survives_interrupted_reconciliation() {
+  local dir return_pid attempt marker_during_drain=0
+  dir="$TMP_ROOT/daemon-death-interruption"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.afk-daemon-died-unexpectedly"
+  : > "$dir/home/state/.block-drain"
+
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" begin > "$dir/return.out" 2>&1 &
+  return_pid=$!
+  attempt=0
+  while [ ! -e "$dir/home/state/.drain-started" ] && [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.02
+  done
+  [ -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] && marker_during_drain=1
+  kill -TERM "$return_pid" 2>/dev/null || true
+  rm -f "$dir/home/state/.block-drain"
+  wait "$return_pid" 2>/dev/null || true
+
+  [ -e "$dir/home/state/.drain-started" ] || fail "interruption fixture never reached reconciliation after observing the death marker"
+  [ "$marker_during_drain" -eq 1 ] || fail "unexpected-death marker was consumed before evidence publication"
+  [ -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] || fail "interrupted reconciliation lost the unpublished unexpected-death marker"
+  pass "interrupted return preserves unexpected-death evidence until publication"
+}
+
+test_daemon_death_marker_survives_evidence_append_failure() {
+  local dir fake_bin real_mktemp out rc gate
+  dir="$TMP_ROOT/daemon-death-append-failure"
+  install_runner "$dir"
+  fake_bin="$dir/fake-bin"
+  real_mktemp=$(command -v mktemp)
+  gate="$dir/home/state/.afk-return-catchup"
+  mkdir -p "$fake_bin"
+  : > "$dir/home/state/.afk-daemon-died-unexpectedly"
+  cat > "$fake_bin/mktemp" <<'SH'
+#!/usr/bin/env bash
+path=$("$REAL_MKTEMP" "$@") || exit 1
+case "$1" in
+  *.afk-return-evidence.*) chmod 400 "$path" || exit 1 ;;
+esac
+printf '%s\n' "$path"
+SH
+  chmod +x "$fake_bin/mktemp"
+
+  set +e
+  out=$(PATH="$fake_bin:$PATH" REAL_MKTEMP="$real_mktemp" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" begin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "unexpected-death evidence append failure should retain catch-up (rc=$rc): $out"
+  [ -e "$dir/home/state/.afk-daemon-died-unexpectedly" ] \
+    || fail "failed unexpected-death append consumed the only durable marker"
+  [ -s "$gate" ] || fail "failed unexpected-death append did not persist a retry gate"
+  assert_contains "$out" 'failed to stage unexpected-daemon-death evidence' \
+    "failed unexpected-death append was not surfaced"
+  pass "unexpected-death append failure preserves the marker for retry"
+}
+
+test_daemon_death_marker_removal_failure_keeps_retry_gate() {
+  local dir out rc gate
+  dir="$TMP_ROOT/daemon-death-marker-removal"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  date +%s > "$dir/home/state/.afk"
+  mkdir "$dir/home/state/.afk-daemon-died-unexpectedly"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "marker removal failure should retain catch-up (rc=$rc): $out"
+  assert_contains "$out" 'catch-up unsupervised: the away-mode daemon exited on its own before this return' \
+    "marker removal failure did not publish the unexpected-death evidence"
+  assert_contains "$out" 'failed to consume the unexpected-daemon-death marker' \
+    "marker removal failure was not reported explicitly"
+  [ -s "$gate" ] || fail "marker removal failure did not persist a retry gate"
+  grep -F $'evidence\tunsupervised\tthe away-mode daemon exited on its own before this return' "$gate" >/dev/null \
+    || fail "marker removal failure did not retain unexpected-death evidence in the gate"
+
+  rmdir "$dir/home/state/.afk-daemon-died-unexpectedly"
+  out=$(run_return "$dir" check) || fail "catch-up did not recover after marker removal became possible: $out"
+  assert_contains "$out" 'catch-up unsupervised: the away-mode daemon exited on its own before this return' \
+    "retry did not replay persisted unexpected-death evidence"
+  [ ! -e "$gate" ] || fail "successful marker cleanup left the retry gate pending"
+  pass "marker removal failure is explicit and preserves a durable retry gate"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
+test_daemon_died_unexpectedly_surfaces_without_blocking
+test_daemon_death_marker_survives_interrupted_reconciliation
+test_daemon_death_marker_survives_evidence_append_failure
+test_daemon_death_marker_removal_failure_keeps_retry_gate

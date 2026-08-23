@@ -608,6 +608,25 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Native in-pane background daemon launch is not verified, and is refused
+
+Reproduced 2026-08-23: `bin/fm-afk-start.sh` execed via a harness's own native in-pane tracked-background tool (Claude's, through this same repo's own background-bash mechanism) received SIGTERM from that harness's own background-task teardown primitive (its task-stop control) and exited, while `state/.afk` stayed present with nothing left to notice.
+`pgrep -f fm-supervise-daemon` still answered "alive" because a sibling home's own daemon process shares that basename, the exact false positive `daemon_pid_matches`'s command-line fallback in `bin/fm-afk-start.sh` used to accept before this fix (it now only matches this home's own absolute `$FM_AFK_DAEMON` path).
+`tests/fm-afk-launch.test.sh`'s `unit_daemon_liveness_is_home_scoped` pins that home-scoping with a live same-basename process from a different `bin/` directory.
+
+No harness has verification evidence that its own native background mechanism survives that harness's own session/task teardown, so `bin/fm-afk-launch.sh start-native` refuses unconditionally and `bin/fm-afk-start.sh` refuses every entry without the explicit `FM_AFK_STATE_PREPARED=0` value supplied by the detached launcher, naming `bin/fm-afk-launch.sh start` (the one verified path, covered by the e2e topology tests above) in their refusal message.
+`tests/fm-afk-launch.test.sh`'s `unit_native_start_refused` and `unit_native_entry_refused` cover the refusal.
+`unit_refresh_requires_supported_live_terminal` proves that refresh accepts only a live daemon backed by a verified Herdr or tmux terminal and rejects a legacy `none` record or missing record without inventing death evidence.
+
+`unit_restart_records_unexpected_daemon_death`, `unit_refresh_revalidates_daemon_before_success`, `unit_stop_records_unexpected_daemon_death`, `unit_stop_records_death_of_a_really_killed_daemon`, and `unit_stop_classifies_death_during_failed_signal` cover the launcher boundaries that persist `state/.afk-daemon-died-unexpectedly` when away mode is active and this home's daemon is confirmed gone.
+`unit_start_waits_for_recorded_terminal_readiness` and `unit_stop_confirms_recorded_terminal_absence_before_death` prove that a live recorded terminal receives the bounded lock-publication window before the launcher declares death, while `unit_stop_malformed_record_fails_closed` proves malformed terminal metadata cannot suppress independently established death evidence or authorize terminal action.
+`test_daemon_died_unexpectedly_surfaces_without_blocking`, `test_daemon_death_marker_survives_interrupted_reconciliation`, `test_daemon_death_marker_survives_evidence_append_failure`, and `test_daemon_death_marker_removal_failure_keeps_retry_gate` cover return publication: the captain sees the unsupervised interval, and interruption or persistence failure retains durable evidence for retry.
+
+```sh
+bash tests/fm-afk-launch.test.sh
+bash tests/fm-afk-return.test.sh
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

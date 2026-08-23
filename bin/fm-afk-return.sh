@@ -42,9 +42,11 @@ append_evidence() {  # <kind> <text> <file>
   [ -n "$text" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    clean=$(printf '%s' "$line" | clean_field)
-    record=$(printf 'evidence\t%s\t%s' "$kind" "$clean")
-    grep -Fqx "$record" "$file" 2>/dev/null || printf '%s\n' "$record" >> "$file"
+    clean=$(printf '%s' "$line" | clean_field) || return 1
+    record=$(printf 'evidence\t%s\t%s' "$kind" "$clean") || return 1
+    if ! grep -Fqx "$record" "$file" 2>/dev/null; then
+      printf '%s\n' "$record" >> "$file" || return 1
+    fi
   done <<EOF
 $text
 EOF
@@ -128,6 +130,20 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-inject-wedged"
 }
 
+consume_unexpected_death_marker() {  # <evidence-file> <blockers-file>
+  local evidence=$1 blockers=$2
+  if rm -f "$STATE/.afk-daemon-died-unexpectedly"; then
+    return 0
+  fi
+  append_evidence lifecycle 'unexpected daemon death evidence was published, but its durable marker could not be consumed; retry catch-up' "$evidence"
+  if ! write_gate "$evidence" "$blockers"; then
+    printf 'fm-afk-return: failed to consume the unexpected-daemon-death marker and could not persist the retry gate\n' >&2
+    return 1
+  fi
+  printf 'fm-afk-return: failed to consume the unexpected-daemon-death marker; catch-up remains pending\n' >&2
+  return 3
+}
+
 return_guard() {
   if [ -e "$STATE/.afk" ]; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
@@ -143,6 +159,7 @@ return_guard() {
 
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
+  local unexpected_daemon_death=0 marker_result
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -152,6 +169,19 @@ return_reconcile() {
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
       lifecycle_ok=0
       append_evidence lifecycle 'away-mode shutdown failed; lifecycle state preserved for retry' "$evidence"
+    fi
+  fi
+
+  # Launcher death-detection boundaries can persist this marker well before
+  # the captain returns. The daemon is already gone, so the unsupervised
+  # stretch is evidence rather than a live blocker; retain it until publication
+  # succeeds, then consume it through consume_unexpected_death_marker below.
+  if [ -e "$STATE/.afk-daemon-died-unexpectedly" ]; then
+    if append_evidence unsupervised 'the away-mode daemon exited on its own before this return - away mode may have been unsupervised for an unknown period' "$evidence"; then
+      unexpected_daemon_death=1
+    else
+      lifecycle_ok=0
+      printf 'fm-afk-return: failed to stage unexpected-daemon-death evidence; preserving its durable marker for retry\n' >&2
     fi
   fi
 
@@ -185,6 +215,14 @@ return_reconcile() {
   fi
   if [ "$lifecycle_ok" -ne 1 ] || [ -s "$blockers" ]; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
+    if [ "$unexpected_daemon_death" -eq 1 ]; then
+      consume_unexpected_death_marker "$evidence" "$blockers"
+      marker_result=$?
+      if [ "$marker_result" -eq 1 ]; then
+        rm -f "$evidence" "$blockers" "$drain_err"
+        return 1
+      fi
+    fi
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
@@ -199,6 +237,15 @@ return_reconcile() {
     printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
     rm -f "$evidence" "$blockers" "$drain_err"
     return 3
+  fi
+
+  if [ "$unexpected_daemon_death" -eq 1 ]; then
+    consume_unexpected_death_marker "$evidence" "$blockers"
+    marker_result=$?
+    if [ "$marker_result" -ne 0 ]; then
+      rm -f "$evidence" "$blockers" "$drain_err"
+      return "$marker_result"
+    fi
   fi
 
   if [ -n "$wake_ack_line" ] && ! printf '%s\n' "$wake_ack_line" >&2; then
