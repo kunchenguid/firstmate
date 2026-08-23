@@ -286,7 +286,7 @@ The mid-wait level reconcile consumes the budget but is bounded only by its per-
 Edges dropped at the deadline are safe: the poll loop is the permanent backstop.
 An unbounded wait here starved the watcher's liveness beacon and crash-looped the away daemon's restarts on quiet fleets (2026-08-21 incident, negotiation-os mate home).
 
-`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-backend-herdr-eventwait.test.py` (including the saturated-stream budget regression), `tests/fm-backend-herdr.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, budget bounds, and polling fallback.
+`tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-backend-herdr-eventwait.test.py` (including the saturated-stream budget regression), `tests/fm-backend-herdr.test.sh` (including the watcher-level saturated-wait beat and restart-refuse regressions), `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, budget bounds, watcher-level beat continuity, and polling fallback.
 
 ## Away-mode supervisor support
 
