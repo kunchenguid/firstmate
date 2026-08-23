@@ -118,6 +118,22 @@ fi
 [ ! -s "$LOG" ] || fail "a refused empty-default-action open_default must not write anything to the log"
 pass "open_default refuses an empty default action"
 
+# A recommendation/default action of pure whitespace is not empty (the
+# nonempty check alone would let it through) but carries no content once
+# fm_decision_tier_clean_field's TAB/newline scrub runs on it - the exact gap
+# fm_decision_tier_require_meaningful closes.
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "   " "apply default" 300 2>/dev/null; then
+  fail "open_default must refuse a whitespace-only recommendation"
+fi
+[ ! -s "$LOG" ] || fail "a refused whitespace-only-recommendation open_default must not write anything to the log"
+pass "open_default refuses a recommendation that is whitespace only"
+
+if fm_decision_tier_open_default "$LOG" 1000 dec-bad two-option-tradeoff "prefer A" "$(printf '\t\n')" 300 2>/dev/null; then
+  fail "open_default must refuse a default action that is only a TAB/newline"
+fi
+[ ! -s "$LOG" ] || fail "a refused whitespace-only-default-action open_default must not write anything to the log"
+pass "open_default refuses a default action that is whitespace only"
+
 # --- mutators refuse an id that already has any record in the log ----------
 
 REUSE_LOG="$TMP_ROOT/decisions-reuse.log"
@@ -136,6 +152,44 @@ fi
 REUSE_RECORD_COUNT=$(fm_decision_tier_find_records "$REUSE_LOG" dec-reuse-1 | grep -c .)
 [ "$REUSE_RECORD_COUNT" = "1" ] || fail "every refused reuse attempt must leave the id with exactly its original record, got $REUSE_RECORD_COUNT"
 pass "log_auto, log_hard_stop, and open_default all refuse an id that already has a record, from any mutator"
+
+# --- concurrent writers must not both pass the uniqueness check ------------
+#
+# A sequential reuse attempt (above) can't catch a race: without a lock
+# around the check-and-append sequence, two processes can both read "no
+# record for this id yet" before either has written, and both append -
+# fm_decision_tier_require_unused_id alone can't see a write that hasn't
+# happened yet. This spawns two real background processes contending for the
+# same fresh id and asserts the lock serializes them down to exactly one
+# surviving record. Comment out either fm_decision_tier_lock_acquire call in
+# open_default/log_auto to see this go red.
+CONCURRENT_LOG="$TMP_ROOT/decisions-concurrent.log"
+CONCURRENT_ID="dec-concurrent-1"
+CONCURRENT_RESULTS="$TMP_ROOT/concurrent-results"
+mkdir -p "$CONCURRENT_RESULTS"
+
+fm_decision_tier_concurrent_attempt() {  # <slot>
+  if fm_decision_tier_log_auto "$CONCURRENT_LOG" 1000 "$CONCURRENT_ID" precedent-match "concurrent attempt $1" 2>/dev/null; then
+    printf 'ok\n' > "$CONCURRENT_RESULTS/$1"
+  else
+    printf 'refused\n' > "$CONCURRENT_RESULTS/$1"
+  fi
+}
+
+fm_decision_tier_concurrent_attempt 1 &
+CONCURRENT_PID_1=$!
+fm_decision_tier_concurrent_attempt 2 &
+CONCURRENT_PID_2=$!
+wait "$CONCURRENT_PID_1" "$CONCURRENT_PID_2"
+
+CONCURRENT_RECORD_COUNT=$(fm_decision_tier_find_records "$CONCURRENT_LOG" "$CONCURRENT_ID" | grep -c .)
+[ "$CONCURRENT_RECORD_COUNT" = "1" ] \
+  || fail "two concurrent log_auto calls racing on the same fresh id must leave exactly one record, got $CONCURRENT_RECORD_COUNT"
+
+CONCURRENT_OK_COUNT=$(cat "$CONCURRENT_RESULTS"/1 "$CONCURRENT_RESULTS"/2 | grep -c '^ok$')
+[ "$CONCURRENT_OK_COUNT" = "1" ] \
+  || fail "exactly one of two concurrent log_auto calls racing on the same fresh id must succeed, got $CONCURRENT_OK_COUNT"
+pass "concurrent writers opening the same fresh id are serialized by the log lock, not both accepted"
 
 # --- successful logging for each tier ---------------------------------------
 

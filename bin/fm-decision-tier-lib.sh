@@ -74,14 +74,19 @@
 # refuse (return 1, message on stderr) rather than silently mis-tiering:
 # logging a category as auto when it classifies default-veto or hard-stop is
 # refused, opening a default-veto record for a hard-stop category is refused,
-# opening a default-veto record with an empty recommendation or default
-# action is refused (the tier's whole contract is a stated recommendation and
-# an executable default), reusing an id that already has any record in the
-# log is refused for every one of log_auto/log_hard_stop/open_default (a
-# reused id would let status/report collapse two unrelated decisions into
-# one), and vetoing a decision that is not currently pending (already vetoed
-# or already expired) is refused. Every one of those refusals is a real,
-# mutation-provable guard - see tests/fm-decision-tier-lib.test.sh.
+# opening a default-veto record with a recommendation or default action that
+# is empty OR consists solely of whitespace is refused (the tier's whole
+# contract is a stated recommendation and an executable default - whitespace
+# is not one), reusing an id that already has any record in the log is
+# refused for every one of log_auto/log_hard_stop/open_default (a reused id
+# would let status/report collapse two unrelated decisions into one), and
+# vetoing a decision that is not currently pending (already vetoed or already
+# expired) is refused. The reused-id check and the record it guards are
+# performed while holding a lock on the log file (fm_decision_tier_lock_*),
+# so two processes racing to open the same id are serialized rather than both
+# passing the uniqueness check before either has written. Every one of those
+# refusals is a real, mutation-provable guard - see
+# tests/fm-decision-tier-lib.test.sh.
 set -u
 
 FM_DECISION_TIER_FIELD_SEP=$'\t'
@@ -102,6 +107,43 @@ fm_decision_tier_require_int() {  # <label> <value>
       return 1
       ;;
   esac
+}
+
+# fm_decision_tier_require_meaningful: refuses a value that is empty OR
+# normalizes to nothing but whitespace once fm_decision_tier_clean_field's
+# TAB/CR/LF scrub runs on it. require_nonempty alone lets a value through
+# that is technically non-empty but carries no content (all spaces, or a
+# lone TAB/newline that the record builder turns into spaces) - exactly the
+# case where a default-veto record would be persisted with no stated
+# recommendation or executable default despite passing validation.
+fm_decision_tier_require_meaningful() {  # <label> <value>
+  local label=$1 value=${2:-} stripped
+  stripped=$(printf '%s' "$value" | tr -d '[:space:]')
+  if [ -z "$stripped" ]; then
+    printf 'fm-decision-tier-lib: %s must contain non-whitespace content\n' "$label" >&2
+    return 1
+  fi
+}
+
+# fm_decision_tier_lock_acquire / _release: a minimal mutex around the
+# check-and-append sequence that opens a decision's lifecycle
+# (require_unused_id followed by the log write). `mkdir` is atomic on every
+# filesystem this library runs on, so two processes racing to open the same
+# log always see exactly one of them create the lock directory first; that
+# ordering is what stops two writers from both passing the uniqueness check
+# for the same id before either has appended its record.
+fm_decision_tier_lock_acquire() {  # <log_file>
+  local log=$1
+  local lockdir="$log.lock" dir
+  dir=$(dirname "$log")
+  [ -d "$dir" ] || mkdir -p "$dir" || return 1
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    sleep 0.05
+  done
+}
+
+fm_decision_tier_lock_release() {  # <log_file>
+  rmdir "$1.lock" 2>/dev/null || true
 }
 
 # fm_decision_tier_require_unused_id: refuses an id that already has any
@@ -242,13 +284,19 @@ fm_decision_tier_log_auto() {  # <log_file> <epoch> <id> <category> <note>
   fm_decision_tier_require_nonempty log_file "$log" || return 1
   fm_decision_tier_require_int epoch "$now" || return 1
   fm_decision_tier_require_nonempty id "$id" || return 1
-  fm_decision_tier_require_unused_id "$log" "$id" || return 1
+  fm_decision_tier_lock_acquire "$log" || return 1
+  if ! fm_decision_tier_require_unused_id "$log" "$id"; then
+    fm_decision_tier_lock_release "$log"
+    return 1
+  fi
   tier=$(fm_decision_tier_classify "$category")
   if [ "$tier" != auto ]; then
     printf 'fm-decision-tier-lib: category %s classifies %s, not auto; refusing\n' "$category" "$tier" >&2
+    fm_decision_tier_lock_release "$log"
     return 1
   fi
   fm_decision_tier_log "$log" "$(fm_decision_tier_record "$now" "$id" "$category" "$tier" acted "" "" "" "$note")"
+  fm_decision_tier_lock_release "$log"
 }
 
 fm_decision_tier_log_hard_stop() {  # <log_file> <epoch> <id> <category> <note>
@@ -256,13 +304,19 @@ fm_decision_tier_log_hard_stop() {  # <log_file> <epoch> <id> <category> <note>
   fm_decision_tier_require_nonempty log_file "$log" || return 1
   fm_decision_tier_require_int epoch "$now" || return 1
   fm_decision_tier_require_nonempty id "$id" || return 1
-  fm_decision_tier_require_unused_id "$log" "$id" || return 1
+  fm_decision_tier_lock_acquire "$log" || return 1
+  if ! fm_decision_tier_require_unused_id "$log" "$id"; then
+    fm_decision_tier_lock_release "$log"
+    return 1
+  fi
   tier=$(fm_decision_tier_classify "$category")
   if [ "$tier" != hard-stop ]; then
     printf 'fm-decision-tier-lib: category %s classifies %s, not hard-stop; refusing\n' "$category" "$tier" >&2
+    fm_decision_tier_lock_release "$log"
     return 1
   fi
   fm_decision_tier_log "$log" "$(fm_decision_tier_record "$now" "$id" "$category" "$tier" escalated "" "" "" "$note")"
+  fm_decision_tier_lock_release "$log"
 }
 
 fm_decision_tier_open_default() {  # <log_file> <epoch> <id> <category> <recommendation> <default_action> <window_seconds>
@@ -270,9 +324,8 @@ fm_decision_tier_open_default() {  # <log_file> <epoch> <id> <category> <recomme
   fm_decision_tier_require_nonempty log_file "$log" || return 1
   fm_decision_tier_require_int epoch "$now" || return 1
   fm_decision_tier_require_nonempty id "$id" || return 1
-  fm_decision_tier_require_unused_id "$log" "$id" || return 1
-  fm_decision_tier_require_nonempty recommendation "$recommendation" || return 1
-  fm_decision_tier_require_nonempty default_action "$default_action" || return 1
+  fm_decision_tier_require_meaningful recommendation "$recommendation" || return 1
+  fm_decision_tier_require_meaningful default_action "$default_action" || return 1
   fm_decision_tier_require_int window_seconds "$window" || return 1
   if [ "$window" -eq 0 ]; then
     printf 'fm-decision-tier-lib: window_seconds must be greater than zero (a zero window never lets the captain veto)\n' >&2
@@ -283,7 +336,13 @@ fm_decision_tier_open_default() {  # <log_file> <epoch> <id> <category> <recomme
     printf 'fm-decision-tier-lib: category %s classifies %s, not default-veto; refusing to open a timed default for it\n' "$category" "$tier" >&2
     return 1
   fi
+  fm_decision_tier_lock_acquire "$log" || return 1
+  if ! fm_decision_tier_require_unused_id "$log" "$id"; then
+    fm_decision_tier_lock_release "$log"
+    return 1
+  fi
   fm_decision_tier_log "$log" "$(fm_decision_tier_record "$now" "$id" "$category" "$tier" opened "$window" "$recommendation" "$default_action" "")"
+  fm_decision_tier_lock_release "$log"
 }
 
 # --- 3. status derivation -----------------------------------------------------
