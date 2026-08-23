@@ -114,10 +114,12 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
-#   name from PATH once, probes that concrete path with --help, and launches the
-#   same path. It adds --tui-mode regular only when that help advertises the flag;
+#   whitespace is treated as a RAW launch command.
+#   For a receipt-covered spawn, its executable head and exact model and effort
+#   axes must satisfy the routing-receipt contract in docs/configuration.md.
+#   For pi and pi-signed, fm-spawn resolves the selected executable name from PATH
+#   once, probes that concrete path with --help, and launches the same path.
+#   It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.

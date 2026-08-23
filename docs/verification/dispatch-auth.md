@@ -205,7 +205,7 @@ The skill's primary path is that default TOON; `--json` is the documented defens
 
 ## Routing receipt boundary
 
-Verified 2026-08-22 against the generation-specific routing receipt implementation.
+This section records the generation-specific routing receipt verification contract.
 The executable boundary operations are `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
 `snapshot` opens the final task directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies selected inputs relative to held handles.
 `publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies the receipt and brief relative to the held generation handle.
@@ -241,4 +241,4 @@ bin/fm-test-run.sh tests/fm-routing-decision-negative-battery.test.sh
 bin/fm-test-run.sh tests/fm-control-relaunch.test.sh
 ```
 
-Pipeline-owned test and documentation phases must refresh dated results, counts, timings, shell versions, and empirical outcome claims after either entrypoint changes.
+Pipeline-owned test and documentation phases must refresh dated results, counts, timings, shell versions, and empirical outcome claims after any entrypoint changes.
