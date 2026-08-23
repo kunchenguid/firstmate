@@ -13,14 +13,6 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-find_chrome() {
-  local candidate
-  for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
-    command -v "$candidate" 2>/dev/null && return 0
-  done
-  return 1
-}
-
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
@@ -110,6 +102,134 @@ EOF
 extract_payload() {  # <board-path>
   sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$1" \
     | sed '1d;$d'
+}
+
+# Execute the shipped renderer from a built board page against a minimal DOM
+# shim and print the rendered node state as JSON, so tooltip behavior is
+# asserted from what the renderer actually produced rather than from a headless
+# browser that the runner may not have. The board page is generated public
+# output and the renderer is the real consumer under test.
+render_board_nodes() {  # <board-path>
+  BOARD_PAGE="$1" node --input-type=module <<'JS'
+import { readFileSync } from "node:fs";
+
+const html = readFileSync(process.env.BOARD_PAGE, "utf8");
+const dataBlock = html.match(
+  /<script id="bearings-data" type="application\/json">\n([\s\S]*?)\n<\/script>/);
+if (!dataBlock) throw new Error("the built board carries no bearings-data block");
+const rendererBlock = html
+  .slice(dataBlock.index + dataBlock[0].length)
+  .match(/<script>\n([\s\S]*?)\n<\/script>/);
+if (!rendererBlock) throw new Error("the built board carries no renderer script");
+
+class ClassList {
+  constructor(node) { this.node = node; }
+  tokens() {
+    return this.node.className ? this.node.className.split(/\s+/).filter(Boolean) : [];
+  }
+  write(tokens) { this.node.className = tokens.join(" "); }
+  contains(name) { return this.tokens().indexOf(name) !== -1; }
+  add(name) { if (!this.contains(name)) this.write(this.tokens().concat([name])); }
+  remove(name) { this.write(this.tokens().filter((t) => t !== name)); }
+  toggle(name, on) {
+    const want = on === undefined ? !this.contains(name) : !!on;
+    if (want) this.add(name); else this.remove(name);
+  }
+}
+
+class Element {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.className = "";
+    this.attributes = {};
+    this.listeners = {};
+    this.ownText = "";
+    this.titleValue = undefined;
+    this.rawHtml = "";
+    this.classList = new ClassList(this);
+  }
+  get textContent() {
+    return this.ownText + this.children.map((c) => c.textContent).join("");
+  }
+  set textContent(value) {
+    this.children = [];
+    this.ownText = value == null ? "" : String(value);
+  }
+  /* title reflects a DOMString, so the DOM stringifies whatever it is given -
+     that is exactly what makes a null value observable as "null". */
+  get title() { return this.titleValue === undefined ? "" : this.titleValue; }
+  set title(value) { this.titleValue = String(value); }
+  get innerHTML() { return this.rawHtml; }
+  set innerHTML(value) {
+    this.rawHtml = value == null ? "" : String(value);
+    this.children = [];
+    this.ownText = "";
+  }
+  appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      ? this.attributes[name] : null;
+  }
+  addEventListener(type, fn) {
+    (this.listeners[type] = this.listeners[type] || []).push(fn);
+  }
+  matches(selector) {
+    const parts = selector.split(":");
+    const cls = parts[0].replace(/^\./, "");
+    if (cls && !this.classList.contains(cls)) return false;
+    return parts.slice(1).every((p) => (p === "checked" ? this.checked === true : false));
+  }
+  querySelectorAll(selector) {
+    const found = [];
+    const walk = (node) => node.children.forEach((child) => {
+      if (child.matches(selector)) found.push(child);
+      walk(child);
+    });
+    walk(this);
+    return found;
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+}
+
+const byId = new Map();
+for (const m of html.matchAll(/\bid="([^"]+)"/g)) {
+  const node = new Element("div");
+  new Element("div").appendChild(node);
+  byId.set(m[1], node);
+}
+const main = new Element("main");
+main.className = "bb-main";
+const dataNode = byId.get("bearings-data");
+if (!dataNode) throw new Error("the built board carries no bearings-data element");
+dataNode.textContent = dataBlock[1];
+
+globalThis.window = {};
+globalThis.document = {
+  createElement: (tag) => new Element(tag),
+  getElementById: (id) => byId.get(id) || null,
+  querySelector: (selector) => (selector === ".bb-main" ? main : null),
+};
+new Function(rendererBlock[1])();
+
+const nodes = [];
+const collect = (node) => node.children.forEach((child) => {
+  nodes.push({
+    tag: child.tagName,
+    classes: child.className ? child.className.split(/\s+/).filter(Boolean) : [],
+    text: child.textContent,
+    title: child.titleValue === undefined ? null : child.titleValue,
+  });
+  collect(child);
+});
+/* anything under .bb-main means the renderer bailed to its fail-closed card */
+const errored = main.children.length > 0;
+collect(main);
+byId.forEach((node) => collect(node));
+process.stdout.write(JSON.stringify({ errored, nodes }) + "\n");
+JS
 }
 
 test_path_is_stable_and_home_scoped() {
@@ -235,60 +355,131 @@ test_build_injects_binds_then_arms() {
 }
 
 test_rendered_truncated_text_has_full_native_tooltips() {
-  local home data board chrome dom marker escaped
-  chrome=$(find_chrome) || { printf '%s\n' "skip: Chrome or Chromium not found for rendered tooltip assertions"; return; }
+  local home data board marker long_id render entry cls want
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to render the board for the tooltip assertions"
   home=$(make_home tooltips)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
   marker='Long & exact "captain-facing" value <must stay text> '
+  long_id='long-slug-legal-charted-id-that-overflows-the-half-width-charted-column-and-stays-hoverable'
   write_valid_payload "$data"
-  jq --arg marker "$marker" '
+  # Every row carries a truncation-prone value: markup-like long text on the
+  # repo-bearing rows, and the genuinely-no-repo rows fall back to the routing
+  # id, which the charted schema restricts to a slug.
+  jq --arg marker "$marker" --arg long_id "$long_id" '
     .captains_call[0].repo = ($marker + "decision repo") |
     .captains_call[1].pr_url = "https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" |
-    .underway = [{
-      "id": ($marker + "underway id"),
-      "repo": "",
-      "kind": "ship",
-      "state": ($marker + "working badge"),
-      "doing": ($marker + "underway title")
+    .captains_call += [{
+      "key": "sample-no-repo-decision",
+      "type": "decision",
+      "repo": null,
+      "title": "A decision that names no repository",
+      "options": [{ "value": "ack", "label": "Acknowledge" }]
     }] |
-    .landed = [{
-      "id": ($marker + "landed id"),
-      "repo": "",
-      "what": ($marker + "landed title"),
-      "owner": ($marker + "landed owner"),
-      "pr_url": "https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review"
-    }] |
-    .charted[0].repo = "" |
-    .charted[0].id = ($marker + "charted id") |
-    .charted[0].title = ($marker + "charted title") |
-    .charted[0].reason = ($marker + "charted reason")
+    .underway = [
+      {
+        "id": "underway-with-repo",
+        "repo": ($marker + "underway repo"),
+        "kind": "ship",
+        "state": ($marker + "working badge"),
+        "doing": ($marker + "underway title")
+      },
+      {
+        "id": ($marker + "underway id"),
+        "repo": "",
+        "kind": "ship",
+        "state": "working",
+        "doing": "a short underway line"
+      }
+    ] |
+    .landed = [
+      {
+        "id": "landed-with-repo",
+        "repo": ($marker + "landed repo"),
+        "what": ($marker + "landed title"),
+        "owner": ($marker + "landed owner"),
+        "pr_url": "https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review"
+      },
+      {
+        "id": ($marker + "landed id"),
+        "repo": "",
+        "what": "a short landed line",
+        "owner": ($marker + "landed owner")
+      }
+    ] |
+    .charted = [
+      {
+        "id": "charted-with-repo",
+        "repo": ($marker + "charted repo"),
+        "title": ($marker + "charted title"),
+        "reason": ($marker + "charted reason"),
+        "dispatchable": true
+      },
+      {
+        "id": $long_id,
+        "repo": "",
+        "title": "a short charted line",
+        "reason": "",
+        "dispatchable": false
+      }
+    ]
   ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
 
   run_board "$home" build "$data" >/dev/null || fail "the long-text tooltip board did not build"
-  "$chrome" --headless --disable-gpu --no-sandbox --dump-dom "file://$board" > "$home/dom.html" 2>/dev/null \
-    || fail "Chrome could not render the long-text tooltip board"
-  dom="$home/dom.html"
+  # The markup-like text stays inert data in the page, and only the renderer
+  # turns it back into an exact tooltip value.
+  grep -qF 'value \u003cmust stay text>' "$board" \
+    || fail "the markup-like tooltip text was not \\u003c-escaped in the injected payload"
+  grep -qF 'value <must stay text>' "$board" \
+    && fail "the built board embedded the markup-like tooltip text as live markup"
 
-  for escaped in \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; decision repo' \
-    'https://github.com/example/sample/pull/12345678901234567890?view=full&amp;mode=review' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; working badge' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; underway title' \
-    'ship · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; underway id' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed title' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed id · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; landed owner' \
-    'https://github.com/example/sample/pull/98765432109876543210?view=full&amp;mode=review' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted title' \
-    'Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted reason · Long &amp; exact &quot;captain-facing&quot; value &lt;must stay text&gt; charted id'; do
-    grep -Fq "title=\"$escaped\"" "$dom" \
-      || fail "the rendered board omitted or altered a full native tooltip: $escaped"
+  render=$(render_board_nodes "$board") || fail "the shipped renderer could not run over the built board"
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
+    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+
+  for entry in \
+    "bb-decision__repo|${marker}decision repo" \
+    "bb-decision__link|https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" \
+    "fm-badge|${marker}working badge" \
+    "bb-row__title|${marker}underway title" \
+    "bb-row__sub|ship · ${marker}underway repo" \
+    "bb-row__sub|ship · ${marker}underway id" \
+    "bb-row__title|${marker}landed title" \
+    "bb-row__sub|${marker}landed repo · ${marker}landed owner" \
+    "bb-row__sub|${marker}landed id · ${marker}landed owner" \
+    "bb-row__pr|https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review" \
+    "bb-row__title|${marker}charted title" \
+    "bb-row__sub|${marker}charted reason · ${marker}charted repo" \
+    "bb-row__sub|$long_id"; do
+    cls=${entry%%|*}
+    want=${entry#*|}
+    printf '%s' "$render" | jq -e --arg cls "$cls" --arg want "$want" \
+      'any(.nodes[]; (.classes | index($cls)) != null and .title == $want)' >/dev/null \
+      || fail "the rendered board omitted the exact full tooltip on .$cls: $want"
   done
-  grep -Fq '&lt;must stay text&gt;' "$dom" \
-    || fail "the tooltip payload was not HTML-escaped in the rendered board"
-  ! grep -Fq '<must stay text>' "$dom" \
-    || fail "the tooltip payload became live markup in the rendered board"
-  pass "rendered truncation-prone text exposes exact escaped native tooltips"
+
+  # Tooltips carry the payload text verbatim - the renderer must not smuggle
+  # entity-escaped or truncated text into the captain-facing value.
+  printf '%s' "$render" | jq -e '
+    [.nodes[] | select(.title != null) | .title | select(test("must stay text"))] as $titles
+    | ($titles | length) >= 8
+      and ($titles | all(contains("<must stay text>")
+        and (contains("&lt;") | not)
+        and (contains("&amp;") | not)
+        and (contains("&quot;") | not)))
+  ' >/dev/null || fail "a rendered tooltip did not carry the exact unescaped payload text"
+
+  # A genuinely-repo-less Captain's Call item shows no repo and must not
+  # advertise a stringified "null" as its hidden full text.
+  printf '%s' "$render" | jq -e '
+    any(.nodes[]; (.classes | index("bb-decision__repo")) != null
+      and .text == "" and .title == null)
+  ' >/dev/null || fail "a repo-less Captain's Call item produced a tooltip for absent text"
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
+    || fail "the rendered board exposed a stringified null as a tooltip"
+
+  pass "the rendered board exposes exact full tooltips and none for absent text"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {

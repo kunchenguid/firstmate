@@ -436,7 +436,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   function titledEl(tag, cls, text) {
     var n = el(tag, cls, text);
-    n.title = text;
+    if (text != null) n.title = text;
     return n;
   }
   function badge(tone, text) { return titledEl("span", "fm-badge fm-badge--" + tone, text); }
