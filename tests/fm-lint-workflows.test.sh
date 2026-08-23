@@ -952,6 +952,62 @@ test_event_note_names_the_file_it_describes() {
   pass "the default-branch note names the file whose event it describes"
 }
 
+# actionlint rejects every empty and null `branches:` spelling before the gating
+# check ever sees the file, so the gate's own handling of one is only reachable
+# with the linter stubbed to pass. It still has to be right: this is the one
+# refusal that reaches the caller through the banked verdict rather than being
+# emitted directly, and wrapping it in an event prefix once turned it into a
+# report of the bases the required check covers.
+fm_stub_actionlint_accepts_everything() {
+  local fakebin=$1
+  cat > "$fakebin/actionlint" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-version" ]; then
+  printf '%s\n' "$REQUIRED"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
+test_empty_branches_list_refuses_by_name() {
+  local tmp fakebin out rc form
+  for form in flow null; do
+    tmp=$(gating_root "fm-lint-wf-gate-empty-$form")
+    fakebin=$(fm_fakebin "$tmp")
+    fm_stub_actionlint_accepts_everything "$fakebin"
+    # A required check that gates main would make this set pass, so the test can
+    # only stay green while the empty list is refused rather than read as a
+    # filter covering everything or covering nothing.
+    write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+      'on:' '  pull_request:' '    branches: [main]'
+    if [ "$form" = flow ]; then
+      write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+        'on:' '  pull_request:' '    branches: []'
+    else
+      write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+        'on:' '  pull_request:' '    branches:' '    types: [opened]'
+    fi
+    rc=0
+    out=$(PATH="$fakebin:$PATH" "$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "an empty branches list ($form form) exited 0"$'\n'"$out"
+    assert_contains "$out" "(empty branches list)" \
+      "the $form-form refusal did not reach the caller naming its own construct"
+    assert_contains "$out" "no-mistakes-required.yml" \
+      "the $form-form refusal did not name the workflow it cannot read"
+    case "$out" in
+      *"unrecognized classification"*)
+        fail "the $form-form refusal reached the caller in an unrecognized shape"$'\n'"$out"
+        ;;
+      *"requires checks on"*)
+        fail "an empty branches list ($form form) was reported as required bases"$'\n'"$out"
+        ;;
+    esac
+  done
+  pass "an empty branches list is refused by name rather than banked as a verdict"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -1005,4 +1061,5 @@ test_pull_request_target_scalar_trigger_is_gated
 test_required_check_pull_request_target_paths_fails
 test_both_gating_events_in_one_workflow_fails_closed
 test_event_note_names_the_file_it_describes
+test_empty_branches_list_refuses_by_name
 test_explicit_path_skips_set_level_gating
