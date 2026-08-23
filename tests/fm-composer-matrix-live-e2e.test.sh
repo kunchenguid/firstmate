@@ -14,7 +14,19 @@
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     --ansi` capture must classify empty through the zellij thin adapter;
+#   - the herdr titled-rule shape live (when herdr is running): a claude pane
+#     whose composer's top rule carries the terminal title is the shape that
+#     read `unknown` and deferred every away-mode escalation. Whether the
+#     vendor draws that overlay changes between Claude releases, so the guard
+#     asserts it when present and says so explicitly when it is absent. A rule
+#     the classifier declines on one of its documented boundaries is noted with
+#     that reason rather than reported as a regression, and is never a pass.
+#     It also reads every idle claude pane through the shared classifier, expecting the
+#     verdict that pane's own composer row calls for - `empty` when that row is
+#     blank, and either `empty` or a pending read when it carries text, which
+#     may be an unsubmitted draft or the vendor's own dim suggestion. A pane
+#     showing no composer row at all is skipped and said so, never asserted.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -212,6 +224,393 @@ if command -v zellij >/dev/null 2>&1; then
   zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
 else
   note "harness absent, not verified here: zellij (false-positive regression not exercised)"
+fi
+
+# hd_rule_refusal_reason: the DOCUMENTED reason _fm_composer_rule_row declined a
+# dashes-plus-text row, or nothing when the refusal is not one of the shape
+# owner's authorized boundaries. Two are authorized here.
+#
+# A title that precedes the opening 8-column dash run is the one title position
+# that predicate deliberately does not read.
+#
+# A column count that does not match the partner rule is authorized ONLY when the
+# title carries non-ASCII text. There, one space per character can be wrong in
+# either direction - a double-width glyph under-counts, a zero-width or combining
+# character over-counts - so the width genuinely cannot be established. When the
+# title is ASCII-only the count is exact, because every ASCII printable is one
+# column and a captured grid carries no tabs, so a mismatch means the two rules
+# really are different widths: the shared-width assumption this fix rests on has
+# stopped holding, the classifier returns `unknown`, and away-mode escalation
+# defers silently. That is the outage shape, so it must FAIL rather than be
+# excused.
+#
+# Residual, stated rather than papered over: a SINGLE-width non-ASCII title whose
+# rules genuinely disagree in width is still only noted, because nothing in a
+# captured grid distinguishes a single-width glyph from a double-width one without
+# a width table. That hole runs in the same safe-refusal direction as every other
+# limit here, and it is recorded in docs/verification/runtime-backends.md.
+#
+# Anything else - a structural glyph, a malformed byte, no dash run at all - is
+# not a documented refusal, so the caller must fail rather than excuse it.
+hd_rule_refusal_reason() {  # <trimmed-row> <partner-spaces>
+  local row=$1 expected=$2 spaces cols
+  case "$row" in
+    ────────*)
+      spaces=${row//─/ }
+      cols=$(fm_composer_column_spaces "$spaces") || return 1
+      [ "$cols" = "$expected" ] && return 1
+      _fm_composer_ascii_only "$spaces" && return 1
+      printf 'its mapped column count does not match the closing rule, and its title carries non-ASCII text, so the width cannot be established honestly (a double-width, zero-width, or combining title glyph)'
+      ;;
+    *────────*)
+      printf 'its title precedes the opening 8-column dash run, the one title position the rule predicate deliberately does not read'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# hd_composer_row_state: a FRESH plain read of this pane's composer row, as one of
+# three answers - `blank`, `text`, or `unreadable` when the capture did not come
+# back or carries no agent glyph row at all.
+#
+# The idle loop derives its expectation from one pane read and its verdict from
+# another, inside fm_backend_herdr_composer_state, so a keystroke landing between
+# the two turns a correct draft verdict into a false failure on the operator's own
+# fleet. Only a BLANK expectation races, and only a DRAFT verdict can be that race's
+# result: a keystroke on a styled capture yields `pending`, never `unknown` and never
+# an unreadable verdict, so the caller gates on the verdict BEFORE it reads here and
+# this read can never excuse the two verdicts the guard exists to catch.
+#
+# The three answers stay apart because they license different conclusions. `text`
+# confirms the race. `blank` refutes it and leaves a real disagreement, which the
+# caller must fail. `unreadable` establishes neither, so the caller may claim
+# neither a race nor a live pass.
+#
+# Blankness, never the row's TEXT: claude's dim rotating suggestion changes that
+# text on its own, so a comparison would excuse a pane on every rotation and hide
+# real failures behind a race that did not happen.
+hd_composer_row_state() {  # <target> -> blank|text|unreadable
+  local cap line trim glyph draft='' found=0
+  cap=$(fm_backend_herdr_capture "$1" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null) || cap=''
+  if [ -z "$cap" ]; then
+    printf 'unreadable'
+    return 0
+  fi
+  while IFS= read -r line; do
+    trim=$line
+    fm_composer_normalize_trim_var trim
+    if fm_composer_leading_agent_glyph_var glyph "$trim"; then
+      found=1
+      draft=${trim#*"$glyph"}
+      fm_composer_normalize_trim_var draft
+    fi
+  done <<EOF
+$cap
+EOF
+  if [ "$found" -eq 0 ]; then
+    printf 'unreadable'
+  elif [ -n "$draft" ]; then
+    printf 'text'
+  else
+    printf 'blank'
+  fi
+}
+
+# hd_documented_unknown: the DOCUMENTED reason a pane's composer reads `unknown`,
+# or nothing when that verdict is a real disagreement. A pane with no titled rule
+# above its composer row has no boundary of this exception's in play, so its
+# `unknown` stays a failure - that is the defect this guard exists to catch.
+hd_documented_unknown() {  # <capture> <glyph-row>
+  local cap=$1 g=$2 above below probe limit row
+  [ "$g" -ge 1 ] || return 1
+  above=$(_fm_composer_screen_row "$((g - 1))" "$cap")
+  fm_composer_normalize_trim_var above
+  ! _fm_composer_pi_separator_row "$above" || return 1
+  below=$(_fm_composer_screen_row "$((g + 1))" "$cap")
+  fm_composer_normalize_trim_var below
+  if _fm_composer_pi_separator_row "$below"; then
+    hd_rule_refusal_reason "$above" "${below//─/ }"
+    return
+  fi
+  # A closing rule further down is the single-row adjacency limit the sandwich
+  # exception deliberately does not cross, which is what a ghost suggestion
+  # wrapping onto a second row produces on a narrow pane.
+  probe=$((g + 2))
+  limit=$((g + 4))
+  while [ "$probe" -le "$limit" ]; do
+    row=$(_fm_composer_screen_row "$probe" "$cap")
+    fm_composer_normalize_trim_var row
+    if _fm_composer_pi_separator_row "$row"; then
+      case "$above" in
+        ────────*)
+          printf 'its closing rule sits %s rows below the composer row, outside the single-row adjacency the sandwich exception requires' \
+            "$((probe - g))"
+          return 0
+          ;;
+      esac
+      return 1
+    fi
+    probe=$((probe + 1))
+  done
+  return 1
+}
+
+# --- 4. herdr: the real live composer through the herdr adapter ---------------
+# The titled-rule regression: Claude draws its borderless composer between two
+# horizontal `─` rules, and a terminal-title overlay burned into the TOP rule
+# makes that rule dashes PLUS text, so the separated pair never opens and the
+# composer's own bottom rule reads as an unmatched separator below the already
+# matched `❯` row. That shape classified `unknown` and deferred every away-mode
+# escalation, silently.
+#
+# Whether the overlay is drawn at all is the vendor's choice and it has already
+# changed once inside a patch release, so this guard asserts the RENDERING it
+# finds and reports explicitly when the shape is absent. Absence is not a pass:
+# the standing proof of the classifier's behaviour is the portable regression
+# `test_matrix_claude_titled_composer_rule` in tests/fm-composer-lib.test.sh,
+# which builds the shape itself and therefore holds on every Claude release.
+#
+# A titled rule the classifier declines on one of its DOCUMENTED boundaries is
+# noted with the reason and is not a regression: the boundary is the specified
+# behaviour, and failing there would cry wolf on a classifier doing exactly what
+# it says. A refusal for any other reason fails loudly, because a live composer
+# reading `unknown` is the defect that cost the outage. Neither a note nor a skip
+# counts as a live pass, so this section can never go vacuously green.
+#
+# Read-only throughout: pane list and pane capture on the explicitly named
+# `default` session, and nothing submitted. This section makes no lifecycle call
+# itself, though pane capture reaches fm_backend_herdr_server_ensure, which
+# backgrounds a server start when the session's server is not running; that is
+# unreachable here in practice because capture only runs after `pane list`
+# already returned output, which only a live server produces.
+if command -v herdr >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+  hd_version=$(herdr --version 2>/dev/null | head -1)
+  [ -n "$hd_version" ] || hd_version='version-unknown'
+  cl_version=$(harness_version claude)
+  export FM_ROOT_OVERRIDE="$ROOT"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  if fm_backend_source herdr 2>/dev/null; then
+    hd_checked=0
+    hd_titled=0
+    hd_clean=0
+    hd_examined=0
+    hd_shaped=0
+    hd_noted=0
+    hd_failed=0
+    hd_panes=$(fm_backend_herdr_cli default pane list 2>/dev/null || true)
+    if [ -n "$hd_panes" ]; then
+      # EVERY claude pane is scanned, not only the focused one. The 2026-08-11
+      # observation that only a focused pane carried the overlay was true of
+      # claude 2.1.226.634 and false of 2.1.228.649, so filtering on focus would
+      # narrow this guard to one vendor build.
+      while IFS= read -r hd_pane; do
+        [ -n "$hd_pane" ] || continue
+        hd_cap=$(fm_backend_herdr_capture "default:$hd_pane" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null || true)
+        [ -n "$hd_cap" ] || continue
+        hd_glyph_row=-1
+        hd_row=0
+        while IFS= read -r hd_line; do
+          hd_trim=$hd_line
+          fm_composer_normalize_trim_var hd_trim
+          if fm_composer_leading_agent_glyph_var hd_g "$hd_trim"; then hd_glyph_row=$hd_row; fi
+          hd_row=$((hd_row + 1))
+        done <<EOF
+$hd_cap
+EOF
+        [ "$hd_glyph_row" -ge 1 ] || continue
+        hd_examined=$((hd_examined + 1))
+        hd_above=$(_fm_composer_screen_row "$((hd_glyph_row - 1))" "$hd_cap")
+        fm_composer_normalize_trim_var hd_above
+        hd_below=$(_fm_composer_screen_row "$((hd_glyph_row + 1))" "$hd_cap")
+        fm_composer_normalize_trim_var hd_below
+        # The rule below the glyph is this composer's closing rule and supplies
+        # the width the titled rule above must match.
+        _fm_composer_pi_separator_row "$hd_below" || continue
+        hd_shaped=$((hd_shaped + 1))
+        if _fm_composer_pi_separator_row "$hd_above"; then
+          hd_clean=$((hd_clean + 1))
+          continue
+        fi
+        if _fm_composer_rule_row "$hd_above" "${hd_below//─/ }"; then
+          hd_titled=$((hd_titled + 1))
+          CHECKED=$((CHECKED + 1))
+          pass "herdr ($hd_version) + claude ($cl_version): pane $hd_pane titled composer rule is recognized as a rule"
+          continue
+        fi
+        hd_reason=$(hd_rule_refusal_reason "$hd_above" "${hd_below//─/ }" || true)
+        if [ -n "$hd_reason" ]; then
+          hd_noted=$((hd_noted + 1))
+          note "herdr ($hd_version) + claude ($cl_version): pane $hd_pane draws a titled composer rule the classifier declines on a documented boundary - $hd_reason; the refusal is the specified behaviour and not a regression, and this pane is NOT a live pass"
+          printf '#   rule above the glyph row: [%s]\n' "$hd_above"
+          continue
+        fi
+        # A row carrying no 8-column dash run anywhere is not a titled rule at
+        # all, so neither the titled-rule framing nor the column proof's refusal
+        # reasons describe it. It is its own regression: the composer has a
+        # closing rule and no opening one, which is what a vendor restyle that
+        # drops the top rule looks like.
+        case "$hd_above" in
+          *────────*) ;;
+          *)
+            FAILED=1
+            hd_failed=$((hd_failed + 1))
+            printf '# pane %s row above the composer row:\n#   [%s]\n' "$hd_pane" "$hd_above" >&2
+            printf 'not ok - herdr (%s) + claude (%s): pane %s has a closing rule below its composer row but NO rule above it - the row above carries no 8-column dash run at all, titled or plain - so this composer has no readable frame and the classifier will defer on it\n' \
+              "$hd_version" "$cl_version" "$hd_pane" >&2
+            continue
+            ;;
+        esac
+        # Reaching here, the row opens with the dash run and was not excused, so
+        # either the column proof refused it or the count was exact and the two
+        # rules are different widths. Both rows are printed so an operator can
+        # compare their widths directly from this output.
+        FAILED=1
+        hd_failed=$((hd_failed + 1))
+        printf '# pane %s rule above the glyph row:\n#   [%s]\n# pane %s closing rule below it:\n#   [%s]\n' \
+          "$hd_pane" "$hd_above" "$hd_pane" "$hd_below" >&2
+        if hd_cols=$(fm_composer_column_spaces "${hd_above//─/ }"); then
+          printf 'not ok - herdr (%s) + claude (%s): pane %s titled composer rule carries an ASCII-only title, so its column count is exact, and that count still disagrees with the closing rule - the two rules are different widths, the shared-width assumption this fix rests on has stopped holding, and the classifier will defer on this composer\n' \
+            "$hd_version" "$cl_version" "$hd_pane" >&2
+          continue
+        fi
+        hd_residue=${hd_cols//[[:space:]]/}
+        if [ -n "$hd_residue" ]; then
+          # Dumped as bytes as well as text: a control byte is exactly the kind of
+          # leftover that would otherwise print as an empty pair of brackets.
+          printf '#   the column proof could not count: [%s] bytes:%s\n' \
+            "$hd_residue" "$(printf '%s' "$hd_residue" | LC_ALL=C od -An -tx1 | tr -d '\n')" >&2
+        else
+          printf '#   the column proof refused the row before counting anything (a structural box-drawing glyph)\n' >&2
+        fi
+        printf 'not ok - herdr (%s) + claude (%s): pane %s titled composer rule was NOT recognized; the away-mode titled-rule regression is live again\n' \
+          "$hd_version" "$cl_version" "$hd_pane" >&2
+      done <<EOF
+$(printf '%s' "$hd_panes" | jq -r '
+  .result.panes[]?
+  | select(.agent == "claude")
+  | .pane_id' 2>/dev/null)
+EOF
+      # Every live claude pane herdr reports idle, read through the shared
+      # classifier. The expected verdict comes from the pane's OWN composer row,
+      # not from herdr's agent-state: an idle agent whose operator has typed a
+      # draft and not submitted it is legitimately `pending`, and a guard that
+      # demanded `empty` there would fail on any real fleet with an unsent
+      # message in it - crying wolf on the exact panes it is meant to protect.
+      #
+      # The expectation is read from the raw glyph row rather than through
+      # fm_composer_extract_selected_content, which would route it back through
+      # the selector under test and make the assertion circular. That row comes
+      # from the PLAIN capture, while the classifier reads the STYLED one and
+      # strips claude's dim rotating suggestion, so the two see different bytes
+      # whenever the row carries text: `❯ Try "..."` is a draft to this loop and
+      # correctly nothing to the classifier. So the exact `empty` is asserted
+      # only where the plain row is blank and the derivation is unambiguous, and
+      # a row carrying text accepts either direction of the read. What is never
+      # accepted, in both cases, is `unknown` or an unreadable verdict on a
+      # composer this loop can see - the defect that deferred every away-mode
+      # escalation, and the whole reason this guard exists.
+      #
+      # A pane with no readable capture or no composer glyph row at all is
+      # SKIPPED, not asserted: herdr reports `idle` for a pane parked on a
+      # `/model` picker or a compaction prompt the classifier rightly refuses,
+      # and for a pane scrolled into its own scrollback. Skipped panes count
+      # toward nothing, so the "no idle claude pane to read" note below still
+      # fires rather than the guard passing vacuously.
+      while IFS=$'\t' read -r hd_pane hd_focused; do
+        [ -n "$hd_pane" ] || continue
+        hd_cap=$(fm_backend_herdr_capture "default:$hd_pane" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null || true)
+        if [ -z "$hd_cap" ]; then
+          note "herdr ($hd_version): idle pane $hd_pane returned no capture; skipped, not asserted"
+          continue
+        fi
+        hd_glyph_row=-1
+        hd_row=0
+        hd_draft=''
+        while IFS= read -r hd_line; do
+          hd_trim=$hd_line
+          fm_composer_normalize_trim_var hd_trim
+          if fm_composer_leading_agent_glyph_var hd_g "$hd_trim"; then
+            hd_glyph_row=$hd_row
+            hd_draft=${hd_trim#*"$hd_g"}
+            fm_composer_normalize_trim_var hd_draft
+          fi
+          hd_row=$((hd_row + 1))
+        done <<EOF2
+$hd_cap
+EOF2
+        if [ "$hd_glyph_row" -lt 0 ]; then
+          note "herdr ($hd_version): idle pane $hd_pane renders no composer row (modal or scrollback); skipped, not asserted"
+          continue
+        fi
+        if [ -n "$hd_draft" ]; then
+          hd_accept='empty pending pending-unproven'
+          hd_why="composer row carries text that is either a draft or the vendor's dim suggestion"
+        else
+          hd_accept='empty'
+          hd_why="composer row is blank"
+        fi
+        hd_verdict=$(fm_backend_herdr_composer_state "default:$hd_pane" 2>/dev/null || true)
+        hd_ok=0
+        case " $hd_accept " in
+          *" ${hd_verdict:-unreadable} "*) hd_ok=1 ;;
+        esac
+        if [ "$hd_ok" -eq 1 ]; then
+          hd_checked=$((hd_checked + 1))
+          CHECKED=$((CHECKED + 1))
+          pass "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies $hd_verdict"
+        elif [ "$hd_verdict" = unknown ] \
+             && hd_reason=$(hd_documented_unknown "$hd_cap" "$hd_glyph_row") \
+             && [ -n "$hd_reason" ]; then
+          note "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies unknown on a documented boundary - $hd_reason; reported, not asserted, and not a live pass"
+        elif [ "$hd_accept" = empty ] \
+             && { [ "$hd_verdict" = pending ] || [ "$hd_verdict" = pending-unproven ]; }; then
+          hd_reread=$(hd_composer_row_state "default:$hd_pane")
+          case "$hd_reread" in
+            text)
+              note "herdr ($hd_version): idle pane $hd_pane raced this read - its composer row was blank when the expectation was derived and carries text now, so the verdict $hd_verdict describes a different row than the expectation does; skipped, not asserted, and not a live pass"
+              ;;
+            unreadable)
+              note "herdr ($hd_version): idle pane $hd_pane classified $hd_verdict against a blank composer row, and the second read did not come back (no capture, or no composer row in it), so neither a read race nor a disagreement was established; inconclusive, skipped, and not a live pass"
+              ;;
+            *)
+              FAILED=1
+              printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
+              fm_backend_herdr_capture "default:$hd_pane" 6 2>/dev/null \
+                | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+              printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) %s, a second read confirmed that row STILL blank so this is not a read race, and the classifier still returned %s\n' \
+                "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "$hd_why" "$hd_verdict" >&2
+              ;;
+          esac
+        else
+          FAILED=1
+          printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
+          fm_backend_herdr_capture "default:$hd_pane" 6 2>/dev/null \
+            | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+          printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) %s but classified %s, expected one of: %s\n' \
+            "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "$hd_why" "${hd_verdict:-unreadable}" "$hd_accept" >&2
+        fi
+      done <<EOF
+$(printf '%s' "$hd_panes" | jq -r '
+  .result.panes[]?
+  | select(.agent == "claude")
+  | select(.agent_status == "idle" or .agent_status == "done")
+  | [.pane_id, (.focused | tostring)] | @tsv' 2>/dev/null)
+EOF
+    fi
+    if [ "$hd_checked" -eq 0 ]; then
+      note "herdr ($hd_version) running but no idle claude pane to read; live empty verdicts not exercised here"
+    fi
+    if [ "$hd_titled" -eq 0 ] && [ "$hd_failed" -gt 0 ]; then
+      note "herdr ($hd_version) + claude ($cl_version) read NO titled composer rule as a live pass, and $hd_failed pane(s) FAILED above: of $hd_examined claude composer pane(s) examined, $hd_shaped carried a rule directly below the composer row, $hd_clean of those drew a plain rule, and $hd_noted drew a titled rule declined on a documented boundary; the failures above are this run's finding, so the shape was exercised live and did not hold"
+    elif [ "$hd_titled" -eq 0 ]; then
+      note "herdr ($hd_version) + claude ($cl_version) read NO titled composer rule live: of $hd_examined claude composer pane(s) examined, $hd_shaped carried a rule directly below the composer row, $hd_clean of those drew a plain rule, and $hd_noted drew a titled rule declined on a documented boundary (noted above); the titled-rule regression was NOT exercised live here and rests on the portable regression in tests/fm-composer-lib.test.sh"
+    fi
+  else
+    note "herdr present but adapter source failed; titled-rule shape not exercised here"
+  fi
+else
+  note "harness absent, not verified here: herdr+claude (titled composer rule not exercised)"
 fi
 
 # --- refuse a vacuous pass ---------------------------------------------------

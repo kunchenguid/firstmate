@@ -371,9 +371,188 @@ test_matrix_grok_titled_bottom_border() {
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
   # The tolerance is additive: an untitled border still proves the same box.
   assert_screen "grok untitled border" empty "$CAPS_TMUX" "$plain_border" 1
+  # A non-ASCII glyph in this title still refuses, at the same border width. The
+  # titled-bottom proof shares the column count with the titled-rule predicate but
+  # NOT its widened script boundary: this border decides a bordered composer's
+  # geometry, and `empty` there authorizes an injection, so the boundary stays
+  # where it was reviewed. Pinned so a future consolidation cannot move it as a
+  # side effect.
+  local glyph_titled
+  glyph_titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰────────────────── ✳ Grok 4.5 (high) ─╯'
+  assert_screen "grok non-ASCII titled bottom border refuses" unknown "$CAPS_TMUX" "$glyph_titled" 1
   typed=$'  ╭──────────────────────────────────────╮\n  │ ❯ deploy the fix                     │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
   assert_screen "grok typed on tmux" pending "$CAPS_TMUX" "$typed" 1
   pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
+}
+
+test_matrix_claude_titled_composer_rule() {
+  # Claude's borderless composer sits between two horizontal `─` rules. When a
+  # vendor overlays the pane title on the TOP rule, that rule is dashes PLUS
+  # text, so the separated pair never opens and the composer's own BOTTOM rule
+  # becomes an unmatched separator below the already-matched `❯` row. The
+  # staleness rule read that as proof the glyph was scrollback and returned
+  # `unknown` - which defers every away-mode escalation indefinitely, silently.
+  #
+  # Built from the SHAPE, never from a captured pane, and that is the point.
+  # This defect appeared fixed for three days only because the installed Claude
+  # stopped drawing the title; a fixture that depended on the vendor still
+  # drawing it would have gone vacuously green in exactly the same way.
+  local rule mid end narrow wide idle_mid idle_end out
+  rule='────────────────────────────────────────'                 # 40 columns
+  mid='───────────── Review demo ──────────────'                  # 40, title mid-rule
+  end='─────────────────────────────Review demo'                  # 40, title flush at end
+  narrow='──────────── Review demo'                               # 24, titled, too narrow
+  wide="$mid"'──────────'                                        # 50, titled, too wide
+
+  # THE DIVERGENCE PIN. Both titled rules must be rejected by the strict
+  # dashes-only separator predicate and accepted as rules by the titled one. If
+  # a future fixture edit lets the title slip out, these two assertions fail
+  # instead of the test quietly passing on a plain rule.
+  local spaces
+  spaces=${rule//─/ }
+  for out in "$mid" "$end"; do
+    ! _fm_composer_pi_separator_row "$out" \
+      || fail "fixture no longer diverges: '$out' passed the strict dashes-only separator, so the titled shape is not being exercised"
+    _fm_composer_rule_row "$out" "$spaces" \
+      || fail "titled rule '$out' must read as a rule at its partner's width"
+  done
+  # The strict predicate still accepts a plain rule, so the divergence above is
+  # about the title and not about the predicate being broken outright.
+  _fm_composer_pi_separator_row "$rule" \
+    || fail "the strict separator predicate must still accept a plain rule"
+
+  # The regression itself, on every capture profile and in both locales.
+  # Only the CURSORLESS profiles - herdr, zellij, cmux, orca - regressed, because
+  # the staleness rule this narrows lives in the cursorless selector; a tmux
+  # capture reaches the verdict through its cursor row and read `empty` all
+  # along. The tmux row is here as the cross-profile invariant, not as a pin.
+  idle_mid=$'transcript line\n'"$mid"$'\n❯'"$NBSP"$'\n'"$rule"$'\n  bypass permissions'
+  idle_end=$'transcript line\n'"$end"$'\n❯'"$NBSP"$'\n'"$rule"$'\n  bypass permissions'
+  assert_screen "claude titled-rule idle on tmux" empty "$CAPS_TMUX" "$idle_mid" 2 probe-absent
+  assert_screen "claude titled-rule idle on herdr" empty "$CAPS_STYLED" "$idle_mid" '' probe-absent
+  assert_screen "claude titled-rule idle on zellij" empty "$CAPS_STYLED_NOID" "$idle_mid"
+  assert_screen "claude titled-rule idle on cmux/orca" empty "$CAPS_PLAIN" "$idle_mid"
+  # A title flush at the row's end is the same shape and must not depend on the
+  # rule happening to close with a dash.
+  assert_screen "claude end-titled-rule idle on herdr" empty "$CAPS_STYLED" "$idle_end" '' probe-absent
+  assert_screen "claude end-titled-rule idle on cmux/orca" empty "$CAPS_PLAIN" "$idle_end"
+
+  # NEGATIVE CASES: the exception is a narrow one and must not become a general
+  # relaxation of the staleness rule.
+  #
+  # Width is the structural proof that the title was overlaid onto this
+  # composer's own rule. A dashes-plus-text row of any other width is a
+  # transcript row, not this box's edge - checked at the predicate and again
+  # through the public verdict, in both directions.
+  #
+  # Both of these are titled rows on purpose. A PLAIN rule of a mismatched width
+  # is a different question, owned by the strict separator predicate this change
+  # deliberately did not touch: two plain rules open the separated pair whatever
+  # their widths, so such a row reads `empty` here exactly as it does without
+  # this fix, and asserting otherwise would be asserting someone else's contract.
+  for out in "$narrow" "$wide"; do
+    ! _fm_composer_rule_row "$out" "$spaces" \
+      || fail "titled row '$out' is not the closing rule's width and must not read as its partner"
+  done
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$narrow"$'\n❯\n'"$rule")
+  [ "$out" = unknown ] \
+    || fail "a dashes-plus-text row narrower than the closing rule must not prove a composer, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$wide"$'\n❯\n'"$rule")
+  [ "$out" = unknown ] \
+    || fail "a dashes-plus-text row wider than the closing rule must not prove a composer, got '$out'"
+  # THE OUTAGE HOST'S OWN TITLE. The live terminal title on the host that paid
+  # for this defect began with U+2733, so a title of any script must READ at the
+  # partner's exact width - an ASCII-only proof would have excluded the one shape
+  # this exception exists for.
+  local glyph_title
+  glyph_title='──────────── ✳ Review demo ─────────────'         # 40, non-ASCII title
+  _fm_composer_rule_row "$glyph_title" "$spaces" \
+    || fail "a non-ASCII title glyph at the partner's width must read as a rule"
+  assert_screen "claude glyph-titled-rule idle on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$glyph_title"$'\n❯'"$NBSP"$'\n'"$rule" '' probe-absent
+  assert_screen "claude glyph-titled-rule idle on cmux/orca" empty "$CAPS_PLAIN" \
+    $'transcript\n'"$glyph_title"$'\n❯'"$NBSP"$'\n'"$rule"
+
+  # WHAT THE WIDENED PROOF STILL REFUSES, each isolated by deriving it from the
+  # 40-column `mid` fixture so only one cause changes. Every one of these rows
+  # would read as a rule if the proof credited the offending bytes with one
+  # column, so each assertion pins its own rejection rather than a width accident.
+  local dwide struct ctrl badlead esc badbyte
+  esc=$(printf '\033')
+  printf -v badbyte '%b' '\0365'
+  # A DOUBLE-WIDTH title glyph: 40 columns on screen, 39 characters, so one
+  # space per character under-counts and the width proof mismatches. Refusing is
+  # the safe direction - a capture carries no width table.
+  dwide="${mid%──}審"
+  ! _fm_composer_rule_row "$dwide" "$spaces" \
+    || fail "a double-width title glyph cannot be counted honestly and must not read as a rule"
+  # Another container's edge glyph, at the partner's exact character count.
+  struct="${mid%─}│"
+  ! _fm_composer_rule_row "$struct" "$spaces" \
+    || fail "a structural box-drawing glyph in the title must refuse, never count as a column"
+  # Malformed bytes, again at the partner's exact character count: a control byte
+  # and an invalid UTF-8 lead byte.
+  ctrl="${mid%─}$esc"
+  ! _fm_composer_rule_row "$ctrl" "$spaces" \
+    || fail "a control byte in the title must refuse, never count as a column"
+  badlead="${mid%─}$badbyte"
+  ! _fm_composer_rule_row "$badlead" "$spaces" \
+    || fail "an invalid UTF-8 lead byte in the title must refuse, never count as a column"
+  # Sequences UTF-8 forbids are malformed even though their lead byte is in range,
+  # so a lead-range-only proof would credit them with a column. Each is spliced in
+  # at the partner's exact character count, so only the byte sequence differs.
+  local overlong surrogate toohigh combining
+  printf -v overlong '%b' '\0340\0200\0200'
+  printf -v surrogate '%b' '\0355\0240\0200'
+  printf -v toohigh '%b' '\0364\0220\0200\0200'
+  ! _fm_composer_rule_row "${mid%─}$overlong" "$spaces" \
+    || fail "an overlong UTF-8 sequence in the title must refuse, never count as a column"
+  ! _fm_composer_rule_row "${mid%─}$surrogate" "$spaces" \
+    || fail "a UTF-16 surrogate sequence in the title must refuse, never count as a column"
+  ! _fm_composer_rule_row "${mid%─}$toohigh" "$spaces" \
+    || fail "a sequence above U+10FFFF in the title must refuse, never count as a column"
+  # A COMBINING mark occupies no column of its own and is counted as one, so the
+  # proof over-counts and refuses - the mirror of the double-width case above, and
+  # the same safe direction.
+  printf -v combining '%b' 'e\0314\0201'
+  ! _fm_composer_rule_row "${mid%─}$combining" "$spaces" \
+    || fail "a combining mark over-counts the row's columns and must not read as a rule"
+  assert_screen "claude double-width titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$dwide"$'\n❯\n'"$rule"
+  assert_screen "claude structural glyph in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$struct"$'\n❯\n'"$rule"
+  assert_screen "claude control byte in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$ctrl"$'\n❯\n'"$rule"
+  assert_screen "claude invalid UTF-8 lead byte in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$badlead"$'\n❯\n'"$rule"
+  # Adjacency on both edges: a glyph genuinely stranded in scrollback has
+  # transcript rows between it and the separator below, not its own box edges.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$mid"$'\n❯\nolder output\n'"$rule")
+  [ "$out" = unknown ] \
+    || fail "a glyph separated from the closing rule by transcript rows is scrollback and must stay unknown, got '$out'"
+  # The dead-shell rule is untouched: a shell glyph in this shape is still a
+  # dead shell, never an injectable composer.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$mid"$'\n$\n'"$rule")
+  [ "$out" = unknown ] \
+    || fail "a dead shell glyph inside a titled-rule sandwich must stay unknown, got '$out'"
+  # The strict blank-row posture is untouched: structure alone never promotes an
+  # unidentified blank row, which is what the pi identity gate exists for.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$mid"$'\n\n'"$rule")
+  [ "$out" = unknown ] \
+    || fail "a blank row inside a titled-rule sandwich must stay unknown, got '$out'"
+  # Real typed text in the same shape is still pending, not empty: sparing the
+  # candidate hands it to the ordinary content classifier, it does not force a
+  # verdict. On an unstyled capture the same row stays unknown, because a
+  # borderless row with no styling proof cannot be told from transcript output -
+  # the pre-existing bare-row rule, unchanged here and asserted so a future
+  # relaxation of it cannot hide behind this test.
+  local typed
+  typed=$'transcript\n'"$mid"$'\n❯ fix the login bug\n'"$rule"
+  assert_screen "claude titled-rule typed on tmux" pending "$CAPS_TMUX" "$typed" 2 probe-absent
+  assert_screen "claude titled-rule typed on herdr" pending "$CAPS_STYLED" "$typed" '' probe-absent
+  assert_screen "claude titled-rule typed on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "claude titled-rule typed on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  pass "matrix: a titled composer rule no longer discards a live claude composer, and the staleness, dead-shell, and strict blank-row rules are unchanged"
 }
 
 test_matrix_kimi_bordered_shell_glyph_box() {
@@ -386,6 +565,23 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   assert_screen "kimi idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   assert_screen "kimi idle on herdr" empty "$CAPS_STYLED" "$screen"
   assert_screen "kimi idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # THE BORDERED BOUNDARY THIS CHANGE DELIBERATELY DID NOT MOVE. The box geometry
+  # proof shares the column count with the titled-rule predicate, whose script
+  # boundary was widened, but keeps its own ASCII-only content boundary: `empty`
+  # from a bordered composer is what authorizes away mode to type into that pane,
+  # and only the titled composer RULE was authorized to start reading wider.
+  #
+  # Both directions are pinned so a future consolidation cannot move either one
+  # silently. A non-ASCII idle placeholder stays unreadable geometry and so reads
+  # `unknown`, never an injectable `empty`; a non-ASCII draft in the same box is
+  # `pending-unproven`, unsent text whose container could not be proven, which is
+  # the verdict this shape has always had.
+  local accented cyrillic_placeholder
+  cyrillic_placeholder=$'╭────────────╮\n│ > кот      │\n╰────────────╯'
+  FM_COMPOSER_IDLE_RE='^кот$' assert_screen "bordered non-ASCII placeholder is not injectable" \
+    unknown "$CAPS_PLAIN" "$cyrillic_placeholder"
+  accented=$'╭────────────────────────╮\n│ > café                 │\n╰────────────────────────╯'
+  assert_screen "bordered non-ASCII draft stays unproven" pending-unproven "$CAPS_TMUX" "$accented" 1
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
@@ -631,6 +827,7 @@ test_cursorless_container_rejects_contiguous_lower_activity
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
+test_matrix_claude_titled_composer_rule
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 

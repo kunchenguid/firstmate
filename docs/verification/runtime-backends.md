@@ -206,6 +206,94 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Titled composer rule
+
+Claude draws its borderless composer between two horizontal `─` rules.
+When a terminal-title overlay is burned into the TOP rule, that rule is dashes plus text, so it fails the dashes-only separator predicate, the separated pair never opens, and the composer's own BOTTOM rule becomes an unmatched separator sitting below the `❯` row the scan already matched.
+The cursorless staleness rule read that unmatched separator as proof the match was scrollback and returned `unknown`, which defers away-mode escalation indefinitely and silently; this host paid one 8.5-hour undelivered-escalation outage for it.
+The current classifier spares exactly that shape and returns `empty`.
+
+**This guarantee is deliberately not scoped to a Claude version, and a version-scoped record of it would be wrong.**
+A 2026-08-11 measurement recorded the overlay as a property of `claude 2.1.226.634` focused panes specifically.
+By 2026-08-14 the installed build had moved twice, to `2.1.228.649` and then `2.1.231.653`, and stopped writing the title into the captured grid on any pane, focused or not.
+Nothing in firstmate or Herdr changed across that window: the Herdr binary and the same running server process spanned both observations.
+So the defect stopped being observable live without being fixed, and a version-scoped record of a live pass would have rotted into a false claim of coverage.
+The standing proof is therefore the portable regression `test_matrix_claude_titled_composer_rule` in `tests/fm-composer-lib.test.sh`, which builds the shape from its structure rather than from a captured pane and holds on every Claude release, asserts the titled rule diverges from the strict separator predicate so it cannot go vacuously green, and reproduces the exact failure when only the consumer narrowing is reverted.
+
+The live half was measured on 2026-08-14 on Linux x86_64 with `herdr 0.8.0`, `claude 2.1.231.653 (ASBX Claude Code, channel stable)`, and tmux 3.6a, against the running `default` Herdr session, reading real panes only and submitting nothing.
+Because the current Claude build renders no titled rule, the shape was proven against the live pane's own 20-row capture with only the top rule's dashes overwritten by that pane's actual terminal title, at the same column width, leaving every other byte of the real capture untouched.
+The run read that capture twice, once through the pre-fix classifier at base `6789876` - the block it labels `current main reader` - and once through the shipped one:
+
+```text
+### current main reader
+  top=asis      cols=163  residue=[] verdict=empty  (LC_ALL=C: empty)
+  top=at-end    cols=163  residue=[Review interview demo and deck prep] verdict=unknown  (LC_ALL=C: unknown)
+  top=embedded  cols=163  residue=[ Review interview demo and deck prep ] verdict=unknown  (LC_ALL=C: unknown)
+
+### with the fix
+  top=asis      cols=163  residue=[] verdict=empty  (LC_ALL=C: empty)
+  top=at-end    cols=163  residue=[Review interview demo and deck prep] verdict=empty  (LC_ALL=C: empty)
+  top=embedded  cols=163  residue=[ Review interview demo and deck prep ] verdict=empty  (LC_ALL=C: empty)
+```
+
+`at-end` places the title flush at the row's end and `embedded` places it mid-rule; both are recognized, so the rule test does not depend on the row happening to close with a dash.
+The already-working clean-rule case (`asis`) is unchanged, and both locales agree, which is what the character-for-character space-string width comparison buys over a `${#row}` length test that counts characters under UTF-8 and bytes under `LC_ALL=C`.
+Only the cursorless capture profiles regressed - Herdr, Zellij, cmux, and Orca - because the narrowed rule lives in the cursorless selector; a tmux capture reaches its verdict through the cursor row and read `empty` throughout.
+
+The strict dashes-only separator predicate that gates Pi identity is unchanged, so recognizing a titled rule did not relax that gate, and the dead-shell and strict blank-row `unknown` rules are unchanged.
+
+A titled rule is read when its title is well-formed, single-width, non-structural text of ANY script, deliberately wider than the ASCII-printable-only limit the bordered shapes keep.
+The terminal title on the host that paid for this defect began with U+2733, so an ASCII-only proof excluded the exact shape the fix exists for.
+The widening works by making the column proof correct for non-ASCII text rather than by tolerating leftover bytes.
+The set of byte sequences the proof refuses is therefore SMALLER than the ASCII-only pass it replaced, because well-formed non-ASCII text is now counted instead of refused, and that is the whole point.
+What keeps the widening from becoming a general tolerance for junk rows is that every malformed and structural class still refuses: a structural box-drawing glyph from another container's edge, a control byte, DEL or ESC, an invalid UTF-8 lead byte, an orphan continuation byte, a truncated multibyte sequence, an overlong form, a UTF-16 surrogate, and any code point above U+10FFFF.
+Five live shapes still refuse, and each refusal is a deliberate `unknown` - a refusal to read - which is the safe direction.
+A DOUBLE-WIDTH title glyph (CJK, emoji presentation) is counted as one column and therefore under-counted, so the width comparison mismatches; a terminal capture carries no width table, so refusing is the only honest answer.
+A ZERO-WIDTH or COMBINING character is the mirror case: it occupies no column and is counted as one, so the proof over-counts and refuses.
+A structural box-drawing glyph in the title refuses, because the caller has already mapped away its own rule glyph and anything structural still standing belongs to another container.
+Malformed bytes refuse, including the sequences whose lead byte is in range but which UTF-8 forbids.
+A title that precedes the row's opening 8-column dash run refuses, because the wider boundary is about which title CHARACTERS can be counted and not about where the title may sit.
+
+One column-counting proof serves all three callers that ask the same question, so what counts as a column cannot drift between them: the titled-rule predicate, grok's titled bottom border, and the box content-row geometry check.
+The WIDER SCRIPT boundary, though, reaches only the titled-rule predicate.
+Both bordered callers keep their pre-existing ASCII-only content boundary through `_fm_composer_ascii_only`, which is a deliberate choice over a single fleet-wide boundary: `empty` from a bordered composer is what authorizes away mode to type into that pane, and a safety boundary must not move as a side effect of a change whose purpose was removing three duplicate spellings of the column count.
+Both directions of that boundary are pinned in `tests/fm-composer-lib.test.sh`, because it was previously unpinned by accident and a consolidation can otherwise move it unnoticed: a bordered non-ASCII idle placeholder reads `unknown` rather than an injectable `empty`, and a bordered non-ASCII draft reads `pending-unproven`.
+So the set of panes away mode may type into grows by exactly the titled composer rule the classifier was always supposed to read, and by nothing else.
+The preserved boundary was measured rather than assumed: `fm_composer_geometry_spaces` accepts and refuses exactly what it accepted and refused before the consolidation at base `6789876`, byte for byte, across ASCII printables, ASCII whitespace including a tab, a normalised NO-BREAK SPACE, an empty row, a prompt glyph followed by a NO-BREAK SPACE, a prompt glyph followed by ASCII, and the accented, Cyrillic, CJK, box-drawing and ESC cases it refuses.
+End to end across the bordered shapes every verdict is byte-identical to the pre-consolidation one in both locales, and the ONLY verdict that differs anywhere is the titled composer rule itself, which moves from `unknown` to `empty`.
+No other pinned verdict moved when the three callers were consolidated, measured on 2026-08-14 and re-measured on 2026-08-16: `tests/fm-composer-lib.test.sh` (31 ok), `tests/fm-composer-ghost.test.sh` (33 ok), `tests/fm-backend-herdr.test.sh` (175 ok), `tests/fm-backend-cmux.test.sh` (61 ok), `tests/fm-tmux-agent-liveness.test.sh` (14 ok), `tests/fm-kimi-harness.test.sh` (17 ok), `tests/fm-gotmp.test.sh` (3 ok), `tests/fm-send-settle.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-send-secondmate-marker.test.sh` all pass.
+`tests/fm-backend-orca.test.sh` and `tests/fm-backend-zellij.test.sh` each fail one teardown-family assertion in both runs, byte-identically with the composer narrowing reverted, so that failure belongs to the teardown family and not to composer classification.
+A titled composer rule whose closing rule sits more than one row below the composer row - which a ghost suggestion wrapping onto a second row produces on a narrow pane - is a separate scoped gap that remains open: the sandwich exception requires adjacency on both edges, so that shape reads `unknown`, the safe direction.
+
+`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` is the refresh command.
+Its Herdr section scans every live Claude pane rather than only the focused one, asserts any titled rule it finds, and reports explicitly when no pane renders one so absence is never read as a live pass.
+When a live titled rule is declined on one of the documented boundaries above, the guard notes that pane with the concrete reason and prints the rule row it read, rather than reporting a classifier behaving as specified as a regression.
+A refusal for any other reason still fails loudly, printing both rules and naming the leftover the proof could not count as text and as bytes, or stating that a structural glyph refused the row before anything was counted.
+A width mismatch is noted only when the title carries non-ASCII text, where one space per character can be wrong in either direction and the count therefore cannot be established.
+An ASCII-titled width mismatch FAILS, because that count is exact: every ASCII printable is one column and a captured grid carries no tabs, so a mismatch means the two rules really are different widths and the shared-width assumption this fix rests on has stopped holding, which is the outage shape rather than a boundary.
+The residual in that discriminator is stated rather than left to be discovered: a single-width non-ASCII title whose rules genuinely disagree in width is still only noted, because nothing in a captured grid distinguishes a single-width glyph from a double-width one without a width table.
+The guard also re-reads a pane before failing an `empty` expectation, because that expectation and the verdict come from two separate pane reads and a keystroke landing between them would otherwise be reported as a regression.
+That allowance is deliberately narrow in both directions.
+It is reached only for a DRAFT verdict, `pending` or `pending-unproven`, which is what a keystroke on a styled capture actually produces; `unknown` and an unreadable verdict fail regardless of what any re-read shows, because a keystroke cannot produce them and they are the defect the guard exists to catch.
+The re-read then has three outcomes rather than two: a row carrying text confirms the race and the pane is skipped, a row confirmed still blank refutes it and the pane FAILS with that stated in the message, and a second read that does not come back establishes neither and the pane is reported inconclusive rather than as a race or a pass.
+Its closing note counts the panes actually examined and reports plain rules, documented refusals, read titled rules, and failures separately, so it can no longer declare the shape unexercised in the same run that failed on it.
+A pane whose composer row has a closing rule below it and no dash run at all above it gets its own failure message naming that, rather than being reported as an unrecognized titled rule, because a vendor restyle that drops the top rule while keeping the bottom one is a different regression from a rule the proof declined.
+It also reads every idle Claude pane through the shared classifier, deriving the expected verdict from that pane's own composer row rather than from Herdr's agent state, because an idle agent whose operator has typed and not submitted a message is legitimately `pending` and a guard demanding `empty` there would fail on any working fleet.
+That derivation reads the plain capture while the classifier reads the styled one and strips Claude's dim rotating suggestion, so the exact `empty` is asserted only where the plain composer row is blank, and a row carrying text accepts either direction of the read; `unknown` and an unreadable verdict fail in both cases, which is the behaviour the guard exists to catch.
+A pane with no readable capture or no composer row at all - parked on a `/model` picker or a compaction prompt the classifier rightly refuses, or scrolled into its own scrollback - is skipped with a note and counts toward nothing, so an absent composer is reported as absent rather than converted into a false regression report.
+
+The same 2026-08-14 run confirmed both directions of that reading against real panes on `claude 2.1.231.653`, which supersedes the older per-harness Claude result above for the Herdr capture path:
+
+```text
+ok - claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): real idle composer classifies empty
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): idle pane w1:p9 (focused=true) composer row is blank and classifies empty
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): idle pane w12:p2 (focused=false) composer row is blank and classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+```
+
+An earlier reading of the same fleet, before that pane's draft was submitted, returned `pending` for a pane carrying `❯ 1/ Why does every agent get it's own space? ...`, which is the drafted direction of the same rule.
+Codex is unverified in this run for the pre-existing reason recorded above: launched from a worktree it opens a first-launch directory-trust dialog, which the guard correctly treats as an unreadable composer and never confirms.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

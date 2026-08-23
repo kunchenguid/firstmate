@@ -145,6 +145,37 @@ for _fm_composer_space_octal in \
 done
 unset -v _fm_composer_space_octal _fm_composer_space_utf8
 
+# The UTF-8 lead-byte pairs of U+2500..U+25FF - box drawing, block elements, and
+# geometric shapes - built from octal escapes for the same reviewability reason
+# as the space list above. What this set covers is exactly that range, which is
+# every NON-ASCII glyph fm_composer_row_has_edge treats as structural, and it is
+# what fm_composer_column_spaces refuses before it counts anything.
+#
+# The two ASCII edges that predicate also recognises, `|` and `+`, are deliberately
+# NOT reached here: each occupies exactly one column, so the ASCII pass counts them
+# width-accurately, and a title containing one is still measured correctly against
+# its partner rule. Pass 1 exists for glyphs whose presence means another
+# container's edge was captured, not to enumerate that predicate's whole set.
+FM_COMPOSER_STRUCTURAL_LEADS=()
+for _fm_composer_lead_octal in '\0342\0224' '\0342\0225' '\0342\0226' '\0342\0227'; do
+  printf -v _fm_composer_lead_utf8 '%b' "$_fm_composer_lead_octal"
+  FM_COMPOSER_STRUCTURAL_LEADS+=("$_fm_composer_lead_utf8")
+done
+unset -v _fm_composer_lead_octal _fm_composer_lead_utf8
+
+# One WELL-FORMED UTF-8 multibyte character as a byte-exact ERE. Built from octal
+# escapes rather than `\xHH`, which GNU sed accepts and BSD sed does not, and
+# always applied under LC_ALL=C so it matches bytes rather than the locale's idea
+# of a character.
+#
+# The lead ranges are split so the sequences UTF-8 forbids are NOT matched, and
+# therefore survive to be refused as residue rather than being credited with a
+# column: the overlong forms (E0 followed by 80-9F, F0 followed by 80-8F), the
+# UTF-16 surrogates (ED followed by A0-BF), and everything above U+10FFFF (F4
+# followed by 90-BF). A lead-range-only pattern credited all three.
+printf -v FM_COMPOSER_UTF8_CHAR_RE '%b' \
+  '[\0302-\0337][\0200-\0277]|\0340[\0240-\0277][\0200-\0277]|[\0341-\0354][\0200-\0277]{2}|\0355[\0200-\0237][\0200-\0277]|[\0356-\0357][\0200-\0277]{2}|\0360[\0220-\0277][\0200-\0277]{2}|[\0361-\0363][\0200-\0277]{3}|\0364[\0200-\0217][\0200-\0277]{2}'
+
 # fm_composer_normalize_spaces_var: the ONE Unicode-whitespace mapping.
 # Replaces in place through the named variable so no caller needs a subshell.
 # Substitution, never deletion: deleting would silently join "foo<NBSP>bar"
@@ -584,6 +615,59 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# _fm_composer_rule_row: 0 when a row is a composer rule that may carry an
+# overlaid pane TITLE - dashes with text burned into them - proven by the row
+# collapsing to exactly the same width as the plain rule it pairs with.
+# <plain-rule-spaces> is that partner rule already mapped to spaces.
+#
+# This is NOT a relaxation of _fm_composer_pi_separator_row above, and the two
+# must not be merged. That predicate also feeds the pi identity conjunction,
+# where being wrong about what closes a separated composer would promote an
+# unidentified blank region into an injection target, so it stays strictly
+# dashes-only. This one serves a single narrow consumer,
+# _fm_composer_bare_rule_sandwich.
+#
+# The row must still OPEN with the same 8-column dash run the strict separator
+# requires, so a title flush at the row's START is not recognized: that row
+# reads `unknown`, the safe direction and the same answer as before this
+# predicate existed. Past that opening run the title's position is not assumed,
+# because that is the vendor's choice and it has already moved once: the title
+# may sit mid-rule or run flush to the row's END, and both must read as a rule.
+# What is assumed is structural and survives a vendor restyle - an overlaid
+# title overwrites dashes rather than displacing them, so the titled rule keeps
+# its partner's width.
+#
+# Width is proven by fm_composer_column_spaces, the shared column-counting proof
+# _fm_composer_titled_bottom_ok and fm_composer_geometry_spaces also use, so all
+# three agree about what a column is and about what refuses. Space strings are
+# compared, never counted: `${#row}` counts characters under a UTF-8 locale and
+# BYTES under LC_ALL=C, so a length test here would silently disagree with itself
+# between locales (issue #1988).
+#
+# Title text may be any script, and that boundary was widened deliberately: the
+# terminal title on the host that paid for this defect began with U+2733, so an
+# ASCII-only proof excluded the exact shape this predicate exists to read. What
+# still refuses is what cannot be counted honestly - a double-width glyph, a
+# zero-width or combining character, a structural box-drawing glyph, or a
+# malformed byte - and each of those leaves the verdict `unknown`, a refusal to
+# read, which is the safe direction.
+#
+# This predicate is the ONLY caller that reads wider than ASCII. Its two siblings
+# keep the pre-existing ASCII-only boundary through _fm_composer_ascii_only,
+# because they decide a bordered composer's geometry and the widening was
+# authorized for this shape alone.
+_fm_composer_rule_row() {  # <trimmed-row> <plain-rule-spaces>
+  local row=$1 expected=$2 spaces
+  [ -n "$row" ] || return 1
+  # Open with the same 8-column dash run the strict separator requires.
+  case "$row" in
+    ────────*) ;;
+    *) return 1 ;;
+  esac
+  spaces=$(fm_composer_column_spaces "${row//─/ }") || return 1
+  [ "$spaces" = "$expected" ]
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -791,6 +875,11 @@ EOF
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
+# The column count belongs to fm_composer_column_spaces, shared with
+# _fm_composer_rule_row and fm_composer_geometry_spaces. The title text stays
+# ASCII-only through _fm_composer_ascii_only: this predicate decides a BORDERED
+# composer's geometry, so relaxing it would move the same injection boundary that
+# function exists to hold still.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   local family=$1 inner=$2 expected=$3 dash spaces
   fm_composer_normalize_trim_var inner
@@ -806,10 +895,8 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
-  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$spaces" in
-    *[![:space:]]*) return 1 ;;
-  esac
+  _fm_composer_ascii_only "$spaces" || return 1
+  spaces=$(fm_composer_column_spaces "$spaces") || return 1
   [ "$spaces" = "$expected" ]
 }
 
@@ -836,22 +923,112 @@ fm_composer_row_has_edge() {  # <trimmed-row>
   return 1
 }
 
+# fm_composer_column_spaces: the ONE fleet-wide column-counting proof - map text
+# to exactly one space per terminal column, or refuse when the column count
+# cannot be honestly established. Prints the mapping and returns 0 when every
+# byte was counted. A refusal returns 1, and prints what it did map with the
+# uncountable bytes still in place so a caller can name what it saw - except the
+# structural rejection in pass 1, which prints nothing because it never counted
+# anything.
+#
+# Three callers ask this same question - "how many columns is this text, refusing
+# anything I cannot count" - against a partner row's canonical space string:
+# _fm_composer_rule_row, _fm_composer_titled_bottom_ok, and
+# fm_composer_geometry_spaces. They share one boundary here rather than three
+# spellings that drift apart the next time what counts as residue changes.
+#
+# Equality against the partner's space string is what makes the mapping safe: a
+# miscounted column in EITHER direction fails that comparison and refuses, so
+# only the structural rejection has to be exactly right. Never a length test:
+# `${#text}` counts characters under UTF-8 and BYTES under LC_ALL=C (issue
+# #1988), so a count would silently disagree with itself between locales.
+#
+# The passes, in order:
+#   1. A box-drawing, block, or geometric glyph (U+2500..U+25FF) refuses
+#      outright, BEFORE any mapping. The caller has already substituted away its
+#      own rule glyph, so one still standing here is another container's edge and
+#      must never be credited as a column of title text.
+#   2. One well-formed UTF-8 multibyte character maps to one space, by bytes.
+#      Malformed bytes are deliberately left in place rather than deleted, so
+#      pass 4 refuses them explicitly instead of the arithmetic coming out right
+#      by luck.
+#   3. Every ASCII printable maps to a space, the pass this proof always had.
+#   4. Anything still standing refuses: a control byte, DEL, ESC, an invalid lead
+#      byte, an orphan continuation byte, a truncated sequence, an overlong form,
+#      a surrogate, or a code point above U+10FFFF.
+#
+# Two classes of well-formed text are counted WRONG on purpose, and both refuse at
+# the partner comparison rather than being read. A DOUBLE-WIDTH character (CJK,
+# emoji presentation) occupies two columns and is counted as one, so the mapping
+# under-counts. A ZERO-WIDTH or COMBINING character occupies none and is counted
+# as one, so the mapping over-counts. A terminal capture carries no width table,
+# and refusing to read is the safe direction everywhere in this owner, so both are
+# pinned as intended rather than left as accidents.
+#
+# This proof counts columns and says nothing about which SCRIPT is acceptable.
+# That is a separate question and it belongs to the callers: only
+# _fm_composer_rule_row reads non-ASCII text, and the two callers below keep their
+# pre-existing ASCII-only boundary through _fm_composer_ascii_only.
+fm_composer_column_spaces() {  # <text> -> one space per counted column
+  local text=$1 lead
+  for lead in "${FM_COMPOSER_STRUCTURAL_LEADS[@]}"; do
+    case "$text" in
+      *"$lead"*) return 1 ;;
+    esac
+  done
+  text=$(printf '%s' "$text" \
+    | LC_ALL=C sed -E -e "s/$FM_COMPOSER_UTF8_CHAR_RE/ /g" -e 's/[!-~]/ /g')
+  printf '%s' "$text"
+  case "$text" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+# _fm_composer_ascii_only: 0 when <text> carries no byte outside ASCII.
+#
+# This is the pre-existing BORDERED-composer boundary, kept deliberately after the
+# column proof above was widened to read any script. The widening was authorized
+# to restore away-mode handover on a titled composer rule, not to change which
+# panes away mode may type into, and `empty` from the bordered shapes is exactly
+# that authorization - so the boundary that decides it stays where it was reviewed,
+# rather than moving as a side effect of removing three duplicate spellings of the
+# column count. _fm_composer_rule_row is the ONE caller that reads wider.
+#
+# Byte-exact under an explicit LC_ALL=C, and never a `case` bracket range:
+# bracket ranges compare in the locale's COLLATION order, so `*[<lo>-<hi>]*` would
+# mean different things under a UTF-8 locale and under LC_ALL=C - the same trap
+# `${#text}` sets for width (issue #1988), and every verdict is asserted under both.
+#
+# Cost, measured and accepted: this is one extra process per row over folding the
+# ASCII test into the column pass, which is already LC_ALL=C byte work over the
+# same text. Measured on a Linux x86_64 cloud desktop over 30 iterations of
+# fm_composer_classify_screen against a rounded box with three content rows, the
+# single-pass shape ran 29 ms per call and this two-pass shape runs 34 ms. The
+# separation is kept anyway: the column proof counts columns and says nothing about
+# which script is acceptable, that question belongs to its callers, and folding it
+# in as a mode argument would put a conditional boundary inside the one owner and
+# make the wider boundary the silent default for any caller that omitted the flag -
+# exactly the drift the consolidation removed. Away mode polls a pane on a
+# multi-second cadence, so 5 ms per classify buys that separation cheaply.
+_fm_composer_ascii_only() {  # <text>
+  [ -z "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\177')" ]
+}
+
 # fm_composer_geometry_spaces: prove a box content row blank to the same width
 # as its border. One leading prompt glyph is blanked (every prompt glyph
-# occupies one column), the content is normalized so a Unicode space cannot
-# defeat the blankness proof, then every remaining ASCII-printable is mapped to
-# a space; any other residue fails the proof.
+# occupies one column, and the glyph itself may be non-ASCII) and the content is
+# normalized so a Unicode space cannot defeat the blankness proof; the column
+# count belongs to fm_composer_column_spaces above, and the ASCII-only content
+# boundary to _fm_composer_ascii_only.
 fm_composer_geometry_spaces() {  # <content-inner> -> spaces
   local content=$1 glyph
   fm_composer_normalize_spaces_var content
   if fm_composer_leading_prompt_glyph_var glyph "$content"; then
     content=${content/"$glyph"/ }
   fi
-  content=$(printf '%s' "$content" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$content" in
-    *[![:space:]]*) return 1 ;;
-  esac
-  printf '%s' "$content"
+  _fm_composer_ascii_only "$content" || return 1
+  fm_composer_column_spaces "$content"
 }
 
 # _fm_composer_screen_row: print row <n> (zero-based) of <screen>.
@@ -1023,6 +1200,33 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
+# _fm_composer_bare_rule_sandwich: 0 when a bare agent glyph sits in its own
+# composer box - a rule directly above it (plain or titled) and the window's
+# only unmatched separator directly below it, which is that box's closing rule.
+#
+# This is the exception the staleness invalidation below needs. That rule reads
+# an unmatched separator BELOW a matched candidate as proof the candidate is
+# scrollback, which is right in general and wrong for exactly this shape: when a
+# vendor overlays the pane title on the composer's TOP rule, the pair never
+# opens, and the composer's own BOTTOM rule becomes that unmatched separator.
+#
+# Adjacency on BOTH edges is what keeps the staleness rule intact everywhere
+# else: a glyph genuinely stranded in scrollback has transcript rows between it
+# and the separator below, not its own box edges.
+_fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
+  local plain=$1 row=$2 above below
+  [ "$row" -ge 1 ] || return 1
+  # The separator the invalidation is about to act on must be this box's own
+  # closing rule, immediately below the glyph row.
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
+  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  fm_composer_normalize_trim_var below
+  _fm_composer_pi_separator_row "$below" || return 1
+  above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
+  fm_composer_normalize_trim_var above
+  _fm_composer_rule_row "$above" "${below//─/ }"
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed
   FM_COMPOSER_SELECTED_KIND=
@@ -1062,8 +1266,14 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    # Spare only a bare glyph inside its own rule-bounded box; see
+    # _fm_composer_bare_rule_sandwich for why that shape is not scrollback.
+    if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
+           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
