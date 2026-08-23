@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. Every backend-owned endpoint axis in the replacement record comes from the
+#      task's own prior record, including Herdr's created-workspace proof.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1312,6 +1314,120 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+# --- 7. backend endpoint axes the replacement record carries forward ---------
+#
+# A relaunch adopts the recorded endpoint rather than creating one, so every
+# backend-owned axis in the replacement record comes from the task's own prior
+# record. Herdr carries one axis that is not an id: herdr_workspace_created is
+# teardown's only authority to retire the workspace firstmate created for the
+# task, an adopted workspace has none, and an adopted endpoint is still the same
+# workspace afterwards. preserve_relaunch_meta owns that key, so the replacement
+# writer has to resolve it or the record silently loses the proof.
+
+# make_herdr_stub <case-dir>: a `herdr` fake covering exactly the calls a
+# relaunch makes - the version/server probe, the agent-absence proof, the
+# foreground-cwd read that proves the pane sits in the recorded worktree, and
+# the silent input sends. Every call is logged to $FM_FAKE_HERDR_LOG.
+make_herdr_stub() {  # <case-dir>
+  cat > "$1/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.8.0","protocol":19},"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmses","running":true}]}'
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","foreground_cwd":"%s"}}}\n' \
+      "${3:-}" "${FM_FAKE_HERDR_CWD:?}"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+# add_herdr_ship_task <case-dir> <id> <created:0|1>: a stopped herdr ship task
+# whose record either carries the created proof or, like an adopted workspace,
+# has no such line at all.
+add_herdr_ship_task() {  # <case-dir> <id> <created>
+  local dir=$1 id=$2 created=$3
+  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  {
+    echo "window=fmses:w1:p2"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "backend=herdr"
+    echo "herdr_session=fmses"
+    echo "herdr_workspace_id=w1"
+    [ "$created" != 1 ] || echo "herdr_workspace_created=1"
+    echo "herdr_tab_id=w1:t2"
+    echo "herdr_pane_id=w1:p2"
+  } > "$home/state/$id.meta"
+  make_herdr_stub "$dir"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
+run_spawn_herdr() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_FAKE_HERDR_CWD="$dir/wt" \
+    "$SPAWN" "$@" 2>&1
+}
+
+test_herdr_relaunch_carries_the_created_workspace_proof_forward() {
+  local dir out rc
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip: jq not found (required by the herdr backend)"
+    return 0
+  }
+  dir=$(new_case herdr-created rl20)
+  add_herdr_ship_task "$dir" rl20 1
+  out=$(run_spawn_herdr "$dir" rl20 --relaunch); rc=$?
+  expect_code 0 "$rc" "a herdr relaunch should publish a replacement record"$'\n'"$out"
+  [ "$(meta_field "$dir" rl20 window)" = "fmses:w1:p2" ] \
+    || fail "the herdr endpoint must be reused, not recreated"
+  [ "$(meta_field "$dir" rl20 herdr_workspace_id)" = w1 ] \
+    || fail "the recorded workspace must survive the relaunch"
+  [ "$(meta_field "$dir" rl20 herdr_workspace_created)" = 1 ] \
+    || fail "the replacement record dropped the created-workspace proof, so its workspace can never be retired"
+  pass "fm-spawn --relaunch: a herdr replacement record keeps the created-workspace proof it adopted"
+}
+
+test_herdr_relaunch_invents_no_created_workspace_proof() {
+  local dir out rc
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip: jq not found (required by the herdr backend)"
+    return 0
+  }
+  dir=$(new_case herdr-adopted rl21)
+  add_herdr_ship_task "$dir" rl21 0
+  out=$(run_spawn_herdr "$dir" rl21 --relaunch); rc=$?
+  expect_code 0 "$rc" "a herdr relaunch of an adopted workspace should publish a replacement record"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl21 herdr_workspace_created)" ] \
+    || fail "a task that never created its workspace must not gain a proof that would license closing the captain's workspace"
+  pass "fm-spawn --relaunch: an adopted workspace gains no created proof from being relaunched"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1358,3 +1474,5 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_herdr_relaunch_carries_the_created_workspace_proof_forward
+test_herdr_relaunch_invents_no_created_workspace_proof

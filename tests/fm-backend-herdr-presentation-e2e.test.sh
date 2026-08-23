@@ -430,12 +430,18 @@ finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
     || fail "projected teardown $id retry failed after presentation cleanup completed: $(cat "$err")"
 }
 
+# The flat path ADOPTS the anchor's workspace while the projected path CREATES
+# its own, so herdr_workspace_created is legitimately present on one side only
+# and is dropped rather than masked to a placeholder. The created-versus-adopted
+# boundary itself is pinned in tests/fm-backend-herdr.test.sh and
+# tests/fm-teardown.test.sh, not through this shape comparison.
 normalize_meta() {  # <meta>
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e '/^herdr_workspace_created=/d' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
     "$1"
 }

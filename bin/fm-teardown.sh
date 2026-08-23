@@ -37,14 +37,18 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
-# A Herdr presentation journal never authorizes cleanup. Teardown still closes
-# only the exact task pane from ordinary endpoint metadata and never calls
-# `workspace close`. It retires the non-authoritative journal only when a
-# read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# A Herdr presentation journal never authorizes cleanup. Teardown closes only
+# the exact task pane from ordinary endpoint metadata. It retires the
+# non-authoritative journal only when a read-only token correlation agrees with
+# that endpoint and pane closure is confirmed. Otherwise the journal stays
+# quarantined for manual inspection.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# Once that pane is confirmed gone, teardown closes the workspace when the
+# task's own metadata proves its spawn CREATED it, so a workspace still holding
+# a pane firstmate does not own no longer survives every cleanup. The adapter
+# owns every gate; the leftover pane itself is never closed.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -2074,6 +2078,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
+    fm_backend_herdr_workspace_retire_created \
     fm_backend_herdr_presentation_session_lock_path; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
@@ -2521,7 +2526,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  echo "warning: herdr presentation journal for $ID does not correlate with this task's exact endpoint, so the journal itself was not retired and stays quarantined for manual inspection" >&2
 fi
 # A refused, skipped, or failed Herdr close must never erase a live task's
 # durable endpoint identity: unless the exact pane is confirmed gone, retain
@@ -2538,6 +2543,29 @@ if [ "$BACKEND" = herdr ]; then
   if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
+  fi
+fi
+# The exact task pane is now confirmed gone, so remove the workspace this
+# task's own spawn CREATED. Closing only the pane and relying on Herdr dropping
+# a workspace with no tabs left leaked every workspace that also held a pane
+# firstmate does not own - a plugin sidebar, an extra tab the captain opened -
+# and projected one-task workspaces accumulated without bound.
+# An adopted workspace carries no proof and is never closed. A refusal or
+# failure is a warning, never a teardown blocker: the endpoint is already gone
+# and every durable record below must still be reclaimed. stderr is deliberately
+# not discarded, because the adapter's only output here is a real warning
+# naming why a workspace was left in place.
+if [ "$BACKEND" = herdr ] && [ "$(meta_value "$META" herdr_workspace_created)" = 1 ]; then
+  TEARDOWN_HERDR_WORKSPACE_SESSION=$(meta_value "$META" herdr_session)
+  TEARDOWN_HERDR_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  if [ -z "$TEARDOWN_HERDR_WORKSPACE_SESSION" ] || [ -z "$TEARDOWN_HERDR_WORKSPACE" ]; then
+    echo "warning: herdr workspace cleanup for $ID has no exact recorded session and workspace; leaving the workspace in place" >&2
+  elif ! teardown_herdr_session_lock_held "$TEARDOWN_HERDR_WORKSPACE_SESSION"; then
+    echo "warning: herdr session presentation lock is unavailable; leaving the created workspace in place rather than closing it unlocked" >&2
+  else
+    fm_backend_herdr_workspace_retire_created \
+      "$TEARDOWN_HERDR_WORKSPACE_SESSION" "$TEARDOWN_HERDR_WORKSPACE" \
+      created "$STATE" "$ID" || true
   fi
 fi
 if [ "$KIND" = secondmate ]; then

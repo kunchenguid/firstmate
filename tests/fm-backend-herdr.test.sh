@@ -1437,6 +1437,304 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
   pass "herdr presentation reclaim: live agent state at the close boundary refuses mutation"
 }
 
+# --- created-workspace retirement -----------------------------------------
+#
+# Closing only the task pane leaked every workspace that also held a pane
+# firstmate does not own, because Herdr removes a workspace only when its LAST
+# tab goes. These fixtures drive the explicit workspace close that fixes it, and
+# pin every gate that must refuse instead: no created proof, an unreadable
+# workspace, the captain's focused workspace or active tab, a still-registered
+# agent, another task still recorded in the same workspace, an ambiguous
+# endpoint key in another task's record, and an unconfirmed removal. The foreign
+# pane is never a close target in any of them.
+#
+# w2 is the captain's focused workspace throughout, w1 is the retiring task's
+# own created workspace, and w1:p9 is a pane firstmate does not own.
+
+# retire_state_dir <dir> [<other-task-meta-lines>...]: a state directory holding
+# only the retiring task's own record, plus any extra task record a fixture
+# needs to model a second live task.
+retire_state_dir() {  # <dir> [<line>...]
+  local dir=$1 state; shift
+  state="$dir/state"
+  mkdir -p "$state"
+  printf '%s\n' 'backend=herdr' 'herdr_session=fmtest' 'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' 'herdr_pane_id=w1:p2' 'herdr_workspace_created=1' \
+    > "$state/task-x1.meta"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@" > "$state/task-other.meta"
+  printf '%s\n' "$state"
+}
+
+# retire_run <dir> <state-dir>: run the retirement against the fake, echoing its
+# combined output; the caller inspects $? and the call log.
+retire_run() {  # <dir> <state-dir>
+  local dir=$1 state=$2 fb
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_workspace_retire_created fmtest w1 created "$1" task-x1' \
+    "$ROOT" "$state" 2>&1
+}
+
+# retire_reach_the_close_boundary <resp>: the response sequence every fixture
+# that must reach the workspace close shares - w1 present and not focused, the
+# captain's exact focus on w2:t2, only w1's own tabs left in w1, and one foreign
+# agent-free pane still in it.
+retire_reach_the_close_boundary() {  # <responses-dir>
+  local resp=$1
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w1","active_tab_id":"w1:t9","focused":false}]}}' > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","focused":true}]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1"}}}' > "$resp/6.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/7.out"
+}
+
+test_workspace_retire_created_refuses_without_the_created_proof() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-no-proof"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  local fb
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_workspace_retire_created fmtest w1 adopted "$1" task-x1' \
+    "$ROOT" "$state" 2>&1)
+  status=$?
+  expect_code 2 "$status" "an adopted workspace must be rejected as an argument error, not closed"
+  [ -z "$(cat "$log")" ] \
+    || fail "a workspace with no created proof was inspected at all: $(cat "$log")"
+  pass "herdr created-workspace retirement: only the literal created proof reaches the close"
+}
+
+test_workspace_retire_created_is_a_noop_when_the_workspace_is_already_gone() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-already-gone"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true}]}}' > "$resp/1.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  expect_code 0 "$status" "a workspace already removed with its last tab must be a silent no-op: $out"
+  [ -z "$out" ] || fail "an already-absent workspace produced output: $out"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "an already-absent workspace was still sent a close"
+  pass "herdr created-workspace retirement: an already-absent workspace is an idempotent no-op"
+}
+
+test_workspace_retire_created_refuses_an_unreadable_workspace() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-unreadable"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t9","focused":false},{"workspace_id":"w1","active_tab_id":"w1:t9","focused":false}]}}' > "$resp/1.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ambiguous workspace read must refuse: $out"
+  assert_contains "$out" "could not read the exact workspace" \
+    "an ambiguous workspace read did not explain the refusal"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "an ambiguous workspace read still reached the close"
+  pass "herdr created-workspace retirement: an unreadable workspace refuses rather than closing"
+}
+
+test_workspace_retire_created_refuses_the_captains_focused_workspace() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-focused"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t9","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":false}]}}' > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","focused":true}]}}' > "$resp/3.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the captain's focused workspace must never be closed: $out"
+  assert_contains "$out" "is the captain's focused workspace" \
+    "the focused-workspace refusal did not explain the focus-safety boundary"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "the captain's focused workspace was still sent a close"
+  pass "herdr created-workspace retirement: the captain's focused workspace is never a target"
+}
+
+test_workspace_retire_created_refuses_when_the_captains_active_tab_remains_in_it() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-active-tab"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/4.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a workspace still holding the captain's active tab must refuse: $out"
+  assert_contains "$out" "active tab or an ambiguous tab list" \
+    "the active-tab refusal did not explain the focus-safety boundary"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "a workspace holding the captain's active tab was still closed"
+  pass "herdr created-workspace retirement: the captain's active tab blocks the close"
+}
+
+test_workspace_retire_created_refuses_a_still_registered_agent() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-live-agent"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/7.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a workspace holding a registered agent must refuse: $out"
+  assert_contains "$out" "found a live agent still registered" \
+    "the registered-agent refusal did not name the state it read"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "a workspace holding a registered agent was still closed"
+  pass "herdr created-workspace retirement: a still-registered agent blocks the close"
+}
+
+test_workspace_retire_created_refuses_when_another_task_records_the_workspace() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-second-task"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir" 'backend=herdr' 'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' 'herdr_pane_id=w1:p3')
+  retire_reach_the_close_boundary "$resp"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a workspace another task still records must refuse: $out"
+  assert_contains "$out" "another task still recorded in the workspace" \
+    "the second-task refusal did not explain what it found"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "a workspace another task still records was closed anyway"
+  pass "herdr created-workspace retirement: another task's record in the same workspace blocks the close"
+}
+
+test_workspace_retire_created_refuses_when_another_tasks_pane_is_still_present() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-second-task-pane"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A second task recorded against a DIFFERENT workspace whose recorded pane is
+  # nonetheless one of the panes still live here: the live pane list, never a
+  # label, is what proves a firstmate task pane remains.
+  state=$(retire_state_dir "$dir" 'backend=herdr' 'herdr_session=fmtest' \
+    'herdr_workspace_id=w7' 'herdr_pane_id=w1:p9')
+  retire_reach_the_close_boundary "$resp"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a live pane another task still records must refuse: $out"
+  assert_contains "$out" "recorded pane still live in the workspace" \
+    "the live-recorded-pane refusal did not explain what it found"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+    "a workspace still holding another task's live pane was closed anyway"
+  pass "herdr created-workspace retirement: another task's still-live pane blocks the close"
+}
+
+test_workspace_retire_created_refuses_an_ambiguous_key_in_another_tasks_record() {
+  local dir log resp out status state key lines
+  # A duplicated endpoint key is ambiguity about which task holds what, exactly
+  # as fm_backend_meta_exact_value treats it before any destructive step. Each
+  # record below duplicates ONE key so that reading the first occurrence sails
+  # past the gate while the later occurrence names this very workspace or one of
+  # its live panes, which is the case where picking an occurrence would license
+  # closing a workspace a live task still holds.
+  for key in herdr_session herdr_workspace_id herdr_pane_id; do
+    dir="$TMP_ROOT/retire-ambiguous-$key"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$key" in
+      herdr_session)
+        lines=('backend=herdr' 'herdr_session=other' 'herdr_session=fmtest' 'herdr_workspace_id=w1')
+        ;;
+      herdr_workspace_id)
+        lines=('backend=herdr' 'herdr_session=fmtest' 'herdr_workspace_id=w7' 'herdr_workspace_id=w1')
+        ;;
+      *)
+        lines=('backend=herdr' 'herdr_session=fmtest' 'herdr_workspace_id=w7' \
+          'herdr_pane_id=w5:p3' 'herdr_pane_id=w1:p9')
+        ;;
+    esac
+    state=$(retire_state_dir "$dir" "${lines[@]}")
+    retire_reach_the_close_boundary "$resp"
+    out=$(retire_run "$dir" "$state")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a duplicated $key must refuse the close: $out"
+    assert_contains "$out" "ambiguous $key in another task's record" \
+      "the duplicated-$key refusal did not name the ambiguity it read"
+    assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+      "a duplicated $key still licensed the workspace close"
+  done
+  pass "herdr created-workspace retirement: a duplicated endpoint key in another task's record refuses the close"
+}
+
+test_workspace_retire_created_closes_the_workspace_and_never_the_foreign_pane() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-closes"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  : > "$resp/8.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true}]}}' > "$resp/9.out"
+  cp "$resp/9.out" "$resp/10.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' > "$resp/11.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  expect_code 0 "$status" "a created workspace holding only a foreign pane should be removed: $out"
+  [ -z "$out" ] || fail "a confirmed workspace removal produced output: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1fclose\x1fw1' \
+    "the leaked workspace was never closed"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+    "the retirement closed a pane firstmate does not own instead of the workspace"
+  assert_not_contains "$(cat "$log")" $'tab\x1fclose' \
+    "the retirement closed a tab firstmate does not own instead of the workspace"
+  assert_not_contains "$(cat "$log")" $'tab\x1ffocus' \
+    "a removal that never moved focus still issued a focus change"
+  pass "herdr created-workspace retirement: the workspace is closed and the foreign pane is left alone"
+}
+
+test_workspace_retire_created_restores_focus_a_close_moves() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-restores-focus"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  : > "$resp/8.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/9.out"
+  # Herdr 0.7.5 moves focus to a neighbor when an explicit close empties a
+  # non-focused workspace; the exact-tab restore is the backstop for it.
+  cp "$resp/9.out" "$resp/10.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/12.out"
+  : > "$resp/13.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/14.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' > "$resp/15.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  expect_code 0 "$status" "a confirmed removal that moved focus should still succeed after restoring it: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1fclose\x1fw1' \
+    "the focus-restoring fixture never reached the workspace close"
+  assert_contains "$(cat "$log")" $'tab\x1ffocus\x1fw2:t2' \
+    "a workspace close that moved focus did not restore the captain's exact tab"
+  pass "herdr created-workspace retirement: a close that moves focus restores the captain's exact tab"
+}
+
+test_workspace_retire_created_reports_an_unconfirmed_removal() {
+  local dir log resp out status state
+  dir="$TMP_ROOT/retire-unconfirmed"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state=$(retire_state_dir "$dir")
+  retire_reach_the_close_boundary "$resp"
+  : > "$resp/8.out"
+  cp "$resp/1.out" "$resp/9.out"
+  cp "$resp/1.out" "$resp/10.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' > "$resp/11.out"
+  out=$(retire_run "$dir" "$state")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a workspace still listed after its close must not report success: $out"
+  assert_contains "$out" "could not confirm removal" \
+    "an unconfirmed removal was not reported"
+  pass "herdr created-workspace retirement: an unconfirmed removal is reported, never assumed"
+}
+
 # --- emptying-close focus-safe removal (Herdr 0.7.5 #1621 mitigation) ------
 #
 # The fixtures below model the verified 0.7.5 rules: an explicit close that
@@ -4486,6 +4784,18 @@ test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
+test_workspace_retire_created_refuses_without_the_created_proof
+test_workspace_retire_created_is_a_noop_when_the_workspace_is_already_gone
+test_workspace_retire_created_refuses_an_unreadable_workspace
+test_workspace_retire_created_refuses_the_captains_focused_workspace
+test_workspace_retire_created_refuses_when_the_captains_active_tab_remains_in_it
+test_workspace_retire_created_refuses_a_still_registered_agent
+test_workspace_retire_created_refuses_when_another_task_records_the_workspace
+test_workspace_retire_created_refuses_when_another_tasks_pane_is_still_present
+test_workspace_retire_created_refuses_an_ambiguous_key_in_another_tasks_record
+test_workspace_retire_created_closes_the_workspace_and_never_the_foreign_pane
+test_workspace_retire_created_restores_focus_a_close_moves
+test_workspace_retire_created_reports_an_unconfirmed_removal
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
 test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move
