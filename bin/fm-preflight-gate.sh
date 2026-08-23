@@ -45,15 +45,22 @@
 #     than a silent pass, because this check has no other forge's permissions
 #     API wired up yet.
 #   - Check 2's direct-PR detection is a structural scan for a pull_request-
-#     triggered workflow with a single job that both reads the PR body
-#     (references "pull_request.body") and checks it for the literal marker
-#     no-mistakes itself writes ("git push no-mistakes"). Requiring both
-#     inside the SAME job - not just anywhere in the file - keeps an
-#     unrelated job's PR-body read, or an unrelated job's comment/doc
-#     string/echo that merely mentions the phrase, from being mistaken for
-#     enforcement. It catches the no-mistakes-required convention (which is
-#     what actually blocked direct-PR on firstmate's own repo); it does not
-#     evaluate arbitrary branch-protection rules.
+#     triggered workflow with a job that actually COMPARES a PR-body-derived
+#     value against the marker no-mistakes itself writes ("git push
+#     no-mistakes") - a line containing a comparison construct (grep, case,
+#     [[ ]]/[ ], =~, ==, or the Actions contains()/startsWith() functions)
+#     whose operands are a PR-body reference (the literal expression
+#     "pull_request.body", or a variable previously assigned from it) and the
+#     marker (the literal text, or a variable previously assigned it, as
+#     firstmate's own workflow does via `marker='...git push no-mistakes...'`
+#     then `grep -qF -- "$marker"`). Requiring an actual comparison, not mere
+#     co-occurrence anywhere in the same job, keeps an unrelated step's PR-body
+#     read (e.g. logging its length) plus a completely unconnected mention of
+#     the marker in that same job's step name, env value, echo/printf text, or
+#     heredoc body from being mistaken for enforcement. It catches the
+#     no-mistakes-required convention (which is what actually blocked
+#     direct-PR on firstmate's own repo); it does not evaluate arbitrary
+#     branch-protection rules.
 #   - Check 3 measures quota-axi's own reported state. AGENTS.md section 4
 #     treats missing quota data as "disclosed uncertainty that keeps a
 #     candidate eligible" when CHOOSING among harnesses at intake - a
@@ -209,34 +216,58 @@ fm_preflight_check_push_path() {  # <project-dir> <mode>
 
 # --- check 2: delivery path --------------------------------------------------
 
-fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job's block enforces both markers
+fm_preflight_workflow_step_reads_no_mistakes_body() {  # <file> -> 0 if one job actually compares a PR-body value to the marker
   local f=$1
   awk '
-    function reset() { body = 0; marker = 0 }
-    BEGIN { reset(); in_jobs = 0 }
+    function clear(arr) { for (k in arr) delete arr[k] }
+    BEGIN { clear(body_vars); clear(marker_vars); in_jobs = 0 }
     /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
     in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
-      if (body && marker) { found = 1; exit }
-      reset()
+      clear(body_vars); clear(marker_vars)
+      next
     }
     {
-      # A comment or a bare echo only ever narrates the marker/body - it
-      # never enforces anything - so it must not count as evidence that
-      # this job checks the PR body against the marker. Excluding these
-      # lines is what keeps an unrelated "echo <instructions mentioning
-      # the marker>" step (inline as "run: echo ..." or on its own line
-      # inside a "run: |" block) from being conflated with real
-      # enforcement.
       trimmed = $0
       sub(/^[[:space:]]+/, "", trimmed)
-      stripped = trimmed
-      sub(/^- /, "", stripped)
-      sub(/^(run|name):[[:space:]]*/, "", stripped)
-      if (trimmed ~ /^#/ || stripped ~ /^echo[[:space:]]/) next
+      if (trimmed ~ /^#/) next
+
+      # Track a variable assigned FROM the PR body context expression (the
+      # usual "env: NAME: ${{ github.event.pull_request.body }}" indirection)
+      # so a later comparison line that only references the variable - not
+      # the literal expression - still counts as a body-derived operand.
+      if (trimmed ~ /^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\$\{\{.*pull_request\.body.*\}\}/) {
+        name = trimmed; sub(/:.*/, "", name); body_vars[name] = 1
+      }
+
+      # Track a shell variable assigned a string containing the literal
+      # marker (the real no-mistakes-required.yml does this: marker="...git
+      # push no-mistakes..." then later compares against $marker), so the
+      # comparison line does not need to spell the marker out itself.
+      if (trimmed ~ /^[A-Za-z_][A-Za-z0-9_]*=.*git push no-mistakes/) {
+        name = trimmed; sub(/=.*/, "", name); marker_vars[name] = 1
+      }
+
+      # A comparison construct is required on the SAME line as both
+      # operands: a bare mention of the body or the marker anywhere in the
+      # job (a step name, an unrelated env value, an echo/printf string, a
+      # heredoc body) proves nothing about whether they are ever checked
+      # against each other.
+      if (trimmed !~ /grep|case[[:space:]]|\[[[:space:]]|=~|==|contains\(|startsWith\(/) next
+
+      has_body = (trimmed ~ /pull_request\.body/)
+      if (!has_body) {
+        for (v in body_vars) {
+          if (index(trimmed, "$" v) > 0 || index(trimmed, "${" v) > 0) { has_body = 1; break }
+        }
+      }
+      has_marker = (trimmed ~ /git push no-mistakes/)
+      if (!has_marker) {
+        for (v in marker_vars) {
+          if (index(trimmed, "$" v) > 0 || index(trimmed, "${" v) > 0) { has_marker = 1; break }
+        }
+      }
+      if (has_body && has_marker) { print "MATCH"; exit }
     }
-    /pull_request\.body/ { body = 1 }
-    /git push no-mistakes/ { marker = 1 }
-    END { if (body && marker) found = 1; if (found) print "MATCH" }
   ' "$f" 2>/dev/null | grep -q MATCH
 }
 

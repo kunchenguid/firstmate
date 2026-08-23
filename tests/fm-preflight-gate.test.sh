@@ -326,6 +326,161 @@ YML
   pass "delivery-path does not conflate an unrelated PR-body read with an incidental same-job echo mention of the marker"
 }
 
+test_delivery_path_direct_pr_variable_indirected_marker_refuses() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-varindirect")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The exact shape of firstmate's own .github/workflows/no-mistakes-required.yml:
+  # the marker text is assigned to a shell variable first, and the comparison
+  # line references that variable ($marker) rather than spelling the marker
+  # out itself. A detector that only looks for the marker's literal text on
+  # the same line as the comparison would miss this - the real case this
+  # workstream targets.
+  cat > "$dir/.github/workflows/no-mistakes-required.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - run: |
+          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
+            exit 0
+          fi
+          exit 1
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-varindirect-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  expect_code 4 "$status" "direct-PR should refuse against the real firstmate-shaped workflow where the marker is compared via a variable, not a literal on the comparison line"
+  assert_contains "$out" "error: preflight refused [delivery-path]:" "refusal must name delivery-path"
+  pass "delivery-path refuses direct-PR when the marker is checked through a variable indirection, matching firstmate's own workflow shape"
+}
+
+test_delivery_path_direct_pr_step_name_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-stepname")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The job genuinely reads the PR body (for an unrelated purpose), and a
+  # DIFFERENT step's name field happens to mention the marker phrase. Neither
+  # step compares the body against the marker.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Log PR body length
+        run: echo "body length: ${#PR_BODY}"
+      - name: Remind contributors to use git push no-mistakes
+        run: echo done
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-stepname-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "a step name mentioning the marker must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker only appears in a step name: $out"
+  pass "delivery-path does not conflate a step name's marker mention with a PR-body enforcement check"
+}
+
+test_delivery_path_direct_pr_env_value_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-envvalue")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The job reads the PR body, and an unrelated env value (YAML "NAME: value"
+  # form, not a shell assignment) happens to contain the marker phrase. That
+  # env value is never compared against anything.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+      HINT: "contributions normally arrive via git push no-mistakes"
+    steps:
+      - run: echo "body length: ${#PR_BODY}"
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-envvalue-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "an unrelated env value mentioning the marker must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker only appears in an unrelated env value: $out"
+  pass "delivery-path does not conflate an unrelated env value's marker mention with a PR-body enforcement check"
+}
+
+test_delivery_path_direct_pr_printf_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-printf")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The job reads the PR body, and a separate step prints a plain message
+  # containing the marker phrase via printf - never comparing it to anything.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - run: echo "body length: ${#PR_BODY}"
+      - run: printf 'Contributions normally arrive via git push no-mistakes\n'
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-printf-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "a plain printf mentioning the marker must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker only appears in a printf message: $out"
+  pass "delivery-path does not conflate a plain printf's marker mention with a PR-body enforcement check"
+}
+
+test_delivery_path_direct_pr_heredoc_body_mention_does_not_refuse() {
+  local dir fakebin out status
+  dir=$(make_repo "$TMP_ROOT/dp-directpr-heredoc")
+  git -C "$dir" remote add origin https://github.com/acme/widgets.git
+  mkdir -p "$dir/.github/workflows"
+  # The job reads the PR body, and a separate step's heredoc body (documentation
+  # text, not a comparison) mentions the marker phrase.
+  cat > "$dir/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - run: echo "body length: ${#PR_BODY}"
+      - run: |
+          cat <<DOC
+          Contributions normally arrive via git push no-mistakes.
+          DOC
+YML
+  fakebin=$(fm_fakebin "$TMP_ROOT/dp-directpr-heredoc-bin")
+  fake_gh_axi "$fakebin"; fake_quota_axi "$fakebin"
+  out=$(FM_FAKE_GH_PUSH=true run_gate "$dir" direct-PR claude "$fakebin")
+  status=$?
+  assert_not_contains "$out" "[delivery-path]" "a heredoc body mentioning the marker must not trip the heuristic"
+  [ "$status" -ne 4 ] || fail "direct-PR should not refuse when the marker only appears in a heredoc body: $out"
+  pass "delivery-path does not conflate a heredoc body's marker mention with a PR-body enforcement check"
+}
+
 # --- check 3: quota headroom ---------------------------------------------------
 
 test_quota_stale_refuses() {
@@ -542,6 +697,11 @@ test_delivery_path_direct_pr_without_required_workflow_passes
 test_delivery_path_direct_pr_unrelated_mention_does_not_refuse
 test_delivery_path_direct_pr_cross_job_conflation_does_not_refuse
 test_delivery_path_direct_pr_same_job_incidental_mention_does_not_refuse
+test_delivery_path_direct_pr_variable_indirected_marker_refuses
+test_delivery_path_direct_pr_step_name_mention_does_not_refuse
+test_delivery_path_direct_pr_env_value_mention_does_not_refuse
+test_delivery_path_direct_pr_printf_mention_does_not_refuse
+test_delivery_path_direct_pr_heredoc_body_mention_does_not_refuse
 test_quota_stale_refuses
 test_quota_exhausted_refuses
 test_quota_healthy_passes
