@@ -10,14 +10,36 @@
 # this deliberately does not pass `--reverse`). Added lines whose content
 # starts with '#' (source comments, never emitted to a worker) are excluded.
 # A commit that touches the pattern on more than one line still counts once.
+#
+# A commit only counts if the pattern was absent (outside comments) from the
+# file at the commit's parent revision. Without that check, a commit that
+# merely rewrites or reformats a line the pattern already matched (e.g. a
+# reflow that shows as a "-"/"+" pair with no semantic change) would emit
+# another "+" line and get counted as a fresh occurrence, even though the
+# defect never went away - inflating the recurrence count with the same
+# unbroken breach instead of a genuine reintroduction after a fix.
 introductions_for_path() {
-  local repo="$1" path="$2" pattern="$3"
-  git -C "$repo" log --follow --format='@@COMMIT@@%H@@%ad' --date=short -p -- "$path" \
+  local repo="$1" path="$2" pattern="$3" date commit oldpath
+  while IFS=' ' read -r date commit oldpath; do
+    [ -n "$date" ] || continue
+    if [ "$oldpath" != "/dev/null" ] && git -C "$repo" show "$commit"^:"$oldpath" 2>/dev/null \
+        | grep -v '^[[:space:]]*#' | grep -qE -- "$pattern"; then
+      continue
+    fi
+    printf '%s %s\n' "$date" "$commit"
+  done < <(git -C "$repo" log --follow --format='@@COMMIT@@%H@@%ad' --date=short -p -- "$path" \
     | awk -v pat="$pattern" '
         /^@@COMMIT@@/ {
           split($0, parts, "@@")
           commit = parts[3]
           date = parts[4]
+          oldpath = ""
+          next
+        }
+        /^--- / {
+          oldpath = $0
+          sub(/^--- /, "", oldpath)
+          sub(/^a\//, "", oldpath)
           next
         }
         /^\+/ && !/^\+\+\+/ {
@@ -25,8 +47,8 @@ introductions_for_path() {
           if (line ~ /^[ \t]*#/) next
           if (line ~ pat && !(commit in seen)) {
             seen[commit] = 1
-            print date, commit
+            print date, commit, oldpath
           }
         }
-      '
+      ')
 }

@@ -102,5 +102,29 @@ test_recurrence_since_recorded_splits_on_rule_date() {
   pass "fm-learning-recurrence.sh: CLI wrapper measures the real rule and splits on its recorded date"
 }
 
+# Regression test: a commit that rewrites a line the pattern already
+# matches (e.g. a reformat) must not be counted as a fresh occurrence. The
+# defect never went away in between, so this is the same unbroken breach
+# continuing to exist, not "the same defect showing up again."
+test_introductions_for_path_ignores_rewrite_of_still_present_pattern() {
+  local repo out lines
+  repo="$TMP_ROOT/rewrite-fixture"
+  build_fixture "$repo"
+  # Reformat the already-present "invoke /demo-pattern instead" line (add
+  # trailing whitespace) without the pattern ever leaving the file in
+  # between - git still emits a "-"/"+" pair for the touched line.
+  printf 'line one\nline two\ninvoke /demo-pattern instead \n# see /demo-pattern docs\n' \
+    > "$repo/fixture/target.txt"
+  git -C "$repo" add fixture/target.txt
+  commit_at "$repo" "2026-09-10" "reformat: trailing whitespace on an already-present line"
+
+  out=$(introductions_for_path "$repo" fixture/target.txt '/demo-pattern')
+  lines=$(printf '%s\n' "$out" | grep -c .)
+  [ "$lines" -eq 2 ] || fail "expected the reformat commit not to inflate the count, got $lines:"$'\n'"$out"
+  assert_not_contains "$out" "2026-09-10" "reformat of an already-present pattern was counted as a fresh introduction"
+  pass "fm-learning-recurrence-lib.sh: rewriting an already-present pattern line does not inflate the recurrence count"
+}
+
 test_introductions_for_path_counts_additions_only
 test_recurrence_since_recorded_splits_on_rule_date
+test_introductions_for_path_ignores_rewrite_of_still_present_pattern
