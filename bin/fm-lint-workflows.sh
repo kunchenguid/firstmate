@@ -222,8 +222,12 @@ fm_lint_workflows_pr_gating() {
   local names=() verdicts=()
 
   for file in "${FILES[@]}"; do
-    verdict=$(fm_lint_workflows_pr_filter "$file")
     name=${file##*/}
+    verdict=$(fm_lint_workflows_pr_filter "$file") || {
+      printf 'fm-lint-workflows.sh: %s: could not be read for its pull_request base filter.\n' \
+        "$name" >&2
+      return 1
+    }
     case "$verdict" in
       "unsupported "*)
         printf 'fm-lint-workflows.sh: %s: cannot read the pull_request base filter (%s). Keep the on: block in block style with an explicit branches: list, or teach this gate the new form.\n' \
