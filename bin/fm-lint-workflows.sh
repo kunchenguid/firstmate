@@ -113,7 +113,7 @@ if ! command -v actionlint >/dev/null 2>&1; then
   exit 1
 fi
 ACTIONLINT_BIN=$(command -v actionlint)
-resolved=$("$ACTIONLINT_BIN" -version | awk 'NR==1 {print; exit}')
+resolved=$("$ACTIONLINT_BIN" -version | awk 'NR==1 {sub(/^v/, ""); print; exit}')
 printf 'fm-lint-workflows.sh: actionlint %s (pinned %s)\n' "$resolved" "$REQUIRED_ACTIONLINT" >&2
 if [ "$resolved" != "$REQUIRED_ACTIONLINT" ]; then
   printf 'fm-lint-workflows.sh: actionlint %s required for CI parity, found %s. Install %s with bin/fm-install-actionlint.sh <destination-directory>.\n' \
