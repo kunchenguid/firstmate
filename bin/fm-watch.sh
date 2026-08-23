@@ -334,7 +334,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
     escalate)
       reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
-      if [ ! -f "$rec" ]; then
+      if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi

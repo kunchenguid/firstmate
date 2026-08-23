@@ -281,7 +281,11 @@ $ladder
 EOF
   [ "$rec_base" = "$base" ] || count=0
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
-  printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
 }
 
 # Mark the current oldest as escalated so the stale wake fires at most once
@@ -289,5 +293,9 @@ EOF
 fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
   local dir
   dir=$(fm_task_inbox_dir "$1" "$2")
-  printf '%s\n' "${3##*/}" > "$dir/.escalated"
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\n' "${3##*/}" > "$dir/.escalated"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
 }

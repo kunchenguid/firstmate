@@ -194,6 +194,19 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
+test_ladder_writes_ignore_vanished_inbox() {
+  local state rec
+  state="$TMP_ROOT/vanished/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "retired task")
+  rm -rf "$state/t1.inbox"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" \
+    || fail "ring bookkeeping should ignore a concurrently removed inbox"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$rec" \
+    || fail "escalation bookkeeping should ignore a concurrently removed inbox"
+  [ ! -e "$state/t1.inbox" ] || fail "bookkeeping recreated a retired task inbox"
+  pass "inbox: ladder bookkeeping ignores a concurrently removed inbox"
+}
+
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -342,6 +355,7 @@ test_watcher_escalates_once_after_budget() {
 test_write_is_durable_and_exact
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_ladder_writes_ignore_vanished_inbox
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
