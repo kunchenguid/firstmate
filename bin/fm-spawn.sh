@@ -142,7 +142,10 @@
 #   against, so that refresh is skipped with a loud notice and the spawn
 #   continues; only a configured remote can make a base unverifiable. A pooled
 #   worktree carrying uncommitted work is still refused on that path, because a
-#   new task must never start on top of another task's unlanded work.
+#   new task must never start on top of another task's unlanded work, and so is
+#   one whose HEAD has left the local default branch tip, which is how committed
+#   leftovers show up. That refusal names the worktree, the commit it sits on,
+#   and the branch tip expected, and never discards those commits itself.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1755,6 +1758,10 @@ spawn_worktree_is_clean() {  # <worktree>
 # Skipping the refresh never skips the unlanded-work refusal: a pooled worktree
 # carrying uncommitted files must not silently become the base of a new task,
 # and that risk is identical with or without an upstream.
+# Committed leftovers read as clean, so the no-origin path also requires HEAD to
+# sit on the local default branch tip. It refuses rather than resetting: with no
+# remote, a leftover commit may be the only copy of that work anywhere, so a
+# person decides its fate instead of a pool slot being tidied at its expense.
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual remotes
   remotes=$(git -C "$worktree" remote) || {
@@ -1773,6 +1780,19 @@ freshen_spawn_worktree_base() {  # <worktree>
         return 1
         ;;
     esac
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the local default branch for pooled worktree '$worktree'; refusing to launch from an unverifiable base" >&2
+      return 1
+    }
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null) || {
+      echo "error: local default branch '$default' is not a commit for pooled worktree '$worktree'; refusing to launch from an unverifiable base" >&2
+      return 1
+    }
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$expected" ]; then
+      echo "error: pooled worktree '$worktree' is sitting on commit '${actual:-unknown}', not the tip of its local default branch '$default' ('$expected'); refusing to start a new task on top of commits that are not on '$default'. Inspect that worktree and decide what to do with those commits before it is reused" >&2
+      return 1
+    fi
     echo "notice: pooled worktree '$worktree' has no origin remote configured; skipping the base refresh because there is no upstream it can be stale against" >&2
     return 0
   fi

@@ -11,6 +11,8 @@
 # while a configured origin that cannot be reached still refuses.
 # Skipping that refresh still refuses a pooled worktree carrying uncommitted
 # work, which no upstream is needed to detect.
+# A committed leftover reads as clean, so the same path also refuses a worktree
+# whose HEAD has left the local default branch tip, and never resets it away.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -308,6 +310,42 @@ test_dirty_remoteless_pool_still_refuses() {
   pass "a dirty pooled worktree on a project with no origin remote is still refused"
 }
 
+test_committed_leftover_in_remoteless_pool_refuses() {
+  local rec id out status leftover tip
+  id='pool-no-origin-committed-r8'
+  rec=$(make_remoteless_case no-origin-committed "$id")
+  read_case_record "$rec"
+  tip=$(git -C "$POOL_DIR" rev-parse "$DEFAULT_BRANCH")
+  printf 'the only copy of this work\n' > "$POOL_DIR/previous-task.txt"
+  git -C "$POOL_DIR" add previous-task.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'previous task committed work'
+  leftover=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$leftover" != "$tip" ] || fail "fixture did not move the pool off the local default branch tip"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture must be committed, not dirty, or it would prove the wrong check"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn started a task on top of a previous task's committed work"
+  assert_contains "$out" "$POOL_DIR" "the refusal did not name the worktree it found"
+  assert_contains "$out" "$leftover" "the refusal did not name the commit the worktree is sitting on"
+  assert_contains "$out" "$tip" "the refusal did not name the branch tip it expected"
+  assert_contains "$out" "$DEFAULT_BRANCH" "the refusal did not name the local default branch"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$leftover" ] \
+    || fail "spawn moved HEAD away from the leftover commit instead of refusing"
+  assert_grep 'the only copy of this work' "$POOL_DIR/previous-task.txt" \
+    "spawn discarded a previous task's committed work while refusing"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed committed-leftover refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed preserved commit: HEAD=%s tip=%s\n' "$leftover" "$tip"
+  fi
+  pass "a pooled worktree holding a previous task's committed work is refused, not reset"
+}
+
 test_unreachable_origin_is_not_read_as_a_missing_remote() {
   local rec id out status before after
   id='pool-unreachable-not-missing-r6'
@@ -342,6 +380,7 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_project_spawns_with_a_skip_notice
 test_dirty_remoteless_pool_still_refuses
+test_committed_leftover_in_remoteless_pool_refuses
 test_unreachable_origin_is_not_read_as_a_missing_remote
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
