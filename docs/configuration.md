@@ -221,11 +221,12 @@ Pool paths are encoded as TOML basic strings in the generated view, so quotes, b
 
 After treehouse hands a fresh spawn a path, Firstmate checks every `state/*.meta` record in that same home before refreshing the copy or launching the agent.
 An unreadable, non-regular, missing, empty, or ambiguous worktree declaration fails closed, as does another task record that resolves to the acquired path.
-The refused spawn neither returns nor resets the copy and leaves its new endpoint parked there, so the recorded owner can be reconciled without losing work.
+An unpublished lease is returned when spawn otherwise aborts.
+When rejection detects another owner for the acquired copy, Firstmate neither returns nor resets it and leaves its new endpoint parked there, so the recorded owner can be reconciled without losing work.
 A fresh spawn also refuses before endpoint or lease creation when its task id already has a durable record; [`agent-control.md`](agent-control.md) owns how `relaunch` safely reuses that task's recorded endpoint and worktree.
 
 A pool also runs out when delivered copies are never handed back, and a dispatch then fails for want of a slot rather than for want of work.
-A project may publish that housekeeping as a `pool:release-delivered` script, which `bin/fm-spawn.sh` runs once in the clone with `--yes` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
+A project may publish that housekeeping as a `pool:release-delivered` script, which `bin/fm-spawn.sh` runs once with `--yes` from a temporary authenticated snapshot of the canonical clone's `HEAD` before asking for a worktree; the project owns the script's idempotency and its own pool lock.
 This one is capacity rather than safety, so a release that fails or cannot be confirmed warns and the spawn continues.
 `FM_SPAWN_RELEASE_DELIVERED_TIMEOUT` (default 60 seconds) bounds it.
 

@@ -501,7 +501,7 @@ test_projected_custody_conflict() {
   mkdir -p "$(dirname "$conflict_wt")"
   git -C "$PROJECT_DIR" worktree add --quiet --detach "$conflict_wt" HEAD
   conflict_head=$(git -C "$conflict_wt" rev-parse HEAD)
-  printf 'window=firstmate:fm-other-owner\nworktree=%s\nproject=%s\nkind=ship\nmode=no-mistakes\n' \
+  printf 'window=firstmate:fm-other-owner\nworktree=%s\ntreehouse_lease_holder=other-owner\nproject=%s\nkind=ship\nmode=no-mistakes\n' \
     "$conflict_wt" "$PROJECT_DIR" > "$HOME_DIR/state/other-owner.meta"
   mkdir -p "$POST_CREATE_ABORT_CONTROL"
   printf '%s\n' "$conflict_wt" > "$POST_CREATE_ABORT_CONTROL/lease-path"
