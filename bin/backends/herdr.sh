@@ -3267,13 +3267,16 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
 # fresh `blocked` edge, then prints the normalized record and returns 0.
-# The ENTIRE wait is bounded to the budget (reader lifetime, subscription ack,
-# level reconcile, and stream drain): the reader enforces the deadline on every
-# stream iteration and bounds every stdout write, and this side bounds the
-# drain with `read -t` and stops the reader when the budget expires - a
-# saturated or backlogged event stream can never make the call outlive its
-# poll budget, because an unbounded wait here starves the watcher's liveness
-# beacon (2026-08-21 quiet-fleet crash-loop, negotiation-os mate home).
+# Every enforced side of the wait is bounded to the budget (reader lifetime,
+# subscription ack, and stream drain): the reader enforces the deadline on
+# every stream iteration and bounds every stdout write, and this side bounds
+# the ack and drain with `read -t` and stops the reader when the budget
+# expires - a saturated or backlogged event stream can never make the call
+# outlive its poll budget, because an unbounded wait here starves the
+# watcher's liveness beacon (2026-08-21 quiet-fleet crash-loop,
+# negotiation-os mate home). The level reconcile runs inside the budget
+# window but is bounded only by its per-window `herdr agent get` CLI reads,
+# which carry no deadline of their own.
 # Returns 1 on a clean timeout (the budget elapsed with no fresh actionable
 # edge - the caller has effectively already slept and just continues)
 # and 2 when the event path is unusable (not capable, socket unresolved, reader
@@ -3320,12 +3323,14 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     return 2
   fi
 
-  # Overall budget for this whole wait (reader lifetime + reconcile + drain),
-  # measured from the reader spawn. Every part of the wait is bounded by it so
-  # the call can never outlive its caller's poll cadence: the reader enforces
-  # the same deadline internally (every iteration and every stdout write), and
-  # the drain below additionally uses `read -t` and stops the reader when the
-  # budget expires. Unbounded waits here starve the watcher's liveness beacon
+  # Overall budget for this whole wait, measured from the reader spawn: the
+  # reader enforces the same deadline internally (every iteration and every
+  # stdout write), the subscription-ack and drain reads below use it as their
+  # `read -t` bound, and the reader is stopped the moment it expires - the
+  # enforced sides of the wait (reader lifetime, ack, drain) can never outlive
+  # the caller's poll cadence. The level reconcile between them consumes the
+  # budget but its per-window `herdr agent get` reads carry no deadline of
+  # their own. Unbounded waits here starve the watcher's liveness beacon
   # (2026-08-21 quiet-fleet crash-loop: a saturated or backlogged event stream
   # kept the drain alive past the 300s heartbeat grace while the watcher sat
   # healthy-but-frozen in this call).
@@ -3340,7 +3345,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
-  if ! IFS= read -r -u 9 line || [ "$line" != "@subscribed" ]; then
+  if ! IFS= read -r -t "$wait_budget" -u 9 line || [ "$line" != "@subscribed" ]; then
     rc=2
   fi
 

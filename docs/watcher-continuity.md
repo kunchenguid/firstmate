@@ -76,7 +76,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
-The watcher's own waits must respect the beacon: every blocking wait inside a cycle (today the Herdr native event wait in `bin/fm-watch.sh`) is bounded by the poll budget on all sides - reader, drain, and reconcile - so a legitimately-blocked watcher still beats while the poll loop remains the delivery backstop.
+The watcher's own waits must respect the beacon: every blocking wait inside a cycle (today the Herdr native event wait in `bin/fm-watch.sh`) is bounded by the poll budget on every enforced side - reader lifetime, subscription ack, and drain - so a legitimately-blocked watcher still beats while the poll loop remains the delivery backstop.
+The mid-wait level reconcile consumes the budget but is bounded only by its per-window `herdr agent get` CLI reads, which carry no deadline of their own.
 A wait that outlives the grace makes a healthy watcher read dead, which the away daemon then cannot restart past the singleton lock (2026-08-21 quiet-fleet incident; budget bounds live in `docs/herdr-backend.md` "Push events and polling fallback").
 
 ## Regression coverage
