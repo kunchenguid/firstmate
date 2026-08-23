@@ -914,3 +914,32 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
+
+## Claude Remote Control
+
+Claude Code's `--remote-control <name>` leaves the session an ordinary interactive one and additionally publishes it to claude.ai/code and the Claude mobile app, so `bin/fm-spawn.sh` passes it on every claude-harness launch unless `config/claude-remote-control` says `off`.
+Whether firstmate's per-task supervision survives that flag is harness-dependent: the verdict comes from hooks the vendor fires and from what the vendor renders in the pane.
+
+Verified on 2026-08-20 with Claude Code 2.1.234 and tmux 3.7b on macOS 26.5.1 arm64, against a throwaway scout spawned through the modified `bin/fm-spawn.sh` into an isolated tmux server and a scratch firstmate home.
+
+```sh
+bin/fm-spawn.sh rc-probe-a1 <scratch-project> --scout --harness claude
+# spawned rc-probe-a1 harness=claude kind=scout window=firstmate:fm-rc-probe-a1 worktree=...
+ps -o pid,ppid,command -ax | grep -F -- --remote-control
+# claude --dangerously-skip-permissions --remote-control rc-probe-a1  -c<encoded launch brief>
+```
+
+The flag parses as its own option and does not swallow the positional launch brief; the pane footer rendered `/rc active` for the whole session.
+
+| Fact | Observed |
+| --- | --- |
+| Flag syntax | `--remote-control [name]`; both `--remote-control <name>` and `--remote-control=<name>` parse, and an unknown option after either is still reported as that unknown option |
+| Folder trust | the fresh worktree still raised the ordinary trust prompt, unchanged by the flag |
+| Turn-end notification | `state/<id>.turn-ended` was created on the first turn's `Stop` and re-touched on the second |
+| Semantic busy state | the project `Stop` hook recorded `state=idle source=claude-hook event=stop`, so `UserPromptSubmit` and `Stop` both fired from `.claude/settings.local.json` |
+| Recorded worker state | `bin/fm-crew-state.sh <id>` read `state: done` from the status log |
+| Pane read | `bin/fm-peek.sh <id>` captured the transcript, composer, and footer and exited 0 |
+| Steer delivery | `bin/fm-send.sh <id> "<text>"` exited 0 (submit confirmed); the steer appeared in the transcript and the worker answered it |
+
+Both hook-driven signals repeated across two turns, so the wiring is not a launch-time artifact.
+The portable regression for the launch-flag assembly and the `config/claude-remote-control` knob is `tests/fm-spawn-dispatch-profile.test.sh`, which shadows the real CLI with a fake `claude --help` so the verdict does not depend on whether the host has claude installed.
