@@ -23,7 +23,7 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+BASH_BIN=$(command -v bash) || { echo "skip: bash not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -47,24 +47,36 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# The duration argument every stand-in receives: bash resolves it as a script
+# relative to the pane cwd ($LAB/wt) and runs a real sleep child by name.
+printf 'sleep 900\n' > "$LAB/wt/900"
+
+# Stand-in "harness" binaries. These are SYMLINKS to a real system binary,
+# never copies: a copied platform binary fails code-signing validation and is
+# killed on macOS arm64. The symlink name is what the kernel records as the
+# executable identity, which is exactly the signal under test. The target is
+# bash rather than sleep, because modern hosts ship multi-call Rust coreutils
+# whose applet dispatch reads argv[0]: a sleep symlinked as `claude-link` runs
+# the `link` applet and dies instantly (observed live 2026-08-23, tmux 3.6,
+# uutils coreutils). bash ignores every argv[0] used here, and the `900`
+# argument resolves to the pane-cwd script below, which execs a real
+# `sleep 900` child by its own name - so each stand-in pane holds a
+# long-running foreground group under the symlink's identity on GNU and
+# multi-call hosts alike.
+ln -s "$BASH_BIN" "$LAB/bin/claude-link"
+ln -s "$BASH_BIN" "$LAB/bin/pi"
+ln -s "$BASH_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+ln -s "$BASH_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
+ln -s "$BASH_BIN" "$LAB/bin/musescore"
+ln -s "$BASH_BIN" "$LAB/bin/amuse"
+ln -s "$BASH_BIN" "$LAB/bin/muse-binary"
+ln -s "$BASH_BIN" "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -268,8 +280,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+ln -s "$BASH_BIN" "$LAB/bin/cursor-agent"
+ln -s "$BASH_BIN" "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -349,6 +361,38 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+# --- pane CPU sample and delta evidence (plan v3 U1.4) ------------------------
+# fm_backend_tmux_pane_cputime is the raw sample behind the liveness probe's
+# CPU-progress evidence, and fm_busy_cpu_progress is the delta verdict built on
+# it. Drive the two process shapes apart on real processes - a busy loop and a
+# sleeper - and assert the verdicts DIVERGE, so neither side can pass vacuously.
+new_window cpu-busy bash -c 'while :; do :; done'
+new_window cpu-idle "$LAB/bin/pi" 900
+sleep 3
+busy_a=$(fm_backend_tmux_pane_cputime "$SESSION:cpu-busy") || fail "cputime read failed on the busy pane"
+idle_a=$(fm_backend_tmux_pane_cputime "$SESSION:cpu-idle") || fail "cputime read failed on the idle pane"
+sleep 3
+busy_b=$(fm_backend_tmux_pane_cputime "$SESSION:cpu-busy") || fail "second cputime read failed on the busy pane"
+idle_b=$(fm_backend_tmux_pane_cputime "$SESSION:cpu-idle") || fail "second cputime read failed on the idle pane"
+[ "$busy_b" -gt "$busy_a" ] || fail "a busy-looping pane must accrue CPU across the interval (got $busy_a -> $busy_b)"
+[ $(( idle_b - idle_a )) -lt 1 ] || fail "a sleeping pane must stay under the activity threshold (got $idle_a -> $idle_b)"
+[ $(( busy_b - busy_a )) -gt $(( idle_b - idle_a )) ] || fail "the two shapes did not diverge - the CPU signal is vacuous"
+pass "pane cputime: a busy loop accrues CPU, a sleeper stays flat, and the shapes diverge"
+
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+CPU_STATE="$LAB/state"; mkdir -p "$CPU_STATE"
+v=$(fm_busy_cpu_progress tmux "$SESSION:cpu-busy" "$CPU_STATE" busykey)
+[ "$v" = no-baseline ] || fail "first delta read must report no-baseline, got '$v'"
+v=$(fm_busy_cpu_progress tmux "$SESSION:cpu-idle" "$CPU_STATE" idlekey)
+[ "$v" = no-baseline ] || fail "first idle delta read must report no-baseline, got '$v'"
+sleep 3
+v=$(fm_busy_cpu_progress tmux "$SESSION:cpu-busy" "$CPU_STATE" busykey)
+case "$v" in progress*) ;; *) fail "busy pane must report progress across the interval, got '$v'" ;; esac
+v=$(fm_busy_cpu_progress tmux "$SESSION:cpu-idle" "$CPU_STATE" idlekey)
+case "$v" in flat*) ;; *) fail "sleeping pane must report flat across the interval, got '$v'" ;; esac
+pass "fm_busy_cpu_progress: no-baseline on first read, then progress for the busy loop and flat for the sleeper"
 
 cleanup_all
 trap - EXIT

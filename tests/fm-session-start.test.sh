@@ -299,6 +299,11 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
+  list-windows)
+    # Inventory lists exactly the live window, so the absent one reads missing.
+    printf '%s\n' "${live#*:}"
+    exit 0
+    ;;
   display-message)
     target=""
     prev=""
@@ -306,8 +311,13 @@ case "\${1:-}" in
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
-    exit 1
+    [ "\$target" = "$live" ] || exit 1
+    case "\$*" in
+      *pane_current_command*) printf 'claude\n'; exit 0 ;;
+      *pane_tty*) exit 1 ;;
+    esac
+    printf '%%1\n'
+    exit 0
     ;;
 esac
 exit 1
@@ -493,7 +503,19 @@ make_fake_herdr() {
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$live" ] && exit 0
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$live"
+    exit 0
+  fi
+  printf '{"error":{"code":"pane_not_found"}}\n'
+  exit 1
+fi
+if [ "\${1:-}" = agent ] && [ "\${2:-}" = get ]; then
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+    exit 0
+  fi
+  printf '{"error":{"code":"agent_not_found"}}\n'
   exit 1
 fi
 exit 1
@@ -1237,8 +1259,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read should still see the ambiguous endpoint"
+  assert_contains "$out" "agent: ambiguous (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later fleet read should report the ambiguous agent as ambiguous, never a false alive"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
 
@@ -1256,8 +1278,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
+  assert_contains "$out" "agent: unreadable (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later fleet read should report the unreadable probe as unreadable, never a confident verdict"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
@@ -1314,8 +1336,8 @@ EOF
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "agent: alive (backend=tmux window=fm-sess:live-window)" "live tmux agent not reported alive"
+  assert_contains "$out" "agent: missing (backend=tmux window=fm-sess:dead-window)" "absent tmux window not reported missing"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
@@ -1334,8 +1356,8 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "agent: alive (backend=herdr window=sess:p-live)" "live herdr agent not reported alive"
+  assert_contains "$out" "agent: missing (backend=herdr window=sess:p-dead)" "absent herdr pane not reported missing"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }

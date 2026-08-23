@@ -27,6 +27,12 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
+#   1b. An ACTIVE declared machine wait (state/<id>.wait, bin/fm-wait-lib.sh)
+#      reports paused · wait-field with the declared reason, deadline, and
+#      declaration age, and deliberately outranks the run-step and pane reads
+#      below: the old precedence of run-step/pane busy-ness over the worker's
+#      own declaration is abolished (plan v3 U1.4). Expired or malformed
+#      fields decide nothing.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? For a TERMINAL run, branch name alone is not enough: a
@@ -61,8 +67,11 @@
 #      and a terminal done/failed run is left alone. The pane's paused verdict
 #      applies only when no run is attributed (case 4 below) or the attributed
 #      run is in none of those states.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
+#   4. No run for this crew (pre-validation, or kind=scout): first the
+#      process-evidence liveness read (fm_backend_agent_state) - an endpoint
+#      that is open but confidently agent-free reports unknown · agent-gone
+#      instead of trusting a stale busy record (the empty-shell shape) - then
+#      the recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail. For harness=claude, a
 #      busy pane verdict is overridden when the pane's composer region shows
@@ -98,6 +107,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-wait-lib.sh
+. "$SCRIPT_DIR/fm-wait-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
@@ -214,6 +225,20 @@ if [ -n "$REMOTE_HOST" ]; then
       emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
       ;;
   esac
+fi
+
+# --- declared machine wait (bin/fm-wait-lib.sh) ------------------------------
+# An ACTIVE declared wait is the worker's own authoritative self-report and
+# outranks run-step and pane busy-ness - the old precedence rule, under which
+# surface or run-step occupation overrode the self-declaration, is abolished
+# (plan v3 U1.4). The worker owns refreshing or clearing its declaration, so
+# the wait stands until its deadline or an explicit clear; an expired or
+# malformed field decides nothing here and resolution continues normally.
+if fm_wait_read "$STATE" "$ID" && [ "$FM_WAIT_STATE" = active ]; then
+  WAIT_ISO=$(date -u -d "@$FM_WAIT_UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+    || WAIT_ISO=$(date -u -r "$FM_WAIT_UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+    || WAIT_ISO="epoch $FM_WAIT_UNTIL"
+  emit paused wait-field "waiting: $FM_WAIT_REASON${SEP}until $WAIT_ISO${SEP}declared $(( $(date +%s) - FM_WAIT_TS ))s ago"
 fi
 
 # pane_readable has two callers: the no-run fallback below, and claude_limit_scan
@@ -439,9 +464,9 @@ nm_ci_checks_state() {
 # status` answer was not this crew's own branch, attribution always failed and
 # the caller fell straight through to the pane/log fallback below. (The
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
+# a separate precedence bug in bin/fm-watch.sh's since-removed stale path -
+# see that file's history - but this cross-branch path was independently
+# confirmed dead code and is worth having actually work.)
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`; both halves of this split
@@ -836,6 +861,17 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
+  # Process-evidence liveness (plan v3 U1.4): an endpoint that is open but
+  # confidently agent-free is the empty-shell shape the 2026-08-23 incidents
+  # documented - an agent killed mid-turn leaves a stale busy record behind,
+  # and trusting it would report a dead crew as working. Only a confident
+  # negative overrides; ambiguous, unreadable, and unverified reads fall
+  # through to the semantic verdict unchanged.
+  case "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")" in
+    dead|missing)
+      emit unknown agent-gone "endpoint open but its process family holds no live agent (empty shell) - inspect or recover"
+      ;;
+  esac
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy)

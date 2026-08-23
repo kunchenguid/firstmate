@@ -65,6 +65,9 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+The same pane tty scoping also feeds the liveness probe's CPU-progress evidence: `fm_backend_tmux_pane_cputime` sums the accumulated CPU seconds of every process on the pane tty, and `bin/fm-busy-lib.sh`'s `fm_busy_cpu_progress` owns the delta semantics on top of it.
+tmux resolves an absent target to the active window, so that sample is trusted only after the agent-state probe above verified the exact window.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.

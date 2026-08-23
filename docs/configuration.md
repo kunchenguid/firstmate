@@ -461,6 +461,15 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a check th
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the findings.
 A sweep that runs out of budget names the entry it did not reach rather than reporting the rest as still waiting.
 
+## Declared machine waits (state/<id>.wait)
+
+A live worker's deliberate wait on a known external event is a machine field with reason and deadline, never a prose status prefix.
+The worker declares it with `bin/fm-wait.sh declare <id> --reason <text> --until <when>`, refreshes it by re-declaring, and clears it with `bin/fm-wait.sh clear <id>`; the command also appends the matching status event so the wake channel and the field cannot drift.
+While the field is active, the watcher's liveness probe raises no alarm for that task, and `bin/fm-crew-state.sh` reports the declared wait as the current state ahead of run-step and pane busy-ness.
+At the deadline the watcher checks the task exactly once per field identity; a malformed field silences nothing.
+[`bin/fm-wait-lib.sh`](../bin/fm-wait-lib.sh) owns the byte format and parsing contract, and `bin/fm-wait.sh --help` (its header) owns the accepted deadline shapes.
+Backlog-level external waits remain `wartet-auf:` conditions in the section above; the wait field covers a live worker's own bounded wait, not a queued item's.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -748,16 +757,16 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watche
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
-FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_PAUSE_RESURFACE_SECS=3600       # seconds before the watcher re-surfaces an idle external wait - declared paused:, pane-derived, or a verified captain-held transfer - for a recheck, including a live busy pane past FM_BUSY_TURN_MAX_SECS; also the re-probe cadence for a pane-derived pause's liveness check, and the away-mode daemon uses the same setting for a declared external wait or verified captain-held transfer
-FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
-FM_PAUSE_DEMAND_INSPECT_COUNT=3    # FM_PAUSE_RESURFACE_SECS windows an external wait may stand unrefreshed before its recheck also carries demand-deep-inspection; any status append re-anchors the age, and the recheck stays a declared-wait recheck rather than becoming a wedge verdict
-FM_RUN_PROGRESS_TIMEOUT=10         # seconds allowed for the read-only no-mistakes run read both supervisors make at a wedge-escalation moment; an executing run that advanced since the previous check restarts the aging window instead of escalating
+FM_PROBE_INTERVAL_SECS=240         # base seconds between one window's liveness probes (bin/fm-watch.sh probe_window); each refuted alarm doubles that window's interval
+FM_PROBE_BACKOFF_MAX=6             # cap on refuted-alarm doublings of the probe interval (2^6 = 64x base)
+FM_PROBE_CPU_MIN_SECS=1            # accumulated CPU seconds the pane's process family must accrue across a probe interval to count as progress evidence (bin/fm-busy-lib.sh fm_busy_cpu_progress)
+FM_PAUSE_RESURFACE_SECS=3600       # bounded re-surface cadence for anything a supervisor deliberately keeps quiet: the watcher probe's unrefuted no-progress alarms and vendor-derived external waits, and the away-mode daemon's declared external waits and verified captain-held transfers
+FM_RUN_PROGRESS_TIMEOUT=10         # seconds allowed for the read-only no-mistakes run read made at due probe moments; an executing run that advanced since the previous check counts as progress evidence
+FM_STALE_ESCALATE_SECS=240         # AWAY-MODE DAEMON ONLY since the liveness-probe rebuild: idle seconds before the daemon's housekeeping escalates a quiet pane as a possible wedge
 FM_RUN_SUPERSEDED_TTL=120          # seconds a "no newer running run replaced this terminal one" answer stays cached per task and worktree head before fm-crew-state.sh re-probes; only that negative answer is cached, and a moved head invalidates it outright
-FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
-FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
-FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
+FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the liveness probe's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
+FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at due probe moments, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
+FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the alarm schedule exactly as it was; a value that is not a positive integer falls back to the default
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone

@@ -846,13 +846,15 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+    # Agent-grade liveness, not window presence: an open window with a bare
+    # shell is NOT alive (plan v3 U1.4 - liveness claims from window lists are
+    # abolished; the 2026-08-23 empty-shell incidents are the evidence). The
+    # richer state vocabulary is fm_backend_agent_state's; anything that is
+    # not a confident alive prints as what it is.
+    printf 'agent: %s (backend=%s window=%s)\n' \
+      "$(fm_backend_agent_state "$backend" "${target:-$window}")" "$backend" "$window"
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    printf 'agent: unknown (no window recorded)\n'
   fi
 
   status="$STATE/$id.status"

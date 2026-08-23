@@ -45,9 +45,10 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
-# Every scaffold's status protocol distinguishes the configured
-# declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
-# "blocked:": pause for a known external wait expected to clear on its own,
+# Every scaffold's status protocol distinguishes a declared external wait from
+# "blocked:": a known external wait expected to clear on its own is declared
+# through bin/fm-wait.sh (the machine wait field with reason and deadline,
+# which also appends the configured FM_CLASSIFY_PAUSED_VERB status line),
 # blocked when firstmate must act.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
@@ -251,7 +252,7 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+For a deliberate domain-wide wait on a known external event you expect to clear on its own, declare it as a machine wait with \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\` - it appends the \`$PAUSED_VERB:\` event for you and records the deadline - and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
@@ -334,7 +335,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Never add an agent name as a commit co-author or Co-authored-by footer; commit as the repository's configured user only.
-3. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+3. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and your own wait record via the fm-wait.sh command in rule 5.
 4. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 5. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -342,10 +343,13 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   For a deliberate wait on a known external event you expect to clear on its own (an upstream
+   release, a rate-limit reset), do NOT hand-write a \`$PAUSED_VERB:\` line: declare the wait as a
+   machine field with \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\`
+   (accepts +<seconds>, a unix epoch, or an ISO date). It appends the status line for you and
+   silences firstmate's liveness checks until that deadline; refresh it the same way if the wait
+   extends, and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early.
+   Use \`blocked:\` when you are stuck and need help.
 6. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 7. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -462,10 +466,14 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   For a deliberate wait on a known external event you expect to clear on its own (an upstream
+   release, a rate-limit reset, a scheduled window), do NOT hand-write a \`$PAUSED_VERB:\` line:
+   declare the wait as a machine field with
+   \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\`
+   (accepts +<seconds>, a unix epoch, or an ISO date). It appends the status line for you and
+   silences firstmate's liveness checks until that deadline; refresh it the same way if the wait
+   extends, and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early.
+   Use \`blocked:\` when you are stuck and need help.
 6. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 7. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

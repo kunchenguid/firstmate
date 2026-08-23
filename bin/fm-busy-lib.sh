@@ -2,14 +2,20 @@
 # fm-busy-lib.sh - the ONE owner of firstmate's semantic busy-state contract.
 #
 # Design source: the captain-approved semantic busy-state redesign
-# (2026-07-28): each harness adapter reports turn lifecycle through a
+# (2026-07-28), extended by the captain-approved liveness redesign (plan v3
+# U1.4, 2026-08-23): each harness adapter reports turn lifecycle through a
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
-# owned by the watcher, not current-state truth.
+# unverified semantic data is UNKNOWN - never idle. Beside that TURN layer
+# sits the process-evidence LIVENESS layer, which this file also owns: a gone
+# endpoint and an endpoint whose process family confidently holds no agent
+# (fm_backend_agent_state) both override every record as dead, never busy,
+# and accumulated CPU time across a probe interval (fm_busy_cpu_progress
+# below) is positive progress evidence for the watcher's liveness probe.
+# Rendered pane stillness, process sleep state, marker mtimes, and the old
+# global UI-regex OR remain non-signals for turn state; state/<id>.turn-ended
+# files remain wake NOTIFICATIONS owned by the watcher, not current-state
+# truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
@@ -45,7 +51,8 @@
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
-#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
+#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone;
+#      endpoint open but confidently agent-free -> dead agent-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
@@ -1116,9 +1123,14 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   printf 'unknown missing'
 }
 
-# fm_busy_classify_live: fm_busy_classify behind the one process-level
-# override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
-# be sourced for fm_backend_target_exists.
+# fm_busy_classify_live: fm_busy_classify behind the process-level liveness
+# overrides - a gone endpoint is dead, and an endpoint whose process family
+# confidently holds no agent (fm_backend_agent_state dead/missing) is dead
+# too, never busy: an agent killed mid-turn leaves its semantic record open,
+# and an open window with a bare shell is exactly the false-alive shape the
+# 2026-08-23 empty-shell incidents documented. Ambiguous, unreadable, and
+# unverified agent reads change nothing - only a confident negative
+# overrides. Requires fm-backend.sh to be sourced.
 fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
   if [ -z "$target" ]; then
@@ -1129,7 +1141,55 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
     printf 'dead endpoint-gone'
     return 0
   fi
+  case "$(fm_backend_agent_state "$backend" "$target")" in
+    dead|missing)
+      printf 'dead agent-gone'
+      return 0
+      ;;
+  esac
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
+}
+
+# fm_busy_cpu_progress: the CPU-delta progress evidence for the watcher's
+# liveness probe. Reads the backend's accumulated pane CPU sample
+# (fm_backend_pane_cputime), compares it against the previous sample stored in
+# <state-dir>/.proc-cpu-<key> ("<epoch> <cpusecs>", atomically replaced), and
+# prints exactly one verdict:
+#   progress <delta>s   the family accrued at least FM_PROBE_CPU_MIN_SECS of
+#                       CPU since the stored sample
+#   flat <interval>s    a valid earlier sample exists and the family accrued
+#                       less than the threshold across that interval
+#   no-baseline         first successful read for this key - a delta needs two
+#   no-source           this backend/target has no readable CPU source
+# Every successful read replaces the stored sample, so one probe's verdict is
+# always measured against the previous probe, never a stale anchor. A shrunk
+# reading (family member exited and took its accumulated time with it) stores
+# the new sample and reports flat rather than inventing progress.
+# FM_PROBE_CPU_MIN_SECS (default 1) is the activity threshold: `ps` time has
+# one-second granularity, an idle TUI at its prompt stays under it across a
+# probe interval, and a working or streaming agent crosses it.
+fm_busy_cpu_progress() {  # <backend> <target> <state-dir> <key>
+  local backend=$1 target=$2 state=$3 key=$4 now cpu prev prev_ts prev_cpu min
+  min=${FM_PROBE_CPU_MIN_SECS:-1}
+  case "$min" in ''|*[!0-9]*) min=1 ;; esac
+  cpu=$(fm_backend_pane_cputime "$backend" "$target" 2>/dev/null) || {
+    printf 'no-source'
+    return 0
+  }
+  case "$cpu" in ''|*[!0-9]*) printf 'no-source'; return 0 ;; esac
+  now=$(date +%s)
+  prev=$(cat "$state/.proc-cpu-$key" 2>/dev/null || true)
+  prev_ts=${prev%% *}
+  prev_cpu=${prev#* }
+  printf '%s %s' "$now" "$cpu" > "$state/.proc-cpu-$key.tmp" \
+    && mv -f "$state/.proc-cpu-$key.tmp" "$state/.proc-cpu-$key"
+  case "$prev_ts" in ''|*[!0-9]*) printf 'no-baseline'; return 0 ;; esac
+  case "$prev_cpu" in ''|*[!0-9]*) printf 'no-baseline'; return 0 ;; esac
+  if [ "$cpu" -ge $(( prev_cpu + min )) ]; then
+    printf 'progress %ss' $(( cpu - prev_cpu ))
+  else
+    printf 'flat %ss' $(( now - prev_ts ))
+  fi
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every

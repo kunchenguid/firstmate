@@ -101,8 +101,18 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    # Agent-state inventory: a named list serves the agent-liveness cases; the
+    # default is an UNREADABLE inventory (not "missing"), so every case that
+    # predates the process-evidence read keeps its original resolution path.
+    if [ -n "${FM_FAKE_TMUX_LIST:-}" ]; then printf '%s\n' "$FM_FAKE_TMUX_LIST"; exit 0; fi
+    printf 'fake inventory unavailable\n'; exit 1 ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+      *pane_tty*) exit 1 ;;
+    esac
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
@@ -2354,6 +2364,51 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+# --- process-evidence liveness and the declared machine wait (plan v3 U1.4) --
+
+test_agent_free_endpoint_reports_agent_gone() {
+  reset_fakes
+  local d; d=$(new_case agent-gone)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-gone.status"
+  # A stale busy record is exactly what a killed agent leaves behind.
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gone)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gone busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  export FM_FAKE_TMUX_LIST=fm-feat-gone FM_FAKE_TMUX_CURRENT_COMMAND=bash
+  local out; out=$(run_crew_state "$d" feat-gone)
+  unset FM_FAKE_TMUX_LIST FM_FAKE_TMUX_CURRENT_COMMAND
+  assert_contains "$out" "source: agent-gone" "empty-shell endpoint -> agent-gone source"
+  assert_contains "$out" "state: unknown" "empty-shell endpoint -> unknown, never working"
+  pass "an open endpoint whose process family holds no agent reports agent-gone, not a stale busy verdict"
+}
+
+test_active_wait_field_outranks_run_and_pane() {
+  reset_fakes
+  local d now; d=$(new_case wait-field)
+  make_repo_on_branch "$d/wt" fm/feat-wait
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-wait.meta" "window=fm:fm-feat-wait" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-wait.status"
+  # Both occupation signals present: an executing run and a busy pane. The
+  # abolished precedence rule would have reported working; the field wins.
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-wait)"
+  FM_FAKE_BUSY=1
+  now=$(date +%s)
+  printf 'v1 until=%s ts=%s reason=vendor limit reset\n' $(( now + 3600 )) "$now" > "$d/state/feat-wait.wait"
+  local out; out=$(run_crew_state "$d" feat-wait)
+  assert_contains "$out" "state: paused" "active wait field -> paused"
+  assert_contains "$out" "source: wait-field" "active wait field -> wait-field source"
+  assert_contains "$out" "vendor limit reset" "the declared reason is carried"
+  # Expired field decides nothing: resolution continues to the run as before.
+  printf 'v1 until=%s ts=%s reason=vendor limit reset\n' $(( now - 60 )) $(( now - 600 )) > "$d/state/feat-wait.wait"
+  out=$(run_crew_state "$d" feat-wait)
+  assert_contains "$out" "source: run-step" "expired wait field falls through to the run"
+  pass "an active machine wait outranks run-step and pane busy-ness; an expired one decides nothing"
+}
+
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
@@ -2382,5 +2437,7 @@ test_replaced_done_run_not_reported_as_current
 test_ci_green_override_is_not_probed_for_supersession
 test_terminal_supersession_probe_is_damped_but_never_caches_a_positive
 test_unanswered_runs_listing_is_never_cached_as_absent
+test_agent_free_endpoint_reports_agent_gone
+test_active_wait_field_outranks_run_and_pane
 
 echo "all fm-crew-state tests passed"

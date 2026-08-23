@@ -638,7 +638,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief wait_frag
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -661,12 +661,18 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     brief="$home/data/$id/brief.md"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
-      "$kind brief did not instruct the configured pause status"
+    assert_grep 'fm-wait.sh declare' "$brief" \
+      "$kind brief did not instruct the machine wait declaration"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    case "$kind" in
+      secondmate) wait_frag='appends the `awaiting:` event' ;;
+      *)          wait_frag='do NOT hand-write a `awaiting:` line' ;;
+    esac
+    assert_grep "$wait_frag" "$brief" \
+      "$kind brief did not render the configured pause verb in its wait instruction"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
-      "$kind brief still instructs the default paused status"
+      "$kind brief still instructs the prose paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \

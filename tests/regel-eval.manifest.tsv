@@ -37,3 +37,7 @@ number-provenance	L02 L59	every number carries measured/derived/estimated proven
 verbatim-quote-travel	L46	the captain's wording travels verbatim to the lowest level, interpretation marked separately	prose:brief scaffold duty until the typed envelope (E5 interim form)
 reservation-leases	L38 L82	shared environments carry a machine-readable reservation with holder and expiry	prose:U5 P1 reservation register - until then a coordination duty
 paid-run-abort	L94	paid and device runs carry their abort limit in the order	prose:brief scaffold duty until mechanized
+probe-process-evidence	L28 L34	the watcher alarms only on process evidence - agent death or a whole interval with no cpu, write, or pipeline movement - never on window stillness	test:tests/fm-watch-triage.test.sh
+probe-refutation-backoff	L28 L34	a probe alarm refuted by real progress clears itself and lengthens the probe interval instead of escalating	test:tests/fm-watch-triage.test.sh
+declared-wait-machine-field	L29	a declared wait is a machine field with reason and deadline that silences liveness alarms until the deadline and is checked exactly once after it	test:tests/fm-wait.test.sh
+empty-shell-never-alive	L11 L28	an open window whose process family holds no agent reports dead or agent-gone, never alive	test:tests/fm-crew-state.test.sh

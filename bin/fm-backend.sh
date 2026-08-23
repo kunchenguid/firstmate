@@ -922,6 +922,21 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_pane_cputime: accumulated CPU seconds of <target>'s own process
+# family, as one integer, for the liveness probe's CPU-progress evidence
+# (bin/fm-busy-lib.sh's fm_busy_cpu_progress owns the delta semantics).
+# Only tmux has a verified per-target CPU source today; every other backend
+# fails (non-zero, no output), which the probe treats as "no CPU source",
+# never as a zero-progress verdict.
+fm_backend_pane_cputime() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_pane_cputime "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

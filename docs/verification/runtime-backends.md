@@ -80,6 +80,14 @@ alive
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
+On 2026-08-23 (Linux, tmux 3.6, uutils coreutils) the portable regression's original stand-in construction was found broken on multi-call coreutils hosts: a `sleep` binary symlinked as `claude-link` dispatched uutils' `link` applet on argv[0] and exited instantly, so every stand-in window died before classification.
+The fixture now symlinks `bash` (argv[0]-neutral) and holds each pane open through a real `sleep` child invoked by its own name; the same run verified the pane CPU sample and delta evidence (`fm_backend_tmux_pane_cputime`, `fm_busy_cpu_progress`) with a busy loop against a sleeper via `tests/fm-tmux-agent-liveness.test.sh`, whose output asserts the two shapes diverge:
+
+```text
+ok - pane cputime: a busy loop accrues CPU, a sleeper stays flat, and the shapes diverge
+ok - fm_busy_cpu_progress: no-baseline on first read, then progress for the busy loop and flat for the sleeper
+```
+
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
