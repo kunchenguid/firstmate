@@ -115,8 +115,8 @@ EOF
   [ "$shown" -gt 0 ] || return 0
 }
 
-# Print the consolidated OPEN DECISIONS section: every still-open
-# needs-decision/blocked, fleet-wide, folded from the durable status logs by
+# Print the consolidated OPEN DECISIONS section: every open keyed status record,
+# fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently

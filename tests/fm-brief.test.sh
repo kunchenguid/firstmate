@@ -669,7 +669,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief expected_states
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -690,8 +690,20 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
-      "$kind brief did not render the configured pause verb in its states list"
+    # A complete line per kind: the ship scaffold carries the promotion verb and
+    # the other two do not, so a shared prefix would stop pinning either shape.
+    case "$kind" in
+      ship) expected_states="States: working, needs-decision, blocked, awaiting, promoted, done, failed." ;;
+      *)    expected_states="States: working, needs-decision, blocked, awaiting, done, failed." ;;
+    esac
+    assert_grep "$expected_states" "$brief" \
+      "$kind brief did not render the configured pause verb in its complete states list"
+    case "$kind" in
+      ship|scout)
+        assert_grep "needs-decision/blocked/awaiting/" "$brief" \
+          "$kind brief left the pause verb hardcoded in its adjacent enumeration"
+        ;;
+    esac
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"
@@ -704,6 +716,68 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief did not warn that an answer-started done/working never closes a decision"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+# The routing-promotion verb is deliberately NOT configurable, and it belongs to
+# the SHIP scaffold alone. Both properties are safety properties, not tidiness:
+# a rename would stop the fold matching records already written with the old
+# spelling, silently disarming the landing gate; and a verb listed in a brief that
+# never defines it invites a worker to report something the fold does not act on.
+test_promotion_verb_is_fixed_and_ship_only() {
+  local home brief id kind
+  home="$TMP_ROOT/promotion-verb-home"
+  mkdir -p "$home/data"
+
+  # An attempted rename must not reach any generated brief.
+  for kind in ship scout secondmate; do
+    id="brief-promotion-verb-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" FM_CLASSIFY_PROMOTION_VERB=escalated \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" FM_CLASSIFY_PROMOTION_VERB=escalated \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_CLASSIFY_PROMOTION_VERB=escalated \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    # Only the status-verb positions matter here: "escalated" also appears as
+    # ordinary prose ("an escalated decision") in the charter scaffold.
+    assert_no_grep 'blocked, paused, escalated' "$brief" \
+      "$kind brief honored a rename of a verb that must stay fixed"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_no_grep '`escalated' "$brief" \
+      "$kind brief rendered a renamed verb in a status instruction"
+  done
+
+  # The ship brief alone carries the verb, and carries it complete: the states
+  # list, the reporting exemption, and the append template.
+  brief="$home/data/brief-promotion-verb-ship/brief.md"
+  assert_grep 'States: working, needs-decision, blocked, paused, promoted, done, failed.' "$brief" \
+    "ship brief lost the promotion verb from its states list"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep '`promoted` is the ONE exception to reporting sparingly' "$brief" \
+    "ship brief lost the reporting exemption that keeps a promotion from being skipped"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep '`promoted [key=<slug>]: <tier> <factor>' "$brief" \
+    "ship brief lost the append template that makes a promotion well-formed"
+
+  # A scout has no diff to re-resolve and a charter governs a domain, so neither
+  # may advertise a verb it never defines.
+  for kind in scout secondmate; do
+    brief="$home/data/brief-promotion-verb-$kind/brief.md"
+    assert_no_grep 'paused, promoted' "$brief" \
+      "$kind brief lists a promotion verb it never defines"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_no_grep '`promoted' "$brief" \
+      "$kind brief instructs a promotion verb it never defines"
+  done
+  pass "fm-brief.sh: the promotion verb is fixed and appears only in the ship scaffold"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -766,5 +840,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_promotion_verb_is_fixed_and_ship_only
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

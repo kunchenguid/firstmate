@@ -49,6 +49,11 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# The routing-promotion verb is fixed at "promoted" and appears in the SHIP
+# scaffold only: it reports that a task's own diff re-resolved its tier upward,
+# which presupposes a diff to resolve. A scout produces a report and a charter
+# governs a domain, so neither can raise one, and listing a verb those briefs
+# never define would invite exactly the misuse this vocabulary exists to prevent.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -341,7 +346,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
+   would act on and the needs-decision/blocked/$PAUSED_VERB/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
@@ -455,11 +460,17 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: working, needs-decision, blocked, $PAUSED_VERB, promoted, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
+   needs-decision/blocked/$PAUSED_VERB/promoted/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   \`promoted\` is the ONE exception to reporting sparingly, and you must not skip it: if resolving
+   this task's actual changed paths raises its tier above the one you were dispatched at, append
+   \`promoted [key=<slug>]: <tier> <factor> - <what raised it>\` as soon as you know, then KEEP WORKING.
+   Firstmate froze the reviewer count, effort, and delivery path at the old tier and has no other way
+   to learn they need re-staffing. Do not repin yourself, widen scope, or change delivery: report it
+   and continue. The record stays open until firstmate answers with a keyed \`resolved\` line.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a

@@ -1030,6 +1030,52 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+# `promoted:` is the first real "decision-only sibling" this deriver's contract
+# anticipates. A crewmate appends it when its own diff re-resolves the task's tier
+# UPWARD, and it must behave like `resolved:` here for two different reasons.
+# Nonterminal: the crewmate KEEPS WORKING through a promotion while firstmate
+# re-staffs around it, so a busy crew must still read working - a promotion that
+# suppressed the pane verdict would make a live worker look stopped and invite a
+# recovery that interrupts healthy work. Not-a-state: with no other source, the
+# promotion must not become the current state or leak its tier prose as the detail.
+# The keyed fold in fm-classify-lib.sh keeps the record OPEN either way; that is
+# what obligates the re-staff, and it is deliberately independent of this render.
+test_promotion_event_is_not_a_state_and_never_masks_a_working_crew() {
+  reset_fakes
+  local d; d=$(new_case promoted-state)
+  make_repo_on_branch "$d/wt" fm/feat-promo
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-promo.meta" "window=fm:fm-feat-promo" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+
+  # Nonterminal: a busy crew that just reported a promotion is still working.
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-promo)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-promo busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'working: implementing the bounded change\n' > "$d/state/feat-promo.status"
+  printf 'promoted [key=tier]: tier-2 blast-radius - diff reaches the auth policy path\n' \
+    >> "$d/state/feat-promo.status"
+  local out; out=$(run_crew_state "$d" feat-promo)
+  assert_contains "$out" "state: working" "a promotion must not stop a busy crew reading working"
+  assert_contains "$out" "source: pane" "a promotion must not displace the live pane verdict"
+
+  # Not a state: with no run and an idle pane, the promotion is not a state source.
+  reset_fakes
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-promo
+  out=$(run_crew_state "$d" feat-promo)
+  assert_not_contains "$out" "state: blocked" "a promotion must never render as blocked"
+  assert_not_contains "$out" "state: parked" "a promotion must never render as parked"
+  assert_not_contains "$out" "state: failed" "a promotion must never render as a failure"
+  assert_not_contains "$out" "blast-radius" "promotion prose must not leak into the detail"
+  pass "a promotion is nonterminal and is never read as current state"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1443,6 +1489,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_promotion_event_is_not_a_state_and_never_masks_a_working_crew
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

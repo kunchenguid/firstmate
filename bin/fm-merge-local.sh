@@ -9,21 +9,55 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# Usage: fm-merge-local.sh <task-id>
+#
+# It also refuses while the task has an unanswered routing promotion, on the same
+# terms as the PR path: landing is the last point stale rigor can still be
+# corrected. bin/fm-promotion-gate-lib.sh owns that check and its last resort.
+# Usage: fm-merge-local.sh <task-id> [--promotion-override <reason>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-promotion-gate-lib.sh
+. "$SCRIPT_DIR/fm-promotion-gate-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
+shift
+PROMOTION_OVERRIDE=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --promotion-override)
+      [ "$#" -ge 2 ] || { echo "error: --promotion-override requires a reason" >&2; exit 2; }
+      PROMOTION_OVERRIDE=$2
+      shift 2
+      ;;
+    --promotion-override=*)
+      PROMOTION_OVERRIDE=${1#--promotion-override=}
+      [ -n "$PROMOTION_OVERRIDE" ] \
+        || { echo "error: --promotion-override requires a reason" >&2; exit 2; }
+      shift
+      ;;
+    *)
+      echo "error: unknown argument '$1'" >&2
+      exit 2
+      ;;
+  esac
+done
+# Validate before any path is built from the id: a traversing id would otherwise
+# be resolved into a state path first and only be caught, if at all, further down.
+fm_promotion_task_id_safe "$ID" \
+  || { echo "error: '$ID' is not a usable task id" >&2; exit 2; }
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+
+# Same gate as the PR path, before anything in the project is touched.
+fm_promotion_gate "$STATE" "$ID" "$PROMOTION_OVERRIDE" || exit 1
 
 default_branch() {
   local ref branch

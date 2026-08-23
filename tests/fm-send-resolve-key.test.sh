@@ -143,6 +143,50 @@ test_answer_send_closes_open_decision() {
 # session that wrote it, while any other writer's later line on the same task
 # still must. Both directions are read through the production seen-signature
 # gate the watcher's signal scan consumes (bin/fm-wake-lib.sh).
+# Closing a routing promotion is not just answering a question: it also unblocks
+# both landing paths for that task. That makes it the one cheap way past a gate the
+# design deliberately made expensive and recorded, so the close must name the
+# re-staff obligation at the moment someone is discharging it, rather than relying
+# on the routing-promotion skill having been loaded first. An ordinary decision
+# must NOT carry that line, or it becomes noise everyone learns to skip.
+test_closing_a_promotion_names_the_restaff_obligation() {
+  local dir fb log home rc out err
+  dir="$TMP_ROOT/promo-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home promo-close)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'promoted [key=tier]: tier-2 blast-radius - diff reaches the auth policy path\n' \
+    > "$home/state/t1.status"
+
+  # run_send discards stderr, and stderr is exactly what this case is about, so
+  # invoke the script directly with the same environment.
+  err="$dir/promo.err"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" t1 --resolve-key tier "re-staffed onto a stronger runtime" \
+    >/dev/null 2> "$err"; rc=$?
+  expect_code 0 "$rc" "answering a promotion should succeed"
+  grep -F 'resolved [key=tier]' "$home/state/t1.status" >/dev/null \
+    || fail "fm-send did not close the promotion record"
+  assert_contains "$(cat "$err")" "routing promotion" \
+    "closing a promotion did not name what was being discharged"
+  assert_contains "$(cat "$err")" "re-staffed" \
+    "closing a promotion did not name the re-staff obligation"
+
+  # An ordinary decision closes silently.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+  err="$dir/ordinary.err"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" t1 --resolve-key api-shape "go with REST" \
+    >/dev/null 2> "$err"; rc=$?
+  expect_code 0 "$rc" "answering an ordinary decision should succeed"
+  if grep -F 'routing promotion' "$err" >/dev/null 2>&1; then
+    fail "an ordinary decision close wrongly carried the promotion reinforcement"
+  fi
+  pass "fm-send --resolve-key: closing a promotion names the re-staff obligation, an ordinary decision does not"
+}
+
 test_answer_close_is_self_announced() {
   local dir fb log home rc
   dir="$TMP_ROOT/self-announced"; mkdir -p "$dir"
@@ -537,6 +581,7 @@ test_flag_misuse_refuses() {
 }
 
 test_answer_send_closes_open_decision
+test_closing_a_promotion_names_the_restaff_obligation
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
