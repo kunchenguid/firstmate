@@ -291,6 +291,16 @@ if [ -f "$STATE/.fleet-stop" ]; then
   echo "error: fleet stop active ($STATE/.fleet-stop) - launch refused; inspect: bin/fm-fleet-stop.sh status" >&2
   exit 1
 fi
+# Day-close pre-warning zone (file contract: bin/fm-tagesschluss.sh header):
+# from 19:30 no NEW launches tonight; running work winds down to a safe halt.
+# The marker binds only on its own date; a stale one is cleaned, not obeyed.
+if [ -f "$STATE/.tagesschluss-vorwarn" ]; then
+  if [ "$(sed -n '1s/^date=//p' "$STATE/.tagesschluss-vorwarn")" = "$(date +%F)" ]; then
+    echo "error: day-close pre-warning zone active (19:30) - no new launches tonight; the morning check reopens the fleet" >&2
+    exit 1
+  fi
+  rm -f "$STATE/.tagesschluss-vorwarn"
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
