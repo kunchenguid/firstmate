@@ -152,6 +152,17 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+fm_session_lock_has_generation_marker() {  # <lock-path>
+  local mode
+  mode=$(stat -f %Lp "$1" 2>/dev/null) \
+    || mode=$(stat -c %a "$1" 2>/dev/null) \
+    || return 1
+  case "$mode" in
+    *[1357][0-7][0-7]) return 0 ;;
+  esac
+  return 1
+}
+
 # Print the pid of the session the harness itself publishes for lock path $1,
 # or return 1.
 #
@@ -166,11 +177,12 @@ fm_harness_pid_alive() {
 # publishes one today; every other harness has no such variable and keeps the
 # ancestry-only behavior below unchanged.
 #
-# The pid is trusted only while it is still a live Claude Code process that
-# strictly predates the lock. The lock's existing mtime is process-generation
-# evidence: if an exited session's pid is recycled, the replacement process
-# starts at or after the lock the original session published and is rejected
-# even when the replacement is another Claude process.
+# The pid is trusted only while it is still a live Claude Code process from a
+# generation compatible with the lock. Current locks carry an owner-execute
+# marker and require the process to strictly predate the lock. Unmarked locks
+# published before that marker existed may share the process-start second so a
+# session already running across an in-place update keeps its home. The lock's
+# mtime remains process-generation evidence for every other ordering.
 #
 # Trust boundary. The variable is inherited by any child, so on its own it says
 # "a Claude session named this pid", never "I am that session". That is why
@@ -200,7 +212,10 @@ fm_harness_session_pid() {  # <lock-path>
   case "$started_epoch:$lock_epoch" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
-  [ "$started_epoch" -lt "$lock_epoch" ] || return 1
+  if [ "$started_epoch" -ge "$lock_epoch" ]; then
+    [ "$started_epoch" -eq "$lock_epoch" ] || return 1
+    fm_session_lock_has_generation_marker "$lock" && return 1
+  fi
   printf '%s\n' "$pid"
 }
 

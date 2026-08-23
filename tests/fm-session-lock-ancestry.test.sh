@@ -267,13 +267,22 @@ SH
   chmod +x "$1/ps"
   cat > "$1/stat" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${FM_TEST_LOCK_MTIME:-}" ]; then
-  printf '%s\n' "$FM_TEST_LOCK_MTIME"
-else
-  exec /usr/bin/stat "$@"
-fi
+case "${1:-}:${2:-}" in
+  -f:%m|-c:%Y)
+    if [ -n "${FM_TEST_LOCK_MTIME:-}" ]; then
+      printf '%s\n' "$FM_TEST_LOCK_MTIME"
+      exit 0
+    fi
+    ;;
+esac
+exec /usr/bin/stat "$@"
 SH
   chmod +x "$1/stat"
+}
+
+lstart_epoch() {  # <ps lstart value>
+  LC_ALL=C date -d "$1" +%s 2>/dev/null \
+    || LC_ALL=C date -j -f '%a %b %e %T %Y' "$1" +%s 2>/dev/null
 }
 
 test_pool_served_session_owns_the_lock_it_holds() {
@@ -311,12 +320,36 @@ test_pool_served_session_never_claims_another_session_lock() {
   pass "session-lock: a pool-served session never claims a lock held by another session"
 }
 
+test_live_upgrade_accepts_only_its_legacy_same_second_lock() {
+  local dir fakebin same_epoch
+  dir="$TMP_ROOT/pool-live-upgrade"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+  same_epoch=$(lstart_epoch 'Sun Jan  4 00:00:00 1970') \
+    || fail "could not derive the live upgrade fixture's same-second timestamp"
+
+  printf '700\n' > "$dir/state/.lock"
+  FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a live upgraded session could not prove ownership of its legacy same-second lock"
+
+  printf '650\n' > "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a live upgraded session claimed another session's legacy same-second lock"
+  fi
+  pass "session-lock: a live upgrade accepts only its own legacy same-second lock"
+}
+
 test_published_session_pid_requires_the_original_live_harness_generation() {
-  local dir fakebin
+  local dir fakebin same_epoch
   dir="$TMP_ROOT/pool-stale"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
   write_pool_ps "$fakebin"
+  same_epoch=$(lstart_epoch 'Sun Jan  4 00:00:00 1970') \
+    || fail "could not derive the replacement fixture's same-second timestamp"
 
   # 999 is not a harness in this table: a stale exported value whose pid has
   # been recycled onto something else proves nothing and must fail closed.
@@ -348,9 +381,10 @@ test_published_session_pid_requires_the_original_live_harness_generation() {
   # inside one second. Equality therefore fails closed; the real acquisition
   # path below proves an ordinary just-started session publishes after the
   # ambiguous boundary instead of being rejected.
-  if FM_TEST_LOCK_MTIME=259200 FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+  chmod u+x "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
     lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
-    fail "a same-second replacement Claude process was trusted"
+    fail "a same-second replacement Claude process was trusted for a current-generation lock"
   fi
   pass "session-lock: a published session pid requires the original live Claude process generation"
 }
@@ -403,6 +437,8 @@ SH
     || fail "could not read the acquired lock's generation timestamps"
   [ "$started_epoch" -lt "$lock_epoch" ] \
     || fail "lock publication did not advance beyond the session start second ($started_epoch >= $lock_epoch)"
+  [ -x "$dir/state/.lock" ] \
+    || fail "the acquired lock did not carry current-generation evidence"
   pass "session-lock: a just-started Claude session publishes after the ambiguous start second"
 }
 
@@ -411,7 +447,7 @@ SH
 # session pid here is a real live process so the script's own kill -0 liveness
 # check runs unstubbed; only ps is shadowed.
 test_lock_acquire_is_not_refused_to_the_session_that_holds_it() {
-  local dir fakebin session_pid out rc
+  local dir fakebin session_pid started_epoch out rc
   dir="$TMP_ROOT/pool-acquire"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -448,9 +484,26 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/ps"
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  -f:%m|-c:%Y)
+    printf '%s\n' "$FM_TEST_LOCK_MTIME"
+    exit 0
+    ;;
+esac
+exec /usr/bin/stat "$@"
+SH
+  chmod +x "$fakebin/stat"
   printf '%s\n' "$session_pid" > "$dir/state/.lock"
+  started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+    xargs -I{} date -d "{}" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+      xargs -I{} date -j -f '%a %b %e %T %Y' "{}" +%s 2>/dev/null) \
+    || started_epoch=''
+  [ -n "$started_epoch" ] || fail "could not read the live upgrade fixture's session start"
 
-  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" CLAUDE_PID="$session_pid" \
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" FM_TEST_LOCK_MTIME="$started_epoch" CLAUDE_PID="$session_pid" \
     FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>&1) && rc=0 || rc=$?
   kill "$session_pid" 2>/dev/null || true
   wait "$session_pid" 2>/dev/null || true
@@ -608,6 +661,7 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_pool_served_session_owns_the_lock_it_holds
 test_pool_served_session_never_claims_another_session_lock
+test_live_upgrade_accepts_only_its_legacy_same_second_lock
 test_published_session_pid_requires_the_original_live_harness_generation
 test_lock_acquire_publishes_after_the_session_start_second
 test_lock_acquire_is_not_refused_to_the_session_that_holds_it
