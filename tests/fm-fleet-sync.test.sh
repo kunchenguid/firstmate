@@ -113,6 +113,8 @@ build_enclosing_home() {
 
   git init -q "$work"
   git -C "$work" symbolic-ref HEAD refs/heads/main
+  printf '/projects/\n' > "$work/.gitignore"
+  git -C "$work" add .gitignore
   commit_file "$work" AGENTS.md v0 C0
 
   git clone --quiet --bare "$work" "$remote"
