@@ -1181,6 +1181,63 @@ test_lock_failure_reason_separates_held_from_unavailable() {
   pass "a failing filesystem primitive is distinguishable from a lock that is simply held"
 }
 
+# The pid write happens AFTER ln -s has already succeeded, so no unwritable
+# parent can reach it: a symlink needs no data blocks, which is exactly why a
+# full volume can admit the link and then refuse the write. Making the owner's
+# pid file unwritable once it exists injects that refusal at the one statement
+# it happens at, and leaves every other primitive working.
+test_lock_claim_pid_write_refusal_is_unavailable_not_held() {
+  local dir state lockdir out
+  dir=$(make_case lock-claim-write-refused)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      chmod 0400 "$1/pid" 2>/dev/null || return 1
+      return 0
+    }
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"rc=1 reason=unavailable held=[]"*) ;;
+    *) fail "a refused pid write was not reported as unavailable with no holder: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    || fail "a refused pid write never told the operator the filesystem said no"
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fail "a refused claim left its own lock behind"
+  fi
+  pass "a claim whose pid write is refused reports unavailable, not a held lock"
+}
+
+# A watcher whose lock the filesystem refuses has no lock, no recorded pid and
+# no peer process: reporting the ordinary singleton message and exiting 0 there
+# tells an operator a supervisor exists when none does.
+test_watch_refuses_when_lock_cannot_be_created() {
+  local dir state out rc=0
+  dir=$(make_case watch-unavailable)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  chmod 0555 "$state"
+  out=$(FM_STATE_OVERRIDE="$state" "$WATCH" 2>&1) || rc=$?
+  chmod 0755 "$state"
+  case "$out" in
+    *"already running"*)
+      fail "watcher claimed a watcher is already running when the filesystem refused the lock (rc=$rc): $out" ;;
+  esac
+  [ "$rc" -ne 0 ] \
+    || fail "watcher exited 0 (success) though it never acquired the lock and no watcher runs: $out"
+  case "$out" in
+    *"filesystem refused"*) ;;
+    *) fail "watcher did not name the filesystem refusal as the cause: $out" ;;
+  esac
+  pass "watcher refuses loudly when the lock cannot be created"
+}
+
 test_lock_steal_is_bounded_to_one_level() {
   local dir state lockdir dead live rc newpid deeper
   dir=$(make_case lock-steal-bounded)
@@ -1568,6 +1625,8 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_refuses_when_the_filesystem_cannot_create
 test_lock_failure_reason_separates_held_from_unavailable
+test_lock_claim_pid_write_refusal_is_unavailable_not_held
+test_watch_refuses_when_lock_cannot_be_created
 test_lock_steal_is_bounded_to_one_level
 test_lock_clears_legacy_steal_chains
 test_lock_reclaims_orphan_steal_with_absent_primary

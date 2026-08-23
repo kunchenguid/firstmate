@@ -145,9 +145,27 @@ fi
 # (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh owns that proof and its
 # race-free reclaim). Reclaim it once and retry; anything still genuinely
 # deciding keeps the lock and this firing stays inert.
+#
+# A lock the filesystem refused outright is not another firing holding it: no
+# owner exists, nobody armed, and every later state write this hook makes will
+# fail too. Exiting silently there is how a home loses supervision with nobody
+# told. The Stop decision itself must not be blocked - exit 2 would demand a
+# rewake turn whose own bounding markers (the failure notice and alarm) live in
+# the same unwritable state dir and so could never end the loop - so the exit
+# code the hook contract requires stands and the refusal goes out on stderr.
+autoarm_refuse_if_lock_unavailable() {  # <lock-path>
+  [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ] || return 0
+  printf 'firstmate watcher auto-arm REFUSED - the filesystem refused to create %s (out of space, read-only, or not writable), so no owner claim was taken and this Stop armed no watcher. Supervision is NOT running for this home until that is fixed.\n' \
+    "$1" >&2
+  exit 0
+}
 if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
   fm_autoarm_release_abandoned "$STATE" || exit 0
-  fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+  if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+    autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
+    exit 0
+  fi
 fi
 # Record WHO this claim is before publishing the role both Stop participants read
 # as ownership. A bare pid the operating system later hands to an unrelated live

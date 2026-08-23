@@ -779,6 +779,37 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+# A state directory the filesystem will not let the hook write is the shape a
+# full or read-only volume has: the owner lock cannot be created at all, so no
+# firing holds it and nobody armed. Exiting silently there is how a home loses
+# supervision with nobody told.
+test_refuses_loudly_when_the_owner_lock_cannot_be_created() {
+  local dir out status=0
+  dir=$(make_primary_dir "$TMP_ROOT/owner-lock-unavailable")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # The fake harness records its own pid, so the lock file has to exist and be
+  # writable before the directory itself stops accepting new entries.
+  : > "$dir/state/.lock"
+  chmod 0600 "$dir/state/.lock"
+  chmod 0555 "$dir/state"
+  out=$(printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1) || status=$?
+  chmod 0755 "$dir/state"
+  [ ! -e "$dir/state/arm-ran" ] \
+    || fail "hook armed a watcher though the filesystem refused its owner lock"
+  assert_contains "$out" "auto-arm REFUSED" \
+    "an owner lock the filesystem refused must be reported, not silently skipped"
+  assert_contains "$out" "Supervision is NOT running" \
+    "the refusal must say plainly that no watcher is supervising this home"
+  expect_code 0 "$status" \
+    "the Stop decision must not be blocked by an unwritable state directory"
+  pass "auto-arm: refuses loudly when the owner lock cannot be created"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -814,4 +845,5 @@ test_terminal_check_claim_is_never_reclaimed
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_refuses_loudly_when_the_owner_lock_cannot_be_created
 test_fm_lock_status_still_works_with_shared_lib
