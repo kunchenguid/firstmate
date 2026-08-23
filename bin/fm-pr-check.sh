@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: extract and surface its qualified destination through
+# the authoritative forge outcome path, store canonical pr=<url>, pr_base=,
+# pr_default=, and pr_head= evidence when available, then atomically arm a poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# --pre-merge marks a caller that is about to act on the PR rather than report
+# on it, so the outcome it prints is framed as the state observed before that
+# action instead of as the PR's standing outcome.
+# Usage: fm-pr-check.sh [--pre-merge] <task-id> <pr-url>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +22,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+OUTCOME_PREFIX=
+if [ "$#" -eq 3 ] && [ "$1" = --pre-merge ]; then
+  OUTCOME_PREFIX='before merging: '
+  shift
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -49,12 +58,16 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
-# reported, so the absent tool stops the watch here instead of watching nothing.
-if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
-  echo "error: watching a GitLab merge request requires glab on PATH" >&2
+# Poll errors are silent by design, so every provider dependency is checked at
+# the visible arming boundary rather than allowed to become a permanent silent
+# lookup failure. GitHub's JSON selector is built into gh; GitLab JSON needs jq.
+# fm_pr_poll_prepare enforces the same gate for every other arming path.
+if ! fm_pr_poll_provider_tools_present "$PROVIDER"; then
+  if [ -n "$FM_PR_POLL_MISSING_TOOLS" ] && fm_pr_provider_label "$PROVIDER"; then
+    echo "error: watching this $FM_PR_PROVIDER_LABEL outcome requires $FM_PR_POLL_MISSING_TOOLS on PATH" >&2
+  else
+    echo "error: invalid PR check request" >&2
+  fi
   exit 1
 fi
 
@@ -64,23 +77,23 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
-fi
+# One forge query path owns state, destination, head extraction, and all visible
+# wording. Repository-default lookup is deferred until an exact merged outcome
+# needs classification. Malformed trusted output refuses before metadata or poll
+# publication rather than falling back to an implication.
+OUTCOME_RECORD=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated-machine ready \
+  "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER") || {
+  echo "error: PR outcome could not be established" >&2
+  exit 1
+}
+fm_pr_outcome_parse "$OUTCOME_RECORD" "$URL" || {
+  echo "error: PR outcome could not be established" >&2
+  exit 1
+}
+PR_BASE=$FM_PR_OUTCOME_BASE
+PR_DEFAULT=$FM_PR_OUTCOME_DEFAULT
+PR_HEAD=$FM_PR_OUTCOME_HEAD
+PR_OUTCOME=$FM_PR_OUTCOME_HUMAN
 
 META_TMP=
 META_LOCK=
@@ -109,12 +122,14 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|pr_base=*|pr_default=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+[ -z "$PR_BASE" ] || printf 'pr_base=%s\n' "$PR_BASE" >> "$META_TMP" || exit 1
+[ -z "$PR_DEFAULT" ] || printf 'pr_default=%s\n' "$PR_DEFAULT" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
@@ -136,4 +151,5 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+printf '%s%s\n' "$OUTCOME_PREFIX" "$PR_OUTCOME"
 printf 'armed: state/%s.check.sh\n' "$ID"

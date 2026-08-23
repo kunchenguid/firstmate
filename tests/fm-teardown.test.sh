@@ -273,10 +273,12 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,isDraft,baseRefName,headRefOid"*) printf '%s\037%s\037%s\037%s\n' 'MERGED' 0 main '$head' ; exit 0 ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "repo view") printf '%s\n' main ; exit 0 ;;
 esac
 echo "error: pull request not found" >&2
 exit 1

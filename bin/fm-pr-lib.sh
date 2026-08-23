@@ -34,6 +34,14 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_POLL_MISSING_TOOLS=
+FM_PR_PROVIDER_LABEL=
+FM_PR_OUTCOME_STATE=
+FM_PR_OUTCOME_URL=
+FM_PR_OUTCOME_BASE=
+FM_PR_OUTCOME_DEFAULT=
+FM_PR_OUTCOME_HEAD=
+FM_PR_OUTCOME_HUMAN=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -213,6 +221,75 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+fm_pr_branch_valid() {
+  local branch=${1-}
+  [ -n "$branch" ] && git check-ref-format --branch "$branch" >/dev/null 2>&1
+}
+
+# Parse the private record emitted by fm-pr-poll.sh --validated-machine.
+# The unit separator cannot occur in a valid Git ref, URL, SHA, or the formatter's
+# fixed prose. Callers surface only FM_PR_OUTCOME_HUMAN after this exact parse.
+fm_pr_outcome_parse() {
+  local record=${1-} expected_url=${2-} separator version extra
+  local LC_ALL=C
+  FM_PR_OUTCOME_STATE=
+  FM_PR_OUTCOME_URL=
+  FM_PR_OUTCOME_BASE=
+  FM_PR_OUTCOME_DEFAULT=
+  FM_PR_OUTCOME_HEAD=
+  FM_PR_OUTCOME_HUMAN=
+  case "$record" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  separator=$(printf '\037')
+  IFS="$separator" read -r version FM_PR_OUTCOME_STATE FM_PR_OUTCOME_URL \
+    FM_PR_OUTCOME_BASE FM_PR_OUTCOME_DEFAULT FM_PR_OUTCOME_HEAD FM_PR_OUTCOME_HUMAN extra <<< "$record"
+  [ "$version" = fm-pr-outcome-v1 ] && [ -z "$extra" ] || return 1
+  case "$FM_PR_OUTCOME_STATE" in ready|draft|closed|locked|merged|unavailable) ;; *) return 1 ;; esac
+  [ "$FM_PR_OUTCOME_URL" = "$expected_url" ] || return 1
+  [ -z "$FM_PR_OUTCOME_BASE" ] || fm_pr_branch_valid "$FM_PR_OUTCOME_BASE" || return 1
+  [ -z "$FM_PR_OUTCOME_DEFAULT" ] || fm_pr_branch_valid "$FM_PR_OUTCOME_DEFAULT" || return 1
+  [ -z "$FM_PR_OUTCOME_HEAD" ] || fm_pr_head_valid "$FM_PR_OUTCOME_HEAD" || return 1
+  [ -n "$FM_PR_OUTCOME_HUMAN" ]
+}
+
+# Provider lookup dependencies for bin/fm-pr-poll.sh. The poll is silent on
+# every error by design, so a missing CLI would be indistinguishable from a PR
+# that is never merged. Every arming boundary checks this instead, so an absent
+# tool refuses visibly rather than arming a watch that can never fire. Sets
+# FM_PR_POLL_MISSING_TOOLS to the human list and returns non-zero when any is
+# absent; an unknown provider is a refusal with no named tool.
+fm_pr_poll_provider_tools_present() {
+  local provider=${1-} missing=
+  FM_PR_POLL_MISSING_TOOLS=
+  case "$provider" in
+    github)
+      command -v gh >/dev/null 2>&1 || missing=gh
+      ;;
+    gitlab)
+      command -v glab >/dev/null 2>&1 || missing=glab
+      command -v jq >/dev/null 2>&1 || missing="${missing:+$missing and }jq"
+      ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2034
+  FM_PR_POLL_MISSING_TOOLS=$missing
+  [ -z "$missing" ]
+}
+
+# Forge noun for user-facing wording. GitHub and GitLab name the same object
+# differently and every captain-facing sentence uses the forge's own term, so
+# the mapping has one owner rather than a literal at each message site. Sets
+# FM_PR_PROVIDER_LABEL and returns non-zero for an unknown provider.
+fm_pr_provider_label() {
+  # shellcheck disable=SC2034  # read by sourcing scripts (fm-pr-check.sh, fm-pr-check-migrate.sh)
+  case "${1-}" in
+    github) FM_PR_PROVIDER_LABEL='GitHub pull request' ;;
+    gitlab) FM_PR_PROVIDER_LABEL='GitLab merge request' ;;
+    *) FM_PR_PROVIDER_LABEL=; return 1 ;;
+  esac
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -286,7 +363,7 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 base_count=0 default_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -313,6 +390,22 @@ fm_pr_metadata_identity_parse() {
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
           fm_pr_head_valid "$value" || post_pr_invalid=1
+        fi
+        ;;
+      pr_base=*)
+        base_count=$((base_count + 1))
+        value=${line#pr_base=}
+        if ! [ "$seen_pr" -eq 1 ] || ! [ "$base_count" -eq 1 ] \
+          || ! fm_pr_branch_valid "$value"; then
+          post_pr_invalid=1
+        fi
+        ;;
+      pr_default=*)
+        default_count=$((default_count + 1))
+        value=${line#pr_default=}
+        if ! [ "$seen_pr" -eq 1 ] || ! [ "$default_count" -eq 1 ] \
+          || ! fm_pr_branch_valid "$value"; then
+          post_pr_invalid=1
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
@@ -453,6 +546,10 @@ fm_pr_poll_prepare() {
   local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
+  # Both arming paths - direct registration and migration rebuild - pass through
+  # here, so no poll is ever published for a provider whose lookup dependency is
+  # absent and would only ever fail silently.
+  fm_pr_poll_provider_tools_present "$provider" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1

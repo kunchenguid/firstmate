@@ -24,6 +24,7 @@
 #   (o) glab or jq absent refuses before any state is recorded
 #   (p) --sha in extra GitLab args fails fast, and still forwards on GitHub
 #   (q) a GitLab refusal still leaves pr= recorded and the merge poll armed
+#   (r) the state read before merging is never presented as the PR's outcome
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -58,14 +59,11 @@ make_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
   printf '%s\n' "$case_dir"
 }
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# the authoritative ready-outcome query. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -76,13 +74,9 @@ SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
-  "pr view")
-    case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-    esac
-    ;;
+  "pr view") printf '%s\037%s\037%s\037%s\n' OPEN 0 main '$head' ;;
+  "repo view") printf '%s\n' main ;;
 esac
-exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -101,7 +95,10 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+case "${1:-} ${2:-}" in
+  "pr view") printf '%s\037%s\037%s\037%s\n' OPEN 0 main 0123456789abcdef0123456789abcdef01234567 ;;
+  "repo view") printf '%s\n' main ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -120,6 +117,10 @@ case "${1:-} ${2:-}" in
   "mr view")
     [ ! -e "$case_dir/glab-view-fails" ] || exit 1
     cat "$FM_TEST_GLAB_JSON"
+    exit 0
+    ;;
+  "repo view")
+    printf '%s\n' '{"default_branch":"main"}'
     exit 0
     ;;
   "mr merge")
@@ -160,7 +161,7 @@ write_mr_json() {
   if [ "$pipeline" = present ]; then
     pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
   fi
-  printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
+  printf '{"iid":7,"state":"%s","target_branch":"main","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s}\n' \
     "$discussions" "$head" "$pipeline" >> "$file"
@@ -250,6 +251,47 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+# The recording step reads the PR while it is still open, so its sentence says
+# "is ready for review". A merge run must not hand that back as the PR outcome
+# a crew would relay, because the merge happens immediately afterwards.
+test_pre_merge_state_is_not_reported_as_the_outcome() {
+  local case_dir rc url
+  url=https://github.com/example/repo/pull/9
+  case_dir=$(make_case pre-merge-outcome)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pre-merge-outcome: fm-pr-merge should succeed"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "pre-merge-outcome: the merge itself did not run"
+  grep -qxF "PR $url is ready for review into 'main'." "$case_dir/stdout" \
+    && fail "pre-merge-outcome: a merged PR was reported as ready for review"
+  grep -qxF "before merging: PR $url is ready for review into 'main'." "$case_dir/stdout" \
+    || fail "pre-merge-outcome: the pre-merge state reading was not marked as one"
+  grep -qxF 'armed: state/task-x1.check.sh' "$case_dir/stdout" \
+    || fail "pre-merge-outcome: the merge watch was not armed"
+
+  # Reporting the same PR outside a merge keeps the unprefixed outcome.
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 "$url" > "$case_dir/check.out" 2> "$case_dir/check.err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pre-merge-outcome: plain fm-pr-check should succeed"
+  grep -qxF "PR $url is ready for review into 'main'." "$case_dir/check.out" \
+    || fail "pre-merge-outcome: reporting outside a merge lost the plain outcome sentence"
+
+  pass "fm-pr-merge marks the state it reads before merging instead of reporting it as the outcome"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -811,6 +853,7 @@ test_github_still_forwards_sha_arg() {
 }
 
 test_records_pr_and_head_before_merging
+test_pre_merge_state_is_not_reported_as_the_outcome
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

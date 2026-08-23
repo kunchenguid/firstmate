@@ -356,8 +356,12 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records the canonical PR identity and available forge branch evidence, prints the authoritative destination-qualified ready or merged outcome, and arms the merge poll.
+Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary using that exact branch evidence, and the no-mistakes risk level when applicable.
+Say "merged into `<base>`" rather than default-branch delivery unless the repository default is established and matches.
+Relay a draft, closed, locked, or unavailable outcome as that outcome; only an open pull request that is not a draft is ready for review.
+The outcome names the object by its own forge - `PR <url>` for GitHub and `MR <url>` for GitLab - so relay that noun rather than renaming it.
+A `before merging:` prefix marks a state read by `bin/fm-pr-merge.sh` just before it acts, not the PR's standing outcome, so never relay that line as the landing result.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 

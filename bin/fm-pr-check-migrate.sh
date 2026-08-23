@@ -792,6 +792,20 @@ record_ambiguous_failure() {
   ensure_outcome_obligation "$id" failure-ambiguous
 }
 
+# fm_pr_poll_prepare refuses to rebuild a poll whose provider lookup dependency
+# is absent, because such a poll could only ever fail silently. Every migration
+# rebuild goes through here, so the missing tool is named wherever that refusal
+# can happen rather than attributed to the task's private artifacts.
+migrate_poll_prepare() {
+  local id=$1 provider=$2 url=$3 host=$4 path=$5 number=$6
+  if ! fm_pr_poll_provider_tools_present "$provider" \
+    && [ -n "$FM_PR_POLL_MISSING_TOOLS" ] \
+    && fm_pr_provider_label "$provider"; then
+    echo "PR_CHECK_MIGRATION: task $id: watching this $FM_PR_PROVIDER_LABEL outcome requires $FM_PR_POLL_MISSING_TOOLS on PATH" >&2
+  fi
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE"
+}
+
 canonical_repair_from_pending() {
   local id=$1 meta data registration provider url host path number check
   meta="$STATE/$id.meta"
@@ -810,7 +824,7 @@ canonical_repair_from_pending() {
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
+  migrate_poll_prepare "$id" "$provider" "$url" "$host" "$path" "$number" || return 1
   fm_pr_poll_publish_prepared || return 1
   canonical_terminal_success "$id"
 }
@@ -1063,7 +1077,7 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
+          && migrate_poll_prepare "$id" "$provider" "$url" "$host" "$path" "$number" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then
           :
