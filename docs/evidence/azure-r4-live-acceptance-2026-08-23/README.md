@@ -48,6 +48,16 @@ jq -e '
   .runtime.provider_binary_sha256 == "55d281096f57d411ebbdd94dbf5e9ff3accb7c05713e37348c2c11d4b83bf9d9" and
   .owner_decision.protected == true and
   .owner_decision.protocol == "fm.azure-validation-owner-decision/v1" and
+  (.owner_decision.responded_gates | length) == 1 and
+  all(.owner_decision.responded_gates[];
+    (.gate_index | type) == "number" and
+    (.challenge_digest | test("^sha256:[0-9a-f]{64}$")) and
+    (.decision_digest | test("^sha256:[0-9a-f]{64}$")) and
+    (.previous_head | test("^[0-9a-f]{64}$")) and
+    (.next_head | test("^[0-9a-f]{64}$")) and
+    .action == "approve") and
+  .owner_decision.responded_gates[0].previous_head == .owner_decision.genesis_head and
+  .owner_decision.responded_gates[-1].next_head == .owner_decision.history_head and
   (.behavior_shards | length) == 4 and
   ([.behavior_shards[].shard] | sort) == [1, 2, 3, 4] and
   ([.behavior_shards[].invocation] | unique | length) == 4 and

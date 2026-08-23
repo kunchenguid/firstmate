@@ -35,7 +35,17 @@
     "key_id": "6f9f081a52b6abdbb802238a8b5161dd556af033b942996c8e02d6ce27ceb30b",
     "genesis_head": "49007283a5f1af3e6d28f8674a80fb0e0c09d57b7c95a2a033fa9e88f79f1fa4",
     "history_head": "bf68b33c9a6de606a3c8c2daf50d1526e539db81fec530a88902c80f09d4e73a",
-    "source_commit": "3eb261add486516995df0791f7dcf815acfbaf5d"
+    "source_commit": "3eb261add486516995df0791f7dcf815acfbaf5d",
+    "responded_gates": [
+      {
+        "gate_index": 1,
+        "challenge_digest": "sha256:baf608ea73dbc7099f3354f19610131b9a2caae2aed8688b6422bc65b273c5d3",
+        "decision_digest": "sha256:71f961065c4ef3b08fa2e57bad4b900b662fe6459470c91ae8f6f2581fa982aa",
+        "previous_head": "49007283a5f1af3e6d28f8674a80fb0e0c09d57b7c95a2a033fa9e88f79f1fa4",
+        "next_head": "bf68b33c9a6de606a3c8c2daf50d1526e539db81fec530a88902c80f09d4e73a",
+        "action": "approve"
+      }
+    ]
   },
   "behavior_shards": [
     {
