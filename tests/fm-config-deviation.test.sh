@@ -237,7 +237,7 @@ test_deviation_holds_against_primary_absence() {
 }
 
 test_remote_receiver_honors_the_record() {
-  local home payload out
+  local home payload out payload_bytes payload_hash
   home="$TMP_ROOT/remote/home"
   mkdir -p "$home/config" "$home/state"
   printf 'tmux\n' > "$home/config/backend"
@@ -245,10 +245,11 @@ test_remote_receiver_honors_the_record() {
   payload="$TMP_ROOT/remote/payload"
   mkdir -p "$TMP_ROOT/remote"
   printf 'herdr\n' > "$payload"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  payload_hash=$(fm_inherit_sha256 "$payload")
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
-    "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" \
-    "$(fm_inherit_sha256 "$payload")" 1 < "$payload") \
+    "$payload_bytes" "$payload_hash" 1 < "$payload") \
     || fail "remote receiver failed on a deviated item"
 
   [ "$(cat "$home/config/backend")" = tmux ] \
@@ -262,8 +263,7 @@ test_remote_receiver_honors_the_record() {
   # so honoring a deviation never becomes the remote path's default.
   rm -f "$home/config/backend.deviation"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
-    "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" \
-    "$(fm_inherit_sha256 "$payload")" 2 < "$payload") \
+    "$payload_bytes" "$payload_hash" 2 < "$payload") \
     || fail "remote receiver failed on an ordinary item"
   [ "$(cat "$home/config/backend")" = herdr ] \
     || fail "remote convergence stopped applying the primary value"
@@ -272,17 +272,18 @@ test_remote_receiver_honors_the_record() {
 }
 
 test_remote_receiver_agreement_stays_quiet() {
-  local home payload out empty_hash
+  local home payload out empty_hash payload_bytes payload_hash
   home="$TMP_ROOT/remote-agreeing/home"
   mkdir -p "$home/config"
   printf 'tmux\n' > "$home/config/backend"
   printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
   payload="$TMP_ROOT/remote-agreeing/payload"
   printf 'tmux\n' > "$payload"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  payload_hash=$(fm_inherit_sha256 "$payload")
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
-    "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" \
-    "$(fm_inherit_sha256 "$payload")" 1 < "$payload") \
+    "$payload_bytes" "$payload_hash" 1 < "$payload") \
     || fail "remote receiver failed on an agreeing value"
   assert_contains "$out" "unchanged: config/backend" \
     "an agreeing remote value must retain the ordinary unchanged result"
@@ -335,7 +336,7 @@ test_remote_deviation_relay_survives_later_failure() {
 }
 
 test_remote_receiver_commits_honored_generation() {
-  local home newer older out status
+  local home newer newer_bytes newer_hash older older_bytes older_hash out status
   home="$TMP_ROOT/remote-generation/home"
   mkdir -p "$home/config"
   printf 'tmux\n' > "$home/config/backend"
@@ -344,17 +345,19 @@ test_remote_receiver_commits_honored_generation() {
   older="$TMP_ROOT/remote-generation/older"
   printf 'herdr\n' > "$newer"
   printf 'orca\n' > "$older"
+  newer_bytes=$(LC_ALL=C wc -c < "$newer" | tr -d ' ')
+  newer_hash=$(fm_inherit_sha256 "$newer")
+  older_bytes=$(LC_ALL=C wc -c < "$older" | tr -d ' ')
+  older_hash=$(fm_inherit_sha256 "$older")
 
   FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
-    "$(LC_ALL=C wc -c < "$newer" | tr -d ' ')" \
-    "$(fm_inherit_sha256 "$newer")" 2 < "$newer" >/dev/null \
+    "$newer_bytes" "$newer_hash" 2 < "$newer" >/dev/null \
     || fail "remote receiver failed on the newer deviated generation"
 
   rm -f "$home/config/backend.deviation"
   status=0
   out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
-    "$(LC_ALL=C wc -c < "$older" | tr -d ' ')" \
-    "$(fm_inherit_sha256 "$older")" 1 < "$older" 2>&1) || status=$?
+    "$older_bytes" "$older_hash" 1 < "$older" 2>&1) || status=$?
 
   expect_code 1 "$status" "a delayed older generation after deviation revocation"
   assert_contains "$out" "generation is superseded" \
