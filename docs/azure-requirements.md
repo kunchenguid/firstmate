@@ -1175,19 +1175,13 @@ outside the fleet lock under a non-blocking per-slot lease, with the drain after
 What remains for DONE is the acceptance itself: many crewmates, no-mistakes runs, and
 crosschecks demonstrated running in parallel against live capacity without contention.
 
-The lock is the other half, and the harder one: `controller_lock` is held across provider calls
-and for an execute's whole guest run, and the code's own note records that fixing only the lock was
-tried and reverted.
-
-Work: per-assignment pending state, so reconcile drives many workers concurrently, with
-idempotency preserved per action rather than globally, and a lock discipline that puts the provider
-call outside the fleet lock.
-The first of three changes landed on 2026-08-19: a provider mutation now applies into a copy,
+The completed implementation uses per-assignment pending state so reconcile drives many workers
+concurrently, with idempotency preserved per action rather than globally, and a lock discipline
+that puts provider calls outside the fleet lock.
+The first of the three changes landed on 2026-08-19: a provider mutation applies into a copy,
 commits only on success, and is refused if its effects reach outside the one compartment its slot
 owns.
-Two remain: the per-slot pending map with a revision fence, still fully serialized; then the lock
-discipline, which has to ship as one change because a half-serialized controller is worse than
-either end state.
+The later per-slot pending map and lock-discipline changes completed that work.
 
 One thing not to do, found while designing this: the three capacity commands stay fully locked.
 `merged_specialized_reservations` ignores local reservations whose status is not `reserved`, so a
@@ -1251,7 +1245,7 @@ billable capacity has not run yet.
 ## Order of work
 
 1. R8, done 2026-08-19.
-2. C2, because contention blocks demonstrating anything at scale. One of its three changes landed.
+2. C2, whose three implementation changes are landed but whose live parallel acceptance remains.
 3. R2/R3, done 2026-08-22. It was the largest architectural gap and the requirement the build had
    most misread.
 4. R6, done 2026-08-22 under its evidenceable two-declaration amendment; the accepted records keep
