@@ -825,6 +825,7 @@ test_cycle_exit_record_refusal_is_reported_without_failing_the_wake() {
   local dir state out rc=0
   dir=$(make_case arm-cycle-ledger-refused)
   state="$dir/state"
+  # shellcheck disable=SC2016 # The fixture body is literal shell source; $FM_STATE_OVERRIDE must expand when it runs, not when it is written.
   install_arm_fixture "$dir" '#!/usr/bin/env bash
 set -u
 printf "signal: fixture wake\n"
