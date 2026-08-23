@@ -42,7 +42,8 @@ Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
-Never add an agent name as a commit co-author.
+Never leave AI attribution in the work you ship: no agent co-author trailer, no agent session trailer, and no generated-by note, in commit messages, PR bodies, or files.
+Harnesses emit these by default, so strip them deliberately rather than relying on never typing them.
 
 ## 2. Layout and state
 

@@ -54,6 +54,15 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs carry an "Engineering craft" section separate from the
+# numbered lifecycle Rules, so the lifecycle rule numbers other instructions cite
+# stay stable. The ship variant carries the full set; the scout variant carries
+# only the two items that survive a discarded laboratory worktree - state your
+# assumptions, and never add AI attribution (which binds a scout because
+# bin/fm-promote.sh ships from this same worktree without regenerating the brief).
+# A secondmate charter carries no craft section: a second mate delegates rather than
+# codes, reads the full AGENTS.md that owns the attribution rule, and its own
+# crewmates get this scaffold's craft section in their briefs.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -336,6 +345,10 @@ The report is the only thing that survives, so anything worth keeping must be in
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+# Engineering craft
+1. State your assumptions explicitly before non-trivial work. If the task has more than one reasonable reading, name them in the report rather than silently picking one.
+2. Never add AI attribution: no agent co-author trailer (a \`Co-Authored-By:\` naming your harness or model), no agent session trailer, no generated-by note, in commit messages, PR bodies, or files. Your harness emits these by default, so strip them deliberately rather than relying on never typing them. This binds your scratch commits too, because firstmate may promote this task in place and you would then commit and open a PR from this same worktree.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -452,6 +465,15 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Engineering craft
+1. Turn a vague task into a verifiable goal before writing code: "fix the bug" becomes a failing test that reproduces it, then make it pass; "refactor X" means confirming the relevant tests pass before AND after.
+2. State your assumptions explicitly before non-trivial work. If the task has more than one reasonable reading, name them rather than silently picking one.
+3. Every changed line traces to the actual request. No drive-by edits.
+4. If the diff is 200 lines and could be 50, rewrite it.
+5. Remove imports, variables, and functions that YOUR change orphaned. Pre-existing dead code is mentioned, not deleted.
+6. Delete throwaway test and debug scripts once they are no longer needed. This does not mean the project's real test suite.
+7. Never add AI attribution: no agent co-author trailer (a \`Co-Authored-By:\` naming your harness or model), no agent session trailer, no generated-by note, in commit messages, PR bodies, or files. Your harness emits these by default, so strip them deliberately rather than relying on never typing them.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

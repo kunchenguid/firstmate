@@ -371,6 +371,76 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The craft section is deliberately per-variant, not one block pasted everywhere.
+# A ship task delivers a diff, so it carries all seven items. A scout's worktree is
+# a declared laboratory that is discarded whole, so diff-hygiene and cleanup items
+# would contradict its own Setup section; it keeps only the two that survive -
+# assumptions, and the attribution rule, which binds a scout because
+# bin/fm-promote.sh ships from the same worktree without regenerating the brief.
+# A secondmate delegates rather than codes and reads the AGENTS.md that owns the
+# attribution rule, so its charter carries no craft section at all.
+test_craft_section_is_scoped_per_variant() {
+  local home brief mode
+  home="$TMP_ROOT/craft-home"
+  mkdir -p "$home/data"
+
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-craft-$mode" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh --mode $mode exited non-zero"
+    brief="$home/data/brief-craft-$mode/brief.md"
+    grep -qx "# Engineering craft" "$brief" \
+      || fail "$mode ship brief lost its engineering-craft section"
+    assert_grep "becomes a failing test that reproduces it" "$brief" \
+      "$mode ship brief lost the verifiable-goal rule"
+    assert_grep "name them rather than silently picking one" "$brief" \
+      "$mode ship brief lost the explicit-assumptions rule"
+    assert_grep "No drive-by edits." "$brief" \
+      "$mode ship brief lost the traceable-change rule"
+    assert_grep "200 lines and could be 50" "$brief" \
+      "$mode ship brief lost the diff-size rule"
+    assert_grep "Pre-existing dead code is mentioned, not deleted." "$brief" \
+      "$mode ship brief lost the orphaned-code rule"
+    assert_grep "This does not mean the project's real test suite." "$brief" \
+      "$mode ship brief lost the throwaway-script cleanup rule"
+    assert_grep "Never add AI attribution" "$brief" \
+      "$mode ship brief lost the AI-attribution rule"
+    assert_grep "in commit messages, PR bodies, or files" "$brief" \
+      "$mode ship brief did not extend the attribution rule past the co-author field"
+    assert_grep "strip them deliberately" "$brief" \
+      "$mode ship brief did not require actively stripping harness-emitted attribution"
+  done
+
+  # The lifecycle Rules list keeps its own numbering: the no-mistakes DOD cites
+  # "rule 6" by number, so the craft items must never be folded into that list.
+  brief="$home/data/brief-craft-no-mistakes/brief.md"
+  assert_grep "escalate to firstmate (rule 6)" "$brief" \
+    "the craft section must not disturb the numbered lifecycle rules the DOD cites"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-craft-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout exited non-zero"
+  brief="$home/data/brief-craft-scout/brief.md"
+  grep -qx "# Engineering craft" "$brief" \
+    || fail "scout brief lost its engineering-craft section"
+  assert_grep "name them in the report rather than silently picking one" "$brief" \
+    "scout brief lost the explicit-assumptions rule"
+  assert_grep "Never add AI attribution" "$brief" \
+    "scout brief lost the AI-attribution rule"
+  assert_grep "firstmate may promote this task in place" "$brief" \
+    "scout brief did not explain why attribution binds its scratch commits"
+  assert_no_grep "200 lines and could be 50" "$brief" \
+    "scout brief carries diff-size discipline its discarded laboratory worktree contradicts"
+  assert_no_grep "becomes a failing test that reproduces it" "$brief" \
+    "scout brief carries the ship-only verifiable-goal rule"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-craft-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh --secondmate exited non-zero"
+  brief="$home/data/brief-craft-mate/brief.md"
+  assert_no_grep "Engineering craft" "$brief" \
+    "secondmate charter must not carry the crewmate craft section"
+  pass "fm-brief.sh: engineering-craft section is scoped to the variants it fits"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -722,6 +792,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_craft_section_is_scoped_per_variant
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
