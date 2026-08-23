@@ -769,6 +769,14 @@ write_bound_secondmate() {
   fi
 }
 
+# Same line, appended instead of written, so a case can register one id twice.
+write_bound_secondmate_append() {
+  local dir=$1 id=$2 store=$3 abs
+  abs=$(cd "$dir/smhome" && pwd -P)
+  printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+    "$id" "$id" "$abs" "$id" "$store" >> "$dir/home/data/secondmates.md"
+}
+
 test_bound_secondmate_relaunch_onto_a_non_claude_harness_refuses_before_stop() {
   local dir store out rc
   dir=$(new_case smbound sm8)
@@ -806,6 +814,52 @@ test_bound_secondmate_relaunch_with_a_missing_store_refuses_before_stop() {
   [ "$(meta_field "$dir" sm9 harness)" = claude ] \
     || fail "a refused relaunch must leave the durable record on the recorded harness"
   pass "fm-control relaunch: a missing bound store refuses before the agent is stopped"
+}
+
+# A registry the launch owner would refuse must be refused HERE, not waved past
+# the stop. A bare field lookup cannot tell "records no store" from "this
+# registry is unusable", and the launch owner refuses every unusable form - so
+# degrading one to the other would stop a healthy agent for a launch destined to
+# fail. These drive the two unusable shapes an operator actually produces.
+test_bound_secondmate_relaunch_refuses_a_malformed_registry_before_stop() {
+  local dir store out rc
+  dir=$(new_case smbad sm11)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm11 "$store"
+  # A second entry whose suffix the parser cannot resolve at all.
+  printf -- '- other - other domain (home: not-absolute; scope: x; added 2026-08-23)\n' \
+    >> "$dir/home/data/secondmates.md"
+  out=$(run_control "$dir" sm11 relaunch); rc=$?
+  expect_code 1 "$rc" "an unusable registry should refuse the relaunch"
+  assert_contains "$out" "registry cannot be resolved" \
+    "the refusal should say the registry could not be resolved"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a registry the launch owner would refuse must not cost the mate its agent"
+  [ ! -e "$dir/home/state/sm11.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  [ "$(meta_field "$dir" sm11 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: a malformed registry refuses before the agent is stopped"
+}
+
+test_bound_secondmate_relaunch_refuses_a_duplicate_registry_entry_before_stop() {
+  local dir store out rc
+  dir=$(new_case smdup sm12)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm12 "$store"
+  # The same id twice: which entry binds this mate's account is unresolvable.
+  write_bound_secondmate_append "$dir" sm12 "$store"
+  out=$(run_control "$dir" sm12 relaunch); rc=$?
+  expect_code 1 "$rc" "a duplicated registry id should refuse the relaunch"
+  assert_contains "$out" "registry cannot be resolved" \
+    "the refusal should say the registry could not be resolved"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an ambiguous binding must not cost the mate its agent"
+  [ ! -e "$dir/home/state/sm12.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  pass "fm-control relaunch: a duplicated registry entry refuses before the agent is stopped"
 }
 
 # The preflight must refuse only the two cases fm-spawn refuses. A bound second
@@ -1441,6 +1495,8 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_bound_secondmate_relaunch_onto_a_non_claude_harness_refuses_before_stop
 test_bound_secondmate_relaunch_with_a_missing_store_refuses_before_stop
+test_bound_secondmate_relaunch_refuses_a_malformed_registry_before_stop
+test_bound_secondmate_relaunch_refuses_a_duplicate_registry_entry_before_stop
 test_bound_secondmate_relaunches_normally_on_claude
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config

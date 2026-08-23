@@ -80,11 +80,12 @@
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind.
-#   - A second mate bound to a Claude account store (its registry entry's
-#     claude-config-dir) is refused a relaunch onto a non-claude harness, or
-#     with that store missing, BEFORE its agent is stopped - the launch owner
-#     refuses both, but only after the stop, which would cost a healthy mate
-#     its agent for a launch that must be refused.
+#   - A second mate's Claude account binding (its registry entry's
+#     claude-config-dir) is resolved BEFORE its agent is stopped, through the
+#     launch owner's own registry validation. A non-claude harness, a missing
+#     store, and a registry that cannot be resolved at all are each refused
+#     there, because the launch owner refuses all of them only AFTER the stop,
+#     which would cost a healthy mate its agent for a launch destined to fail.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #
@@ -606,19 +607,31 @@ relaunch_rollback() {
 
 # preflight_bound_store: ask the launch owner's per-mate Claude account
 # questions BEFORE anything is stopped. bin/fm-spawn.sh stays the fail-closed
-# owner of both refusals for a direct spawn, but a relaunch reaches it only
+# owner of these refusals for a direct spawn, but a relaunch reaches it only
 # after the old agent is gone, so a refusal there would kill a healthy second
 # mate and then leave it down - and automated recovery would repeat that same
-# refusal forever. Asking the same two questions on this side of the
-# transaction makes an incompatible transition cost nothing.
+# refusal forever. Asking the same questions on this side of the transaction
+# makes a refused transition cost nothing.
+#
+# It must ask them the SAME way, which means resolving the binding through the
+# launch owner's own registry validation rather than a bare field lookup. A
+# lookup that merely returns nothing cannot tell "this mate records no store"
+# from "this registry is malformed, duplicated, or unreadable" - and the launch
+# owner refuses every one of the latter. Degrading them to an empty binding
+# here would wave the relaunch past the stop and straight into that refusal,
+# reintroducing the same outage through a narrower door.
 preflight_bound_store() {
   local registry ccd
   [ "$KIND" = secondmate ] || return 0
   registry="$DATA/secondmates.md"
-  if [ ! -f "$registry" ] || [ -L "$registry" ]; then
+  # Same trigger as the launch owner: a registry that is present in any form is
+  # validated, and one that does not exist at all leaves the binding unset.
+  if [ ! -e "$registry" ] && [ ! -L "$registry" ]; then
     return 0
   fi
-  ccd=$(secondmate_registry_field "$registry" "$ID" claude-config-dir 2>/dev/null || true)
+  secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key "$ID" "$WT" \
+    || die "secondmate $ID's registry cannot be resolved, so relaunching would stop the running agent for a launch the spawn must refuse: $SECONDMATE_REGISTRY_ERROR"
+  ccd=$SECONDMATE_REGISTRY_MATCH_CLAUDE_CONFIG_DIR
   [ -n "$ccd" ] || return 0
   if [ "$TARGET_HARNESS" != claude ]; then
     die "secondmate $ID records claude-config-dir $ccd, but this relaunch resolves harness '$TARGET_HARNESS', which has no Claude config store to bind; relaunching onto it would stop the running agent for a launch that must be refused. Pass --harness claude, or remove that field from its registry entry"
