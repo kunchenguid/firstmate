@@ -132,18 +132,33 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 # log always see exactly one of them create the lock directory first; that
 # ordering is what stops two writers from both passing the uniqueness check
 # for the same id before either has appended its record.
+#
+# A holder that dies (killed, crashes, or the append itself fails) between
+# `mkdir` and `rmdir` leaves the lock directory behind with nothing left to
+# release it - every later writer would then retry `mkdir` forever. To
+# recover from that, the holder records its PID inside the lock directory;
+# a contender that fails to `mkdir` checks whether that PID is still alive
+# (`kill -0`) and, if not, treats the lock as abandoned and breaks it before
+# retrying. A live holder's PID always answers `kill -0`, so this never
+# steals a lock that is still legitimately held.
 fm_decision_tier_lock_acquire() {  # <log_file>
   local log=$1
-  local lockdir="$log.lock" dir
+  local lockdir="$log.lock" dir holder_pid
   dir=$(dirname "$log")
   [ -d "$dir" ] || mkdir -p "$dir" || return 1
   while ! mkdir "$lockdir" 2>/dev/null; do
+    holder_pid=$(cat "$lockdir/pid" 2>/dev/null) || holder_pid=""
+    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -rf "$lockdir" 2>/dev/null
+      continue
+    fi
     sleep 0.05
   done
+  printf '%s' "$$" > "$lockdir/pid"
 }
 
 fm_decision_tier_lock_release() {  # <log_file>
-  rmdir "$1.lock" 2>/dev/null || true
+  rm -rf "$1.lock" 2>/dev/null || true
 }
 
 # fm_decision_tier_require_unused_id: refuses an id that already has any
@@ -152,6 +167,13 @@ fm_decision_tier_lock_release() {  # <log_file>
 # an id never carries more than one lifecycle - a reused id would otherwise
 # let status/report collapse an unrelated later opening together with an
 # earlier acted/escalated/opened record.
+#
+# Callers must pass an id already run through fm_decision_tier_clean_field
+# (every mutator below normalizes its id argument before calling this) -
+# stored ids are always the normalized form fm_decision_tier_record wrote,
+# so comparing this function's raw input against them would let two ids
+# that only differ by a TAB/CR/LF-vs-space both pass as "unused" and then
+# collide once normalized on write.
 fm_decision_tier_require_unused_id() {  # <log_file> <id>
   local log=$1 id=$2
   if [ -n "$(fm_decision_tier_find_records "$log" "$id")" ]; then
@@ -267,8 +289,14 @@ fm_decision_tier_log() {  # <log_file> <record>
 }
 
 # fm_decision_tier_find_records: every record for one id, in file order.
+# The id is run through the same TAB/CR/LF scrub fm_decision_tier_record
+# applies before storing it, so this always compares against the id in the
+# form it was actually persisted in - an id that differs from a stored one
+# only by a TAB/CR/LF-vs-space substitution collides with it here instead of
+# looking unused and then colliding silently once written.
 fm_decision_tier_find_records() {  # <log_file> <id>
-  local log=$1 id=$2 line
+  local log=$1 id line
+  id=$(fm_decision_tier_clean_field "${2:-}")
   [ -f "$log" ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue

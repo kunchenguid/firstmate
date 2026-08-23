@@ -191,6 +191,67 @@ CONCURRENT_OK_COUNT=$(cat "$CONCURRENT_RESULTS"/1 "$CONCURRENT_RESULTS"/2 | grep
   || fail "exactly one of two concurrent log_auto calls racing on the same fresh id must succeed, got $CONCURRENT_OK_COUNT"
 pass "concurrent writers opening the same fresh id are serialized by the log lock, not both accepted"
 
+# --- an id that only differs by TAB/CR/LF-vs-space must not bypass reuse ----
+#
+# fm_decision_tier_record scrubs TAB/CR/LF out of every field (including id)
+# before storing it, so an id containing a TAB is persisted with a space in
+# its place. If the uniqueness check compared the raw incoming id against
+# that already-normalized stored value, a second id that differs from the
+# first only by a TAB/CR/LF-vs-space substitution would look unused and get
+# accepted, then collide with the first once its own id is normalized on
+# write - two unrelated-looking ids collapsing into one on-disk id, which
+# status/report would then wrongly merge. Comment out the
+# `fm_decision_tier_clean_field` call in fm_decision_tier_find_records to see
+# this go red.
+NORMALIZE_LOG="$TMP_ROOT/decisions-normalize.log"
+fm_decision_tier_log_auto "$NORMALIZE_LOG" 1000 "id with space" precedent-match "first spelling" \
+  || fail "log_auto should succeed for a fresh id"
+if fm_decision_tier_log_auto "$NORMALIZE_LOG" 2000 "$(printf 'id\twith\tspace')" precedent-match \
+  "second spelling, same id once normalized" 2>/dev/null; then
+  fail "log_auto must refuse an id that normalizes to one already recorded"
+fi
+NORMALIZE_RECORD_COUNT=$(fm_decision_tier_find_records "$NORMALIZE_LOG" "id with space" | grep -c .)
+[ "$NORMALIZE_RECORD_COUNT" = "1" ] \
+  || fail "an id differing only by TAB/CR/LF-vs-space must not add a second record, got $NORMALIZE_RECORD_COUNT"
+pass "log_auto refuses an id that normalizes to one already recorded, even spelled with different whitespace"
+
+# --- a lock abandoned by a dead writer must not block every later writer ---
+#
+# A lock directory left behind by a process that died between `mkdir` and
+# `rmdir` (killed, crashed, or the append itself failed) has no owner left to
+# release it. fm_decision_tier_lock_acquire must detect that the recorded PID
+# is dead and break the lock rather than retrying `mkdir` forever. This
+# fabricates exactly that: a lock directory whose pid file names a PID that
+# has already exited, then asserts a fresh acquire completes instead of
+# hanging. Comment out the `kill -0`/`rm -rf` stale-lock recovery in
+# fm_decision_tier_lock_acquire to see this go red (it will hang until the
+# poll loop below gives up and fails).
+STALE_LOG="$TMP_ROOT/decisions-stale.log"
+mkdir -p "$(dirname "$STALE_LOG")"
+( : ) &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null
+mkdir -p "$STALE_LOG.lock"
+printf '%s' "$DEAD_PID" > "$STALE_LOG.lock/pid"
+
+( fm_decision_tier_lock_acquire "$STALE_LOG" && fm_decision_tier_lock_release "$STALE_LOG" ) &
+ACQUIRE_PID=$!
+ACQUIRED=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$ACQUIRE_PID" 2>/dev/null; then
+    ACQUIRED=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$ACQUIRED" -ne 1 ]; then
+  kill "$ACQUIRE_PID" 2>/dev/null
+  fail "lock_acquire must break a lock left by a dead PID instead of blocking forever"
+fi
+wait "$ACQUIRE_PID" 2>/dev/null
+[ ! -d "$STALE_LOG.lock" ] || fail "a broken stale lock must end up released, not just bypassed once"
+pass "lock_acquire detects a lock directory left by a dead PID and breaks it instead of blocking forever"
+
 # --- successful logging for each tier ---------------------------------------
 
 fm_decision_tier_log_auto "$LOG" 1000 dec-auto-1 precedent-match "matched the sibling ruling from dec-0" \
