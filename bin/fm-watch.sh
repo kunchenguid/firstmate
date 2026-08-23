@@ -444,12 +444,17 @@ inbox_steer_check() {  # <window> <task>
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
   local f base task meta kind w key other matches prev now since now_s seen="" absorb_secs marker age
-  local -a churned_keys=()
+  local max_absorb_secs=9223372036854775807 created
+  local -a churned_keys=() missing_keys=() created_keys=()
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   [ "$#" -gt 0 ] || return 1
-  [[ $TURNEND_CHURN_ABSORB_SECS =~ ^[0-9]+$ ]] || return 1
+  [[ $TURNEND_CHURN_ABSORB_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  if [ "${#TURNEND_CHURN_ABSORB_SECS}" -gt "${#max_absorb_secs}" ] \
+    || { [ "${#TURNEND_CHURN_ABSORB_SECS}" -eq "${#max_absorb_secs}" ] \
+      && [[ $TURNEND_CHURN_ABSORB_SECS > $max_absorb_secs ]]; }; then
+    return 1
+  fi
   absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
-  [ "$absorb_secs" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -488,7 +493,7 @@ signal_turnend_panes_churned() {  # <file> ...
     marker="$STATE/.churn-since-$key"
     if [ ! -e "$marker" ]; then
       [ ! -L "$marker" ] || return 1
-      printf '%s' "$now_s" > "$marker" || return 1
+      missing_keys+=("$key")
       continue
     fi
     since=$(cat "$marker" 2>/dev/null) || return 1
@@ -503,8 +508,24 @@ signal_turnend_panes_churned() {  # <file> ...
       return 1
     fi
   done
+  for key in "${missing_keys[@]}"; do
+    marker="$STATE/.churn-since-$key"
+    if (set -C; printf '%s' "$now_s" > "$marker") 2>/dev/null; then
+      created_keys+=("$key")
+      continue
+    fi
+    for created in "${created_keys[@]}"; do
+      rm -f "$STATE/.churn-since-$created"
+    done
+    return 1
+  done
   for key in "${churned_keys[@]}"; do
-    rm -f "$STATE/.stale-$key" || return 1
+    if ! rm -f "$STATE/.stale-$key"; then
+      for created in "${created_keys[@]}"; do
+        rm -f "$STATE/.churn-since-$created"
+      done
+      return 1
+    fi
   done
   return 0
 }

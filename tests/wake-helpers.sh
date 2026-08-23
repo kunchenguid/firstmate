@@ -62,7 +62,9 @@ make_case() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "list-windows" ]; then
-  if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
+  if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+  elif [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
     printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
   fi
   exit 0

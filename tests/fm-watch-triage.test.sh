@@ -1115,6 +1115,36 @@ test_turn_ended_invalid_churn_bound_surfaced() {
   pass "an invalid pane-churn bound surfaces the turn-end"
 }
 
+test_turn_ended_oversized_churn_bound_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-oversized-churn-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexoversized"
+  : > "$state/codexoversized.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexoversized.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_TURNEND_CHURN_ABSORB_SECS=999999999999999999999999999999999999 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an oversized churn bound"
+  grep -F "signal: $state/codexoversized.turn-ended" "$out" >/dev/null \
+    || fail "watcher terminated before printing the oversized-bound turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the oversized churn bound failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexoversized.turn-ended" >/dev/null \
+    || fail "turn-end with an oversized churn bound was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "an oversized churn bound opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "an oversized pane-churn bound surfaces the turn-end"
+}
+
 test_turn_ended_invalid_churn_deadline_surfaced() {
   local variant value dir state fakebin out drain_out capture_file window key marker pid
   for variant in empty leading-zero nonnumeric future overflow; do
@@ -1155,6 +1185,48 @@ test_turn_ended_invalid_churn_deadline_surfaced() {
   done
   unset FM_FAKE_CREW_STATE
   pass "invalid existing pane-churn deadlines surface without mutation"
+}
+
+test_turn_ended_surfaced_batch_opens_no_partial_deadline() {
+  local dir state fakebin out drain_out capture_file first_window second_window first_key second_key pid
+  dir=$(make_case turn-ended-no-partial-churn-deadline); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-codexfirst"; second_window="test:fm-codexsecond"
+  : > "$state/first.turn-ended"
+  : > "$state/second.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$first_window" > "$state/first.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/second.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  first_key=$(printf '%s' "$first_window" | tr ':/.' '___')
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'first previous render')" > "$state/.hash-$first_key"
+  printf '%s' "$(hash_text 'second previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$first_key"
+  printf '0\n' > "$state/.count-$second_key"
+  printf 'bogus' > "$state/.churn-since-$second_key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-codexfirst\nfm-codexsecond')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a batch containing an invalid churn deadline"
+  grep -F "$state/first.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the first turn-end from the surfaced batch"
+  grep -F "$state/second.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the second turn-end from the surfaced batch"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the surfaced churn batch failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
+    || fail "the first turn-end from the surfaced batch was not queued"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/second.turn-ended" >/dev/null \
+    || fail "the second turn-end from the surfaced batch was not queued"
+  [ ! -e "$state/.churn-since-$first_key" ] \
+    || fail "a surfaced batch opened a partial churn deadline"
+  [ "$(cat "$state/.churn-since-$second_key")" = bogus ] \
+    || fail "the invalid churn deadline in a surfaced batch was rewritten"
+  unset FM_FAKE_CREW_STATE
+  pass "a surfaced batch opens no partial pane-churn deadline"
 }
 
 test_working_note_not_working_surfaced() {
@@ -3549,7 +3621,9 @@ test_turn_ended_churn_absorb_off_by_default
 test_turn_ended_churn_absorb_bounded
 test_turn_ended_churn_timer_write_failure_surfaced
 test_turn_ended_invalid_churn_bound_surfaced
+test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
+test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
