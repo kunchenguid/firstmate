@@ -61,12 +61,22 @@
 #   --retire-stale-record drops exactly this task's own durable records (meta,
 #   status, busy state, PR-poll artifacts, its own backend endpoint) without
 #   reaping any process in, deleting the branch in, or returning the recorded
-#   worktree. Use it once a slot-collision refusal (see below) confirms this
-#   task's own worktree= pointer is the stale one, so retiring the record is
-#   safe even though the worktree itself must not be touched. --force and
-#   --retire-stale-record are mutually exclusive: they answer different
-#   questions (discard THIS task's own unlanded work vs. this task's record is
-#   simply wrong) and neither widens the other's meaning.
+#   worktree. It first verifies for itself, from the same two signals the
+#   guard below checks, that this task's own worktree= record really is the
+#   stale half of a genuine collision (verify_worktree_slot_is_stale) - it
+#   never blindly trusts the caller, so running it against a record that is
+#   not actually stale refuses rather than silently orphaning a live
+#   worktree. Only supported for a plain (non-secondmate, non-Orca)
+#   treehouse-pool task. Because that precondition already proves the
+#   worktree is not this task's to protect either way, this flag also exempts
+#   the scout-deliverable and public-followup-reply gates below: both gates
+#   only ever inspect data/<id>/report.md and STATE-side obligation records,
+#   never $WT, so skipping them here is provably worktree-safe - no report or
+#   promised reply is touched or lost by taking this path instead of leaving
+#   the stale record in place forever. --force and --retire-stale-record are
+#   mutually exclusive: they answer different questions (discard THIS task's
+#   own unlanded work vs. this task's record is simply wrong) and neither
+#   widens the other's meaning.
 #
 # Worktree slot-collision guard (ship/scout, non-Orca backends only): a
 # finished task's worktree= pointer becomes a loaded gun once treehouse
@@ -74,9 +84,13 @@
 # looks valid, so an ordinary teardown would reap the new task's processes and
 # hard-reset/return a worktree it does not own (observed 2026-08-21: tearing
 # down a finished task killed a live scout leased the same slot overnight).
-# Before Fix 1/Fix 2 reap anything, and before any branch delete, hook-file
-# removal, or treehouse-pool return, teardown consults two independent
-# signals and refuses on either:
+# This guard runs FIRST among the worktree-touching checks, ahead of the
+# ordinary dirty/landed-work check (validate_worktree_teardown_safety): that
+# check inspects and can mutate worktree git state (stale-lock cleanup),
+# which must never run against a worktree another live task currently owns.
+# It also runs before Fix 1/Fix 2 reap anything, and before any branch
+# delete, hook-file removal, or treehouse-pool return. It consults two
+# independent signals and refuses on either:
 #   1. every OTHER task's state/<id>.meta for a worktree= naming this same
 #      path (by exact string, then by canonical path when the candidate
 #      directory still exists) - a match names the conflicting task id.
@@ -87,7 +101,10 @@
 #      uncertainty, not permission to proceed, so it refuses too.
 # This guard runs unconditionally - --force does not bypass it, because it
 # protects a DIFFERENT task's live work, not this task's own unlanded work.
-# Its own refusal names --retire-stale-record as the safe next step.
+# Its own refusal names --retire-stale-record as the safe next step, and
+# --retire-stale-record itself re-runs the same two signals through
+# verify_worktree_slot_is_stale, this time requiring a CONFIRMED collision
+# rather than merely refusing on one, before dropping anything.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -1243,14 +1260,33 @@ slot_collision_retire_hint() {
   echo "If $ID's own worktree= record is the stale one, drop just its record without touching the worktree: $0 $ID --retire-stale-record" >&2
 }
 
-# Signal 1 (see script header): does another task's OWN state/<id>.meta name
-# this same worktree? A match, by exact recorded string or by canonical path
-# when the other candidate directory still exists, means some other task's
-# own bookkeeping still claims this exact isolated copy - never a guess this
-# function has to resolve on its own, since it never inspects that other
-# task's liveness beyond the record existing.
-worktree_slot_claimed_by_other_task() {
+# Detects, without printing or refusing, whether worktree $1 (already
+# canonicalized) collides with another task's own record or the treehouse
+# pool's own lease state (see script header, "Worktree slot-collision guard",
+# signals 1 and 2). Both the ordinary guard (check_worktree_slot_collision,
+# which refuses on ANY hint of collision or uncertainty) and the
+# --retire-stale-record precondition (verify_worktree_slot_is_stale, which
+# requires a CONFIRMED collision before proceeding) share this one detector
+# so the two signals are never implemented twice.
+# Sets SLOT_COLLISION_STATE to one of:
+#   clear     - neither signal found any claim on this worktree
+#   collision - signal 1 or 2 found a genuine, confirmed conflict
+#   uncertain - the treehouse pool could not be read (unknown occupancy)
+# and SLOT_COLLISION_DETAIL to a human-readable description naming the
+# conflicting task or the pool's reported holder, for callers to fold into
+# their own refusal or confirmation message.
+detect_worktree_slot_collision() {
   local wt_abs=$1 other_meta other_id other_wt_raw other_wt_abs
+  local status_out line slot state pathfield rest path_abs
+  SLOT_COLLISION_STATE=clear
+  SLOT_COLLISION_DETAIL=
+
+  # Signal 1: does another task's OWN state/<id>.meta name this same
+  # worktree? A match, by exact recorded string or by canonical path when the
+  # other candidate directory still exists, means some other task's own
+  # bookkeeping still claims this exact isolated copy - never a guess this
+  # function has to resolve on its own, since it never inspects that other
+  # task's liveness beyond the record existing.
   for other_meta in "$STATE"/*.meta; do
     [ -e "$other_meta" ] || continue
     [ "$other_meta" != "$META" ] || continue
@@ -1259,38 +1295,33 @@ worktree_slot_claimed_by_other_task() {
     other_wt_raw=$(meta_value "$other_meta" worktree)
     [ -n "$other_wt_raw" ] || continue
     if [ "$other_wt_raw" = "$WT" ]; then
-      echo "REFUSED: worktree $WT is also recorded by task $other_id; refusing to reap or return a slot another task's record still claims." >&2
-      slot_collision_retire_hint
-      return 1
+      SLOT_COLLISION_STATE=collision
+      SLOT_COLLISION_DETAIL="worktree $WT is also recorded by task $other_id"
+      return 0
     fi
     if [ -d "$other_wt_raw" ]; then
       other_wt_abs=$(canonical_existing_dir "$other_wt_raw" 2>/dev/null) || continue
       if [ "$other_wt_abs" = "$wt_abs" ]; then
-        echo "REFUSED: worktree $WT is also recorded by task $other_id (its worktree= resolves to the same path); refusing to reap or return a slot another task's record still claims." >&2
-        slot_collision_retire_hint
-        return 1
+        SLOT_COLLISION_STATE=collision
+        SLOT_COLLISION_DETAIL="worktree $WT is also recorded by task $other_id (its worktree= resolves to the same path)"
+        return 0
       fi
     fi
   done
-  return 0
-}
 
-# Signal 2 (see script header): does the treehouse pool's own bookkeeping show
-# this exact worktree slot durably leased? treehouse resolves the pool from
-# the working directory, so this runs from the project like every other
-# treehouse call in this script. A plain ship/scout worktree is only ever
-# acquired with interactive `treehouse get` (never `--lease`), so any `leased`
-# state observed for it is never this task's own and always names a real
-# collision. `treehouse status` failing outright (missing binary, non-zero
-# exit, or no readable output) is uncertainty about occupancy, not permission
-# to proceed, so it refuses exactly like a genuine collision rather than
-# falling through to "no collision found".
-worktree_slot_leased_in_pool() {
-  local wt_abs=$1 status_out line slot state pathfield rest path_abs
+  # Signal 2: does the treehouse pool's own bookkeeping show this exact
+  # worktree slot durably leased? treehouse resolves the pool from the
+  # working directory, so this runs from the project like every other
+  # treehouse call in this script. A plain ship/scout worktree is only ever
+  # acquired with interactive `treehouse get` (never `--lease`), so any
+  # `leased` state observed for it is never this task's own and always names
+  # a real collision. `treehouse status` failing outright (missing binary,
+  # non-zero exit, or no readable output) is uncertainty about occupancy, not
+  # confirmation either way.
   if ! status_out=$(cd "$PROJ" && treehouse status 2>/dev/null); then
-    echo "REFUSED: cannot read the treehouse pool's lease state for worktree $WT; preserving task state rather than reaping while its slot's occupancy is unknown." >&2
-    slot_collision_retire_hint
-    return 1
+    SLOT_COLLISION_STATE=uncertain
+    SLOT_COLLISION_DETAIL="cannot read the treehouse pool's lease state for worktree $WT"
+    return 0
   fi
   while IFS= read -r line; do
     case "$line" in
@@ -1307,27 +1338,75 @@ worktree_slot_leased_in_pool() {
     [ -n "$pathfield" ] && [ -d "$pathfield" ] || continue
     path_abs=$(canonical_existing_dir "$pathfield" 2>/dev/null) || continue
     if [ "$path_abs" = "$wt_abs" ] && [ "$state" = leased ]; then
-      echo "REFUSED: the treehouse pool reports worktree $WT as leased${rest:+ $rest}; refusing to reap or return a slot the pool itself still holds." >&2
-      slot_collision_retire_hint
-      return 1
+      SLOT_COLLISION_STATE=collision
+      SLOT_COLLISION_DETAIL="the treehouse pool reports worktree $WT as leased${rest:+ $rest}"
+      return 0
     fi
   done <<<"$status_out"
   return 0
 }
 
-# Runs before Fix 1/Fix 2 and before any branch delete, hook-file removal, or
-# treehouse-pool return - see script header, "Worktree slot-collision guard".
-# Unconditional on $FORCE: this protects a DIFFERENT task's live work, which
-# --force (explicit discard of THIS task's own unlanded work) was never meant
-# to authorize discarding.
+# Runs before the ordinary dirty/landed-work check, before Fix 1/Fix 2, and
+# before any branch delete, hook-file removal, or treehouse-pool return - see
+# script header, "Worktree slot-collision guard". Unconditional on $FORCE:
+# this protects a DIFFERENT task's live work, which --force (explicit discard
+# of THIS task's own unlanded work) was never meant to authorize discarding.
+# Refuses on either a confirmed collision or genuine uncertainty about
+# occupancy - "preserve rather than proceed" applies to both.
 check_worktree_slot_collision() {
   local wt_abs
   wt_abs=$(canonical_existing_dir "$WT") || {
     echo "REFUSED: cannot canonicalize worktree $WT to check for a slot collision with another task." >&2
     return 1
   }
-  worktree_slot_claimed_by_other_task "$wt_abs" || return 1
-  worktree_slot_leased_in_pool "$wt_abs" || return 1
+  detect_worktree_slot_collision "$wt_abs"
+  case "$SLOT_COLLISION_STATE" in
+    clear) return 0 ;;
+    collision)
+      echo "REFUSED: $SLOT_COLLISION_DETAIL; refusing to reap or return a slot another task's record or the pool still claims." >&2
+      slot_collision_retire_hint
+      return 1
+      ;;
+    uncertain)
+      echo "REFUSED: $SLOT_COLLISION_DETAIL; preserving task state rather than reaping while its slot's occupancy is unknown." >&2
+      slot_collision_retire_hint
+      return 1
+      ;;
+  esac
+}
+
+# --retire-stale-record's own precondition (Fix 3, see script header):
+# confirms THIS task's own worktree= record really is the stale half of a
+# genuine collision before any of its durable records are dropped. The
+# operator-facing hint printed by the guard above is not itself
+# authorization - an operator (or a future automated caller) invoking
+# --retire-stale-record against a record that is not actually stale would
+# silently orphan a live worktree with nothing left tracking it, so only a
+# CONFIRMED collision proceeds here; "clear" (no collision found) and
+# "uncertain" (pool unreadable) both refuse, mirroring the guard's own
+# "preserve rather than proceed" rule.
+verify_worktree_slot_is_stale() {
+  local wt_abs
+  wt_abs=$(canonical_existing_dir "$WT") || {
+    echo "REFUSED: cannot canonicalize worktree $WT to verify --retire-stale-record's staleness precondition." >&2
+    return 1
+  }
+  detect_worktree_slot_collision "$wt_abs"
+  case "$SLOT_COLLISION_STATE" in
+    collision)
+      echo "Confirmed stale: $SLOT_COLLISION_DETAIL." >&2
+      return 0
+      ;;
+    clear)
+      echo "REFUSED: --retire-stale-record given for $ID, but worktree $WT does not appear stale - no other task's record and no treehouse pool lease claim it." >&2
+      echo "If you intended to discard this task's own unlanded work instead, use --force." >&2
+      return 1
+      ;;
+    uncertain)
+      echo "REFUSED: $SLOT_COLLISION_DETAIL; cannot confirm --retire-stale-record's staleness precondition, so preserving the record rather than dropping it." >&2
+      return 1
+      ;;
+  esac
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -2444,7 +2523,25 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
+# --retire-stale-record's own staleness precondition (Fix 3, see script
+# header): runs before the scout-deliverable and public-followup gates below
+# so their exemption under this flag (also see script header) is backed by a
+# CONFIRMED collision, not merely the caller's say-so. Scoped like the
+# collision guard itself: a plain (non-secondmate, non-Orca) treehouse-pool
+# task with an actual worktree path to check.
+if [ "$RETIRE_STALE_RECORD" = 1 ]; then
+  if [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ]; then
+    echo "REFUSED: --retire-stale-record only applies to a plain treehouse-pool ship or scout task, not kind=$KIND backend=$BACKEND." >&2
+    exit 1
+  fi
+  if [ ! -d "$WT" ]; then
+    echo "REFUSED: cannot verify --retire-stale-record's staleness precondition; worktree $WT does not exist." >&2
+    exit 1
+  fi
+  verify_worktree_slot_is_stale || exit 1
+fi
+
+if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ] && [ "$RETIRE_STALE_RECORD" != 1 ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
@@ -2464,11 +2561,15 @@ fi
 # reconcilable. Refuse while this home still owes a public reply for exactly this
 # work. Both gates live in bin/fm-public-followup-lib.sh, so a home that never
 # opted into the myfirstmate relay runs one [ -f ] test and nothing else here.
-if [ "$FORCE" != "--force" ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; then
+# Exempt under a CONFIRMED --retire-stale-record (verified just above): this
+# gate only ever inspects STATE-side obligation records, never $WT, so
+# skipping it here drops no promised reply - it only stops a confirmed-stale
+# record from blocking on a check a stale record can never satisfy anyway.
+if [ "$FORCE" != "--force" ] && [ "$RETIRE_STALE_RECORD" != 1 ] && [ "$PUBLIC_FOLLOWUP_PARENT_UNRESOLVED" = 1 ]; then
   echo "REFUSED: cannot resolve the primary home for marked secondmate $SECOND_MATE_ID; refusing cleanup without its durable parent binding." >&2
   exit 1
 fi
-if [ "$FORCE" != "--force" ] \
+if [ "$FORCE" != "--force" ] && [ "$RETIRE_STALE_RECORD" != 1 ] \
   && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
   && [ "$PUBLIC_FOLLOWUP_RELAY_ACTIVE" = 1 ] \
   && fm_pf_has_registrations "$PUBLIC_FOLLOWUP_STATE"; then
@@ -2497,6 +2598,21 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
+# Worktree slot-collision guard (see script header). Runs here, BEFORE the
+# Orca-path and dirty/landed-work checks below, because those checks inspect
+# and can mutate worktree git state (stale-lock cleanup) that must never run
+# against a worktree another live task currently owns. Independent of those
+# checks and NOT skipped by --force: it protects a DIFFERENT task's live
+# work, not this task's own unlanded work. Scoped to the treehouse pool
+# (non-Orca; Orca already proves worktree identity via its own worktree-id
+# resolution below) and to non-secondmate kinds (a secondmate home's lease is
+# owned by the dedicated removal machinery further below). Skipped entirely
+# under --retire-stale-record, which already ran the stricter
+# verify_worktree_slot_is_stale precondition above.
+if [ "$RETIRE_STALE_RECORD" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  check_worktree_slot_collision || exit 1
+fi
+
 if [ "$RETIRE_STALE_RECORD" != 1 ] && [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2519,17 +2635,6 @@ if [ "$RETIRE_STALE_RECORD" != 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ];
       exit 1
     fi
   fi
-fi
-
-# Worktree slot-collision guard (see script header). Independent of the
-# landed-work safety check above and NOT skipped by --force: it protects a
-# DIFFERENT task's live work in this exact worktree, not this task's own
-# unlanded work. Scoped to the treehouse pool (non-Orca; Orca already proves
-# worktree identity via its own worktree-id resolution above) and to
-# non-secondmate kinds (a secondmate home's lease is owned by the dedicated
-# removal machinery further below).
-if [ "$RETIRE_STALE_RECORD" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  check_worktree_slot_collision || exit 1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

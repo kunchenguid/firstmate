@@ -1464,6 +1464,170 @@ test_slot_collision_retire_stale_record_leaves_worktree_untouched() {
   pass "--retire-stale-record drops this task's own record without touching the worktree"
 }
 
+# The four cases below cover the captain-approved follow-up findings on the
+# slot-collision guard: the guard now runs ahead of the dirty/landed-work
+# check, --retire-stale-record verifies staleness for itself instead of
+# trusting the caller, and that verified staleness is what authorizes
+# exempting the scout-deliverable gate under --retire-stale-record.
+
+test_slot_collision_refuses_before_dirty_check() {
+  local case_dir rc
+  case_dir=$(make_case slot-collision-before-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  # Real, genuinely unlanded work: no push, no PR, content not in default -
+  # this alone would refuse via validate_worktree_teardown_safety (see
+  # test_no_mistakes_truly_unpushed_refuses). A collision is ALSO present, so
+  # this proves the collision guard is now checked first (Fix 1, see script
+  # header): the refusal must name the conflicting task, never the
+  # dirty-work reason, because the dirty check must not even run against a
+  # worktree another live task currently owns.
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  fm_write_meta "$case_dir/state/other-task.meta" \
+    "window=firstmate:fm-other-task" \
+    "endpoint_task_id=other-task" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "slot-collision-before-dirty: teardown should refuse"
+  grep -q "other-task" "$case_dir/stderr" || fail "slot-collision-before-dirty: refusal did not name the conflicting task"
+  ! grep -q "not on any remote and not landed" "$case_dir/stderr" \
+    || fail "slot-collision-before-dirty: the dirty/landed-work check ran before the collision guard"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "slot-collision-before-dirty: refused teardown removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "slot-collision-before-dirty: refused teardown removed the worktree"
+  pass "the collision guard refuses ahead of the dirty/landed-work check, not after it"
+}
+
+test_retire_stale_record_refuses_when_not_stale() {
+  local case_dir rc
+  case_dir=$(make_case retire-not-stale)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  # No other task's record names this worktree, and the pool reports nothing
+  # for this slot (default empty FM_FAKE_TREEHOUSE_STATUS): the record is NOT
+  # actually stale, so --retire-stale-record must refuse rather than trust
+  # the caller's say-so.
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "retire-not-stale: --retire-stale-record should refuse"
+  grep -q "does not appear stale" "$case_dir/stderr" \
+    || fail "retire-not-stale: refusal did not explain the record is not stale"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-not-stale: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "retire-not-stale: refused --retire-stale-record removed the worktree"
+  pass "--retire-stale-record refuses when the record does not actually appear stale"
+}
+
+test_retire_stale_record_refuses_when_pool_unreadable() {
+  local case_dir rc
+  case_dir=$(make_case retire-pool-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  # The pool itself cannot be read: uncertainty about staleness, never
+  # silent permission to drop the record anyway.
+  export FM_FAKE_TREEHOUSE_STATUS_EXIT=1
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_FAKE_TREEHOUSE_STATUS_EXIT
+
+  expect_code 1 "$rc" "retire-pool-unreadable: --retire-stale-record should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "retire-pool-unreadable: no REFUSED line in stderr"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-pool-unreadable: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "retire-pool-unreadable: refused --retire-stale-record removed the worktree"
+  pass "--retire-stale-record preserves the record rather than trusting an unreadable pool"
+}
+
+test_retire_stale_record_succeeds_via_pool_lease_signal() {
+  local case_dir rc wt_head
+  case_dir=$(make_case retire-pool-leased)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # No other task's own record claims this worktree - the treehouse pool's
+  # own lease state is the ONLY signal proving staleness here, exactly like
+  # test_slot_collision_pool_lease_refuses but for the retire precondition.
+  export FM_FAKE_TREEHOUSE_STATUS="1     leased       $case_dir/wt  (held by other-holder)"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FM_FAKE_TREEHOUSE_STATUS
+
+  expect_code 0 "$rc" "retire-pool-leased: --retire-stale-record should succeed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "retire-pool-leased: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "retire-pool-leased: task-x1's own record was not retired"
+  [ -d "$case_dir/wt" ] || fail "retire-pool-leased: the worktree directory was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$wt_head" ] \
+    || fail "retire-pool-leased: the worktree's branch/HEAD was reset"
+  pass "--retire-stale-record succeeds when only the pool's own lease state confirms staleness"
+}
+
+test_retire_stale_record_exempts_scout_report_gate() {
+  local case_dir rc wt_head
+  case_dir=$(make_case retire-scout-exempt)
+  write_meta "$case_dir" no-mistakes scout
+  wt_commit "$case_dir" "scout work in progress"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # No data/task-x1/report.md exists anywhere - an ordinary teardown of this
+  # scout would refuse on the missing-deliverable gate (see the next test). A
+  # CONFIRMED collision is what authorizes --retire-stale-record to bypass
+  # that gate here: the gate only ever inspects DATA/STATE, never $WT, so
+  # skipping it drops no report and touches no worktree.
+  fm_write_meta "$case_dir/state/other-task.meta" \
+    "window=firstmate:fm-other-task" \
+    "endpoint_task_id=other-task" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "retire-scout-exempt: --retire-stale-record should succeed despite no report"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "retire-scout-exempt: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "retire-scout-exempt: task-x1's own record was not retired"
+  [ -d "$case_dir/wt" ] || fail "retire-scout-exempt: the worktree directory was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$wt_head" ] \
+    || fail "retire-scout-exempt: the worktree's branch/HEAD was reset"
+  pass "--retire-stale-record exempts the scout-deliverable gate once staleness is confirmed"
+}
+
+test_scout_report_gate_still_enforced_without_retire_flag() {
+  local case_dir rc
+  case_dir=$(make_case scout-report-required)
+  write_meta "$case_dir" no-mistakes scout
+  wt_commit "$case_dir" "scout work in progress"
+  # Same missing-report scout as the exemption test above, but WITHOUT
+  # --retire-stale-record: the ordinary gate must still refuse, proving the
+  # exemption is scoped to a confirmed-stale retire and never weakens the
+  # ordinary path.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "scout-report-required: teardown should refuse"
+  grep -q "has no report" "$case_dir/stderr" || fail "scout-report-required: refusal did not cite the missing report"
+  pass "the scout-deliverable gate remains enforced for an ordinary teardown"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -2773,6 +2937,12 @@ test_slot_collision_second_task_meta_refuses
 test_slot_collision_pool_lease_refuses
 test_slot_collision_unreadable_pool_refuses
 test_slot_collision_retire_stale_record_leaves_worktree_untouched
+test_slot_collision_refuses_before_dirty_check
+test_retire_stale_record_refuses_when_not_stale
+test_retire_stale_record_refuses_when_pool_unreadable
+test_retire_stale_record_succeeds_via_pool_lease_signal
+test_retire_stale_record_exempts_scout_report_gate
+test_scout_report_gate_still_enforced_without_retire_flag
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
