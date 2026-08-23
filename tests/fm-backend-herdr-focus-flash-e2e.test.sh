@@ -237,7 +237,7 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+lab pane send-text "$C_DOOMED_PANE" 'cd /; sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
