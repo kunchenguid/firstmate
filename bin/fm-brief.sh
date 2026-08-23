@@ -422,7 +422,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), confirm that claim with \`$FM_ROOT/bin/fm-pr-ci-verify.sh {url}\` before reporting it. An all-green check list is not evidence the suites ran: a pull request can carry only a third-party bot's pass while every repository suite is still held unapproved, which reads as "1 passed, 0 failed" to anything that counts conclusions. That command answers the real question and accepts a commit our own fork already validated. If it refuses, report what it says instead of a green result. Once it passes, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac
