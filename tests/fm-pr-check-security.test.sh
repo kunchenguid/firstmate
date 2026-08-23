@@ -563,7 +563,9 @@ test_valid_recording_and_merge_derivation() {
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
 
   : > "$dir/gh-axi.log"
-  run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
+  # --no-teardown keeps this focused on merge/URL derivation; the atomic
+  # teardown-then-tasks-axi-done chain has its own fixture in fm-pr-merge.test.sh.
+  run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 --no-teardown -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
   grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
@@ -588,7 +590,9 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
-  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
+  # --no-teardown: this test drives its own explicit teardown below, separate
+  # from the merge step under test here.
+  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 --no-teardown \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
@@ -642,7 +646,9 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
-    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+    # --no-teardown: this test drives its own explicit teardown below, separate
+    # from the merge step under test here.
+    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 --no-teardown \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
