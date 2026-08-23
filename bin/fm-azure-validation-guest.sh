@@ -847,7 +847,7 @@ fi
 ENV_FILE=$STATE/cell.env
 {
   printf 'HOME=%s\n' "$HOME_DIR"
-  printf 'NO_MISTAKES_HOME=%s\n' "$NM_HOME"
+  printf 'NM_HOME=%s\n' "$NM_HOME"
   printf 'XDG_CACHE_HOME=%s\n' "$CACHE"
   printf 'TMPDIR=%s\n' "$TMP"
   printf 'FM_AZURE_VALIDATION_CELL=1\n'
@@ -1157,24 +1157,47 @@ END_MEM_AVAILABLE_KIB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
 RUN_EXIT=$(cat "$RUN_LOG.exit" 2>/dev/null || printf 125)
 STATUS_LOG=$LOGS/status-a$ATTEMPT.log
 set +e
-# shellcheck disable=SC2016  # Inner shell intentionally expands its positional arguments.
 # The status read is the sole input to outcome derivation and must run
 # inside the repository like the run itself; without the cd it fails with
 # "not in a git repository" from the guest's own working directory and
 # every outcome derives as failed regardless of the pipeline result.
-runuser -u fmvalidate -- /bin/bash -c \
-  'set -a; . "$1"; set +a; cd "$3" && exec "$2" axi status' \
-  validation-status "$ENV_FILE" "$NM_BIN" "$REPO" >"$STATUS_LOG" 2>&1
+STATUS_RUN_ID=${protected_run_id:-}
+case "$STATUS_RUN_ID" in
+  '') ;;
+  *[!0-9A-HJKMNP-TV-Z]*) STATUS_RUN_ID= ;;
+  *)
+    [ "${#STATUS_RUN_ID}" -eq 26 ] || STATUS_RUN_ID=
+    ;;
+esac
+if [ -n "$STATUS_RUN_ID" ]; then
+  # shellcheck disable=SC2016  # Inner shell intentionally expands its positional arguments.
+  runuser -u fmvalidate -- /bin/bash -c \
+    'set -a; . "$1"; set +a; cd "$3" && exec "$2" axi status --run "$4"' \
+    validation-status "$ENV_FILE" "$NM_BIN" "$REPO" "$STATUS_RUN_ID" >"$STATUS_LOG" 2>&1
+else
+  # shellcheck disable=SC2016  # Inner shell intentionally expands its positional arguments.
+  runuser -u fmvalidate -- /bin/bash -c \
+    'set -a; . "$1"; set +a; cd "$3" && exec "$2" axi status' \
+    validation-status "$ENV_FILE" "$NM_BIN" "$REPO" >"$STATUS_LOG" 2>&1
+fi
 STATUS_RC=$?
 set -e
 RUN_IDS=$(grep -hEo '[0-9A-HJKMNP-TV-Z]{26}' "$STATUS_LOG" | sort -u || true)
-if [ "$(printf '%s\n' "$RUN_IDS" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ]; then
+if [ -n "$STATUS_RUN_ID" ]; then
+  if printf '%s\n' "$RUN_IDS" | grep -Fxq "$STATUS_RUN_ID"; then
+    RUN_ID=$STATUS_RUN_ID
+  else
+    RUN_ID=""
+  fi
+elif [ "$(printf '%s\n' "$RUN_IDS" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ]; then
   RUN_ID=$(printf '%s\n' "$RUN_IDS" | sed -n '1p')
+else
+  RUN_ID=""
+fi
+if [ -n "$RUN_ID" ]; then
   tmp=$IDENTITY.tmp
   jq --arg run "$RUN_ID" '.run_id=$run' "$IDENTITY" >"$tmp"
   mv "$tmp" "$IDENTITY"
-else
-  RUN_ID=""
 fi
 OWNER_PROTECTED=false
 OWNER_HEAD=""
