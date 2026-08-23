@@ -180,6 +180,7 @@ make_spawn_case() {
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 arg next='' model=default effort=default secondmate=0
   local delivery_args=(--mode no-mistakes --yolo off)
+  local receipt_rationale=${FM_KIMI_RECEIPT_RATIONALE:-explicit test-only singleton receipt}
   shift 6
   for arg in "$@"; do
     if [ -n "$next" ]; then
@@ -196,7 +197,7 @@ run_spawn() {
     esac
   done
   [ "$secondmate" -eq 0 ] || delivery_args=()
-  fm_test_write_routing_receipt "$home" "$id" kimi "$model" "$effort"
+  fm_test_write_routing_receipt "$home" "$id" kimi "$model" "$effort" "$home/data" "$receipt_rationale"
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -497,7 +498,8 @@ test_kimi_install_failure_leaves_non_authoritative_artifacts() {
   fi
   rm "$HOME_DIR/.kimi-code/fm-turn-end.d"
   rc=0
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  out=$(FM_KIMI_RECEIPT_RATIONALE="retry after hook installation refusal" \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   expect_code 0 "$rc" "Kimi retry with a fresh validated receipt should succeed"$'\n'"$out"
   retry_decision=$(fm_test_routing_decision_path "$HOME_DIR" "$id")
   [ "$retry_decision" != "$decision" ] || fail "Kimi retry counterexample did not create a fresh receipt generation"

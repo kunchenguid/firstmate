@@ -305,13 +305,13 @@ fm_test_existing_routing_decision_path() { # <home> <id> [data]
   return 1
 }
 
-# fm_test_write_routing_receipt <home> <id> <harness> [model] [effort] [data]
+# fm_test_write_routing_receipt <home> <id> <harness> [model] [effort] [data] [rationale]
 # writes one explicit test-only schema-v1 receipt for a verified template.
 # Production code never calls this helper and every fixture still exercises the
 # real receipt validator rather than suppressing or bypassing the contract.
 fm_test_write_routing_receipt() {
   local home=$1 id=$2 harness=$3 model=${4:-default} effort=${5:-default}
-  local data=${6:-$home/data}
+  local data=${6:-$home/data} rationale=${7:-explicit test-only singleton receipt}
   local task_dir brief intent intent_hash brief_hash home_hash host_hash now source authority
   local config_binding launch_model launch_effort
   task_dir="$data/$id"
@@ -369,6 +369,7 @@ fm_test_write_routing_receipt() {
     --argjson launch_effort "$launch_effort" \
     --arg home_sha256 "$home_hash" \
     --arg identity_sha256 "$host_hash" \
+    --arg rationale "$rationale" \
     --arg generated_at "$now" '{
       schema_version: 1,
       task_id: $task_id,
@@ -385,7 +386,7 @@ fm_test_write_routing_receipt() {
       quota: {source: "NOT_APPLICABLE_SINGLETON", observed_at: null, snapshot_sha256: null},
       quota_basis: "NOT_APPLICABLE_SINGLETON",
       fallback: "NONE",
-      rationale: "explicit test-only singleton receipt",
+      rationale: $rationale,
       required_gate: "LOCAL_TEST_GATE",
       selection_order: ["hard_capability", "ambiguity_complexity", "fresh_quota_among_capable"],
       generated_at: $generated_at

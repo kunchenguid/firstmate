@@ -608,6 +608,27 @@ test_explicit_same_route_requires_a_receipt_before_control_effects() {
   pass "fm-control relaunch: an explicit same-value route needs a receipt before control effects"
 }
 
+test_route_change_requires_a_structured_progress_note() {
+  local dir out rc
+  dir=$(new_case note-substring rl45)
+  add_ship_task "$dir" rl45 claude
+  printf '\nBackground: fix parser remains relevant.\n' >> "$dir/home/data/rl45/brief.md"
+  printf 'codex' > "$dir/fake/becomes"
+  prepare_relaunch_receipt "$dir" rl45 codex default default
+  cp "$dir/home/state/rl45.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl45 relaunch --harness codex --note "fix parser"); rc=$?
+  expect_code 1 "$rc" "a bare note substring must not authorize a route-changing relaunch"
+  assert_contains "$out" "progress note to be present in the task brief" \
+    "the refusal should name the missing structured progress note"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl45.meta" \
+    || fail "a structured-note refusal must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a structured-note refusal must leave the old agent running"
+  [ ! -e "$dir/home/state/rl45.control-relaunch" ] \
+    || fail "a structured-note refusal must create no transaction journal"
+  pass "fm-control relaunch: route changes require the structured progress-note section"
+}
+
 test_late_expiry_refuses_before_journal_writes() {
   local dir out rc counter
   dir=$(new_case late-journal rl38)
@@ -1690,6 +1711,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_explicit_same_route_requires_a_receipt_before_control_effects
+test_route_change_requires_a_structured_progress_note
 test_late_expiry_refuses_before_journal_writes
 test_late_expiry_refuses_before_agent_exit
 test_committed_handoff_revalidates_without_reaging

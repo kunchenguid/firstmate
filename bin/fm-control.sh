@@ -789,7 +789,7 @@ record_note() { # <fresh-routing-decision:0|1>
 }
 
 do_relaunch() {
-  local exit_result state note_line route_decision_fresh=0
+  local brief_content exit_result note_line progress_note_section route_decision_fresh=0 state
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -831,8 +831,10 @@ do_relaunch() {
   safe_checkpoint
   if [ "$route_decision_fresh" -eq 1 ]; then
     if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-      case "$(cat "$RELAUNCH_BRIEF")" in
-        *"$NOTE"*) ;;
+      brief_content=$(cat "$RELAUNCH_BRIEF")
+      progress_note_section=$(printf '\n## Progress note\n\n%s' "$NOTE")
+      case "$brief_content" in
+        *"$progress_note_section") ;;
         *) die "a route-changing relaunch requires its progress note to be present in the task brief before the routing receipt is authored" ;;
       esac
     fi
