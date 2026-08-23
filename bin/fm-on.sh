@@ -42,7 +42,14 @@ PROTOCOL=1
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+  exit 2
+}
 
 encode_base64() {
   base64 | tr -d '\n'

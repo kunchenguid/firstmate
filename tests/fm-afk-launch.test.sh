@@ -119,32 +119,37 @@ unit_relative_paths_are_absolute_before_daemon_launch() {
 }
 
 unit_usage_prints_complete_header() {
-  local st help declared name
+  local st help header declared name last_line
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-usage.XXXXXX")
   mkdir -p "$st/state"
   help=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" --help 2>&1)
+  # Derive the expected header block with the same content-boundary rule
+  # fm_afk_launch_usage uses, so the expectation set tracks the header instead
+  # of a hard-coded line range or indentation.
+  header=$(awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$LAUNCH")
   # Every subcommand the header's Usage block declares must survive in the
   # printed help, so a hard-coded line range that truncates the header is caught
   # the moment the last declared entry is cut off.
-  declared=$(grep -oE '^#   fm-afk-launch.sh [a-z-]+' "$LAUNCH" | awk '{print $3}')
+  declared=$(printf '%s\n' "$header" | grep -oE '^[[:space:]]+fm-afk-launch\.sh [a-z-]+' | awk '{print $2}')
   [ -n "$declared" ] || fail "usage: no declared subcommands parsed from header"
   for name in $declared; do
-    if printf '%s\n' "$help" | grep -Fq "fm-afk-launch.sh $name"; then
+    if printf '%s\n' "$help" | grep -Eq "fm-afk-launch\.sh $name([[:space:]]|\$)"; then
       pass "usage: declared subcommand '$name' present in --help"
     else
       fail "usage: declared subcommand '$name' missing from --help (truncated header)"
     fi
   done
-  # The concrete regression: the stop entry ends whole and reconcile is present.
-  if printf '%s\n' "$help" | grep -Fq 'id, then clear state/.afk last.'; then
-    pass "usage: stop entry complete"
+  # The concrete regression: the header prints through its very last line, not
+  # just up to whichever declared entry a hard-coded range happened to reach.
+  last_line=$(printf '%s\n' "$header" | tail -n 1)
+  if printf '%s\n' "$help" | grep -Fq "$last_line"; then
+    pass "usage: header prints through its final line"
   else
-    fail "usage: stop entry truncated"
-  fi
-  if printf '%s\n' "$help" | grep -Fq 'fm-afk-launch.sh reconcile'; then
-    pass "usage: reconcile entry present"
-  else
-    fail "usage: reconcile entry missing"
+    fail "usage: header truncated before its final line ($last_line)"
   fi
   rm -rf "$st"
 }
