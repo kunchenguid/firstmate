@@ -298,7 +298,8 @@ Harness identity is read from the executable path and `argv[0]` as well as the c
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.241 on 2026-08-23.
+Every real Bash `PreToolUse` hook received the same numeric `CLAUDE_PID`, `fm_harness_session_pid` verified it as a live Claude process while the hook ran, and session start recorded that exact pid as the lock owner across the daemon-served tool path.
 
 ```sh
 claude --version
@@ -308,8 +309,8 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.241 (Claude Code)
+ok - Claude 2.1.241 (Claude Code) live E2E propagated one verified CLAUDE_PID through every Bash hook, recorded it as the session lock, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
 Current entry points:
