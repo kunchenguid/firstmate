@@ -443,10 +443,13 @@ inbox_steer_check() {  # <window> <task>
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  local f base task meta kind w key other matches prev now since now_s seen=""
+  local f base task meta kind w key other matches prev now since now_s seen="" absorb_secs
   local -a churned_keys=()
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   [ "$#" -gt 0 ] || return 1
+  [[ $TURNEND_CHURN_ABSORB_SECS =~ ^[0-9]+$ ]] || return 1
+  absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
+  [ "$absorb_secs" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -484,9 +487,9 @@ signal_turnend_panes_churned() {  # <file> ...
   for key in "${churned_keys[@]}"; do
     since=$(cat "$STATE/.churn-since-$key" 2>/dev/null || true)
     case "$since" in
-      ''|*[!0-9]*) printf '%s' "$now_s" > "$STATE/.churn-since-$key" ;;
+      ''|*[!0-9]*) printf '%s' "$now_s" > "$STATE/.churn-since-$key" || return 1 ;;
       *)
-        if [ "$((now_s - since))" -ge "$TURNEND_CHURN_ABSORB_SECS" ]; then
+        if [ "$((now_s - since))" -ge "$absorb_secs" ]; then
           rm -f "$STATE/.churn-since-$key"
           return 1
         fi

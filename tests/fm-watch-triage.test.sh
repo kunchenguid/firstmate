@@ -1056,6 +1056,65 @@ test_turn_ended_churn_absorb_bounded() {
   pass "a perpetually churning pane surfaces once its bounded deferral window is spent"
 }
 
+test_turn_ended_churn_timer_write_failure_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-churn-timer-write-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codextimer"
+  : > "$state/codextimer.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codextimer.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  mkdir "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without recording its deadline"
+  grep -F "signal: $state/codextimer.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end whose churn deadline could not be recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the failed churn deadline write failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codextimer.turn-ended" >/dev/null \
+    || fail "turn-end with an unrecordable churn deadline was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "an unrecordable pane-churn deadline surfaces the turn-end"
+}
+
+test_turn_ended_invalid_churn_bound_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-invalid-churn-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexbound"
+  : > "$state/codexbound.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexbound.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_TURNEND_CHURN_ABSORB_SECS=bogus \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an invalid churn bound"
+  grep -F "signal: $state/codexbound.turn-ended" "$out" >/dev/null \
+    || fail "watcher terminated before printing the invalid-bound turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the invalid churn bound failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexbound.turn-ended" >/dev/null \
+    || fail "turn-end with an invalid churn bound was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "an invalid churn bound opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "an invalid pane-churn bound surfaces the turn-end"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3446,6 +3505,8 @@ test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
 test_turn_ended_churn_absorb_off_by_default
 test_turn_ended_churn_absorb_bounded
+test_turn_ended_churn_timer_write_failure_surfaced
+test_turn_ended_invalid_churn_bound_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
