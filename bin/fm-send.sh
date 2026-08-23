@@ -57,6 +57,14 @@
 # harness meta, get a longer pre-Enter settle so completion popups do not
 # swallow Enter.
 #
+# Stage-1 compatibility boundary: classification uses the original pre-marker
+# text, but secondmate marking still precedes every typed submission. Therefore
+# a marked parser-native secondmate invocation intentionally reaches the harness
+# as marker-prefixed chat rather than executing as a parser command. This is a
+# pre-existing interaction retained for byte compatibility in this local-inbox
+# stage; do not move the marker behind the invocation or omit it here. Follow-up
+# fm-send-secondmate-harness-invocation-r1 owns that behavior.
+#
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the message uses the live-charter-compatible
 # from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
@@ -618,7 +626,9 @@ else
   # happens to match local metadata: it names an endpoint, not a task, the
   # same boundary that keeps it unmarked and outside --resolve-key.
   # Classification reads the pre-marker text so a marked secondmate request
-  # and a plain crewmate steer classify identically.
+  # and a plain crewmate steer classify identically. It deliberately does NOT
+  # promise that a marked parser-native secondmate request executes as a parser
+  # command: the pre-existing marker-first wire bytes are retained in stage 1.
   INBOX_PLANE=0
   if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
     case "$RESOLVE_ANSWER_TEXT" in
@@ -677,7 +687,7 @@ else
           # is left to reconcile the expectation, so this is a real local
           # failure. The record itself stays durable, and the error says so -
           # a caller must inspect, never blindly resend.
-          echo "error: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+          echo "error: local bookkeeping failed after durable delivery (delivery_durable=yes, retry_safe=no): the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
           exit 1
         fi
       fi

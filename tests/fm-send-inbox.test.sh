@@ -284,6 +284,8 @@ SH
     "post-enqueue bookkeeping failure should give explicit operator recovery guidance"
   assert_contains "$(cat "$err")" "was recorded at" \
     "the failure should name the already-durable record so nobody re-enqueues it"
+  assert_contains "$(cat "$err")" "delivery_durable=yes, retry_safe=no" \
+    "the nonzero local-consistency failure should expose an unambiguous no-retry delivery outcome"
   pass "fm-send inbox: a total bookkeeping failure is loud, names the durable record, and forbids a blind resend"
 }
 
