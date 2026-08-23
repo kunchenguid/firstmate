@@ -23,6 +23,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-wake-ack-lib.sh
+. "$SCRIPT_DIR/fm-wake-ack-lib.sh"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 GATE="$STATE/.afk-return-catchup"
@@ -160,8 +162,8 @@ return_reconcile() {
   }
   grep -v '^WAKE_ACK_REQUIRED:' "$drain_err" >&2 || true
   wake_ack_line=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
-  wake_ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err" | tail -1)
-  wake_ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err" | tail -1)
+  wake_ack_through=$(fm_wake_ack_parse_through "$drain_err")
+  wake_ack_generation=$(fm_wake_ack_parse_generation "$drain_err")
   if [ -n "$wake_ack_line" ] && { [ -z "$wake_ack_through" ] || [ -z "$wake_ack_generation" ]; }; then
     append_evidence lifecycle 'durable wake drain returned an invalid acknowledgement; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0

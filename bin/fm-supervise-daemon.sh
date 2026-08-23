@@ -196,6 +196,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-wake-ack-lib.sh
+. "$FM_DAEMON_DIR/fm-wake-ack-lib.sh"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
@@ -1786,8 +1788,8 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   done < "$out"
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
 
-  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
-  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  ack_through=$(fm_wake_ack_parse_through "$err")
+  ack_generation=$(fm_wake_ack_parse_generation "$err")
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err"
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
