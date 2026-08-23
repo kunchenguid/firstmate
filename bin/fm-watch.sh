@@ -23,7 +23,10 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
+#                          human the wait is on. A paused: wait that its own
+#                          armed, validated merge poll already covers is dropped
+#                          instead of re-surfaced (handle_paused_stale); a
+#                          captain hold never is. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -52,7 +55,11 @@
 #                          demand-deep-inspection marker, for human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable; the one
+#                          output withheld is a validated PR poll's closed-unmerged
+#                          observation, recorded in state/<id>.pr-poll-terminal
+#                          instead and printed here only when that record cannot
+#                          be written (see the check loop)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
