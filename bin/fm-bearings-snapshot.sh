@@ -168,6 +168,42 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
+# jq input plumbing for values that grow with the fleet, mirroring
+# bin/fm-fleet-snapshot.sh, which owns this pattern and documents it in full.
+# Linux caps a SINGLE argv string at MAX_ARG_STRLEN (131072 bytes), so the live
+# PR rows, whose size tracks the number of repositories and the per-repository
+# open-PR limit, reach jq from a file instead of from a command-line value.
+# One private directory per process, so concurrent bearings runs cannot collide.
+BEARINGS_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-snapshot.XXXXXX") || {
+  echo "fm-bearings-snapshot: cannot create a private directory for jq input" >&2
+  exit 1
+}
+bearings_cleanup() {
+  rm -rf "$BEARINGS_TMPDIR"
+}
+trap bearings_cleanup EXIT
+trap 'bearings_cleanup; exit 129' HUP
+trap 'bearings_cleanup; exit 130' INT
+trap 'bearings_cleanup; exit 143' TERM
+
+# Write <blob> to this process's private file for <slot> and echo that path.
+# An empty blob is refused rather than slurped, because --slurpfile on an empty
+# file yields [] and would silently bind null where --argjson used to fail.
+jq_blob_file() {  # <slot> <blob>
+  local file="$BEARINGS_TMPDIR/$1.json"
+  case $2 in
+    '')
+      printf 'fm-bearings-snapshot: empty jq input for %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$2" > "$file" || {
+    printf 'fm-bearings-snapshot: cannot write jq input for %s\n' "$1" >&2
+    return 1
+  }
+  printf '%s' "$file"
+}
+
 # The deterministic return-catch-up owner must clear before this or any other
 # ordinary captain request proceeds. Bearings does not reproduce that policy;
 # it only consults the shared read-only gate.
@@ -259,7 +295,12 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows_file=$(jq_blob_file pr_rows "$rows") || exit 1
+      repo_rows_file=$(jq_blob_file pr_repo_rows "$repo_rows") || exit 1
+      rows=$(jq -n --slurpfile a_blob "$rows_file" --slurpfile b_blob "$repo_rows_file" '
+        ($a_blob[0]) as $a
+        | ($b_blob[0]) as $b
+        | $a + $b')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -283,6 +324,7 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
+CANDIDATE_PRS_FILE=$(jq_blob_file candidate_prs "$CANDIDATE_PRS") || exit 1
 MODEL=$(printf '%s' "$SNAP" | jq \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
@@ -311,8 +353,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
-  def trunc($n): if . == null then null else
+  --slurpfile candidate_prs_blob "$CANDIDATE_PRS_FILE" '
+  ($candidate_prs_blob[0]) as $candidate_prs
+  | def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
     . as $groups

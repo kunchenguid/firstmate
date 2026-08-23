@@ -49,6 +49,19 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ -n "${FAKE_GH_WIDE:-}" ]; then
+  pad=$(printf '%0400d' 0 | tr '0' 'w')
+  i=1
+  printf '['
+  while [ "$i" -le "$FAKE_GH_WIDE" ]; do
+    [ "$i" -gt 1 ] && printf ','
+    printf '{"number":%d,"title":"Wide %d","url":"https://github.com/acme/wide/pull/%d","headRefName":"fm/wide-%d-%s","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}' \
+      "$i" "$i" "$i" "$i" "$pad"
+    i=$((i + 1))
+  done
+  printf ']\n'
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -1257,6 +1270,37 @@ test_per_repository_pr_cap_is_disclosed() {
   pass "per-repository open-PR caps are disclosed with an expansion knob"
 }
 
+# Live PR enrichment accumulates one row per open PR across every candidate
+# repository, and --all-pr-repos removes the repository cap outright, so those rows
+# cross the same per-argv-string ceiling the parsed backlog does. Two repositories at
+# a raised per-repository limit put each half over the ceiling on its own, so both the
+# per-repository page and the accumulated set are covered. tests/lib.sh owns the
+# ceiling.
+test_wide_live_pr_rows_survive_the_argv_string_ceiling() {
+  local home fakebin json prs_bytes
+  home=$(make_home wide-prs); write_large_fixture "$home" 2
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  json=$(FM_BEARINGS_PR_LIMIT=300 FAKE_GH_WIDE=300 \
+    run "$home" "$fakebin" --include-prs --all-pr-repos --json) \
+    || fail "bearings must survive live PR rows wider than one argv string"
+  [ "$(grep -c '^gh pr list ' "$home/net.log")" = 2 ] \
+    || fail "the wide-PR fixture did not enrich both candidate repositories"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+    and (.candidate_prs | length) == 600
+    and (.prs | startswith("checked (2 repos, 600 open"))
+    and ([.omitted[] | select(.surface | startswith("candidate_prs showing"))] | length) == 0
+  ' >/dev/null || fail "wide live PR enrichment lost rows or disclosure: $(printf '%s' "$json" | jq -c '{prs,n:(.candidate_prs|length)}')"
+  # Assert the size the fixture actually reached. Twice the ceiling means each
+  # single-repository page and the mid-loop accumulator both crossed it on their own,
+  # so neither conversion can pass vacuously.
+  prs_bytes=$(printf '%s' "$json" | jq -c '.candidate_prs' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$prs_bytes" -gt $((FM_ARGV_STRING_CEILING * 2)) ] \
+    || fail "fixture never crossed the ceiling twice over: live PR rows are only $prs_bytes bytes"
+  pass "live PR rows wider than one argv string still reach the bearings model ($prs_bytes bytes)"
+}
+
 install_failing_jq() {  # <fakebin> <model|toon>
   local fakebin=$1 phase=$2 real
   real=$(command -v jq)
@@ -2088,3 +2132,4 @@ test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
 test_oversized_backlog_still_charts_bearings
 test_oversized_child_summary_reason_survives_the_ceiling
+test_wide_live_pr_rows_survive_the_argv_string_ceiling

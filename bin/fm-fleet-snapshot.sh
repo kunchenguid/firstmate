@@ -244,7 +244,10 @@ jq_blob_file() {  # <slot> <blob>
       return 1
       ;;
   esac
-  printf '%s' "$2" > "$file" || return 1
+  printf '%s' "$2" > "$file" || {
+    printf 'fm-fleet-snapshot: cannot write jq input for %s\n' "$1" >&2
+    return 1
+  }
   printf '%s' "$file"
 }
 
@@ -255,7 +258,10 @@ jq_blob_file() {  # <slot> <blob>
 # written with no trailing newline, because --rawfile keeps one.
 jq_raw_file() {  # <slot> <value>
   local file="$SNAPSHOT_TMPDIR/$1.txt"
-  printf '%s' "$2" > "$file" || return 1
+  printf '%s' "$2" > "$file" || {
+    printf 'fm-fleet-snapshot: cannot write jq input for %s\n' "$1" >&2
+    return 1
+  }
   printf '%s' "$file"
 }
 
@@ -699,13 +705,10 @@ task_json_lines() {
 # used by secondmate_home_summary_json, without inventing live task rows.
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
-main_inventory_json() {  # <backlog-json> <tasks-json>
-  local backlog_file tasks_file
-  backlog_file=$(jq_blob_file main_inventory_backlog "$1") || return 1
-  tasks_file=$(jq_blob_file main_inventory_tasks "$2") || return 1
+main_inventory_json() {  # <backlog-file> <tasks-file>
   jq -n \
-    --slurpfile backlog_blob "$backlog_file" \
-    --slurpfile tasks_blob "$tasks_file" '
+    --slurpfile backlog_blob "$1" \
+    --slurpfile tasks_blob "$2" '
     ($backlog_blob[0]) as $backlog
     | ($tasks_blob[0]) as $tasks
     | ([ $backlog.records[]?
@@ -732,10 +735,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
-secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
-  local backlog_file tasks_file
-  backlog_file=$(jq_blob_file home_summary_backlog "$1") || return 1
-  tasks_file=$(jq_blob_file home_summary_tasks "$2") || return 1
+secondmate_home_summary_json() {  # <backlog-file> <tasks-file>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
@@ -743,8 +743,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-    --slurpfile backlog_blob "$backlog_file" \
-    --slurpfile tasks_blob "$tasks_file" '
+    --slurpfile backlog_blob "$1" \
+    --slurpfile tasks_blob "$2" '
     ($backlog_blob[0]) as $backlog
     | ($tasks_blob[0]) as $tasks
     | def trunc($n):
@@ -1230,16 +1230,15 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
 }
 
-secondmate_current_json() {  # <parent-tasks-json>
-  local tasks=$1 registry union rows total_registered total shown truncated
+secondmate_current_json() {  # <parent-tasks-file>
+  local tasks_file=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
-  local registry_file tasks_file summary_file decisions_file activities_file activity_scan_file reconciliation_file
+  local registry_file summary_file decisions_file activities_file activity_scan_file reconciliation_file
   local records_file record_file current_reason_file reason_file
   registry=$(registry_secondmates_json) || return 1
   registry_file=$(jq_blob_file union_registry "$registry") || return 1
-  tasks_file=$(jq_blob_file union_tasks "$tasks") || return 1
   union=$(jq -n --slurpfile registry_blob "$registry_file" --slurpfile tasks_blob "$tasks_file" '
     ($registry_blob[0]) as $registry
     | ($tasks_blob[0]) as $tasks
@@ -1532,22 +1531,26 @@ scout_report_lines() {
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
+# The parsed backlog and the task inventory are each computed once and never
+# reassigned, and both are read by several filters, so each one owns a single
+# slot that every consumer reads by path.
+BACKLOG_FILE=$(jq_blob_file backlog "$BACKLOG_JSON") || exit 1
+TASKS_FILE=$(jq_blob_file tasks "$TASKS_JSON") || exit 1
+
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
+  secondmate_home_summary_json "$BACKLOG_FILE" "$TASKS_FILE" \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
-MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
+MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_FILE" "$TASKS_FILE") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
+SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_FILE") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
-RENDER_BACKLOG_FILE=$(jq_blob_file render_backlog "$BACKLOG_JSON") || exit 1
-RENDER_TASKS_FILE=$(jq_blob_file render_tasks "$TASKS_JSON") || exit 1
 RENDER_MAIN_INVENTORY_FILE=$(jq_blob_file render_main_inventory "$MAIN_INVENTORY_JSON") || exit 1
 RENDER_SCOUT_REPORTS_FILE=$(jq_blob_file render_scout_reports "$SCOUT_REPORTS_JSON") || exit 1
 RENDER_SECONDMATE_CURRENT_FILE=$(jq_blob_file render_secondmate_current "$SECONDMATE_CURRENT_JSON") || exit 1
@@ -1561,8 +1564,8 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --slurpfile backlog_blob "$RENDER_BACKLOG_FILE" \
-  --slurpfile tasks_blob "$RENDER_TASKS_FILE" \
+  --slurpfile backlog_blob "$BACKLOG_FILE" \
+  --slurpfile tasks_blob "$TASKS_FILE" \
   --slurpfile main_inventory_blob "$RENDER_MAIN_INVENTORY_FILE" \
   --slurpfile scout_reports_blob "$RENDER_SCOUT_REPORTS_FILE" \
   --slurpfile secondmate_current_blob "$RENDER_SECONDMATE_CURRENT_FILE" \
