@@ -6,7 +6,7 @@
 #
 # message - the typed captain path: a human captain message with text on the
 #   configured channel is published durably to the inbox and wakes firstmate
-#   once with `slack-captain-message <ts><TAB><text>` before the courtesy
+#   once before the courtesy
 #   acknowledgement: the `received` reaction is best-effort, a failure leaves
 #   a durable marker under state/slack-ack-pending/ for a later poll or
 #   repeated event to retry, and an acknowledgement failure never suppresses
