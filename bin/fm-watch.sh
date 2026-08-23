@@ -303,16 +303,18 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
-# The backend library owns the one injective derivation shared by every producer
-# and consumer of watcher marker paths. This wrapper also migrates the complete
-# watcher marker family before returning the key, preserving unambiguous live
-# state across the format transition while ambiguous legacy state fails closed.
+# The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
+# `_` so a window name is usable as a filename suffix. Every per-window file the
+# watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
+# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# disk under the current format, so the format lives here alone: a second copy is
+# how a future change to it silently orphans a window's markers instead of clearing
+# them. The helpers below take the derived key rather than re-deriving it, so one
+# poll of one window derives it once.
 window_key() {  # <window>
-  fm_window_markers_migrate "$STATE" "$1" \
-    .hash- .count- .stale- .stale-since- .wedge-escalations- \
-    .paused- .paused-rechecked- .paused-resurfaced- \
-    .writing-since- .writing-resurfaced-
-  fm_window_marker_key_for_state "$STATE" "$1"
+  local key=${1//:/_}
+  key=${key//\//_}
+  printf '%s' "${key//./_}"
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
@@ -404,7 +406,7 @@ inbox_steer_check() {  # <window> <task>
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
 # before: a secondmate, an unresolvable task, a task with no recorded endpoint,
-# an ambiguous legacy marker, no previous hash to compare against (nothing has
+# an ambiguous marker key, no previous hash to compare against (nothing has
 # been polled yet), a capture that fails or comes back empty, and of course an
 # unchanged pane. A .status file anywhere in the batch also returns 1: an authored
 # append is content the supervisor may need to read, so only the mechanical
@@ -415,7 +417,7 @@ inbox_steer_check() {  # <window> <task>
 # polls that would otherwise cost a full supervisor turn - so it never runs on the
 # ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  local f base task meta kind w key prev now seen=""
+  local f base task meta kind w key other matches prev now seen=""
   [ "$#" -gt 0 ] || return 1
   for f in "$@"; do
     base=${f##*/}
@@ -433,6 +435,13 @@ signal_turnend_panes_churned() {  # <file> ...
     w=$(fm_backend_target_of_meta "$meta") || return 1
     [ -n "$w" ] || return 1
     key=$(window_key "$w")
+    matches=0
+    while IFS= read -r other; do
+      [ "$(window_key "$other")" = "$key" ] || continue
+      matches=$((matches + 1))
+      [ "$matches" -lt 2 ] || return 1
+    done < <(recorded_windows)
+    [ "$matches" = 1 ] || return 1
     prev=$(cat "$STATE/.hash-$key" 2>/dev/null) || return 1
     [ -n "$prev" ] || return 1
     now=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
