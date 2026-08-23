@@ -492,8 +492,10 @@ if FM_SECONDMATE_CHARTER='Local-only charter.' FM_SECONDMATE_SCOPE='local only' 
   > "$TMP_ROOT/seed-localonly.out" 2>&1; then
   fail "a supplied origin bypassed the local-only delivery-mode refusal"
 fi
-assert_grep 'is local-only and cannot be provisioned remotely' "$TMP_ROOT/seed-localonly.out" \
+assert_grep 'is local-only, so its origin is a folder on this machine' "$TMP_ROOT/seed-localonly.out" \
   "the local-only refusal did not name the registered mode"
+assert_grep 'seed it into a local secondmate home instead' "$TMP_ROOT/seed-localonly.out" \
+  "the local-only refusal did not name the route that does carry the project"
 
 if FM_SECONDMATE_CHARTER='Unregistered charter.' FM_SECONDMATE_SCOPE='unregistered' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-unregistered remote-mac "$REMOTE_ROOT" \

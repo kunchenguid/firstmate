@@ -128,6 +128,17 @@ recovery_marker_generation() {  # <marker-file>
   sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
 }
 
+# Give a watcher-recovery case something the handling drain genuinely owes the
+# captain, so it exercises resurfacing rather than an empty-fleet wake. The
+# primed seen marker keeps the ordinary signal path quiet, leaving the recovery
+# path as the only one that can surface it.
+seed_open_decision() {  # <state> <key>
+  local state=$1 key=$2
+  printf 'needs-decision [key=%s]: fixture is held for a decision\n' "$key" \
+    > "$state/held.status"
+  prime_status_seen "$state" "$state/held.status"
+}
+
 # Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
 ack_drain_err() {  # <state> <stderr-file>
   local state=$1 err=$2 sequence generation
@@ -310,6 +321,18 @@ hash_text() {
   else
     printf '%s' "$1" | md5sum | cut -d' ' -f1
   fi
+}
+
+# Satisfy bin/fm-pr-check-migrate.sh's marker short-circuit so it exits before
+# touching the watcher lock. Any suite that plants its own state/.watch.lock must
+# call this first: an unsatisfied migration runs ahead of every watcher and arm,
+# steals that lock itself, and publishes a downtime episode of its own, which
+# silently replaces whatever lock or recovery pre-state the case meant to set up.
+mark_pr_check_migration_complete() {  # <state>
+  local state=$1
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
 }
 
 dead_pid() {
