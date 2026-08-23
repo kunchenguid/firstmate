@@ -361,6 +361,10 @@ test_help_states_relocation_not_removal() {
     "--help does not state that content is relocated, never removed"
   assert_contains "$out" "appends the canonical" \
     "--help does not surface the promotion side effect of appending the self-governance section"
+  assert_contains "$out" "when it is not already present" \
+    "--help does not state that the section is appended only when absent"
+  assert_contains "$out" "CLAUDE.md shrinks" \
+    "--help does not surface the root-file side effect that CLAUDE.md shrinks to the pointer"
   pass "fm-ensure-agents-md.sh: --help states content is relocated, never removed"
 }
 
