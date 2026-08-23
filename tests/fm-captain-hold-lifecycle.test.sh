@@ -522,6 +522,57 @@ test_retire_duplicate_preserves_completion_durability() {
   pass "retiring a duplicate already named in a completion attestation keeps that attestation durable"
 }
 
+# retire-duplicate writes its body record and closes the task as two separate
+# steps. If `tasks-axi done` fails, the task stays open and still captain-held,
+# and the design above (see test_stale_retirement_record_does_not_mask_a_later_answer)
+# is that it may still be finished with a genuine `answer`. But if the hold
+# itself is also lifted out of band before that happens - bypassing this
+# script entirely - the task ends up neither closed nor actively held, with
+# only a duplicate-retirement record sitting on top. `verify_hold_durable`
+# must not read that stale record as proof of a real retirement in that case:
+# a completion attestation naming the task must be refused, not accepted as
+# durable.
+test_interrupted_retire_duplicate_close_that_also_loses_its_hold_is_not_durable() {
+  local home id show
+  home=$(make_home retire-duplicate-tampered)
+  id=sample-tamper-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample tamper" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample tamper review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+
+  run_captain "$home" hold sample-tamper-call \
+    --title "Choose the sample tamper outcome" --reason "captain tamper choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the surviving captain-held task"
+  run_captain "$home" hold sample-tamper-call-dup \
+    --title "Choose the sample tamper outcome" --reason "captain tamper choice pending, dup" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the duplicate captain-held task"
+
+  printf 'Resolution recorded by fm-captain-hold.\nResolution mode: retired-duplicate\nSurviving task: sample-tamper-call\n\nNo captain decision was made on this task.\nIt duplicated an existing captain call; the surviving call is sample-tamper-call.\nAnswer sample-tamper-call instead - this task was closed only to remove a duplicate row from the captain queue.\n' \
+    > "$home/tamper-body.txt"
+  tasks_in "$home" update sample-tamper-call-dup --body-file "$home/tamper-body.txt" --archive-body >/dev/null \
+    || fail "could not stage the interrupted retirement record"
+  tasks_in "$home" unhold sample-tamper-call-dup >/dev/null \
+    || fail "could not simulate the out-of-band hold release"
+  show=$(tasks_in "$home" show sample-tamper-call-dup --full)
+  assert_contains "$show" "state: queued" \
+    "the staged task must still be open, as if tasks-axi done had failed"
+  assert_contains "$show" "held: no" \
+    "the staged task must no longer be held, as if something bypassed this script"
+
+  if run_captain "$home" complete "$id" sample-tamper-call sample-tamper-call-dup \
+    > "$home/tamper-complete.out" 2> "$home/tamper-complete.err"; then
+    fail "complete accepted a task that is neither closed nor held as a durable duplicate retirement"
+  fi
+  assert_grep "sample-tamper-call-dup" "$home/tamper-complete.err" \
+    "the refusal did not name the task that is neither closed nor actively held"
+  pass "a duplicate-retirement record on a task that is neither closed nor held is not accepted as durable"
+}
+
 # A duplicate-retirement record only ever means something when it is the
 # newest record on the body. If `tasks-axi done` fails right after
 # retire-duplicate writes that record, the task stays open and held, and a
@@ -1391,6 +1442,7 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_retire_duplicate_closes_without_recording_a_decision
 test_retire_duplicate_preserves_completion_durability
+test_interrupted_retire_duplicate_close_that_also_loses_its_hold_is_not_durable
 test_stale_retirement_record_does_not_mask_a_later_answer
 test_retire_duplicate_refuses_a_surviving_task_that_is_itself_retired
 test_deferral_leaves_captains_call_until_due

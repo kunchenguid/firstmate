@@ -395,13 +395,23 @@ recorded_surviving_task() {  # <task-body>
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired), a recorded captain answer, or
 # a recorded duplicate retirement (explicitly no answer, but no longer live).
+# A duplicate-retirement record only counts once the close it describes
+# actually landed (state done): `retire-duplicate` writes the body record and
+# closes the task as two separate steps, and if `tasks-axi done` fails between
+# them the task is still open with that record sitting on top. Treating that
+# half-applied state as durable would let a completion attestation point at a
+# task that is not actually retired yet; an open task still falls through to
+# the active-hold check below instead, which is the true state it is in.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
   show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if body_has_resolution_record "$body" || body_has_duplicate_retirement_record "$body"; then
+  if body_has_resolution_record "$body"; then
+    return 0
+  fi
+  if [ "$state" = "done" ] && body_has_duplicate_retirement_record "$body"; then
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
