@@ -1,10 +1,15 @@
 name: CI
 
+# `pull_request.branches` filters a PR's BASE branch, so a base missing from
+# this list gets zero checks - which the PR UI cannot distinguish from passing
+# checks. Add every long-lived base we open PRs into, here and in
+# no-mistakes-required.yml, on the day that branch is created.
+# bin/fm-lint-workflows.sh owns that rule and fails the lint on a mismatch.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feat/omp-adaptor]
 
 permissions:
   contents: read

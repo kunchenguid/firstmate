@@ -47,6 +47,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
+  The same lint also refuses a workflow set where some pull request base branch gets CI without also getting the required check, because `pull_request.branches` matches the base branch and an absent required check is indistinguishable from a passing one; add every long-lived base to both `.github/workflows/ci.yml` and `.github/workflows/no-mistakes-required.yml` on the day that branch is created.
   It pins one exact shellcheck version and one exact actionlint version and refuses to run under any other.
   Print the shellcheck pin with `bin/fm-lint.sh --required-version` and the actionlint pin with `bin/fm-lint-workflows.sh --required-version`.
   Use `bin/fm-install-shellcheck.sh` and `bin/fm-install-actionlint.sh` to install those exact builds locally; each installer's header owns its destination usage and supported platforms.

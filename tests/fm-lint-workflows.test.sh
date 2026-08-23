@@ -514,6 +514,140 @@ SH
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
+# PR base gating. `pull_request.branches` matches the PR BASE branch, so a base
+# absent from every filter gets no checks at all, and an absent required check
+# reads exactly like a passing one in the pull request UI. The gate pins the
+# superset rule: no base may be gated by CI without also being required.
+
+# Fixtures vary only the `on:` block; the job body exists so actionlint accepts
+# the file. Pass the `on:` block as one argument per line.
+write_gating_workflow() {
+  local path=$1 workflow_name=$2
+  shift 2
+  {
+    printf 'name: %s\n' "$workflow_name"
+    printf '%s\n' "$@"
+    cat <<'YAML'
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+YAML
+  } > "$path"
+}
+
+gating_root() {
+  local tmp
+  tmp=$(fm_test_tmproot "$1")
+  mkdir -p "$tmp/.github/workflows"
+  printf '%s\n' "$tmp"
+}
+
+test_current_workflows_gate_the_adapter_branch() {
+  local out rc
+  rc=0
+  out=$("$LINT_WF" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "current workflows failed the gating check, got $rc"$'\n'"$out"
+  assert_contains "$out" "PR base gating: no-mistakes-required.yml requires checks on:" \
+    "current workflows did not report which PR bases the required check covers"
+  assert_contains "$out" "main" \
+    "the required check does not cover the default branch"
+  assert_contains "$out" "feat/omp-adaptor" \
+    "the required check does not cover the long-lived adapter branch"
+  pass "current workflows require checks on every gated PR base"
+}
+
+test_base_gated_without_required_check_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-missing)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    types: [opened]' '    branches:' '      - main'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a base gated by CI but not required unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "feat/omp-adaptor" \
+    "the gating failure did not name the unrequired base"
+  assert_contains "$out" "no-mistakes-required.yml" \
+    "the gating failure did not name the required check to fix"
+  pass "a PR base gated by CI but not by the required check fails the lint"
+}
+
+test_required_superset_of_gated_bases_passes() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-superset)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  push:' '    branches: [main]' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches:' '      - main' '      - feat/omp-adaptor'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a required check wider than CI must pass, got $rc"$'\n'"$out"
+  assert_contains "$out" "requires checks on: main feat/omp-adaptor" \
+    "the passing verdict did not list the required bases"
+  pass "a required check wider than the CI filter passes"
+}
+
+test_unfiltered_pr_workflow_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-unfiltered)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI 'on: pull_request'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "CI on every base with a narrower required check passed"$'\n'"$out"
+  assert_contains "$out" "gates every PR base" \
+    "the gating failure did not report the unfiltered CI trigger"
+  pass "an unfiltered CI trigger with a narrower required check fails the lint"
+}
+
+test_required_check_without_pr_trigger_fails() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-nopr)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  push:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a required check with no pull_request trigger passed"$'\n'"$out"
+  assert_contains "$out" "no pull_request trigger" \
+    "the failure did not report that the required check can never run"
+  pass "a required check with no pull_request trigger fails the lint"
+}
+
+test_unreadable_base_filter_fails_closed() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-ignore)
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches-ignore: [docs]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable base filter unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "branches-ignore" \
+    "the refusal did not name the construct it cannot read"
+  pass "a base filter this gate cannot read fails closed"
+}
+
+test_explicit_path_skips_set_level_gating() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-explicit)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  rc=0
+  out=$("$LINT_WF" "$tmp/.github/workflows/ci.yml" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "explicit-path lint of a valid workflow failed, got $rc"$'\n'"$out"
+  case "$out" in
+    *"PR base gating"*)
+      fail "explicit-path mode ran the set-level gating check"$'\n'"$out"
+      ;;
+  esac
+  pass "explicit-path mode lints one file without the set-level gating check"
+}
+
 test_pins_an_explicit_version
 test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
@@ -530,3 +664,10 @@ test_installer_falls_back_to_shasum
 test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
 test_fm_lint_default_path_catches_broken_ci_yml
+test_current_workflows_gate_the_adapter_branch
+test_base_gated_without_required_check_fails
+test_required_superset_of_gated_bases_passes
+test_unfiltered_pr_workflow_fails
+test_required_check_without_pr_trigger_fails
+test_unreadable_base_filter_fails_closed
+test_explicit_path_skips_set_level_gating

@@ -8,6 +8,12 @@
 # invokes this owner on its default (no explicit-path) path, which CI and
 # commands.lint both use.
 #
+# The directory-scan path then checks one gating invariant across the scanned
+# set: every PR base gated by any pull_request-triggered workflow must also be
+# gated by no-mistakes-required.yml, so a base can never get CI without the
+# check branch protection requires. See the comment above
+# REQUIRED_CHECK_WORKFLOW for why that is worth enforcing mechanically.
+#
 # Usage:
 #   fm-lint-workflows.sh                 lint workflows under this repo
 #   fm-lint-workflows.sh --root <dir>    lint workflows under <dir>
@@ -27,7 +33,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_workflows_usage() {
-  sed -n '2,16{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,22{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 EXPLICIT_ROOT=
@@ -78,7 +84,218 @@ collect_workflow_files() {
     | LC_ALL=C sort
 }
 
+# A `pull_request` trigger's `branches` filter matches the PR BASE branch, and
+# GitHub reads the workflow file from the PR merge commit rather than from the
+# base tip. Two consequences make this worth a gate: a base absent from every
+# filter gets no checks at all, which the pull request UI cannot distinguish
+# from passing checks, and the PR that adds a base to a filter gates itself.
+# Which branches deserve gating is not statically knowable, so the rule pinned
+# here is the superset one: every base gated by any PR-triggered workflow must
+# also be gated by the required check, so a base can never get CI without also
+# getting the check branch protection requires. The reminder to add a new
+# long-lived base at all lives in each workflow's own `on:` block comment.
+REQUIRED_CHECK_WORKFLOW=no-mistakes-required.yml
+
+# Prints exactly one classification line for one workflow file:
+#   none                  no `pull_request` trigger
+#   all                   `pull_request` with no base filter, so every base
+#   bases <base>...       `pull_request` filtered to these bases
+#   unsupported <reason>  a form this gate refuses to guess at
+fm_lint_workflows_pr_filter() {
+  awk '
+function ind(s) { match(s, /^ */); return RLENGTH }
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function unq(s, q) {
+  s = trim(s)
+  q = "\047"
+  if (length(s) >= 2) {
+    if (substr(s, 1, 1) == "\"" && substr(s, length(s), 1) == "\"") \
+      return substr(s, 2, length(s) - 2)
+    if (substr(s, 1, 1) == q && substr(s, length(s), 1) == q) \
+      return substr(s, 2, length(s) - 2)
+  }
+  return s
+}
+function emit(v) { print v; emitted = 1; exit }
+function tokens(s, n, i, a, t, r) {
+  gsub(/[\[\]]/, " ", s)
+  gsub(/,/, " ", s)
+  n = split(s, a, /[ \t]+/)
+  r = ""
+  for (i = 1; i <= n; i++) { t = unq(a[i]); if (t != "") r = r " " t }
+  return r
+}
+function events(s, n, i, a) {
+  n = split(tokens(s), a, / /)
+  for (i = 1; i <= n; i++) if (a[i] == "pull_request") return "all"
+  return "none"
+}
+function branch_list() {
+  return bases == "" ? "unsupported empty branches list" : "bases" bases
+}
+{
+  line = $0
+  sub(/\r$/, "", line)
+  sub(/[ \t]+#.*$/, "", line)
+  t = trim(line)
+  if (t == "" || substr(t, 1, 1) == "#") next
+  i = ind(line)
+  ci = index(line, ":")
+  key = ""
+  val = ""
+  if (ci > 0) {
+    key = unq(substr(line, 1, ci - 1))
+    val = trim(substr(line, ci + 1))
+  }
+  if (mode == 0) {
+    if (i == 0 && key == "on") {
+      if (substr(val, 1, 1) == "{") emit("unsupported flow-mapping on: value")
+      if (val != "") emit(events(val))
+      mode = 1
+      on_indent = -1
+    }
+    next
+  }
+  # A top-level key ends the on: block, so the verdict is whatever we have.
+  if (i == 0) {
+    if (seq) emit(events(ev))
+    if (mode == 1) emit("none")
+    if (mode == 2) emit("all")
+    emit(branch_list())
+  }
+  if (mode == 1) {
+    if (on_indent < 0) {
+      on_indent = i
+      if (substr(t, 1, 1) == "-") seq = 1
+    }
+    if (seq) {
+      if (substr(t, 1, 1) != "-") emit("unsupported mixed sequence in on: block")
+      ev = ev " " unq(trim(substr(t, 2)))
+      next
+    }
+    if (i != on_indent || key != "pull_request") next
+    if (val != "") emit("unsupported inline pull_request value")
+    mode = 2
+    pr_indent = -1
+    next
+  }
+  if (mode == 2) {
+    # The pull_request block ended without a branches filter: every base.
+    if (i <= on_indent) emit("all")
+    if (pr_indent < 0) pr_indent = i
+    if (i != pr_indent) next
+    if (key == "branches-ignore") \
+      emit("unsupported branches-ignore under pull_request")
+    if (key != "branches") next
+    if (val == "") { mode = 3; next }
+    if (substr(val, 1, 1) == "[") {
+      if (index(val, "]") == 0) \
+        emit("unsupported multi-line flow sequence under branches")
+      bases = tokens(val)
+      emit(branch_list())
+    }
+    emit("unsupported scalar branches value")
+  }
+  if (i <= pr_indent) emit(branch_list())
+  if (substr(t, 1, 1) != "-") emit("unsupported non-sequence entry under branches")
+  b = unq(trim(substr(t, 2)))
+  if (b == "") emit("unsupported empty branches entry")
+  bases = bases " " b
+}
+END {
+  if (emitted) exit
+  if (mode == 0) emit("unsupported no top-level on: key")
+  if (seq) emit(events(ev))
+  if (mode == 1) emit("none")
+  if (mode == 2) emit("all")
+  emit(branch_list())
+}
+' "$1"
+}
+
+# Compares the scanned workflow set against REQUIRED_CHECK_WORKFLOW. Runs only
+# on the directory-scan path, because the invariant is a property of the whole
+# workflow set rather than of one explicitly linted file.
+fm_lint_workflows_pr_gating() {
+  local file name verdict required_verdict='' required_set='' found_required=0
+  local rc=0 i n base missing
+  local names=() verdicts=()
+
+  for file in "${FILES[@]}"; do
+    verdict=$(fm_lint_workflows_pr_filter "$file")
+    name=${file##*/}
+    case "$verdict" in
+      "unsupported "*)
+        printf 'fm-lint-workflows.sh: %s: cannot read the pull_request base filter (%s). Keep the on: block in block style with an explicit branches: list, or teach this gate the new form.\n' \
+          "$name" "${verdict#unsupported }" >&2
+        return 1
+        ;;
+    esac
+    if [ "$name" = "$REQUIRED_CHECK_WORKFLOW" ]; then
+      found_required=1
+      required_verdict=$verdict
+      continue
+    fi
+    names+=("$name")
+    verdicts+=("$verdict")
+  done
+
+  if [ "$found_required" -eq 0 ]; then
+    printf 'fm-lint-workflows.sh: PR base gating: %s is absent from this workflow set, so base coverage was not compared.\n' \
+      "$REQUIRED_CHECK_WORKFLOW" >&2
+    return 0
+  fi
+  if [ "$required_verdict" = none ]; then
+    printf 'fm-lint-workflows.sh: %s has no pull_request trigger, so the required check can never run. Restore its pull_request trigger and base list.\n' \
+      "$REQUIRED_CHECK_WORKFLOW" >&2
+    return 1
+  fi
+  case "$required_verdict" in
+    bases*) required_set="${required_verdict#bases} " ;;
+  esac
+
+  n=${#names[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    name=${names[$i]}
+    verdict=${verdicts[$i]}
+    i=$((i + 1))
+    [ "$verdict" != none ] || continue
+    [ "$required_verdict" != all ] || continue
+    if [ "$verdict" = all ]; then
+      printf 'fm-lint-workflows.sh: %s gates every PR base while %s requires checks only on:%s. Drop the base filter in %s or widen it there.\n' \
+        "$name" "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}" \
+        "$REQUIRED_CHECK_WORKFLOW" >&2
+      rc=1
+      continue
+    fi
+    missing=''
+    # Intentional word split: the classifier emits bases separated by spaces.
+    for base in ${verdict#bases}; do
+      case "$required_set" in
+        *" $base "*) ;;
+        *) missing="$missing $base" ;;
+      esac
+    done
+    if [ -n "$missing" ]; then
+      printf 'fm-lint-workflows.sh: %s gates PR base(s)%s that %s does not require, so a PR into them can merge with the required check absent. Add them to %s.\n' \
+        "$name" "$missing" "$REQUIRED_CHECK_WORKFLOW" "$REQUIRED_CHECK_WORKFLOW" >&2
+      rc=1
+    fi
+  done
+
+  [ "$rc" -eq 0 ] || return 1
+  if [ "$required_verdict" = all ]; then
+    printf 'fm-lint-workflows.sh: PR base gating: %s requires checks on every PR base\n' \
+      "$REQUIRED_CHECK_WORKFLOW"
+  else
+    printf 'fm-lint-workflows.sh: PR base gating: %s requires checks on:%s\n' \
+      "$REQUIRED_CHECK_WORKFLOW" "${required_verdict#bases}"
+  fi
+}
+
 FILES=()
+SCAN_MODE=0
 if [ "$#" -gt 0 ]; then
   for path in "$@"; do
     case "$path" in
@@ -95,6 +312,7 @@ if [ "$#" -gt 0 ]; then
     FILES+=("$path")
   done
 else
+  SCAN_MODE=1
   workflow_dir="$ROOT/.github/workflows"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -134,4 +352,8 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 printf 'fm-lint-workflows.sh: %s workflow files valid\n' "${#FILES[@]}"
+
+if [ "$SCAN_MODE" -eq 1 ]; then
+  fm_lint_workflows_pr_gating || exit 1
+fi
 exit 0

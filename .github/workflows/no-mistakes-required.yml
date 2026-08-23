@@ -1,11 +1,18 @@
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
+# `pull_request.branches` filters a PR's BASE branch, so a base missing from
+# this list means this required check never runs for PRs into it - and an absent
+# required check is indistinguishable from a passing one in the PR UI. Keep this
+# list covering every base any PR-triggered workflow gates, adding each
+# long-lived base on the day that branch is created.
+# bin/fm-lint-workflows.sh owns that rule and fails the lint on a mismatch.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
+      - feat/omp-adaptor
 
 permissions:
   contents: read

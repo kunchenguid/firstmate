@@ -1,5 +1,9 @@
 name: Windows Herdr automation spike
 
+# Manual dispatch only: no `pull_request` trigger, so there is no base-branch
+# filter to maintain here. If one is ever added, its `branches` list must stay
+# within no-mistakes-required.yml's bases, which bin/fm-lint-workflows.sh
+# enforces, so a PR base can never be gated by CI without the required check.
 on:
   workflow_dispatch:
 
