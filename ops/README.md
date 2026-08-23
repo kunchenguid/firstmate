@@ -66,3 +66,57 @@ danach `systemctl --user daemon-reload && systemctl --user enable --now fm-konto
   Luecke beim naechsten Lesen sofort.
 - Die Live-Session-Erkennung schuetzt vor Rotations-Rennen; ein Konto, dessen
   einzige Session tagelang haengt, erneuert nicht, bis sie endet.
+
+---
+
+# fm-lastverteilung — Blindempfehlungs-Sperre (23.08.2026)
+
+Auftrag `fm-lastverteilung-blindempfehlung` (Befund sm-snacksuite 23.08.):
+`fm-lastverteilung --worker` empfahl wiederholt `.claude2`, waehrend dessen
+Lesung zeitweise `'?'` war und der echte Wochenrest dort gegen 0 lief.
+
+## Bestandteile (Wiederherstellungskopie)
+
+| Datei | Installationsort (maschinen-lokal) |
+|---|---|
+| `fm-lastverteilung.vor-blindempfehlungs-sperre-20260823` | Vorher-Fassung von `~/.local/bin/fm-lastverteilung` (Stand 17:18, inkl. Sitz-Umzug O-0006) |
+
+Wiederherstellen = Datei nach `~/.local/bin/fm-lastverteilung` kopieren
+(`chmod +x`). Die gesperrte Fassung lebt nur maschinen-lokal; dieser Zweig
+haelt die Vorher-Kopie als Rueckholpunkt.
+
+## Was die Sperre macht (am echten Werkzeug nachgestellt und geprueft)
+
+`konto_lesen` stuft eine Lesung jetzt genau dann als unlesbar aus (Zeile
+`N ? ? -`, Anzeige "UNLESBAR", in JEDEM Rang von `ziel_bestimmen`
+uebergangen), wenn:
+
+- quota-axi fehlschlaegt oder keine gueltige JSON-Antwort liefert (bisher schon),
+- die Antwort keinen oder mehrere `claude`-Anbieter-Eintraege enthaelt,
+- **der Zustand nicht eindeutig frisch ist** (`state.stale: true` oder
+  `state.status` weder `fresh` noch `ok`) — NEU. quota-axi kann bei
+  gescheitertem Abruf den Zwischenstand aus `~/.cache/quota-axi/quotas.json`
+  mit Zahlen liefern; genau solche Zahlen wurden bisher wie frische gerankt
+  (roter Fall, im Sandkasten am echten Werkzeug reproduziert),
+- `percentRemaining` fehlt, keine ganze Zahl ist oder ausserhalb 0..100 liegt,
+- das Wochenfenster in der Antwort fehlt (18.08.-Regel, unverändert:
+  Teilantwort ist unbekannt, nie "ohne Wochenfenster").
+
+Bleibt kein startfaehiges Konto uebrig, verweigert die `--worker`-Weiche laut
+(stderr + Exit 1, Weiche vom 20.08., unveraendert). Gesunde Konten werden
+unveraendert empfohlen (Gegenprobe am echten Lauf: Konto 1 bei 54 %/88 %).
+
+Die Sperre wirkt auch OHNE den Frischhalter-Timer: schlaegt eine Erneuerung
+fehl, liefert quota-axi Zwischenstand- oder Auth-Zustaende — beides faellt
+nun unter "unlesbar" statt unter "Empfehlung".
+
+## Randbefund (nicht hier behoben, Captain-Vorentscheid)
+
+Nachstellung des Befund-Morgens: mit Sitz auf Konto 3, Konto 1 hart gegrenzt
+(Woche 3 %) und Konto 2 bei GENAU 15 % Wochenrest und vollem 5h-Fenster
+waehlt die Regel Konto 2 — `SCHWELLE_WOCHE=15` meint "unter diesem Wert",
+15 selbst bleibt also reguläres Rang-2-Ziel, und der Rang folgt dann dem
+groessten 5h-Fenster. Das erklaert einen Teil der Morgen-Empfehlungen ohne
+jede Unlesbarkeit. Ob die Wochenschwelle inklusiv greifen soll, entscheidet
+der Captain (ein ENV-Wert, keine Codeaenderung).
+
