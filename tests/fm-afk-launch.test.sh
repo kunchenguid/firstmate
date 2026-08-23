@@ -4,8 +4,10 @@
 # (bin/fm-afk-start.sh). Two layers:
 #
 #   UNIT (always run, no backend): the session-scoped stale-artifact clear on a
-#   fresh entry vs a refresh, and the correct-ordered stop (daemon SIGTERM'd
-#   while state/.afk is still present, .afk cleared last).
+#   fresh entry vs a refresh, the correct-ordered stop (daemon SIGTERM'd
+#   while state/.afk is still present, .afk cleared last), and that --help
+#   prints the header's Usage block through its last declared subcommand
+#   (catches a hard-coded line range falling out of sync with the header).
 #
 #   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
 #   regression for the pane split/shrink - entering AND exiting away mode leaves
