@@ -220,6 +220,117 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_cursor_agent_session_is_identified_on_both_platforms() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/cursor-agent-named"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_CURSOR_SHAPE:-linux}" in
+  700:comm=:linux) printf '%s\n' 'cursor-agent' ;;
+  700:args=:linux) printf '%s\n' '/Users/u/.local/bin/cursor-agent --force' ;;
+  700:comm=:macos) printf '%s\n' '/Users/u/.local/bin/curso' ;;
+  700:args=:macos) printf '%s\n' '/Users/u/.local/bin/cursor-agent --force' ;;
+  700:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:*) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  for shape in linux macos; do
+    got=$(FM_TEST_CURSOR_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: the cursor-agent session was not found in the ancestry at all"
+    [ "$got" = 700 ] || fail "$shape: ancestry resolved '$got', expected the cursor-agent session pid 700"
+    FM_TEST_CURSOR_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+      || fail "$shape: a live cursor-agent session was not recognized as a harness"
+    FM_TEST_CURSOR_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the cursor-agent session holding the lock did not recognize itself as the owner"
+  done
+  pass "session-lock: a cursor-agent session is identified from its command name and argv[0]"
+}
+
+test_cursor_agent_lookalikes_are_never_harness_processes() {
+  local dir fakebin shape
+  dir="$TMP_ROOT/cursor-agent-lookalikes"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_CURSOR_LOOKALIKE:-helper}" in
+  810:comm=:helper) printf '%s\n' 'cursor-agent-helper' ;;
+  810:args=:helper) printf '%s\n' '/usr/bin/cursor-agent-helper --once' ;;
+  810:comm=:hooks) printf '%s\n' '/Users/u/.cursor/hooks/notify.sh' ;;
+  810:args=:hooks) printf '%s\n' '/Users/u/.cursor/hooks/notify.sh --quiet' ;;
+  810:comm=:app) printf '%s\n' '/Applications/Cursor.app/Contents/MacOS/Cursor' ;;
+  810:args=:app) printf '%s\n' '/Applications/Cursor.app/Contents/MacOS/Cursor' ;;
+  810:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=:*) printf '%s\n' 810 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '810\n' > "$dir/state/.lock"
+
+  for shape in helper hooks app; do
+    if FM_TEST_CURSOR_LOOKALIKE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "$shape: a cursor-agent lookalike was treated as a harness process"
+    fi
+    if FM_TEST_CURSOR_LOOKALIKE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 810'; then
+      fail "$shape: a cursor-agent lookalike passed the harness-liveness predicate"
+    fi
+    if FM_TEST_CURSOR_LOOKALIKE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: a cursor-agent lookalike claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: cursor-agent-helper, .cursor hooks, and Cursor.app are not harness processes"
+}
+
+test_named_cursor_agent_process_acquires_the_lock() {
+  local dir fakebin out lock_pid
+  dir="$TMP_ROOT/cursor-agent-e2e-lock"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  ln -s /bin/bash "$fakebin/cursor-agent"
+  cat > "$dir/claim.sh" <<'SH'
+#!/usr/bin/env bash
+"$FM_LOCK"
+SH
+  chmod +x "$dir/claim.sh"
+  out=$(FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" PATH="$fakebin:$PATH" \
+    cursor-agent "$dir/claim.sh" 2>&1) \
+    || fail "a process named cursor-agent failed to acquire the session lock: $out"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "cursor-agent lock acquire did not print the real fm-lock success text"
+  lock_pid=$(tr -d '[:space:]' < "$dir/state/.lock")
+  case "$lock_pid" in
+    ''|*[!0-9]*) fail "cursor-agent lock acquire did not record a numeric owner" ;;
+  esac
+  pass "session-lock e2e: a real process named cursor-agent acquires the session lock"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -358,6 +469,9 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_cursor_agent_session_is_identified_on_both_platforms
+test_cursor_agent_lookalikes_are_never_harness_processes
+test_named_cursor_agent_process_acquires_the_lock
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
