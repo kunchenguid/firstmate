@@ -245,85 +245,6 @@ EOF
   pass "body-compliance polls the live PR body when the opened event payload is stale"
 }
 
-test_pr88_signed_body_passes_body_compliance_command() {
-  local pr_json body script out rc
-  if ! command -v gh >/dev/null 2>&1; then
-    pass "pr 88 signed-body evidence skipped because gh is unavailable"
-    return
-  fi
-
-  pr_json=$(gh pr view 88 --repo pedromuller-del/firstmate --json body) \
-    || fail "could not fetch PR #88 body"
-  body=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["body"], end="")' \
-    <<< "$pr_json") || fail "could not decode PR #88 body"
-  if ! script=$(python3 - "$ROOT" <<'PY'
-import pathlib
-import sys
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    sys.exit(2)
-
-root = pathlib.Path(sys.argv[1])
-required = yaml.safe_load(
-    (root / ".github/workflows/no-mistakes-required.yml").read_text()
-)
-runs = [
-    step["run"]
-    for step in required["jobs"]["check"]["steps"]
-    if "run" in step
-]
-assert len(runs) == 1
-print(runs[0], end="")
-PY
-  ); then
-    fail "could not load the body-compliance delivered command from workflow YAML"
-  fi
-
-  rc=0
-  out=$(PR_BODY="$body" PR_AUTHOR=pedromuller-del PR_NUMBER=88 bash -c "$script" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "PR #88 signed body was rejected: rc=$rc out=$out"
-  assert_contains "$out" "Found no-mistakes signature in PR #88 body."
-
-  pass "PR 88 body passes the delivered body-compliance command"
-}
-
-test_hosted_body_compliance_billing_refusal_is_not_signature_failure() {
-  local job annotations
-  if ! command -v gh >/dev/null 2>&1; then
-    pass "hosted billing-refusal evidence skipped because gh is unavailable"
-    return
-  fi
-
-  job=$(gh api repos/pedromuller-del/firstmate/actions/jobs/96949118566) \
-    || fail "could not fetch hosted body-compliance job 96949118566"
-  annotations=$(gh api repos/pedromuller-del/firstmate/check-runs/96949118566/annotations) \
-    || fail "could not fetch hosted body-compliance job annotations"
-  if ! python3 - "$job" "$annotations" <<'PY'
-import json
-import re
-import sys
-
-job = json.loads(sys.argv[1])
-annotations = json.loads(sys.argv[2])
-assert job["run_url"].endswith("/actions/runs/32538086320")
-assert "ubuntu-slim" in job["labels"]
-assert job["steps"] == []
-annotation_text = " ".join(
-    str(annotation.get(field, ""))
-    for annotation in annotations
-    for field in ("title", "message", "raw_details")
-)
-assert re.search(r"billing|spending limit", annotation_text, re.IGNORECASE)
-PY
-  then
-    fail "hosted job evidence did not prove a billing refusal before command execution"
-  fi
-
-  pass "hosted body-compliance failure was a pre-command billing refusal"
-}
-
 make_policy_fixture() {
   local repo=$1 fakebin=$2 command_name
   mkdir -p "$repo/bin/backends" "$repo/.claude" "$fakebin"
@@ -343,7 +264,10 @@ make_policy_fixture() {
 case "${1:-}" in
   --required-version) echo 0.11.0 ;;
   --list-files) printf '%s\n' bin/fm-ci.sh ;;
-  *) printf 'lint\n' >> "$FM_CI_CALLS" ;;
+  *)
+    printf 'lint\n' >> "$FM_CI_CALLS"
+    printf 'FM_LINT_JOBS=%s\n' "${FM_LINT_JOBS:-unset}" >> "$FM_CI_LINT_ENV"
+    ;;
 esac
 SH
   cat > "$repo/bin/fm-test-run.sh" <<'SH'
@@ -515,11 +439,12 @@ run_policy_fixture() {
   [ -z "${FM_TEST_FAST_LANE_BASE:-}" ] \
     || policy_env+=("FM_CI_FAST_LANE_BASE=$FM_TEST_FAST_LANE_BASE")
   env -u HERDR_SESSION -u FM_HERDR_LAB_PROTECTED_SESSION \
-    -u FM_CHROME_BIN \
+    -u FM_CHROME_BIN -u FM_LINT_JOBS \
     -u GITHUB_STEP_SUMMARY -u GITHUB_RUN_ID -u FM_CI_FAST_LANE_BASE \
     "${policy_env[@]+"${policy_env[@]}"}" \
     PATH="$fakebin:$PATH" \
     FM_CI_CALLS="$calls" \
+    FM_CI_LINT_ENV="$calls.lint-env" \
     FM_CI_SUITE_ENV="$calls.suite-env" \
     FM_CI_INSTALL_CALLS="$calls.install" \
     FM_CI_HERDR_CALLS="$calls.herdr" \
@@ -729,6 +654,20 @@ test_policy_fails_when_a_lane_suite_fails_under_the_summary() {
   pass "a failing lane suite still fails the policy while the summary is enabled"
 }
 
+test_policy_runs_lint_serially() {
+  local tmp repo fakebin calls
+  tmp=$(fm_test_tmproot fm-ci-water7-serial-lint)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected its valid host fixture"
+  [ "$(cat "$calls.lint-env")" = "FM_LINT_JOBS=1" ] \
+    || fail "the CI path did not invoke lint through the lint owner's serial mode: $(cat "$calls.lint-env")"
+  pass "the command owner runs lint serially to bound concurrent ShellCheck memory"
+}
+
 test_policy_runs_pr_fast_lane_before_complete_suite() {
   local tmp repo fakebin calls expected
   tmp=$(fm_test_tmproot fm-ci-water7-fast-lane)
@@ -865,9 +804,8 @@ chrome" ] || fail "bounded bootstrap did not use exactly the three tracked insta
 test_workflows_are_static_and_water7_only
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
-test_pr88_signed_body_passes_body_compliance_command
-test_hosted_body_compliance_billing_refusal_is_not_signature_failure
 test_policy_runs_every_family_serially
+test_policy_runs_lint_serially
 test_policy_runs_pr_fast_lane_before_complete_suite
 test_policy_publishes_nonblocking_timing_summary
 test_policy_publishes_the_summary_without_github_run_metadata

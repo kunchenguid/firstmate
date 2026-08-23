@@ -42,8 +42,9 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
-# live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
-# `if [ -d "$WT" ]` guards skip, so teardown runs straight to the cleanup + state rm.
+# live tmux/treehouse/fleet state is touched. The fake Treehouse binds the task's
+# nonexistent worktree path to its recorded lease, so teardown can prove ownership
+# before it reaches the tasktmp cleanup and state removal.
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
@@ -55,6 +56,7 @@ make_fake_root() {
   # tmux adapter; both are unchanged by this suite's fixture, just newly
   # required siblings since the P1 backend extraction).
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
@@ -93,7 +95,18 @@ SH
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH
-  # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
+  local wt="$TMP_ROOT/nonexistent-worktree-$id"
+  cat > "$fake/bin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  jq -n --arg path "$wt" --arg lease "lease-$id" --arg holder "$id" --arg slot "slot-$id" \
+    '[{name:\$slot, path:\$path, status:"in-use", lease_id:\$lease, lease_holder:\$holder, leased_at:null, processes:[]}]'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fake/bin/treehouse"
+  # Meta with a nonexistent worktree and a matching hermetic lease identity.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-worktree-$id
@@ -102,6 +115,8 @@ harness=claude
 kind=ship
 mode=no-mistakes
 yolo=off
+treehouse_slot=slot-$id
+treehouse_lease=lease-$id
 tasktmp=$tasktmp
 META
   printf '%s' "$fake"
@@ -119,7 +134,7 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero with a valid tasktmp"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
@@ -134,6 +149,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-backend-hometag-lib.sh" "$fake/bin/fm-backend-hometag-lib.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
@@ -166,6 +182,17 @@ SH
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
 SH
+  local wt="$TMP_ROOT/nonexistent-wt-$id"
+  cat > "$fake/bin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  jq -n --arg path "$wt" --arg lease "lease-$id" --arg holder "$id" --arg slot "slot-$id" \
+    '[{name:\$slot, path:\$path, status:"in-use", lease_id:\$lease, lease_holder:\$holder, leased_at:null, processes:[]}]'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fake/bin/treehouse"
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -175,8 +202,10 @@ harness=claude
 kind=ship
 mode=no-mistakes
 yolo=off
+treehouse_slot=slot-$id
+treehouse_lease=lease-$id
 META
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp= was absent"
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
@@ -189,7 +218,7 @@ test_teardown_skips_gracefully_when_dir_missing() {
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
   fake=$(make_fake_root "$id" "$task_tmp")
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+  PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero when tasktmp dir was missing"
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"

@@ -27,6 +27,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 # An operator's documented rollback export (FM_SESSION_START_STATUS_TAIL=5)
@@ -93,15 +95,7 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
+  fm_test_write_active_treehouse_fake "$fakebin"
   fm_fake_quota_axi "$fakebin"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash

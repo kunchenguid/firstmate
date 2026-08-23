@@ -4,6 +4,9 @@
 # Lanes run one after another in that single job. The only concurrency is
 # bounded in-lane --jobs for a lane whose set is proven-isolated; see
 # docs/fm-test-portable-shards.md and docs/verification/ci-portable-parallel-jobs.md.
+# Lint runs its two stable shards serially with FM_LINT_JOBS=1 to bound
+# concurrent ShellCheck memory on the shared host without changing diagnostics;
+# bin/fm-lint.sh keeps its two-worker default for other callers.
 #
 # When FM_CI_FAST_LANE_BASE is set by the trusted pull-request workflow, run the
 # conservative diff-scoped test selection before the complete serial merge gate.
@@ -268,7 +271,8 @@ if [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ]; then
 fi
 require_macos_properties
 run_invariants
-bin/fm-lint.sh
+# Keep the shared-host lint memory bound described in this script's header.
+FM_LINT_JOBS=1 bin/fm-lint.sh
 bin/fm-test-run.sh --check-coverage
 run_pr_fast_lane
 run_lane portable-parallel-1 --jobs 2 --lane portable-parallel-1

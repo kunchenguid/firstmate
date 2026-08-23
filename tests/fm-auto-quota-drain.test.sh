@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 DRAIN="$ROOT/bin/fm-auto-quota-drain.sh"
 NODE_BIN=$(command -v node) || fail "test needs node"
@@ -448,11 +450,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-} ${2:-}" != 'get --help' ] || printf '%s\n' 'Usage: treehouse get [--lease]'
-exit 0
-SH
+  fm_test_write_active_treehouse_fake "$fakebin"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" != --version ] || printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
@@ -882,11 +880,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-} ${2:-}" != 'get --help' ] || printf '%s\n' 'Usage: treehouse get [--lease]'
-exit 0
-SH
+  fm_test_write_active_treehouse_fake "$fakebin"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" != --version ] || printf '%s\n' 'no-mistakes version v1.31.2 (fake)'

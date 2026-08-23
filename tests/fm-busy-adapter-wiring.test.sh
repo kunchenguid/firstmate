@@ -11,6 +11,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
@@ -35,7 +37,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex cursor-agent
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_exit0 "$fakebin" pi opencode claude codex cursor-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -65,7 +68,8 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TREEHOUSE_PATH="$wt" \
+    TMUX="fake,1,0" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }

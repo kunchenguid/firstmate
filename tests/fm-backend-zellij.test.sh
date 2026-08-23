@@ -11,6 +11,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zellij adapter)"; exit 0; }
 
@@ -64,6 +66,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/zellij"
+  fm_test_write_active_treehouse_fake "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -846,6 +849,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "worktree=$dir/missing-worktree" \
     "project=$project" \
     "kind=scout" \
+    "treehouse_slot=slot-fixture" \
+    "treehouse_lease=lease-zghost" \
     "decisions_reviewed=1" \
     "decision_keys="
   printf '[]\n' > "$dir/responses/1.out"

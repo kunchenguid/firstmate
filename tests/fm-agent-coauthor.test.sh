@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-agent-coauthor)
@@ -96,7 +98,9 @@ GIT_AUTHOR_NAME='Author Example' GIT_AUTHOR_EMAIL='author@example.invalid' \
   git -C "$FM_FAKE_COMMIT_WORKTREE" commit --amend -q -F "$FM_FAKE_COMMIT_MESSAGE"
 SH
   chmod +x "$fakebin/tmux" "$fakebin/codex"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh claude opencode pi pi-signed grok kimi cursor-agent
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_quota_axi "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh claude opencode pi pi-signed grok kimi cursor-agent
   printf '%s\n' "$fakebin"
 }
 

@@ -31,6 +31,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
@@ -141,7 +143,7 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-backend-hometag-lib.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -806,7 +808,8 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_test_write_active_treehouse_fake "$fb" "$wt"
+  fm_fake_quota_axi "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -876,7 +879,8 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_test_write_active_treehouse_fake "$fb" "$wt"
+  fm_fake_quota_axi "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -938,7 +942,26 @@ SH
 #!/usr/bin/env bash
 set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
-exit 0
+case "${1:-}" in
+  status)
+    separator=
+    printf '['
+    for meta in "${FM_STATE_OVERRIDE:?}"/*.meta; do
+      [ -f "$meta" ] || continue
+      path=$(sed -n 's/^worktree=//p' "$meta" | head -1)
+      [ -n "$path" ] || continue
+      holder=${meta##*/}
+      holder=${holder%.meta}
+      printf '%s' "$separator"
+      jq -cn --arg path "$path" --arg holder "$holder" \
+        '{name:"slot-fixture",path:$path,status:"leased",lease_id:("lease-"+$holder),lease_holder:$holder}'
+      separator=,
+    done
+    printf ']\n'
+    ;;
+  return) exit 0 ;;
+  *) exit 1 ;;
+esac
 SH
   chmod +x "$fb/tmux" "$fb/treehouse"
   printf '%s\n' "$fb"
@@ -1003,8 +1026,8 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
-    "teardown did not call treehouse return --force <worktree>"
+  assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f''--if-lease-id'$'\x1f'"lease-$id"$'\x1f''--if-lease-holder'$'\x1f'"$id"$'\x1f'"$wt" \
+    "teardown did not conditionally return the recorded treehouse lease"
   # The legacy fixture's adapter comes from BASE_REF, so its selector form is
   # whatever the merge-base carried: permissive while the exact-selector change
   # was still on a branch, exact for every branch cut after it landed on main.
@@ -1023,10 +1046,12 @@ test_teardown_conformance_old_vs_new() {
 # --- backend selection loudly refuses an unknown backend --------------------
 
 test_spawn_refuses_unknown_backend_flag() {
-  local out status
+  local out status fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/unknown-backend-flag")
+  fm_fake_quota_axi "$fakebin"
   # bogus names a backend with no adapter at all; zellij and orca both
   # graduated to real adapters and have their own spawn tests.
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
@@ -1036,8 +1061,10 @@ test_spawn_refuses_unknown_backend_flag() {
 }
 
 test_spawn_refuses_codex_app_backend_flag() {
-  local out status
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  local out status fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-app-backend-flag")
+  fm_fake_quota_axi "$fakebin"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
@@ -1047,8 +1074,10 @@ test_spawn_refuses_codex_app_backend_flag() {
 }
 
 test_spawn_refuses_unknown_fm_backend_env() {
-  local out status
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+  local out status fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/unknown-backend-env")
+  fm_fake_quota_axi "$fakebin"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
   status=$?

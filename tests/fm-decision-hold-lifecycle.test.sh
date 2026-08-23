@@ -6,6 +6,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -27,7 +29,8 @@ make_home() {  # <name>
 ## Done
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
   printf '%s\n' "$home"
 }
 
@@ -115,7 +118,9 @@ write_origin_meta() {  # <home> <id> [kind]
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=$kind"
+    "mode=$kind" \
+    "treehouse_lease=lease-$id" \
+    "treehouse_slot=slot-fixture"
 }
 
 test_structured_holds_survive_teardown_and_route_resolution() {
@@ -426,7 +431,8 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null

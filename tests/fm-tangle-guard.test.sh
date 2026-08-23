@@ -18,6 +18,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/treehouse-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tangle-lib.sh"
@@ -199,7 +201,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -278,7 +281,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_test_write_active_treehouse_fake "$fakebin"
+  fm_fake_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -322,9 +326,9 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): worktree entry and the worktree wait loop target the stable id.
+  assert_grep "send-keys -t @spawnwid cd -- '$wt' Enter" "$rec" \
+    "the leased worktree entry must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

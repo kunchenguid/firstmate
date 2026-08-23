@@ -141,9 +141,9 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
-# The shared reader axis must reach each re-executed pair. A writer brief gives
-# the child a behavioral oracle: only a forwarded --access reader can produce
-# the reader-vs-writer contract mismatch.
+# The shared reader axis must reach each re-executed pair. A supported legacy
+# writer brief has no reader marker, so only a forwarded --access reader can
+# produce the child-side access mismatch.
 test_reader_batch_forwards_shared_access() {
   local home id project out status
   home="$TMP_ROOT/reader-batch-home"
@@ -151,11 +151,11 @@ test_reader_batch_forwards_shared_access() {
   project="$home/projects/alpha"
   mkdir -p "$home/data/$id"
   fm_git_init_commit "$project"
-  printf 'writer scout brief\n\n# Task\nfixture\n' > "$home/data/$id/brief.md"
+  printf 'legacy writer scout brief\n' > "$home/data/$id/brief.md"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$id=projects/alpha" --scout --access reader 2>&1)
+    "$SPAWN" "$id=projects/alpha" --scout --access reader --harness claude 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "reader batch with a writer brief should exit non-zero"
   printf '%s\n' "$out" | grep -F 'access mismatch' >/dev/null \

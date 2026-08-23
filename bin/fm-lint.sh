@@ -3,15 +3,15 @@
 #
 # Runs every canonical shell root with ShellCheck's default severity, extended
 # analysis, ambient configuration disabled, and one exact ShellCheck version.
-# CI and no-mistakes both invoke this script with no arguments, so the file set,
-# rule set, version, bounded execution, and diagnostics ordering cannot drift.
+# CI and no-mistakes share this script's file set, rule set, version, and
+# diagnostics ordering; callers may choose a different worker bound.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Each shard writes separate diagnostics, and the parent replays them in
+# deterministic order. FM_LINT_JOBS=1 runs both shards serially with identical
+# diagnostics; bin/fm-ci.sh's header owns Water 7's caller-specific override.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.

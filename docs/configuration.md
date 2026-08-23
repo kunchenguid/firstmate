@@ -144,7 +144,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo, pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI, and points the mandatory Review step at the repository's design-fit owner.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo, pins `commands.lint` to `bin/fm-lint.sh` so local lint and CI share one lint definition and deterministic diagnostics, and points the mandatory Review step at the repository's design-fit owner.
 `bin/fm-pr-merge.sh` uses the user-writable PR-body Review receipt as an omission guard for Firstmate self-merges, not as proof that the review ran; its header owns the explicit captain-authorized escape, which fails closed unless it can first leave a timestamped receipt in the task metadata.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
