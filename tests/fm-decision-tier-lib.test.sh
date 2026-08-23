@@ -217,13 +217,13 @@ pass "log_auto refuses an id that normalizes to one already recorded, even spell
 
 # --- a lock abandoned by a dead writer must not block every later writer ---
 #
-# A lock directory left behind by a process that died between `mkdir` and
-# `rmdir` (killed, crashed, or the append itself failed) has no owner left to
-# release it. fm_decision_tier_lock_acquire must detect that the recorded PID
-# is dead and break the lock rather than retrying `mkdir` forever. This
-# fabricates exactly that: a lock directory whose pid file names a PID that
-# has already exited, then asserts a fresh acquire completes instead of
-# hanging. Comment out the `kill -0`/`rm -rf` stale-lock recovery in
+# A lock left behind by a process that died before releasing it (killed,
+# crashed, or the append itself failed) has no owner left to release it.
+# fm_decision_tier_lock_acquire must detect that the recorded PID is dead
+# and break the lock rather than retrying `ln -s` forever. This fabricates
+# exactly that: a lock symlink whose target names a PID that has already
+# exited, then asserts a fresh acquire completes instead of hanging.
+# Comment out the `kill -0`/`rm -f` stale-lock recovery in
 # fm_decision_tier_lock_acquire to see this go red (it will hang until the
 # poll loop below gives up and fails).
 STALE_LOG="$TMP_ROOT/decisions-stale.log"
@@ -231,8 +231,7 @@ mkdir -p "$(dirname "$STALE_LOG")"
 ( : ) &
 DEAD_PID=$!
 wait "$DEAD_PID" 2>/dev/null
-mkdir -p "$STALE_LOG.lock"
-printf '%s' "$DEAD_PID" > "$STALE_LOG.lock/pid"
+ln -s "$DEAD_PID" "$STALE_LOG.lock"
 
 ( fm_decision_tier_lock_acquire "$STALE_LOG" && fm_decision_tier_lock_release "$STALE_LOG" ) &
 ACQUIRE_PID=$!
@@ -249,8 +248,45 @@ if [ "$ACQUIRED" -ne 1 ]; then
   fail "lock_acquire must break a lock left by a dead PID instead of blocking forever"
 fi
 wait "$ACQUIRE_PID" 2>/dev/null
-[ ! -d "$STALE_LOG.lock" ] || fail "a broken stale lock must end up released, not just bypassed once"
-pass "lock_acquire detects a lock directory left by a dead PID and breaks it instead of blocking forever"
+[ ! -e "$STALE_LOG.lock" ] || fail "a broken stale lock must end up released, not just bypassed once"
+pass "lock_acquire detects a lock symlink left by a dead PID and breaks it instead of blocking forever"
+
+# --- a lock left with no readable PID must not block every later writer ----
+#
+# Greptile flagged a real gap in an earlier two-step mkdir-then-write-pid-file
+# scheme: a holder killed between creating the lock directory and writing its
+# PID into it left a lock with an empty/missing PID, which the old recovery
+# logic only broke when a PID was present and dead - an unreadable PID just
+# meant "keep sleeping", forever. Switching the lock to a single atomic
+# `ln -s "$$" "$lockdir"` (the fix above) makes that exact interior state
+# unreachable through this library's own code, but a corrupt or foreign
+# leftover at the lock path (e.g. a plain file, not a PID symlink) must still
+# not wedge every later writer. This fabricates that directly: a lock path
+# that exists but is not a symlink, so `readlink` on it fails and yields no
+# PID at all. Change the `[ -z "$holder_pid" ] ||` guard back to requiring a
+# live PID (i.e. only break on `-n "$holder_pid" && ! kill -0 ...`) to see
+# this go red - it will hang until the poll loop below gives up and fails.
+NOPID_LOG="$TMP_ROOT/decisions-nopid.log"
+mkdir -p "$(dirname "$NOPID_LOG")"
+: > "$NOPID_LOG.lock"
+
+( fm_decision_tier_lock_acquire "$NOPID_LOG" && fm_decision_tier_lock_release "$NOPID_LOG" ) &
+NOPID_ACQUIRE_PID=$!
+NOPID_ACQUIRED=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$NOPID_ACQUIRE_PID" 2>/dev/null; then
+    NOPID_ACQUIRED=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$NOPID_ACQUIRED" -ne 1 ]; then
+  kill "$NOPID_ACQUIRE_PID" 2>/dev/null
+  fail "lock_acquire must break a lock with no readable PID instead of blocking forever"
+fi
+wait "$NOPID_ACQUIRE_PID" 2>/dev/null
+[ ! -e "$NOPID_LOG.lock" ] || fail "a broken no-PID lock must end up released, not just bypassed once"
+pass "lock_acquire detects a lock with no readable PID and breaks it instead of blocking forever"
 
 # --- successful logging for each tier ---------------------------------------
 

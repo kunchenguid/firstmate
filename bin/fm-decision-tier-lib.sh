@@ -127,38 +127,40 @@ fm_decision_tier_require_meaningful() {  # <label> <value>
 
 # fm_decision_tier_lock_acquire / _release: a minimal mutex around the
 # check-and-append sequence that opens a decision's lifecycle
-# (require_unused_id followed by the log write). `mkdir` is atomic on every
-# filesystem this library runs on, so two processes racing to open the same
-# log always see exactly one of them create the lock directory first; that
-# ordering is what stops two writers from both passing the uniqueness check
-# for the same id before either has appended its record.
+# (require_unused_id followed by the log write). The lock is a symlink
+# whose target is the holder's PID, created with `ln -s`: symlink creation
+# is a single atomic syscall, so the lock's existence and its holder's PID
+# are established in the exact same instant - there is no window where the
+# lock exists but its PID is not yet readable (unlike a two-step
+# mkdir-then-write-pid-file scheme, where a holder killed between the two
+# steps would leave a lock no contender could ever identify as abandoned).
 #
-# A holder that dies (killed, crashes, or the append itself fails) between
-# `mkdir` and `rmdir` leaves the lock directory behind with nothing left to
-# release it - every later writer would then retry `mkdir` forever. To
-# recover from that, the holder records its PID inside the lock directory;
-# a contender that fails to `mkdir` checks whether that PID is still alive
-# (`kill -0`) and, if not, treats the lock as abandoned and breaks it before
-# retrying. A live holder's PID always answers `kill -0`, so this never
-# steals a lock that is still legitimately held.
+# A holder that dies (killed, crashes, or the append itself fails) before
+# releasing leaves the symlink behind with nothing left to remove it -
+# every later writer would then retry `ln -s` forever. To recover from
+# that, a contender that fails to `ln -s` reads the symlink's target
+# (`readlink`) and checks whether that PID is still alive (`kill -0`); if
+# it is not - or the lock isn't a valid PID symlink at all, e.g. a
+# leftover/corrupt artifact - the lock is treated as abandoned and broken
+# before retrying. A live holder's PID always answers `kill -0`, so this
+# never steals a lock that is still legitimately held.
 fm_decision_tier_lock_acquire() {  # <log_file>
   local log=$1
   local lockdir="$log.lock" dir holder_pid
   dir=$(dirname "$log")
   [ -d "$dir" ] || mkdir -p "$dir" || return 1
-  while ! mkdir "$lockdir" 2>/dev/null; do
-    holder_pid=$(cat "$lockdir/pid" 2>/dev/null) || holder_pid=""
-    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
-      rm -rf "$lockdir" 2>/dev/null
+  while ! ln -s "$$" "$lockdir" 2>/dev/null; do
+    holder_pid=$(readlink "$lockdir" 2>/dev/null) || holder_pid=""
+    if [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
+      rm -f "$lockdir" 2>/dev/null
       continue
     fi
     sleep 0.05
   done
-  printf '%s' "$$" > "$lockdir/pid"
 }
 
 fm_decision_tier_lock_release() {  # <log_file>
-  rm -rf "$1.lock" 2>/dev/null || true
+  rm -f "$1.lock" 2>/dev/null || true
 }
 
 # fm_decision_tier_require_unused_id: refuses an id that already has any
