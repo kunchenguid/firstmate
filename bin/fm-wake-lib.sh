@@ -400,21 +400,32 @@ fm_lock_claim_blocked_by_steal() {
   return 0
 }
 
+# Why the owner directory would not take this process's pid. Creating a symlink
+# needs no data blocks, so a full or read-only volume can admit the link and
+# then refuse the write that follows - the ENOSPC case this whole mechanism
+# exists for. A racing reclaimer that resolved our fresh link and discarded the
+# owner directory under us refuses it too, and that is ordinary contention on a
+# perfectly healthy volume. The directory itself is the discriminator: still
+# there means the filesystem said no, gone means a racer took it away.
+fm_lock_note_claim_write_failure() {  # <owner-dir>
+  if [ -d "$1" ]; then
+    FM_LOCK_CREATE_FAILURE=unavailable
+  else
+    FM_LOCK_CREATE_FAILURE=contended
+  fi
+}
+
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
   mypid=${BASHPID:-$$}
-  # Writing the pid and reading it back are filesystem primitives, and creating
-  # a symlink needs no data blocks, so a full or read-only volume can let the
-  # link in and refuse these. Recording them as contention would report the
-  # ENOSPC this whole mechanism exists for as an ordinary held lock.
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
-    FM_LOCK_CREATE_FAILURE=unavailable
+    fm_lock_note_claim_write_failure "$ownerdir"
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$mypid" ]; then
-    FM_LOCK_CREATE_FAILURE=unavailable
+    fm_lock_note_claim_write_failure "$ownerdir"
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -521,8 +532,8 @@ fm_lock_try_create() {
     # path is a useless witness to what happens next: a reclaimer renaming our
     # fresh link away leaves it as absent as ENOSPC would. Contention is the
     # right default reading of a later failure here, but not the only one -
-    # fm_lock_claim still has primitives of its own to run, and it records a
-    # refusal of those as unavailable itself.
+    # fm_lock_claim still has primitives of its own to run, and it tells a
+    # refusal of those apart from a racer for itself.
     FM_LOCK_CREATE_FAILURE=contended
     if fm_lock_points_to_owner "$lockdir" "$ownerdir" \
       && fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then

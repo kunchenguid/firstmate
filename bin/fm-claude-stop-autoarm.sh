@@ -50,11 +50,26 @@
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
 #
-# This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# This hook never blocks the Stop decision itself and never prints to stdout.
+# Exit 2 carries the rewake banner on stderr. Exit 0 is silent in every case but
+# one: a state directory the filesystem refuses outright, where the hook prints
+# its refusal on stderr and still exits 0.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
+#
+# Known limitation of that one loud exit 0, stated rather than papered over.
+# When the state directory itself cannot be written, this hook has no good way
+# to reach the operator. It cannot leave a durable marker, because every marker
+# it owns lives in that same directory. It cannot exit 2, because exit 2 demands
+# a rewake turn and the two markers that bound that loop
+# (.claude-autoarm-failure-notified and .claude-autoarm-failure-alarmed) are
+# unwritable in exactly that state, so nothing could ever end it - an unbounded
+# rewake loop is worse than a refusal that is merely hard to see. That leaves
+# stderr, which the Stop hook contract may not surface on a zero exit, so the
+# refusal may only reach the hook log. The synchronous guard
+# (bin/fm-turnend-guard.sh --claude) fires on the same Stop and still blocks, so
+# the turn is not left believing supervision exists.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -155,13 +170,19 @@ fi
 # code the hook contract requires stands and the refusal goes out on stderr.
 autoarm_refuse_if_lock_unavailable() {  # <lock-path>
   [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ] || return 0
-  printf 'firstmate watcher auto-arm REFUSED - the filesystem refused to create %s (out of space, read-only, or not writable), so no owner claim was taken and this Stop armed no watcher. Supervision is NOT running for this home until that is fixed.\n' \
+  printf 'firstmate watcher auto-arm REFUSED - the filesystem refused to create or reclaim %s (out of space, read-only, or not writable), so no owner claim was taken and this Stop armed no watcher. Supervision is NOT running for this home until that is fixed.\n' \
     "$1" >&2
   exit 0
 }
 if ! fm_lock_try_acquire "$OWNER_LOCK"; then
   autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
-  fm_autoarm_release_abandoned "$STATE" || exit 0
+  # The reclaim takes the steal mutex beside the lock, so it has a refusal of
+  # its own to report. A claim that is simply not abandoned leaves the held
+  # reason from the acquire above in place, and the helper stands down.
+  if ! fm_autoarm_release_abandoned "$STATE"; then
+    autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
+    exit 0
+  fi
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
     exit 0

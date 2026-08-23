@@ -1214,6 +1214,38 @@ test_lock_claim_pid_write_refusal_is_unavailable_not_held() {
   pass "a claim whose pid write is refused reports unavailable, not a held lock"
 }
 
+# The same two statements fail when a racing reclaimer resolves this process's
+# fresh link and discards the owner directory under it, which is ordinary
+# contention on a perfectly healthy volume. Removing the directory the way
+# fm_lock_discard_owner does reproduces that state at the statement it happens
+# at, without racing two real processes through a window measured in syscalls.
+test_lock_claim_racer_removed_owner_is_contention_not_unavailable() {
+  local dir state lockdir out
+  dir=$(make_case lock-claim-racer-removed)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      rm -rf "$1" 2>/dev/null || return 1
+      return 0
+    }
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"rc=1 reason=unavailable"*)
+      fail "a racing reclaimer was blamed on the filesystem: $out" ;;
+    *"rc=1 reason=held"*) ;;
+    *) fail "a claim whose owner directory a racer removed was misreported: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "a claim whose owner directory a racer removed is contention, not a refusing filesystem"
+}
+
 # A watcher whose lock the filesystem refuses has no lock, no recorded pid and
 # no peer process: reporting the ordinary singleton message and exiting 0 there
 # tells an operator a supervisor exists when none does.
@@ -1626,6 +1658,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_refuses_when_the_filesystem_cannot_create
 test_lock_failure_reason_separates_held_from_unavailable
 test_lock_claim_pid_write_refusal_is_unavailable_not_held
+test_lock_claim_racer_removed_owner_is_contention_not_unavailable
 test_watch_refuses_when_lock_cannot_be_created
 test_lock_steal_is_bounded_to_one_level
 test_lock_clears_legacy_steal_chains
