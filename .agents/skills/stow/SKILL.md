@@ -20,6 +20,8 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 - `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
 - `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
+- `<!--a:YYYY-MM-DD/N-->` - either dated marker may carry `/N`, the number of passes that evaluated the entry without reinforcing it.
+  An absent `/N` means zero, so an entry the fleet keeps exercising costs no counter bytes at all.
 - `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
 - `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
@@ -27,13 +29,14 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
 - While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
 - Never restart the shared no-mistakes daemon while runs are active. <!--P-->
+- Codex writes its trust prompt to stderr, not stdout. <!--a:2026-07-28/6-->
 ```
 
 The tier names say what the pass does with an entry:
 
 - `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that an explicit per-item captain approval may offload it under the flow below.
-- `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
+- `aging` - it must re-prove itself: an entry is stale once it reaches either horizon, whichever comes first - 10 passes that evaluated it without reinforcing it, or 30 days since its last-reinforced date - and a stale entry is re-validated (date refreshed and counter cleared) or archived, never kept by inertia alone.
+- `perishable` - it is stored expecting disposal: an entry is stale once it reaches either horizon, whichever comes first - 3 unreinforced passes, or 7 days since its last-reinforced date - and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
   Omission is reserved for non-durable material or facts already owned elsewhere.
 
@@ -48,6 +51,10 @@ Marking rules:
   The required receipt action for that file is `routed`, not `unchanged`; name the ownership exception and do not declare the session reset-safe.
 - A pre-existing missing or hand-dropped marker is never grounds for destructive treatment: it means the file's default tier; an unmarked entry in a default-pinned file is simply pinned, while an unmarked entry in a file whose default tier carries a clock follows the migration rule below.
 
+Each tier carries two horizons because admission and decay must be commensurable.
+A pass admits the findings that pass produced, so growth is a per-pass quantity, while a wall-clock horizon alone is a per-day one.
+In a home that stows daily those two rates diverge by the stow cadence, the wall-clock horizon is reached so rarely that memory only grows, and the pass counter is the horizon that actually bounds that home.
+The date horizon still bounds a rarely stowed home, where a single pass can already exceed it.
 Decay advances only when a pass runs, so a home stowed less often than a clock experiences that clock at its stow interval.
 
 ## Required startup-memory pass
@@ -72,10 +79,13 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Retain lower-utility material only while budget remains.
 4. Reinforce and stamp.
    Refresh an entry's last-reinforced date to today only when this session actually exercised, confirmed, or re-derived it.
+   Refreshing that date also clears the entry's unreinforced-pass counter, and nothing else clears it.
    **Hard rule: reinforcement requires independent evidence from this session that you can name in the receipt; plausibility, importance, prior knowledge, and the entry's own text are not evidence, and any explicit statement that no confirming session evidence exists requires the no-evidence path.**
    For an unmarked `data/learnings.md` entry with no such evidence, the no-evidence path is always to append `<!--g-->` and retain it for this entire pass; never stamp or archive it during that same invocation.
    Stamp each newly written entry with today's date and its tier per the marking rules, and admit a new `perishable` entry only with its named checkable expiry condition in the prose.
-5. Evaluate every dated entry in each editable memory file against its tier clock.
+5. Tick, then evaluate every dated entry in each editable memory file against its tier clocks.
+   First increment the unreinforced-pass counter of every dated entry step 4 did not reinforce; that increment is the pass tick, and it is what lets a clock fire in a home whose entries never sit unused for a wall-clock horizon.
+   Then judge each dated entry against both of its horizons and treat it as stale at whichever it reaches first.
    Re-validate a stale `aging` entry from current evidence and refresh its date, or archive it.
    Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it in this pass.
    Promote `perishable` to `aging` when its condition keeps proving durable past its expected life, and retier in place when a supersession changes an entry's lifetime.
@@ -107,7 +117,7 @@ Never describe the session as reset-safe while the memory total is over budget o
 ## The cold tier: data/memory-archive.md
 
 Stale never means deleted: pruning an entry from an editable memory file always means moving it to `data/memory-archive.md`, this home's append-only, never-injected cold tier, gitignored with the rest of `data/` and never counted by the budget report.
-Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, and the reason it left.
+Each archived entry keeps its provenance under a dated pass heading: source file, tier, last-reinforced date, unreinforced-pass counter when it carried one, and the reason it left.
 Archive provenance stays verbose rather than compact because the cold tier is never budget-counted.
 
 ```markdown
@@ -115,7 +125,7 @@ Archive provenance stays verbose rather than compact because the cold tier is ne
 - (from learnings.md, tier: perishable, reinforced: 2026-06-30) While state/.afk exists, the away-daemon owns triage... [archived: unreinforced 39d]
 ```
 
-Reasons include `unreinforced <N>d`, `budget oldest-first`, and `legacy-unvalidated`.
+Reasons include `unreinforced <N>d` and `unreinforced <N>p`, naming whichever horizon the entry reached first, plus `budget oldest-first` and `legacy-unvalidated`.
 Archiving is a move, not a removal, and recovery is `grep` plus copy back with no tooling.
 Each home keeps its own archive, the archive never cascades, and truncating a grown archive is a captain decision, not a mechanism.
 

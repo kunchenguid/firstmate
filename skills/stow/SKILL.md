@@ -93,6 +93,8 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 - `<!--a:YYYY-MM-DD-->` - an `aging` entry; the embedded date is its last-reinforced date.
 - `<!--p:YYYY-MM-DD-->` - a `perishable` entry; the embedded date is its last-reinforced date.
+- `<!--a:YYYY-MM-DD/N-->` - either dated marker may carry `/N`, the number of passes that evaluated the entry without reinforcing it.
+  An absent `/N` means zero, so an entry you keep exercising costs no counter bytes at all.
 - `<!--P-->` - an explicitly `pinned` entry in a file whose default tier is not `pinned`.
 - `<!--g-->` - migration-only: an unconfirmed legacy entry that has consumed its one grace cycle, carrying no date because grace is not reinforcement.
 
@@ -100,13 +102,14 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 - The staging deploy needs the VPN profile active or the smoke test hangs. <!--a:2026-08-03-->
 - CI is red on the flaky auth test until the pinned runner image updates (tracked in TODO). <!--p:2026-07-20-->
 - Always run the schema linter before touching migrations. <!--P-->
+- The staging seed script must run before the fixture import. <!--a:2026-07-28/6-->
 ```
 
 The tier names say what this skill does with an entry:
 
 - `pinned` - never decays and is never dropped to shorten a file; it changes only when the user or reality changes it.
-- `aging` - must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
-- `perishable` - written to be thrown out: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
+- `aging` - must re-prove itself: an entry is stale once it reaches either horizon, whichever comes first - 10 passes that evaluated it without reinforcing it, or 30 days since its last-reinforced date - and a stale entry is re-validated (date refreshed and counter cleared) or archived, never kept by inertia alone.
+- `perishable` - written to be thrown out: an entry is stale once it reaches either horizon, whichever comes first - 3 unreinforced passes, or 7 days since its last-reinforced date - and its text must name a checkable expiry condition, such as a ticket, a version, or a dated expectation.
   An entry that cannot name a checkable condition is `aging`, not `perishable`.
 
 Rules:
@@ -119,9 +122,12 @@ Rules:
   During one-time migration, add the pointer even to a default-pinned file that contains only unmarked entries, so every governed file names its scheme owner.
 - Refresh an entry's last-reinforced date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
+  Refreshing that date also clears the entry's unreinforced-pass counter, and nothing else clears it.
+- Increment the unreinforced-pass counter of every dated entry this pass did not reinforce, before judging staleness.
+  That increment is what lets a clock fire where you stow often: admitting findings is a per-pass event, so decay needs a per-pass horizon too, while the date horizon keeps bounding a project you stow rarely.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
-- Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, and a one-line reason.
+- Stale never means deleted: a stale entry moves to a `.stow-archive.md` in the source file's own directory, never loaded by any session, and its archive record includes the source filename, tier, reinforcement date when present, the unreinforced-pass counter when it carried one, and a one-line reason naming whichever horizon it reached first.
   In a git worktree, verify that this archive path is not already tracked in the index before writing any archived fact there.
   If it is tracked, do not write to it and report that archival is blocked until the user chooses a safe destination.
   Otherwise add a `.stow-archive.md` line to a `.gitignore` file in the archive's directory, and never write archived facts into a git-tracked file.
