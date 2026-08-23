@@ -138,7 +138,9 @@ When active, `bin/fm-spawn.sh` runs `bin/fm-treehouse-pool-sweep.sh` against the
 - Dirty worktree: tracked modifications, staged changes, or untracked non-ignored files.
 - HEAD contains commits not reachable from an approved durable ref: local branches (`refs/heads/*`), tags (`refs/tags/*`), or rescue refs (`refs/firstmate/rescue/*`). Reflogs are not refs, so a commit reachable only from a reflog is unreferenced.
 
-A refusal aborts the spawn with an error naming the worktree, the sweep exit code, and this config file; the exit codes and the remote-tracking-ref reachability rules are owned by `bin/fm-treehouse-pool-sweep.sh`'s header (`bin/fm-treehouse-pool-sweep.sh --help`).
+It also fails closed when git cannot answer a probe - an unreadable HEAD, a corrupt ref database, an unreadable object - refusing under the same exit code as the negative answer it resembles but with its own diagnostic.
+
+A refusal aborts the spawn with an error naming the worktree, the sweep exit code, and this config file; the exit codes, diagnostics, and the remote-tracking-ref reachability rules are owned by `bin/fm-treehouse-pool-sweep.sh`'s header (`bin/fm-treehouse-pool-sweep.sh --help`).
 
 This is a MITIGATION for the worktree reuse incident, not a fix for the underlying Treehouse invariant that no consumer can reuse an unsafe worktree.
 Two structural gaps it cannot close: a direct `treehouse get` by anything other than firstmate bypasses the sweep, and another firstmate home can race between sweep and acquire.
