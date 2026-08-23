@@ -152,6 +152,71 @@ test_record_for_a_non_deviable_item_is_refused() {
   pass "a record beside a non-deviable item is refused, loudly"
 }
 
+test_unsafe_held_values_are_refused() {
+  local rec primary second report out status linked
+
+  rec=$(new_home_pair symlink-value)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  linked="$TMP_ROOT/symlink-value-target"
+  printf 'tmux\n' > "$linked"
+  ln -s "$linked" "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/symlink-value.report"
+
+  out=$(converge "$primary" "$second" "$report") \
+    || fail "symlinked held value did not follow normal convergence"
+  assert_contains "$out" "deviation record rejected" \
+    "a symlinked held value must be reported as rejected"
+  assert_contains "$out" "held value is a symlink" \
+    "the rejection must name the unsafe held value"
+  [ ! -L "$second/config/backend" ] \
+    || fail "normal convergence preserved the symlinked held value"
+  [ "$(cat "$second/config/backend")" = herdr ] \
+    || fail "normal convergence did not restore the primary value over a symlink"
+  [ "$(cat "$linked")" = tmux ] \
+    || fail "normal convergence changed the symlink target"
+
+  rec=$(new_home_pair directory-value)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  mkdir "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/directory-value.report"
+
+  status=0
+  out=$(converge "$primary" "$second" "$report" 2>&1) || status=$?
+  expect_code 1 "$status" "normal convergence over a directory-valued item"
+  assert_contains "$out" "deviation record rejected" \
+    "a non-ordinary held value must be reported as rejected"
+  assert_contains "$out" "held value is not an ordinary file" \
+    "the rejection must name the non-ordinary held value"
+  assert_grep $'backend\terror\tfailed to copy' "$report" \
+    "normal convergence must retain its existing non-ordinary destination error"
+
+  rec=$(new_home_pair hardlinked-value)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  linked="$TMP_ROOT/hardlinked-value-target"
+  printf 'tmux\n' > "$linked"
+  ln "$linked" "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/hardlinked-value.report"
+
+  out=$(converge "$primary" "$second" "$report") \
+    || fail "hardlinked held value did not follow normal convergence"
+  assert_contains "$out" "held value is hardlinked" \
+    "a hardlinked held value must be reported as rejected"
+  [ "$(cat "$second/config/backend")" = herdr ] \
+    || fail "normal convergence did not restore the primary value over a hardlink"
+  [ "$(cat "$linked")" = tmux ] \
+    || fail "normal convergence changed the other hardlink"
+  pass "unsafe held values are rejected before normal convergence"
+}
+
 test_deviation_holds_against_primary_absence() {
   local rec primary second report out
   rec=$(new_home_pair absence)
@@ -305,6 +370,7 @@ test_agreeing_deviation_stays_quiet
 test_primary_revokes_by_removing_the_record
 test_record_without_evidence_is_refused
 test_record_for_a_non_deviable_item_is_refused
+test_unsafe_held_values_are_refused
 test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
 test_remote_receiver_agreement_stays_quiet

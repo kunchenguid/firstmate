@@ -173,6 +173,29 @@ fm_config_deviation_evidence() {
   return 0
 }
 
+fm_config_deviation_value_rejection() {  # <path>
+  local path=$1 links
+  if [ -L "$path" ]; then
+    printf '%s' "held value is a symlink"
+    return 0
+  fi
+  [ -e "$path" ] || return 1
+  if [ ! -f "$path" ]; then
+    printf '%s' "held value is not an ordinary file"
+    return 0
+  fi
+  links=$(fm_inherit_file_link_count "$path" 2>/dev/null || true)
+  if [ "$links" != 1 ]; then
+    if [ -n "$links" ]; then
+      printf '%s' "held value is hardlinked"
+    else
+      printf '%s' "held value link count cannot be read"
+    fi
+    return 0
+  fi
+  return 1
+}
+
 # The bounded value a config item currently presents, quoted, or the word
 # "absence" when it holds none.
 fm_config_deviation_display() {  # <path>
@@ -204,9 +227,13 @@ fm_config_relay_remote_deviations() {  # <secondmate-id>, remote output on stdin
 # direction is silent: the home never keeps a value the primary cannot see, and
 # the primary never reverts a deviation without reporting it.
 fm_config_deviation_holds() {
-  local dest_config=$1 item=$2 src=$3 dest=$4 answer rc home
+  local dest_config=$1 item=$2 src=$3 dest=$4 answer rc home rejection
   answer=$(fm_config_deviation_evidence "$dest_config" "$item") && rc=0 || rc=$?
   [ "$rc" -ne 1 ] || return 1
+  if [ "$rc" -eq 0 ] && rejection=$(fm_config_deviation_value_rejection "$dest"); then
+    answer=$rejection
+    rc=2
+  fi
   home=${dest_config%/config}
   if [ "$rc" -eq 2 ]; then
     printf 'SECONDMATE_SYNC: secondmate home %s: config/%s deviation record rejected (%s); converging to the primary value\n' \
