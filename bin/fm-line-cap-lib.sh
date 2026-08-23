@@ -43,6 +43,22 @@ fm_cap_line_var() {
   FM_LINE_CAP_LINE="${line:0:$keep}$FM_LINE_CAP_SUFFIX"
 }
 
+fm_cap_prefixed_line_var() {  # <prefix> <content> [<max>]
+  local prefix=$1 content=$2 max=${3:-$FM_LINE_CAP_DEFAULT} available keep
+  available=$((max - ${#prefix}))
+  [ "$available" -gt 0 ] || return 1
+  if [ "${#content}" -le "$available" ]; then
+    FM_LINE_CAP_LINE="${prefix}${content}"
+    return 0
+  fi
+  if [ "$available" -ge "${#FM_LINE_CAP_SUFFIX}" ]; then
+    keep=$((available - ${#FM_LINE_CAP_SUFFIX}))
+    FM_LINE_CAP_LINE="${prefix}${content:0:$keep}$FM_LINE_CAP_SUFFIX"
+  else
+    FM_LINE_CAP_LINE="${prefix}${content:0:$available}"
+  fi
+}
+
 # fm_cap_line <line> [<max>]: the same cut, printed on stdout, for a caller that
 # is streaming lines rather than accumulating them.
 fm_cap_line() {

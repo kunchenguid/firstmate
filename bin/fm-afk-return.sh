@@ -57,19 +57,20 @@ preserve_evidence() {  # <destination>
 }
 
 scan_open_blockers() {  # -> tab-separated blocker rows
-  local meta id status key verb summary clean_summary
+  local meta id status open key verb summary clean_summary
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
     [ -f "$status" ] || continue
+    open=$(status_open_decisions "$status") || return 1
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
       printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
     done <<EOF
-$(status_open_decisions "$status")
+$open
 EOF
   done
 }
@@ -178,7 +179,10 @@ return_reconcile() {
     append_evidence escalation "$escalations" "$evidence"
   fi
 
-  scan_open_blockers > "$blockers"
+  if ! scan_open_blockers > "$blockers"; then
+    append_evidence lifecycle 'a status decision ledger could not be read; retry catch-up before ordinary work' "$evidence"
+    lifecycle_ok=0
+  fi
   if [ "$lifecycle_ok" -ne 1 ] || [ -s "$blockers" ]; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2

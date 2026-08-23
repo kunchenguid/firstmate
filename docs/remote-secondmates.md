@@ -174,7 +174,7 @@ When the verified remote endpoint accepts the text and Enter but synchronous sub
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 
 Marked requests keep the existing correlation contract.
-The remote charter appends replies to `state/parent-replies.status` in the remote home.
+The remote charter appends replies to `state/parent-replies.status` in the remote home, and a decision the mate raises itself reaches the same log through `bin/fm-secondmate-report.sh --escalate`, which resolves that channel from the home's own bindings rather than a hand-typed path.
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.

@@ -386,6 +386,17 @@ EOF
 # writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
+# 0 when <key> belongs to a reserved namespace.
+fm_classify_decision_key_is_reserved() {  # <key>
+  local key=$1 prefix
+  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
+    case "$key" in
+      "$prefix"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
 _fm_decision_key_transition_allowed() {  # <key> <note>
   local key=$1 note=$2 prefix
@@ -439,12 +450,15 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
   local f=$1 line resolve held open=''
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    return 0
+  fi
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-  done < "$f"
+  done < "$f" || return 2
   printf '%s' "$open"
 }
 

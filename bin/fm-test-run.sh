@@ -173,6 +173,7 @@ family_for_basename() {
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-remote-job-orphan-reap.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
     fm-remote-secondmate-trace-context.test.sh|\
+    fm-parent-channel.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
@@ -905,6 +906,16 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;
+    # The parent escalation channel: one owner shared by fm-send's answerer
+    # close, the secondmate escalation helper, and inactive reconciliation, so a
+    # change here selects all three of their families. Must precede the broad
+    # bin/fm-secondmate* clause below, which would otherwise shadow it.
+    bin/fm-parent-channel-lib.sh|bin/fm-secondmate-parent-lib.sh|\
+    bin/fm-secondmate-report.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
+      ;;
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
@@ -956,6 +967,9 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # fm-send owns the answerer-close, whose parent-channel propagation is
+      # covered in the secondmate family.
+      printf '%s\n' secondmate
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
