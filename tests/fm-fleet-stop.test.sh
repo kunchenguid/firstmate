@@ -105,6 +105,52 @@ else
   ok "banner absent once the flag is lifted"
 fi
 
+# --- 5. Origin field: the day-close may never lift a captain stop ----------
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" set --wortlaut "Alle Heime alles stoppen." >/dev/null
+if [ "$(FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" origin)" = "captain" ]; then
+  ok "a set without --origin defaults to origin captain"
+else
+  fail "a set without --origin must default to origin captain"
+fi
+if FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" lift --only-origin tagesschluss >/dev/null 2>&1; then
+  fail "lift --only-origin tagesschluss must refuse a captain stop"
+else
+  ok "lift --only-origin tagesschluss refuses a captain stop"
+fi
+[ -f "$FLAG" ] || fail "the refused lift must leave the captain stop in place"
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" lift >/dev/null || fail "a plain lift must still remove a captain stop"
+
+printf 'set=2026-08-23T00:00:00Z\nAltbestand ohne origin-Zeile.\n' > "$FLAG"
+if [ "$(FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" origin)" = "captain" ]; then
+  ok "a legacy flag without an origin line reads as captain"
+else
+  fail "a legacy flag must read as origin captain"
+fi
+if FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" lift --only-origin tagesschluss >/dev/null 2>&1; then
+  fail "the day-close lift must refuse a legacy flag"
+else
+  ok "the day-close lift refuses a legacy flag"
+fi
+rm -f "$FLAG"
+
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" set --wortlaut "Tagesschluss 20:00." --origin tagesschluss >/dev/null
+if [ "$(FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" origin)" = "tagesschluss" ]; then
+  ok "set --origin tagesschluss is stored and read back"
+else
+  fail "set --origin tagesschluss must be stored"
+fi
+if FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" lift --only-origin tagesschluss >/dev/null; then
+  ok "the day-close lift removes its own stop"
+else
+  fail "lift --only-origin tagesschluss must lift a tagesschluss stop"
+fi
+[ ! -f "$FLAG" ] || fail "the tagesschluss lift must remove the flag"
+if FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" set --wortlaut "x" --origin nachtwache >/dev/null 2>&1; then
+  fail "an unknown origin must be refused"
+else
+  ok "an unknown origin is refused"
+fi
+
 if [ "$FAILS" -gt 0 ]; then
   echo "$FAILS failure(s)" >&2
   exit 1
