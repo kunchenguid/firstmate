@@ -11,9 +11,14 @@ name: CI
 # The pull_request trigger stays so upstream keeps validating incoming forks; a
 # same-repository pull request therefore runs the suites twice, which is the
 # accepted cost of a fork never being left without them.
+# branches-ignore rather than a branch list, so a new branch is validated by
+# default and only a namespace deliberately named here escapes. The one
+# exclusion is no-mistakes/**, where the gate publishes each run's test evidence
+# (.no-mistakes.yaml): those are orphan branches carrying evidence and no source
+# tree, so running a source-tree suite against one could only ever fail.
 on:
   push:
-    branches: ['**']
+    branches-ignore: ['no-mistakes/**']
   pull_request:
     branches: [main]
 
