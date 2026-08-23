@@ -104,6 +104,7 @@ make_primary_root() {
   fi
   case "$mode" in
     intact)
+      # shellcheck disable=SC2016 # Backticks are literal prompt markup.
       printf '\n## Live E2E routing proof\n\nInclude the unique routing proof marker `%s` in the generated worker brief and launch handoff. This proves the procedure was loaded from this checked-out skill rather than supplied by another skill or a generic route.\n' "$ROUTING_SENTINEL" >> "$skill"
       git -C "$root" add "$skill"
       git -C "$root" commit -q -m "test: add routing policy proof marker" \
@@ -214,8 +215,8 @@ SH
 }
 
 wait_for_file() {
-  local path=$1 description=$2 attempt
-  for attempt in $(seq 1 300); do
+  local path=$1 description=$2
+  for _ in $(seq 1 300); do
     [ -s "$path" ] && return 0
     sleep 0.1
   done
