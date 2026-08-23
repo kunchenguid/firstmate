@@ -152,17 +152,6 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-fm_session_lock_has_generation_marker() {  # <lock-path>
-  local mode
-  mode=$(stat -f %Lp "$1" 2>/dev/null) \
-    || mode=$(stat -c %a "$1" 2>/dev/null) \
-    || return 1
-  case "$mode" in
-    *[1357][0-7][0-7]) return 0 ;;
-  esac
-  return 1
-}
-
 # Print the pid of the session the harness itself publishes for lock path $1,
 # or return 1.
 #
@@ -177,12 +166,11 @@ fm_session_lock_has_generation_marker() {  # <lock-path>
 # publishes one today; every other harness has no such variable and keeps the
 # ancestry-only behavior below unchanged.
 #
-# The pid is trusted only while it is still a live Claude Code process from a
-# generation compatible with the lock. Current locks carry an owner-execute
-# marker and require the process to strictly predate the lock. Unmarked locks
-# published before that marker existed may share the process-start second so a
-# session already running across an in-place update keeps its home. The lock's
-# mtime remains process-generation evidence for every other ordering.
+# The pid is trusted only while it is still a live Claude Code process that
+# strictly predates the lock. The lock's existing mtime is process-generation
+# evidence: if an exited session's pid is recycled, the replacement process
+# starts at or after the lock the original session published and is rejected
+# even when the replacement is another Claude process.
 #
 # Trust boundary. The variable is inherited by any child, so on its own it says
 # "a Claude session named this pid", never "I am that session". That is why
@@ -212,10 +200,14 @@ fm_harness_session_pid() {  # <lock-path>
   case "$started_epoch:$lock_epoch" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
-  if [ "$started_epoch" -ge "$lock_epoch" ]; then
-    [ "$started_epoch" -eq "$lock_epoch" ] || return 1
-    fm_session_lock_has_generation_marker "$lock" && return 1
-  fi
+  # A session already running when this change landed cannot prove ownership if
+  # its existing lock was published during its process-start second. That is the
+  # same behavior the session already had, not a regression: the old writer
+  # recorded no generation evidence that could distinguish the original process
+  # from a pid recycled within that second, so this path declines to widen rather
+  # than inventing evidence. The gap lasts at most that session's lifetime and
+  # self-heals when the next session publishes after the bounded wait below.
+  [ "$started_epoch" -lt "$lock_epoch" ] || return 1
   printf '%s\n' "$pid"
 }
 

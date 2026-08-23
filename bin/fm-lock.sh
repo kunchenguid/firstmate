@@ -105,12 +105,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   fi
 fi
 fm_session_lock_wait_until_publishable "$me"
-publication=$(mktemp "$STATE/.lock-publish.XXXXXX" 2>/dev/null) || {
-  echo "error: cannot prepare session lock publication; operate read-only until resolved" >&2
-  exit 1
-}
-if ! { printf '%s\n' "$me" > "$publication" && chmod u+x "$publication" && mv -f "$publication" "$LOCK"; } 2>/dev/null; then
-  rm -f "$publication" 2>/dev/null || true
+if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
