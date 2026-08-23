@@ -25,6 +25,7 @@ The retired task's body carries a `Resolution mode: retired-duplicate` block nam
 `verify_hold_durable` - the check `complete` and `verify` both use - accepts a retired duplicate as durable exactly like an answered task, so a completion attestation whose inventory already names the duplicate key keeps verifying after the retirement.
 A replay against the same surviving task is idempotent; a replay against a different surviving task, or a retire-duplicate call against a task already closed by other means, is refused.
 `answer` itself refuses to run against a task already retired as a duplicate, so a later `answer` call can never overwrite an explicit non-decision with an invented one.
+Known limitation: a surviving task named by an earlier retirement can itself later be retired against a third task, leaving the earlier record's `Surviving task:` pointer stale; the remedy is re-running `retire-duplicate` on the earlier task, naming the new final surviving task.
 
 The `complete` subcommand unions the reviewed captain-held task ids into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
