@@ -49,6 +49,11 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Two worker-behavior contracts are generated from measured cost rather than left
+# to firstmate to retype per task: ship and scout rules forbid waiting in a
+# foreground blocking "sleep" and name the correct alternatives, and every
+# document-producing scaffold (scout report, secondmate detailed answer) requires
+# writing the deliverable incrementally, section by section, straight to its file.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -229,6 +234,8 @@ Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; 
 Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
+Write that doc incrementally, section by section, straight to the file; never compose the whole document and write it once at the end.
+A single long final write can hit a transient \`API Error: The system encountered an unexpected error during processing\` that ends the turn silently and loses everything unwritten; that error is transient, so retry rather than restart.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
 
@@ -335,10 +342,17 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never wait in a foreground blocking \`sleep\`: from outside it is indistinguishable from a stall,
+   and it burns the very context the wait was meant to protect.
+   To wait on your own background job, prefer a harness-tracked background job whose completion
+   resumes or notifies you; otherwise poll briefly and do other useful work between checks;
+   otherwise record the thing as unverified and move on.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Write it incrementally, section by section, straight to that file; never compose the whole report and write it once at the end.
+A single long final write can hit a transient \`API Error: The system encountered an unexpected error during processing\` that ends the turn silently and loses everything unwritten; that error is transient, so retry rather than restart.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
@@ -452,6 +466,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never wait in a foreground blocking \`sleep\`: from outside it is indistinguishable from a stall,
+   and it burns the very context the wait was meant to protect.
+   To wait on your own background job, prefer a harness-tracked background job whose completion
+   resumes or notifies you; otherwise poll briefly and do other useful work between checks;
+   otherwise record the thing as unverified and move on.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
