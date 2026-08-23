@@ -794,6 +794,7 @@ test_bound_secondmate_relaunch_with_a_missing_store_refuses_before_stop() {
   dir=$(new_case smgone sm9)
   store="$dir/claude-client-gone"
   write_bound_secondmate "$dir" sm9 "$store"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
   out=$(run_control "$dir" sm9 relaunch); rc=$?
   expect_code 1 "$rc" "a recorded store that is not there should refuse the relaunch"
   assert_contains "$out" "$store" "the refusal should name the missing store"
