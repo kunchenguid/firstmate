@@ -620,6 +620,8 @@ i=$((n - 1))
 case "${plan[$i]}" in
   interrupt)
     printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  near-interrupt)
+    printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
   other-server-error)
     printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
   feedback)
@@ -700,6 +702,56 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$OTHER_ART" >/dev/null
 pass "only the exact interruption is retried; an unrelated SERVER_ERROR still surfaces"
 unset FM_LAVISH_POLL_RETRY_DELAY
+
+# A whitespace variant is not the exact transient response and must surface on
+# the first poll instead of drifting into the quiet retry policy.
+HNEAR="$TMP_ROOT/hnear"; new_home "$HNEAR"
+NEAR_ART="$TMP_ROOT/near-board.html"
+printf '<h1>near</h1>\n' > "$NEAR_ART"
+near_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NEAR_ART")
+PE_TRACKED+=("$HNEAR|$near_id")
+LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=0 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" pe "$HNEAR" start "$near_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 1 ] \
+  || fail "a near-match interruption was retried instead of surfacing on its first poll"
+assert_contains "$(wake_payloads "$HNEAR")" "procevent lavish $near_id 1" \
+  "a whitespace variant of the interruption is captured and announced immediately"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$NEAR_ART" >/dev/null
+pass "only the literal two-line interruption enters the quiet retry policy"
+
+# The public arm boundary refuses invalid retry intervals before it publishes a
+# source registration, rather than arming a listener that can only fail later.
+HINVALID="$TMP_ROOT/hinvalid"; new_home "$HINVALID"
+INVALID_ART="$TMP_ROOT/invalid-delay-board.html"
+printf '<h1>invalid delay</h1>\n' > "$INVALID_ART"
+invalid_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INVALID_ART")
+for invalid_delay in 61 invalid; do
+  invalid_status=0
+  invalid_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HINVALID" \
+    FM_LAVISH_POLL_RETRY_DELAY="$invalid_delay" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$INVALID_ART" 2>&1) || invalid_status=$?
+  [ "$invalid_status" -ne 0 ] \
+    || fail "arm accepted invalid retry delay: $invalid_delay"
+  assert_contains "$invalid_out" "must be whole seconds from 0 to 60" \
+    "arm explains the rejected retry delay"
+  assert_absent "$HINVALID/state/procevent/$invalid_id.source" \
+    "arm publishes no source registration for an invalid retry delay"
+done
+pass "arm rejects malformed and out-of-range retry delays before registration"
+
+# Shell-safe cleanup must preserve a valid TMPDIR containing an apostrophe.
+QUOTED_TMPDIR="$TMP_ROOT/poll's-stage"
+mkdir -p "$QUOTED_TMPDIR"
+LAVISH_COUNT="$TMP_ROOT/quoted-count"; LAVISH_SCRIPT="feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$QUOTED_TMPDIR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$NEAR_ART" >/dev/null
+quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
+[ ! -e "${quoted_staged[0]}" ] \
+  || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"
+pass "poll cleanup safely handles an apostrophe-containing TMPDIR"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a

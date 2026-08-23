@@ -105,6 +105,7 @@ cmd_arm() {
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
@@ -134,17 +135,13 @@ POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MAX=60
 
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
-# response must be those two lines: a longer response that merely opens with
-# them is a different response, and any other SERVER_ERROR is a genuine error
-# this adapter must never swallow. Leading-space tolerance matches how
-# cmd_classify already reads the same `error:`/`code:` pair.
+# response must be those two lines with those exact bytes: whitespace variants,
+# a longer response that merely opens with them, and any other SERVER_ERROR are
+# genuine errors this adapter must never swallow.
 poll_response_is_interrupted() {  # <response-file>
-  awk '
-    NR == 1 { ok = ($0 ~ /^error:[[:space:]]*Lavish Editor poll response was interrupted[[:space:]]*$/) }
-    NR == 2 { ok = ok && ($0 ~ /^code:[[:space:]]*SERVER_ERROR[[:space:]]*$/) }
-    NR > 2  { ok = 0; exit }
-    END { exit (ok && NR == 2) ? 0 : 1 }
-  ' "$1"
+  cmp -s "$1" <(printf '%s\n' \
+    'error: Lavish Editor poll response was interrupted' \
+    'code: SERVER_ERROR')
 }
 
 # Seconds between retries. FM_LAVISH_POLL_RETRY_DELAY is a bounded test
@@ -169,14 +166,14 @@ poll_retry_delay() {
 # captured in a variable so what the runner captures is the poll's bytes exactly,
 # and so the retry decision reads the whole response instead of a prefix.
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response rc
+  local artifact=${1-} delay attempt=0 response cleanup_command rc
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
-  # shellcheck disable=SC2064 # $response must expand now, while it is still set.
-  trap "rm -f -- '$response'" EXIT
+  printf -v cleanup_command 'rm -f -- %q' "$response"
+  trap "$cleanup_command" EXIT
   # Retirement stops this listener by signalling its process group, and bash runs
   # no EXIT trap for an uncaught signal, so each one cleans up the staged
   # response and then re-raises itself with the default disposition, leaving the
@@ -184,7 +181,7 @@ cmd_poll() {
   local signal
   for signal in INT TERM HUP; do
     # shellcheck disable=SC2064 # Same reason: expand now, while both are set.
-    trap "rm -f -- '$response'; trap - $signal; kill -$signal $$" "$signal"
+    trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
     lavish-axi poll "$artifact" > "$response"
