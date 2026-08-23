@@ -94,6 +94,20 @@ case "$cmd" in
       echo "Judge status: NOT decision-capable - no frozen captain gold set yet (hardening 3)."
     } > "$out/forensik.md"
 
+    # 3b. Record-divergence guard (plan U3 phase 6): a captain call whose two
+    # records contradict each other belongs in the day's forensics.
+    # bin/fm-captain-hold.sh `diverged` owns which pairs count; this quotes it.
+    div_out="$("$SCRIPT_DIR/fm-captain-hold.sh" diverged 2>&1)" || true
+    {
+      echo
+      if [ -n "$div_out" ]; then
+        echo "Record divergence (fm-captain-hold.sh diverged):"
+        printf '%s\n' "$div_out" | sed 's/^/  /'
+      else
+        echo "Record divergence: none."
+      fi
+    } >> "$out/forensik.md"
+
     # 4. Candidate stage (hypothesis only; the ledger is never auto-written).
     kand="$out/lehren-kandidaten.md"
     {

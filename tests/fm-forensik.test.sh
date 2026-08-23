@@ -59,6 +59,9 @@ head -1 "$OUT/forensik.md" | grep -q '^1 sessions, 4 messages, 1 wake deliveries
 grep -q 'NOT decision-capable' "$OUT/forensik.md" \
   && ok "judge status is honestly marked not decision-capable" \
   || fail "the judge status marker is missing"
+grep -q '^Record divergence' "$OUT/forensik.md" \
+  && ok "the record-divergence guard reports into the day's forensics" \
+  || fail "forensik.md must carry a Record divergence line (silent day: 'none.')"
 
 # --- 3. candidate stage ----------------------------------------------------
 grep -q 'STUFE: HYPOTHESE' "$OUT/lehren-kandidaten.md" \
