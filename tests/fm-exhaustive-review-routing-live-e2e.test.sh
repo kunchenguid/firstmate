@@ -208,6 +208,13 @@ assert_meta() {
   grep -Fxq "$expected" "$CASE_META" || fail "worker metadata is missing $expected: $(tr '\n' ';' < "$CASE_META") primary transcript: $(tail -40 "$CASE_TRANSCRIPT" 2>/dev/null || true)"
 }
 
+assert_brief_task_is_filled() {
+  local task_line
+  task_line=$(awk 'found { print; exit } /^# Task$/ { found=1 }' "$CASE_BRIEF")
+  [ -n "$task_line" ] && [ "$task_line" != '{TASK}' ] \
+    || fail "primary left the generated task brief unfilled"
+}
+
 worker_contract_is_complete() {
   local worker_cwd
   worker_cwd=$(cd "$CASE_WORKER" && pwd -P) || return 1
@@ -230,7 +237,7 @@ assert_real_route() {
   assert_meta 'yolo=off'
   grep -Fq 'Delivery contract: mode=direct-PR' "$CASE_BRIEF" \
     || fail "real fm-brief.sh did not preserve the registry delivery contract"
-  grep -Fq '{TASK}' "$CASE_BRIEF" && fail "primary left the generated task brief unfilled"
+  assert_brief_task_is_filled
   [ "$(git -C "$CASE_WORKER" rev-parse HEAD)" = "$CASE_APP_SHA" ] \
     || fail "worker worktree is not at the immutable project baseline"
   [ -z "$(git -C "$CASE_PRIMARY_ROOT" status --porcelain)" ] \
@@ -265,6 +272,7 @@ run_case() {
   prompt=$(cat <<PROMPT
 Captain request: conduct an exhaustive review of the project at $CASE_APP.
 Fixture fact: use task ID $TASK_ID for this request.
+Fixture fact: the authoritative Firstmate config directory for this isolated session is $CASE_HOME/config; read its crew-dispatch profile before selecting the worker.
 PROMPT
 )
   (
