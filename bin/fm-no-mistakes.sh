@@ -19,10 +19,13 @@
 #
 # Every blocking AXI drive call runs in the foreground under the remaining time.
 # On deadline expiry, or when a review gate returns after one authorized review
-# fix, this helper uses only `axi abort --run`, confirms a structured terminal
-# outcome with `axi status --run`, then invokes guarded `axi sync --recover` to
-# return branch custody without dropping correction commits. It never operates
-# the daemon and never starts polling or a background process.
+# fix, this helper aborts only a run id that AXI output authoritatively bound to
+# this exact task branch. If the initial timed call returns no run id and branch,
+# it refuses branch-unscoped discovery and abort. For a bound run it uses only
+# `axi abort --run`, confirms a structured terminal outcome with `axi status --run`,
+# then invokes guarded `axi sync --recover` to return branch custody without
+# dropping correction commits. It never operates the daemon and never starts
+# polling or a background process.
 #
 # Test hooks:
 #   FM_NM_MONOTONIC_BIN prints integer monotonic milliseconds.
@@ -92,11 +95,25 @@ write_policy() {
     echo "started_ms=$STARTED_MS"
     echo "deadline_ms=$DEADLINE_MS"
     echo "run_id=$RUN_ID"
+    echo "bound_branch=$BOUND_BRANCH"
     echo "review_fix_used=$REVIEW_FIX_USED"
   } > "$tmp"
   mv "$tmp" "$POLICY"
 }
 parse_run_id() { printf '%s\n' "$1" | sed -n 's/^[[:space:]]*id:[[:space:]]*"\{0,1\}\([^"[:space:]]*\).*/\1/p' | head -1; }
+parse_branch() { printf '%s\n' "$1" | sed -n 's/^[[:space:]]*branch:[[:space:]]*"\{0,1\}\([^"[:space:]]*\).*/\1/p' | head -1; }
+bind_run_from_output() {
+  local out=$1 candidate_id candidate_branch
+  candidate_id=$(parse_run_id "$out")
+  candidate_branch=$(parse_branch "$out")
+  [ -n "$candidate_id" ] && [ -n "$candidate_branch" ] \
+    || fail "AXI did not return a run id and branch; refusing branch-unscoped run discovery or abort"
+  [ "$candidate_branch" = "$EXPECTED_BRANCH" ] \
+    || fail "AXI run $candidate_id belongs to branch $candidate_branch, expected $EXPECTED_BRANCH; refusing abort"
+  RUN_ID=$candidate_id
+  BOUND_BRANCH=$candidate_branch
+  write_policy
+}
 reject_auto_yes() {
   local arg
   for arg in "$@"; do
@@ -115,9 +132,11 @@ structured_terminal() { printf '%s\n' "$1" | grep -Eq '^outcome:[[:space:]]*(can
 load_policy() {
   [ -f "$POLICY" ] || fail "no bounded run record for task $ID"
   BOOT=$(field boot); STARTED_MS=$(field started_ms); DEADLINE_MS=$(field deadline_ms)
-  RUN_ID=$(field run_id); REVIEW_FIX_USED=$(field review_fix_used)
+  RUN_ID=$(field run_id); BOUND_BRANCH=$(field bound_branch); REVIEW_FIX_USED=$(field review_fix_used)
   [ "$(boot_id)" = "$BOOT" ] || fail "the host rebooted; monotonic deadline custody requires manual reconciliation"
   case "$DEADLINE_MS:$REVIEW_FIX_USED" in *[!0-9:]*|:*|*:) fail "invalid bounded run record for task $ID" ;; esac
+  [ -n "$RUN_ID" ] && [ "$BOUND_BRANCH" = "$EXPECTED_BRANCH" ] \
+    || fail "bounded run record is not bound to task $ID on branch $EXPECTED_BRANCH"
 }
 remaining_ms() {
   local now remaining
@@ -129,20 +148,17 @@ remaining_ms() {
 }
 duration_for_ms() { local ms=$1; printf '%d.%03ds' "$((ms / 1000))" "$((ms % 1000))"; }
 current_status() {
-  if [ -n "$RUN_ID" ]; then no-mistakes axi status --run "$RUN_ID"
-  else no-mistakes axi status
-  fi
+  [ -n "$RUN_ID" ] || fail "bounded run record has no branch-bound run id"
+  no-mistakes axi status --run "$RUN_ID"
 }
 recover_and_report() {
   local reason=$1 evidence=${2:-} status_out abort_out sync_out head sync_rc=0
   if [ -z "$RUN_ID" ]; then
-    status_out=$(no-mistakes axi status 2>&1 || true)
-    RUN_ID=$(parse_run_id "$status_out")
-    [ -n "$RUN_ID" ] || fail "$reason; AXI did not expose the active run id needed for supported cancellation"
-    write_policy
-  else
-    status_out=$(no-mistakes axi status --run "$RUN_ID" 2>&1 || true)
+    bind_run_from_output "$evidence"
   fi
+  [ "$BOUND_BRANCH" = "$EXPECTED_BRANCH" ] \
+    || fail "$reason; run $RUN_ID is not authoritatively bound to branch $EXPECTED_BRANCH"
+  status_out=$(no-mistakes axi status --run "$RUN_ID" 2>&1 || true)
   if ! structured_terminal "$status_out"; then
     abort_out=$(no-mistakes axi abort --run "$RUN_ID" 2>&1 || true)
     status_out=$(no-mistakes axi status --run "$RUN_ID" 2>&1 || true)
@@ -178,8 +194,11 @@ drive() {
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     recover_and_report "20-minute wall-clock ceiling reached" "$out"
   fi
-  [ -n "$RUN_ID" ] || RUN_ID=$(parse_run_id "$out")
-  write_policy
+  if [ -z "$RUN_ID" ]; then
+    bind_run_from_output "$out"
+  else
+    write_policy
+  fi
   if has_review_gate "$out" && [ "$REVIEW_FIX_USED" -eq 1 ]; then
     recover_and_report "review cycle limit reached after one fix and rereview" "$out"
   fi
@@ -197,6 +216,8 @@ META="$STATE/$ID.meta"; POLICY="$STATE/$ID.no-mistakes"
 [ "$(meta_field mode)" = no-mistakes ] || fail "task $ID was not explicitly marked for no-mistakes"
 WT=$(meta_field worktree); [ -n "$WT" ] || fail "task $ID has no recorded worktree"
 [ "$(pwd -P)" = "$(cd "$WT" && pwd -P)" ] || fail "run this command from task $ID's recorded worktree"
+EXPECTED_BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$EXPECTED_BRANCH" ] || fail "task $ID must run from an attached branch"
 shift 2
 
 case "$CMD" in
@@ -205,7 +226,7 @@ case "$CMD" in
     reject_auto_yes "$@"
     verify_bounded_profile
     case " $* " in *' --intent '*) ;; *) fail "run requires --intent" ;; esac
-    BOOT=$(boot_id); RUN_ID=; REVIEW_FIX_USED=0
+    BOOT=$(boot_id); RUN_ID=; BOUND_BRANCH=; REVIEW_FIX_USED=0
     STARTED_MS=; DEADLINE_MS=; INITIAL_DRIVE=1
     drive run "$@"
     ;;

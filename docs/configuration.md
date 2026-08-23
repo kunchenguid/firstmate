@@ -111,7 +111,8 @@ The tracked trusted-default-branch configuration pins the pipeline agent to Code
 A target repository must canonically set `agent: codex` on its trusted default branch and `auto_fix.review: 0` in the submitted HEAD, matching v1.53.0's trust and merge rules.
 Version 1.53.0 has no per-run override for either value, so the driver refuses rather than silently using another agent or allowing an internal review loop.
 No-mistakes v1.53.0 does not expose run `created_at` through structured AXI, so the hard 20-minute outer deadline starts from a conservative monotonic timestamp captured immediately before `axi run`; startup overhead can only shorten the run.
-At the deadline or review-cycle limit, the driver uses supported `axi abort --run`, requires a structured terminal outcome, then runs guarded `axi sync --recover`; it never operates the shared daemon and reports the preserved branch head with remaining structured findings.
+At the deadline or review-cycle limit, the driver uses supported `axi abort --run` only after AXI output binds the run id to the exact task branch, requires a structured terminal outcome, then runs guarded `axi sync --recover`; without that binding it refuses branch-unscoped discovery or abort.
+It never operates the shared daemon and reports the preserved branch head with remaining structured findings.
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.

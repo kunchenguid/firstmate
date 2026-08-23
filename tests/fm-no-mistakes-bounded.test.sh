@@ -34,7 +34,12 @@ SH
   cat > "$d/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 printf 'timeout %s\n' "$*" >> "$EVENT_LOG"
-if [ "${FAKE_TIMEOUT_EXPIRE:-0}" = 1 ]; then exit 124; fi
+if [ "${FAKE_TIMEOUT_EXPIRE:-0}" = 1 ]; then
+  if [ "${FAKE_TIMEOUT_BOUND:-0}" = 1 ]; then
+    printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: running\n' "$(git branch --show-current)"
+  fi
+  exit 124
+fi
 [ "$1" = --foreground ] && shift
 shift
 exec "$@"
@@ -45,34 +50,29 @@ SH
 printf 'nm %s\n' "$*" >> "$EVENT_LOG"
 case "$*" in
   "axi run"*)
+    printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: running\n' "$(git branch --show-current)"
     cat <<'OUT'
-run:
-  id: "run-1"
-  branch: fm/test
-  status: running
 gate: review
 findings[1]{id,severity,file,action,description}:
   r1,warning,a.sh,auto-fix,first review finding
 OUT
     ;;
   "axi respond"*)
+    printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: running\n' "$(git branch --show-current)"
     cat <<'OUT'
-run:
-  id: "run-1"
-  branch: fm/test
-  status: running
 gate: review
 findings[1]{id,severity,file,action,description}:
   r2,error,b.sh,ask-user,remaining rereview finding
 OUT
     ;;
   "axi status --run run-1"*|"axi status")
+    branch=$(git branch --show-current)
     if [ -f "$CASE_DIR/aborted" ]; then
-      printf 'run:\n  id: "run-1"\n  status: cancelled\noutcome: cancelled\n'
+      printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: cancelled\noutcome: cancelled\n' "$branch"
     elif [ "${FAKE_STATUS_CHECKS_PASSED:-0}" = 1 ]; then
-      printf 'run:\n  id: "run-1"\n  status: running\noutcome: checks-passed\n'
+      printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: running\noutcome: checks-passed\n' "$branch"
     else
-      printf 'run:\n  id: "run-1"\n  status: running\ngate:\n  step: review\n  status: fix_review\nfindings[1]{id,severity,file,action,description}:\n  r2,error,b.sh,ask-user,remaining rereview finding\n'
+      printf 'run:\n  id: "run-1"\n  branch: "%s"\n  status: running\ngate:\n  step: review\n  status: fix_review\nfindings[1]{id,severity,file,action,description}:\n  r2,error,b.sh,ask-user,remaining rereview finding\n' "$branch"
     fi
     ;;
   "axi abort --run run-1")
@@ -138,7 +138,7 @@ test_timeout_aborts_confirms_recovers_and_preserves_head() {
   local d out rc=0 before after events
   d=$(make_case timeout)
   before=$(git -C "$d/wt" rev-parse HEAD)
-  out=$(FAKE_TIMEOUT_EXPIRE=1 run_driver "$d" run task --intent "timeout intent" 2>&1) || rc=$?
+  out=$(FAKE_TIMEOUT_EXPIRE=1 FAKE_TIMEOUT_BOUND=1 run_driver "$d" run task --intent "timeout intent" 2>&1) || rc=$?
   expect_code 75 "$rc" "deadline path must return the bounded-stop code"
   after=$(git -C "$d/wt" rev-parse HEAD)
   [ "$before" = "$after" ] || fail "deadline recovery changed the preserved branch head"
@@ -153,10 +153,24 @@ test_timeout_aborts_confirms_recovers_and_preserves_head() {
   pass "deadline cancellation confirms terminal state, recovers custody, and preserves corrections"
 }
 
+test_unbound_timeout_never_discovers_or_aborts_a_run() {
+  local d out rc=0 events
+  d=$(make_case unbound-timeout)
+  out=$(FAKE_TIMEOUT_EXPIRE=1 run_driver "$d" run task --intent "unbound timeout" 2>&1) || rc=$?
+  expect_code 2 "$rc" "timeout without a returned run id must stop safely"
+  assert_contains "$out" 'refusing branch-unscoped run discovery or abort' \
+    "unbound timeout did not explain the safe refusal"
+  events=$(cat "$d/events")
+  assert_not_contains "$events" 'nm axi status' "unbound timeout queried branch-unscoped status"
+  assert_not_contains "$events" 'nm axi abort' "unbound timeout aborted an unverified run"
+  assert_not_contains "$events" 'nm axi sync' "unbound timeout attempted custody recovery without a bound run"
+  pass "timeout without a returned run id never discovers or aborts another branch's run"
+}
+
 test_checks_passed_monitor_is_still_cancelled_at_ceiling() {
   local d out rc=0 events
   d=$(make_case checks-passed-monitor)
-  out=$(FAKE_TIMEOUT_EXPIRE=1 FAKE_STATUS_CHECKS_PASSED=1 run_driver "$d" run task --intent "monitor intent" 2>&1) || rc=$?
+  out=$(FAKE_TIMEOUT_EXPIRE=1 FAKE_TIMEOUT_BOUND=1 FAKE_STATUS_CHECKS_PASSED=1 run_driver "$d" run task --intent "monitor intent" 2>&1) || rc=$?
   expect_code 75 "$rc" "checks-passed monitor must still take the supported terminal path"
   events=$(cat "$d/events")
   assert_contains "$events" 'nm axi abort --run run-1' "checks-passed monitor was mistaken for a terminal run"
@@ -232,6 +246,7 @@ PY
 test_manual_only_routing
 test_pre_invocation_clock_is_deadline_authority
 test_timeout_aborts_confirms_recovers_and_preserves_head
+test_unbound_timeout_never_discovers_or_aborts_a_run
 test_checks_passed_monitor_is_still_cancelled_at_ceiling
 test_one_review_cycle_and_remaining_findings
 test_auto_yes_is_refused_before_axi
