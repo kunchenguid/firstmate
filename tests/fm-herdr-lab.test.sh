@@ -98,7 +98,7 @@ run_with_fake() {
     FM_FAKE_HERDR_PRIMARY_NAME="${FM_FAKE_HERDR_PRIMARY_NAME:-default}" \
     FM_FAKE_HERDR_PRIMARY_RUNNING="${FM_FAKE_HERDR_PRIMARY_RUNNING:-true}" \
     FM_FAKE_HERDR_DUPLICATE_PRIMARY="${FM_FAKE_HERDR_DUPLICATE_PRIMARY:-false}" \
-    FM_HERDR_LAB_PRIMARY_SESSION="${FM_HERDR_LAB_PRIMARY_SESSION:-default}" \
+    FM_HERDR_LAB_PRIMARY_SESSION="${FM_HERDR_LAB_PRIMARY_SESSION:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -150,7 +150,8 @@ test_provision_run_and_guarded_teardown() {
   run_with_fake fm_herdr_lab_cli "$name" --remote host workspace list >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "a leading option subverting session isolation must be refused"
 
-  run_with_fake fm_herdr_lab_teardown "$name" || fail "guarded teardown failed"
+  HERDR_SESSION="$name" run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "guarded teardown failed after HERDR_SESSION mutated to the lab"
   [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "teardown did not delete the lab session"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" "successful teardown left its tripwire behind"
 
@@ -170,7 +171,7 @@ test_provision_run_and_guarded_teardown() {
     || fail "stop was not immediately preceded by a fresh refuse-default session list"
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
-  pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
+  pass "fm-herdr-lab: mutable lab HERDR_SESSION cannot replace the recorded primary during guarded teardown"
 }
 
 test_named_primary_is_exact_and_unambiguous() {

@@ -11,9 +11,7 @@ set -u
 export FM_GATE_REFUSE_BYPASS=1
 
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -z "${FM_HERDR_LAB_PRIMARY_SESSION:-}" ] && [ -n "${HERDR_SESSION:-}" ]; then
-  export FM_HERDR_LAB_PRIMARY_SESSION=$HERDR_SESSION
-fi
+# The helper selects the primary independently of mutable HERDR_SESSION.
 # shellcheck source=/dev/null
 . "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
 

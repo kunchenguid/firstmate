@@ -309,7 +309,8 @@ An environment-only session selection can silently reach a different running ser
 It provisions only non-default names beginning with `fm-lab-`, appends an explicit `--session` to allowed task commands, refuses caller-supplied session flags and server/session lifecycle subcommands, and performs destructive stop/delete only through its guarded lifecycle actions.
 Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
 Its before/after tripwire requires the recorded running primary-session snapshot to remain byte-identical.
-The helper uses `FM_HERDR_LAB_PRIMARY_SESSION`, then an inherited `HERDR_SESSION`, and otherwise literal `default`; it requires exactly one running session with that exact name and refuses a lab-namespaced, missing, stopped, or ambiguous primary record.
+The helper uses an explicit `FM_HERDR_LAB_PRIMARY_SESSION` or discovers exactly one running session outside the `fm-lab-*` namespace during provisioning, records that choice in the tripwire, and never trusts mutable `HERDR_SESSION` as the primary identity.
+It requires exactly one running session with the recorded name and refuses a lab-namespaced, missing, stopped, or ambiguous primary record.
 
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.

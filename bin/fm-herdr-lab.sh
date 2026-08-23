@@ -22,9 +22,10 @@
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
 # Provision records the running primary session as a fleet-state tripwire and
-# teardown requires that record to be identical afterward.
-# FM_HERDR_LAB_PRIMARY_SESSION, then inherited HERDR_SESSION, identifies a
-# named primary; absent either record, the primary remains literal default.
+# teardown requires that immutable record to be identical afterward.
+# FM_HERDR_LAB_PRIMARY_SESSION explicitly identifies a named primary; otherwise
+# provision requires exactly one running session outside the fm-lab-* namespace.
+# HERDR_SESSION is deliberately never a primary source because tests mutate it.
 set -u
 
 fm_herdr_lab_error() {
@@ -60,10 +61,16 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
-fm_herdr_lab_primary_session() {
-  local primary=${FM_HERDR_LAB_PRIMARY_SESSION:-${HERDR_SESSION:-default}}
+fm_herdr_lab_primary_session() { # <session-list-json>
+  local sessions=$1 primary=${FM_HERDR_LAB_PRIMARY_SESSION:-}
+  if [ -z "$primary" ]; then
+    primary=$(printf '%s' "$sessions" | jq -r '
+      [.sessions[]? | select(.running == true and (.name | startswith("fm-lab-") | not))]
+      | if length == 1 then .[0].name else empty end
+    ' 2>/dev/null)
+  fi
   [ -n "$primary" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires a non-empty primary session record"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one running non-lab primary session or an explicit FM_HERDR_LAB_PRIMARY_SESSION"
     return 1
   }
   case "$primary" in
@@ -75,15 +82,21 @@ fm_herdr_lab_primary_session() {
   printf '%s\n' "$primary"
 }
 
-fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 primary sessions snapshot
-  primary=$(fm_herdr_lab_primary_session) || return 1
-  [ "$primary" != "$name" ] || {
-    fm_herdr_lab_error "fleet-state tripwire refuses the lab session as its own primary"
-    return 1
-  }
+fm_herdr_lab_fleet_state() { # <session> [recorded-primary]
+  local name=$1 primary=${2:-} sessions snapshot
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
+    return 1
+  }
+  [ -n "$primary" ] || primary=$(fm_herdr_lab_primary_session "$sessions") || return 1
+  case "$primary" in
+    fm-lab-*|'')
+      fm_herdr_lab_error "fleet-state tripwire refuses invalid recorded primary session '$primary'"
+      return 1
+      ;;
+  esac
+  [ "$primary" != "$name" ] || {
+    fm_herdr_lab_error "fleet-state tripwire refuses the lab session as its own primary"
     return 1
   }
   snapshot=$(printf '%s' "$sessions" | jq -c --arg primary "$primary" '
@@ -240,14 +253,18 @@ fm_herdr_lab_provision() { # <session>
 }
 
 fm_herdr_lab_check_tripwire() { # <session>
-  local name=$1 tripwire before after
+  local name=$1 tripwire before primary after
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
     return 1
   }
   before=$(cat "$tripwire")
-  after=$(fm_herdr_lab_fleet_state "$name") || return 1
+  primary=$(printf '%s' "$before" | jq -er '.name | select(type == "string" and length > 0)' 2>/dev/null) || {
+    fm_herdr_lab_error "fleet-state tripwire has no valid recorded primary session"
+    return 1
+  }
+  after=$(fm_herdr_lab_fleet_state "$name" "$primary") || return 1
   [ "$before" = "$after" ] || {
     fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: primary session changed during lab work"
     fm_herdr_lab_error "before: $before"
