@@ -2,7 +2,7 @@
 # Shared session-lock harness identity.
 #
 # ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# lock, and does the current session own that lock?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -187,14 +187,14 @@ fm_harness_session_pid() {
   printf '%s\n' "$pid"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# True when state dir $1 holds a session lock owned by the current session.
+# Ancestry membership is the ordinary test of that question, because the lock
+# owner sits at an unknown depth in a contiguous Claude run - it is the outermost
+# pid when the hook fires inside the session's own nested worker chain, and an
+# inner pid when a harness-named daemon parents the session. A missing lock, a
+# malformed lock, a lock held by a harness outside this ancestry, or an ancestry
+# that cannot be resolved all fail closed unless the published-session check
+# below establishes the worker-pool case.
 #
 # Membership proves ownership when it holds, but its absence proves nothing: a
 # call served by a reparented worker pool has no ancestry path to its own
