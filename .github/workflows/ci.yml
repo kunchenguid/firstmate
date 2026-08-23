@@ -393,8 +393,8 @@ jobs:
           inbox_output=$(/bin/bash tests/fm-inbox.test.sh)
           printf '%s\n' "$inbox_output"
           inbox_count=$(printf '%s\n' "$inbox_output" | grep -c '^ok - ')
-          [ "$inbox_count" -eq 7 ] || {
-            echo "::error::expected 7 fm-inbox tests, got $inbox_count"
+          [ "$inbox_count" -eq 8 ] || {
+            echo "::error::expected 8 fm-inbox tests, got $inbox_count"
             exit 1
           }
 

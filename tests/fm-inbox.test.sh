@@ -168,6 +168,39 @@ EOF
   pass "fm-inbox.sh: a failed publish leaves no staging file and no wake"
 }
 
+# Cleanup is secondary to reporting the capture failure. Even if both publish
+# and staging cleanup fail, the captain still needs the script-owned explanation
+# that the note was not queued.
+test_a_failed_publish_with_failed_cleanup_still_explains_the_loss() {
+  local home fakebin out code
+  home=$(new_home note-publish-and-cleanup-fail) || fail "could not build a test home"
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/mv" <<'EOF'
+#!/usr/bin/env bash
+echo "mv: simulated publish failure" >&2
+exit 1
+EOF
+  cat > "$fakebin/rm" <<'EOF'
+#!/usr/bin/env bash
+echo "rm: simulated cleanup failure" >&2
+exit 1
+EOF
+  chmod +x "$fakebin/mv" "$fakebin/rm" || fail "could not install failure shims"
+
+  out=$(PATH="$fakebin:$PATH" inbox_run "$home" note 'must report the loss' 2>&1)
+  code=$?
+
+  [ "$code" -ne 0 ] || fail "note exited 0 when publish and cleanup failed"
+  assert_contains "$out" "fm-inbox:" \
+    "cleanup failure suppressed the fm-inbox diagnostic"
+  assert_contains "$out" "nothing was queued" \
+    "cleanup failure suppressed the explanation that nothing was queued"
+  assert_absent "$home/state/.wake-queue" \
+    "a failed publish with failed cleanup still appended a wake"
+
+  pass "fm-inbox.sh: cleanup failure cannot suppress the capture failure diagnostic"
+}
+
 test_drain_ack_moves_the_note_out_of_the_inbox() {
   local home out id listing
   home=$(new_home note-drain-ack) || fail "could not build a test home"
@@ -206,5 +239,6 @@ test_record_carries_the_reported_id_not_a_placeholder
 test_multiline_body_survives_the_round_trip
 test_unwritable_inbox_fails_visibly_and_publishes_nothing
 test_a_failed_publish_leaves_no_staging_file
+test_a_failed_publish_with_failed_cleanup_still_explains_the_loss
 test_drain_ack_moves_the_note_out_of_the_inbox
 test_empty_note_is_refused

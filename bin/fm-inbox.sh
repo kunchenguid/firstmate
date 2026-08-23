@@ -163,6 +163,14 @@ wake_for() {
   fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"
 }
 
+discard_staging() {  # <path>
+  local tmp=$1
+  if ! rm -f "$tmp"; then
+    printf 'fm-inbox: could not remove incomplete staging file %s\n' "$tmp" >&2 || :
+  fi
+  return 0
+}
+
 queue_note() {
   local source=$1 body=$2 extra=${3:-}
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
@@ -172,9 +180,9 @@ queue_note() {
   tmp=$(mktemp "$INBOX/.staging-XXXXXX") \
     || die "cannot open a staging file in $INBOX; nothing was queued"
   staging_name=$(basename "$tmp") \
-    || { rm -f "$tmp"; die "cannot identify the staging file; nothing was queued"; }
+    || { discard_staging "$tmp"; die "cannot identify the staging file; nothing was queued"; }
   at=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-    || { rm -f "$tmp"; die "cannot read the clock; nothing was queued"; }
+    || { discard_staging "$tmp"; die "cannot read the clock; nothing was queued"; }
 
   # The id is derived from the staging name, so it is already known here and the
   # record is written ONCE, with its final id. This used to write id=PENDING and
@@ -184,7 +192,7 @@ queue_note() {
   # id up front needs no -i on either platform, and removes the second pass that
   # could half-succeed.
   epoch=$(date +%s) \
-    || { rm -f "$tmp"; die "cannot read the clock; nothing was queued"; }
+    || { discard_staging "$tmp"; die "cannot read the clock; nothing was queued"; }
   id="$epoch-${staging_name#.staging-}"
 
   # Every write is chained, so a full disk fails here rather than publishing a
@@ -198,13 +206,13 @@ queue_note() {
       printf -- '--\n' &&
       printf '%s\n' "$body"
   } >"$tmp" || {
-    rm -f "$tmp"
+    discard_staging "$tmp"
     die "could not write the note into $INBOX; nothing was queued"
   }
 
   # Publish atomically.
   mv "$tmp" "$INBOX/$id.note" || {
-    rm -f "$tmp"
+    discard_staging "$tmp"
     die "could not publish the note as $INBOX/$id.note; nothing was queued"
   }
 
