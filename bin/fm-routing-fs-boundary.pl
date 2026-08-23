@@ -102,12 +102,27 @@ sub open_nested_dir {
   return $current;
 }
 
+sub create_snapshot_dir_at {
+  my ($task) = @_;
+  enter_dir($task);
+  for (1 .. 128) {
+    my $name = sprintf('.routing-decision.validate.%08x%08x', $$, int(rand(0xffffffff)));
+    if (mkdir($name, 0700)) {
+      my ($snapshot, $snapshot_st) = open_dir_at($task, $name, 0);
+      ($snapshot_st->[2] & 0777) == 0700 or fail("SNAPSHOT_CREATE:$name:mode");
+      return ($name, $snapshot, $snapshot_st);
+    }
+    $! == EEXIST or fail("SNAPSHOT_CREATE:$name:$!");
+  }
+  fail('SNAPSHOT_CREATE:collisions');
+}
+
 sub snapshot_bundle {
-  my ($task_path, $config_path, $snapshot_path, $id) = @_;
+  my ($task_path, $config_path, $id) = @_;
   $id =~ /\A[A-Za-z0-9._-]+\z/ or fail("SNAPSHOT:task-id");
   my ($task) = open_dir($task_path);
+  my ($snapshot_name, $snapshot, $snapshot_st) = create_snapshot_dir_at($task);
   my ($config) = open_dir($config_path, 1);
-  my ($snapshot, $snapshot_st) = open_dir($snapshot_path);
   enter_dir($snapshot);
   mkdir('data', 0700) or fail("SNAPSHOT:data:$!");
   mkdir('config', 0700) or fail("SNAPSHOT:config:$!");
@@ -126,7 +141,7 @@ sub snapshot_bundle {
     ? copy_at($config, 'crew-dispatch.json', $config_snapshot, 'crew-dispatch.json', 1)
     : 0;
   copy_at($task, 'quota-snapshot.json', $task_snapshot, 'quota-snapshot.json', 1);
-  print join("\t", $snapshot_st->[0], $snapshot_st->[1], $pending_st->[0], $pending_st->[1], $config_present, sha256_hex($pending_bytes)), "\n";
+  print join("\t", $snapshot_name, $snapshot_st->[0], $snapshot_st->[1], $pending_st->[0], $pending_st->[1], $config_present, sha256_hex($pending_bytes)), "\n";
 }
 
 sub publish_artifact {

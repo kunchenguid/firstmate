@@ -1102,6 +1102,27 @@ exercise_negative "70 canonical config symlink before snapshot" 'NOT_VERIFIABLE(
   setup_config_symlink_before_snapshot "OPEN_REGULAR:crew-dispatch.json" assert_config_symlink_not_followed
 
 write_fixture
+symlinked_task_target="$LAB/symlinked-task-target"
+mv "$TASK_DIR" "$symlinked_task_target"
+ln -s "$symlinked_task_target" "$TASK_DIR"
+mkdir "$TASK_DIR/.routing-decision.validate.firing"
+assert_present "$symlinked_task_target/.routing-decision.validate.firing" \
+  "final task-directory symlink counterexample did not redirect path-based creation"
+rmdir "$TASK_DIR/.routing-decision.validate.firing"
+symlinked_task_out=$(run_validator_then_effects 2>&1)
+symlinked_task_status=$?
+expect_code 1 "$symlinked_task_status" "a symlinked final task-directory component should refuse"
+assert_contains "$symlinked_task_out" "ROUTING_DECISION NOT_VERIFIABLE(SNAPSHOT)" \
+  "symlinked final task-directory refusal named the wrong predicate"
+assert_contains "$symlinked_task_out" "OPEN_DIR:$TASK_DIR" \
+  "symlinked final task-directory refusal did not come from the no-follow boundary"
+symlinked_task_residue=$(find "$symlinked_task_target" -mindepth 1 -maxdepth 1 -type d -name '.routing-decision.validate.*' -print)
+[ -z "$symlinked_task_residue" ] \
+  || fail "symlinked final task-directory refusal created a validation directory through the link: $symlinked_task_residue"
+assert_no_effects
+pass "final task-directory symlink refuses before validation snapshot creation"
+
+write_fixture
 fm_routing_decision_validate_and_prepare \
   "$HOME_DIR/data" "$HOME_DIR/config" t1 \
   "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \

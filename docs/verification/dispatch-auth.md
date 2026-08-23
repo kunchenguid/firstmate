@@ -206,18 +206,23 @@ The skill's primary path is that default TOON; `--json` is the documented defens
 ## Routing receipt boundary
 
 Verified 2026-08-22 against the generation-specific routing receipt implementation.
-Publication uses exclusive creation with `O_NOFOLLOW` on the final receipt and brief path components, preserves every prior generation, and intentionally makes no all-or-none guarantee across those two files.
-The routing filesystem boundary applies `O_NOFOLLOW` only to the final path component supplied to each operation and does not reject an intermediate symlink, notably `FM_HOME/data`.
-A refused publication may leave partial artifacts, but those artifacts cannot authorize a launch because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
-The canonical dispatch snapshot applies the same final-component no-follow check, and final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
+The executable boundary operations are `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+`snapshot` opens the final task directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies selected inputs relative to held handles.
+`publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies the receipt and brief relative to the held generation handle.
+`hash`, `consume-generation`, and `verify-committed-generation` open their final directory components with `O_NOFOLLOW` and operate on named files or nested directories relative to held handles.
+The routing lifecycle as a whole is not handle-based, path-based operations remain, and the boundary does not reject symlinks in intermediate components, including the `FM_HOME/data` root.
+Publication uses per-artifact exclusive creation with `O_NOFOLLOW`, preserves every prior generation, and is not atomic or all-or-none.
+A refused publication may leave partial artifacts, and neither cleanup nor rollback is guaranteed.
+Those stranded artifacts cannot resolve as authoritative receipts because the runtime never scans generation directories and flag-free inheritance starts only from the successful task metadata `routing_decision` pointer, then requires a non-symlink regular receipt whose task-scoped generation matches its bytes.
+Final receipt freshness is read from the immutable prepared snapshot rather than the mutable pending pathname.
 Every accepted deterministic generation is synchronized to the locked append-only task ledger before generation publication, so restoring generation A after generations A and B were consumed refuses before worktree lease, endpoint, or metadata effects.
-The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it resnapshots and validates the receipt semantics, derives the generation paths, and verifies the published artifacts plus latest ledger row through the final-component no-follow checks without re-aging the preflight acceptance.
+The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it uses `snapshot` to resnapshot and validate the receipt semantics, derives the generation paths, and uses `verify-committed-generation` to verify the published artifacts plus latest ledger row without re-aging the preflight acceptance.
 This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
 The negative battery's shared-validator mutations prove only that the dispatch integration call site is load-bearing; guard-specific mutation coverage remains owned by the separate external 64-site mutation sweep and is not claimed here.
 
-The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance, and the executable boundary operations `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
 There are no surviving routing-lifecycle removal call sites.
-Publication between the generation directory and its two artifacts, cleanup of partial artifacts, and adversarial replacement after an identity check remain deliberately outside this ship; the ledger does not add rollback or an all-or-none publication claim.
+Atomic publication across the generation directory and its two artifacts, cleanup of partial artifacts, rollback, and adversarial replacement after an identity check remain deliberately outside this ship.
 
 The routing boundary verification entrypoints are:
 

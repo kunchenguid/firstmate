@@ -416,16 +416,18 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc receipt
+  local dir out rc receipt brief
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   receipt=$(write_committed_routing_receipt "$dir" rl19)
+  brief="$(dirname "$receipt")/brief.md"
   {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
     printf 'routing_decision=%s\n' "$receipt"
+    printf 'routing_brief=%s\n' "$brief"
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -440,6 +442,8 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task decision state must survive relaunch"
   [ "$(meta_field "$dir" rl19 routing_decision)" = "$receipt" ] \
     || fail "an unchanged relaunch must preserve its routing receipt pointer"
+  [ "$(meta_field "$dir" rl19 routing_brief)" = "$brief" ] \
+    || fail "an unchanged relaunch must preserve its routing brief pointer"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
@@ -699,16 +703,20 @@ test_late_expiry_refuses_before_agent_exit() {
 }
 
 test_committed_handoff_revalidates_without_reaging() {
-  local dir out rc old_receipt new_receipt
+  local dir out rc old_receipt old_brief new_receipt new_brief
   dir=$(new_case committed-handoff rl42)
   add_ship_task "$dir" rl42 claude
   old_receipt="$dir/home/data/rl42/routing-decision.prior.json"
+  old_brief="$dir/home/data/rl42/routing-brief.prior.md"
   printf '{}\n' > "$old_receipt"
+  printf 'prior brief\n' > "$old_brief"
   printf 'routing_decision=%s\n' "$old_receipt" >> "$dir/home/state/rl42.meta"
+  printf 'routing_brief=%s\n' "$old_brief" >> "$dir/home/state/rl42.meta"
   printf 'codex' > "$dir/fake/becomes"
   prepare_relaunch_receipt "$dir" rl42 codex default default "committed handoff"
   age_relaunch_receipt "$dir" rl42 299
   new_receipt=$(fm_test_routing_decision_path "$dir/home" rl42)
+  new_brief=$(fm_test_routing_brief_path "$dir/home" rl42)
   FM_FAKE_DATE_FIRST_EPOCH=$ROUTING_TEST_NOW
   FM_FAKE_DATE_LATE_EPOCH=$((ROUTING_TEST_NOW + 2))
   FM_FAKE_DATE_STATE="$dir/fake/date-count"
@@ -720,6 +728,10 @@ test_committed_handoff_revalidates_without_reaging() {
     || fail "committed routing handoff did not launch the replacement"
   [ "$(meta_field "$dir" rl42 routing_decision)" = "$new_receipt" ] \
     || fail "route-changing relaunch did not point metadata at its new generation"
+  [ "$(grep -c '^routing_brief=' "$dir/home/state/rl42.meta")" -eq 1 ] \
+    || fail "route-changing relaunch published ambiguous routing brief metadata"
+  [ "$(meta_field "$dir" rl42 routing_brief)" = "$new_brief" ] \
+    || fail "route-changing relaunch did not replace the prior routing brief pointer"
   assert_present "$old_receipt" "route-changing relaunch deleted its prior receipt generation"
   assert_present "$new_receipt" "control preflight did not publish the committed receipt generation"
   [ -f "$new_receipt" ] && [ ! -L "$new_receipt" ] \
@@ -765,10 +777,10 @@ fm_routing_decision_validate_committed_handoff() {
   FM_ROUTING_DECISION_FINAL=$FM_CONTROL_ROUTING_DECISION_FINAL
   FM_ROUTING_BRIEF_FINAL=$FM_CONTROL_ROUTING_BRIEF_FINAL
   FM_ROUTING_BRIEF_HASH=$(fm_routing_sha256_file "$FM_ROUTING_BRIEF_FINAL")
-}
-
-fm_routing_decision_seal_committed_handoff() {
-  return 0
+  FM_ROUTING_PREPARED_DIR=$DATA/$ID
+  FM_ROUTING_PREPARED_GENERATION=$(basename "$(dirname "$FM_ROUTING_DECISION_FINAL")")
+  FM_ROUTING_PREPARED_GENERATION=${FM_ROUTING_PREPARED_GENERATION#routing-generation.}
+  FM_ROUTING_PREPARED_PUBLISHED=0
 }
 SH
   run_forged_control_spawn "$counter" rl44 "$counter_root/bin/fm-spawn.sh" \

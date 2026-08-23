@@ -938,7 +938,7 @@ fm_routing_decision_seal_prepared() {
 
 fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-id> <harness> <model> <effort> <home> <raw:0|1> <launch> <model-fragment> <effort-fragment> [fresh|committed]
   local data=$1 config_dir=$2 id=$3 task_dir source_pending
-  local snapshot_dir snapshot_data snapshot_config status identity snapshot_result snapshot_error
+  local snapshot_name snapshot_dir snapshot_data snapshot_config status snapshot_result snapshot_error
 
   FM_ROUTING_DECISION_FINAL=
   FM_ROUTING_BRIEF_FINAL=
@@ -961,19 +961,7 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     return 1
   }
 
-  snapshot_dir=$(mktemp -d "$task_dir/.routing-decision.validate.XXXXXX") || {
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "private validation snapshot could not be created"
-    return 1
-  }
-  identity=$(fm_routing_fs_boundary identity "$snapshot_dir" 2>&1) || {
-    fm_routing_refuse "NOT_VERIFIABLE(SNAPSHOT)" "$identity"
-    return 1
-  }
-  IFS=$'\t' read -r FM_ROUTING_PREPARED_DIR_DEV FM_ROUTING_PREPARED_DIR_INO <<<"$identity"
-  FM_ROUTING_PREPARED_DIR=$snapshot_dir
-  snapshot_data="$snapshot_dir/data"
-  snapshot_config="$snapshot_dir/config"
-  snapshot_result=$(fm_routing_fs_boundary snapshot "$task_dir" "$config_dir" "$snapshot_dir" "$id" 2>&1)
+  snapshot_result=$(fm_routing_fs_boundary snapshot "$task_dir" "$config_dir" "$id" 2>&1)
   status=$?
   if [ "$status" -ne 0 ]; then
     snapshot_error=$snapshot_result
@@ -988,7 +976,11 @@ fm_routing_decision_validate_and_prepare() { # <data> <canonical-config> <task-i
     esac
     return 1
   fi
-  IFS=$'\t' read -r _ _ FM_ROUTING_PREPARED_PENDING_DEV FM_ROUTING_PREPARED_PENDING_INO _ FM_ROUTING_PREPARED_GENERATION <<<"$snapshot_result"
+  IFS=$'\t' read -r snapshot_name FM_ROUTING_PREPARED_DIR_DEV FM_ROUTING_PREPARED_DIR_INO FM_ROUTING_PREPARED_PENDING_DEV FM_ROUTING_PREPARED_PENDING_INO _ FM_ROUTING_PREPARED_GENERATION <<<"$snapshot_result"
+  snapshot_dir="$task_dir/$snapshot_name"
+  FM_ROUTING_PREPARED_DIR=$snapshot_dir
+  snapshot_data="$snapshot_dir/data"
+  snapshot_config="$snapshot_dir/config"
 
   fm_routing_decision_validate_snapshot \
     "$snapshot_data" "$snapshot_config" "$id" "$4" "$5" "$6" "$7" "$8" "$9" \

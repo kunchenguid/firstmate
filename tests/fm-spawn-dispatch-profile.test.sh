@@ -127,6 +127,7 @@ SH
 #!/usr/bin/env bash
 set -u
 target=${!#}
+result=
 receipt_target=
 if [ "${2:-}" = publish ]; then
   receipt_target="$3/routing-generation.$target/receipt.json"
@@ -151,8 +152,9 @@ if [ -n "${FM_TEST_FAIL_RECEIPT_LINK_MARKER:-}" ]; then
       ;;
   esac
 fi
-"$FM_TEST_REAL_PERL" "$@"
+result=$("$FM_TEST_REAL_PERL" "$@")
 status=$?
+[ -z "$result" ] || printf '%s\n' "$result"
 if [ "$status" -eq 0 ] \
   && [ "${2:-}" = snapshot ] \
   && [ -n "${FM_TEST_MUTATE_BRIEF_SOURCE:-}" ]; then
@@ -161,8 +163,9 @@ fi
 if [ "$status" -eq 0 ] \
   && [ "${2:-}" = snapshot ] \
   && [ -n "${FM_TEST_MUTATE_SNAPSHOT_BRIEF:-}" ]; then
-  rm -f -- "$5/data/$6/brief.md"
-  printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" > "$5/data/$6/brief.md"
+  snapshot_name=${result%%$'\t'*}
+  rm -f -- "$3/$snapshot_name/data/$5/brief.md"
+  printf '%s\n' "${FM_TEST_BRIEF_TARGET_REPLACEMENT:-replacement target bytes}" > "$3/$snapshot_name/data/$5/brief.md"
   [ -z "${FM_TEST_SNAPSHOT_BRIEF_MARKER:-}" ] || : > "$FM_TEST_SNAPSHOT_BRIEF_MARKER"
 fi
 exit "$status"
