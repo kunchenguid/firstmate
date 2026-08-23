@@ -113,7 +113,7 @@ restore_binding() { # <source-id> <stored-binding>
 }
 
 cmd_arm() {
-  local artifact=${1-} id real source binding upgraded=0
+  local artifact=${1-} id real source binding backup='' upgraded=0
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
@@ -128,8 +128,16 @@ cmd_arm() {
   if [ -e "$source" ] || [ -L "$source" ]; then
     binding=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id") \
       || die "cannot read the existing answer binding: $id"
-    "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null \
-      || die "cannot retire the legacy Lavish poll registration: $id"
+    backup=$(umask 077; mktemp "$(fm_procevent_registry_dir "$STATE")/.legacy-source.XXXXXX") \
+      || die "cannot preserve the legacy Lavish poll registration: $id"
+    if ! cp -p -- "$source" "$backup"; then
+      rm -f -- "$backup"
+      die "cannot preserve the legacy Lavish poll registration: $id"
+    fi
+    if ! "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null; then
+      rm -f -- "$backup"
+      die "cannot retire the legacy Lavish poll registration: $id"
+    fi
     upgraded=1
   fi
   # The plain blocking form: no --timeout-ms, so completion is a server event.
@@ -137,10 +145,17 @@ cmd_arm() {
   # poll on the same Windows runtime and state store that opened the artifact.
   if ! "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- \
     "$SCRIPT_DIR/fm-lavish.sh" poll "$real" >/dev/null; then
-    [ "$upgraded" -eq 0 ] || restore_binding "$id" "$binding" || true
+    if [ "$upgraded" -eq 1 ]; then
+      if ! cp -p -- "$backup" "$source" || ! restore_binding "$id" "$binding"; then
+        rm -f -- "$backup"
+        die "cannot restore the legacy Lavish poll registration: $id"
+      fi
+      rm -f -- "$backup"
+    fi
     die "cannot publish the routed Lavish poll registration: $id"
   fi
   if [ "$upgraded" -eq 1 ]; then
+    rm -f -- "$backup"
     restore_binding "$id" "$binding" \
       || die "cannot restore the answer binding after upgrading: $id"
     printf 'upgraded: %s\n' "$id"

@@ -599,6 +599,36 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# A failed legacy-to-router publication must put the prior valid registration
+# back, or the captain's next answer has no process-event source to supervise.
+HUPGRADE="$TMP_ROOT/hupgrade"; new_home "$HUPGRADE"
+UPGRADE_ART="$TMP_ROOT/upgrade-review.html"
+printf '<h1>upgrade review</h1>\n' > "$UPGRADE_ART"
+upgrade_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$UPGRADE_ART")
+PE_TRACKED+=("$HUPGRADE|$upgrade_id")
+pe_register "$HUPGRADE" lavish "$upgrade_id" -- lavish-axi poll "$UPGRADE_ART" >/dev/null
+FM_HOME="$HUPGRADE" "$ROOT/bin/fm-captain-hold.sh" bind "$upgrade_id" >/dev/null
+cp "$HUPGRADE/state/procevent/$upgrade_id.source" "$TMP_ROOT/legacy-registration.source"
+FAIL_PUBLISH_BIN=$(fm_fakebin "$TMP_ROOT/fail-lavish-publish")
+cat > "$FAIL_PUBLISH_BIN/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in *.source) exit 1 ;; esac
+done
+exec /bin/mv "$@"
+SH
+chmod +x "$FAIL_PUBLISH_BIN/mv"
+upgrade_status=0
+upgrade_out=$(PATH="$FAIL_PUBLISH_BIN:$PATH" FM_HOME="$HUPGRADE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$UPGRADE_ART" 2>&1) || upgrade_status=$?
+[ "$upgrade_status" -ne 0 ] || fail "faulted router publication unexpectedly succeeded"
+assert_contains "$upgrade_out" "cannot publish the routed Lavish poll registration" \
+  "faulted router publication reports the failed upgrade"
+cmp -s "$TMP_ROOT/legacy-registration.source" "$HUPGRADE/state/procevent/$upgrade_id.source" \
+  || fail "faulted router publication did not restore the prior valid registration"
+pe "$HUPGRADE" retire "$upgrade_id" >/dev/null
+pass "failed Lavish router publication preserves the prior valid registration"
+
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
 # real blocking source completes, its result is captured and published, the
