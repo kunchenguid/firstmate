@@ -14,8 +14,8 @@
 # signal and is completely unaffected.
 #
 # Each entrypoint is exercised in three scenarios, isolating exactly ONE signal:
-#   - env-marker refuse : neutral cwd + NO_MISTAKES_GATE set      -> exit 3, no mutation
-#   - path-backstop refuse: gate-worktree cwd + marker UNSET      -> exit 3, no mutation
+#   - env-marker refuse : neutral cwd + NO_MISTAKES_GATE set      -> refuse, no mutation
+#   - path-backstop refuse: gate-worktree cwd + marker UNSET      -> refuse, no mutation
 #   - no-regression      : neutral cwd + marker UNSET             -> succeeds, no gate error
 # The marker is UNSET explicitly in the no-regression/backstop runs (env -u) and
 # those runs stand in a controlled NON-gate repo, so the suite is hermetic even
@@ -31,6 +31,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
+# Own the refusal code in one place: source it from the library under test so
+# this suite tracks the constant instead of hard-coding the number.
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$GATE_LIB"
+REFUSE_CODE=$FM_GATE_REFUSE_EXIT
 SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -100,7 +105,7 @@ run_guard_lib() {
 test_helper_env_marker_refuses() {
   local out rc
   out=$(run_guard_lib "$NORMAL_CWD" set); rc=$?
-  expect_code 3 "$rc" "helper: env marker must exit 3"
+  expect_code "$REFUSE_CODE" "$rc" "helper: env marker must refuse"
   assert_contains "$out" "$ENV_MSG" "helper: env-marker refusal message"
   pass "fm-gate-refuse-lib: refuses when NO_MISTAKES_GATE is set"
 }
@@ -108,7 +113,7 @@ test_helper_env_marker_refuses() {
 test_helper_empty_env_marker_refuses() {
   local out rc
   out=$(run_guard_lib "$NORMAL_CWD" empty); rc=$?
-  expect_code 3 "$rc" "helper: empty env marker must exit 3"
+  expect_code "$REFUSE_CODE" "$rc" "helper: empty env marker must refuse"
   assert_contains "$out" "$ENV_MSG" "helper: empty env-marker refusal message"
   pass "fm-gate-refuse-lib: refuses when NO_MISTAKES_GATE is set empty"
 }
@@ -117,7 +122,7 @@ test_helper_path_backstop_refuses() {
   local out rc
   # Marker UNSET: only the git-common-dir backstop can fire here.
   out=$(run_guard_lib "$GATE_WT"); rc=$?
-  expect_code 3 "$rc" "helper: gate worktree must exit 3 even with the marker unset"
+  expect_code "$REFUSE_CODE" "$rc" "helper: gate worktree must refuse even with the marker unset"
   assert_contains "$out" "$PATH_MSG" "helper: path-backstop refusal message"
   assert_not_contains "$out" "$ENV_MSG" "helper: backstop must not be attributed to the env marker"
   pass "fm-gate-refuse-lib: refuses from a gate worktree via git-common-dir (marker unset)"
@@ -181,13 +186,13 @@ test_spawn_refuses_and_admits() {
 
   # env-marker refuse: neutral cwd, marker set.
   out=$(run_spawn "$NORMAL_CWD" "$home" spawn-envmark "$proj" "$wt" "$fakebin" NO_MISTAKES_GATE=1); rc=$?
-  expect_code 3 "$rc" "spawn: NO_MISTAKES_GATE must refuse"
+  expect_code "$REFUSE_CODE" "$rc" "spawn: NO_MISTAKES_GATE must refuse"
   assert_contains "$out" "$ENV_MSG" "spawn: env-marker refusal message"
   assert_absent "$home/state/spawn-envmark.meta" "spawn: refused env-marker launch must not record meta"
 
   # path-backstop refuse: gate-worktree cwd, marker UNSET.
   out=$(run_spawn "$GATE_WT" "$home" spawn-backstop "$proj" "$wt" "$fakebin"); rc=$?
-  expect_code 3 "$rc" "spawn: gate-worktree cwd must refuse with the marker unset"
+  expect_code "$REFUSE_CODE" "$rc" "spawn: gate-worktree cwd must refuse with the marker unset"
   assert_contains "$out" "$PATH_MSG" "spawn: path-backstop refusal message"
   assert_absent "$home/state/spawn-backstop.meta" "spawn: refused backstop launch must not record meta"
 
@@ -256,14 +261,14 @@ test_send_refuses_and_admits() {
   # env-marker refuse.
   : > "$log"
   out=$(run_send "$NORMAL_CWD" "$home" "$fakebin" "$log" fm-lane-ok "hello captain" NO_MISTAKES_GATE=1); rc=$?
-  expect_code 3 "$rc" "send: NO_MISTAKES_GATE must refuse"
+  expect_code "$REFUSE_CODE" "$rc" "send: NO_MISTAKES_GATE must refuse"
   assert_contains "$out" "$ENV_MSG" "send: env-marker refusal message"
   [ ! -s "$log" ] || fail "send: refused env-marker send still typed to the endpoint"$'\n'"$(cat "$log")"
 
   # path-backstop refuse (marker UNSET).
   : > "$log"
   out=$(run_send "$GATE_WT" "$home" "$fakebin" "$log" fm-lane-ok "hello captain"); rc=$?
-  expect_code 3 "$rc" "send: gate-worktree cwd must refuse with the marker unset"
+  expect_code "$REFUSE_CODE" "$rc" "send: gate-worktree cwd must refuse with the marker unset"
   assert_contains "$out" "$PATH_MSG" "send: path-backstop refusal message"
   [ ! -s "$log" ] || fail "send: refused backstop send still typed to the endpoint"$'\n'"$(cat "$log")"
 
@@ -347,14 +352,14 @@ test_teardown_refuses_and_admits() {
   # env-marker refuse: a genuinely-landed task is still refused; nothing is torn down.
   case_dir=$(make_teardown_case teardown-envmark)
   out=$(run_teardown "$NORMAL_CWD" "$case_dir" NO_MISTAKES_GATE=1); rc=$?
-  expect_code 3 "$rc" "teardown: NO_MISTAKES_GATE must refuse"
+  expect_code "$REFUSE_CODE" "$rc" "teardown: NO_MISTAKES_GATE must refuse"
   assert_contains "$out" "$ENV_MSG" "teardown: env-marker refusal message"
   assert_present "$case_dir/state/task-x1.meta" "teardown: refused env-marker teardown must leave the task"
 
   # path-backstop refuse (marker UNSET).
   case_dir=$(make_teardown_case teardown-backstop)
   out=$(run_teardown "$GATE_WT" "$case_dir"); rc=$?
-  expect_code 3 "$rc" "teardown: gate-worktree cwd must refuse with the marker unset"
+  expect_code "$REFUSE_CODE" "$rc" "teardown: gate-worktree cwd must refuse with the marker unset"
   assert_contains "$out" "$PATH_MSG" "teardown: path-backstop refusal message"
   assert_present "$case_dir/state/task-x1.meta" "teardown: refused backstop teardown must leave the task"
 

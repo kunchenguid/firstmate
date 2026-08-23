@@ -54,7 +54,10 @@
 # before any resend, and never re-type blindly; a marked request's
 # pending-reply expectation stays armed because this outcome is not a proven
 # failure); any other nonzero = the send failed and nothing may be assumed
-# delivered. Submission dispatches through the target's recorded backend; the
+# delivered. 77 is reserved for the no-mistakes gate-agent refusal and never
+# means delivered (bin/fm-gate-refuse-lib.sh): it exits before any submit, so
+# nothing was sent and the remote leg treats it as a hard failure, never as the
+# delivered-unconfirmed exit 3. Submission dispatches through the target's recorded backend; the
 # tmux adapter shares its composer/submit core with the away-mode daemon via
 # bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
 # (0.4). Slash commands, and codex `$...` skill invocations resolved through
