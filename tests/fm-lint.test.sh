@@ -162,6 +162,16 @@ test_help_reports_the_complete_interface() {
   pass "fm-lint.sh --help reports the complete executable interface"
 }
 
+# fm-lint.sh's default (no explicit-path) mode also runs fm-lint-workflows.sh,
+# which needs real actionlint to do genuine YAML linting; mirrors pinned_ready
+# above so tests exercising that default path self-skip instead of failing
+# closed when the pin is not on PATH.
+ACTIONLINT_REQUIRED=$("$ROOT/bin/fm-lint-workflows.sh" --required-version)
+actionlint_ready() {
+  command -v actionlint >/dev/null 2>&1 || return 1
+  [ "$(actionlint -version | awk 'NR==1 {print; exit}')" = "$ACTIONLINT_REQUIRED" ]
+}
+
 test_list_files_reports_the_shell_inventory() {
   local listed expected
   # CI=true forces the full canonical set regardless of the ambient branch or
@@ -361,6 +371,10 @@ SH
 }
 
 test_changed_mode_lints_only_the_changed_file() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $ACTIONLINT_REQUIRED not resolved): changed-mode regression check"
+    return
+  fi
   local tmp fakebin log diff_file out target
   tmp=$(fm_test_tmproot fm-lint-changed)
   fakebin=$(fm_fakebin "$tmp")
@@ -431,6 +445,10 @@ test_explicit_path_bypasses_changed_logic() {
 }
 
 test_zero_changed_files_exits_clean() {
+  if ! actionlint_ready; then
+    pass "SKIP (actionlint $ACTIONLINT_REQUIRED not resolved): zero-changed-files regression check"
+    return
+  fi
   local tmp fakebin diff_file out rc
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
