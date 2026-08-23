@@ -166,6 +166,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 A project with no origin remote configured has no upstream its base can be stale against, so that refresh is skipped with a notice rather than refused.
 That skip does not lower the clean-worktree bar: a pooled worktree carrying uncommitted work is still refused, because no task may start on top of another task's unlanded work.
+Committed leftovers read as clean, so the skip path also refuses a pooled worktree whose HEAD has left the local default branch tip, refusing rather than resetting because with no remote those commits may be the only copy of that work.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
