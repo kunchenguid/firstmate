@@ -138,6 +138,9 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A repository with no origin remote configured has no upstream to be stale
+#   against, so that refresh is skipped with a loud notice and the spawn
+#   continues; only a configured remote can make a base unverifiable.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,8 +1730,28 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Freshening asks one question: is this worktree's base stale against its
+# upstream? A repository with no origin configured has no upstream, so that
+# question is meaningless rather than failed, and the spawn proceeds from the
+# base it already has. A project that lives only on one machine is a supported
+# shape, so refusing it would strand every fresh task worktree on that project.
+# The distinction is drawn on whether a remote is CONFIGURED, read from git's own
+# local remote list, which makes no network call. A configured origin that cannot
+# be reached still falls through to the strict path below and refuses loudly, so a
+# network outage on an ordinary project is never reclassified as "no remote".
+# This belongs inside the freshening function, not at its call site: the
+# freshening contract - including when it does not apply - stays with its one
+# owner, so no caller has to know what makes a base refresh meaningful.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status remotes
+  remotes=$(git -C "$worktree" remote) || {
+    echo "error: could not read the configured remotes of pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$remotes" | grep -qx origin; then
+    echo "notice: pooled worktree '$worktree' has no origin remote configured; skipping the base refresh because there is no upstream it can be stale against" >&2
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
