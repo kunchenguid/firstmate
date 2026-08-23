@@ -38,6 +38,7 @@ make_inputs() {
     "$root/gh-axi/node_modules/fixture-dependency/dist"
   make_elf "$root/artifacts/no-mistakes"
   make_elf "$root/artifacts/codex"
+  make_elf "$root/artifacts/claude"
   make_elf "$root/artifacts/codex-code-mode-host"
   make_elf "$root/artifacts/gh"
   make_elf "$root/artifacts/node"
@@ -111,6 +112,20 @@ build_bundle() {
     --node "$node" \
     --gh-axi-package "$root/gh-axi" \
     --no-mistakes-version "$version" \
+    --no-mistakes-source-commit "$SOURCE_COMMIT" \
+    --output "$output"
+}
+
+build_claude_bundle() {
+  local root=$1 output=$2
+  "$VALIDATION" build-runtime-bundle \
+    --provider claude \
+    --no-mistakes "$root/artifacts/no-mistakes" \
+    --provider-binary "$root/artifacts/claude" \
+    --gh "$root/artifacts/gh" \
+    --node "$root/artifacts/node" \
+    --gh-axi-package "$root/gh-axi" \
+    --no-mistakes-version 1.48.0 \
     --no-mistakes-source-commit "$SOURCE_COMMIT" \
     --output "$output"
 }
@@ -539,6 +554,36 @@ PY
   out=$($VALIDATION --help) || fail "validation wrapper help failed"
   assert_contains "$out" "build-runtime-bundle" "wrapper help omitted the runtime producer"
   pass "explicit local inputs produce a no-download byte-deterministic manifest-first bundle with normalized guest-safe tar and gzip metadata"
+}
+
+claude_provider_bundle_contract() {
+  local tmp first second
+  fm_test_tmproot_into tmp fm-azure-runtime-claude
+  make_inputs "$tmp"
+  first=$tmp/claude-a.tar.gz
+  second=$tmp/claude-b.tar.gz
+  build_claude_bundle "$tmp" "$first" >/dev/null \
+    || fail "Claude runtime build failed"
+  build_claude_bundle "$tmp" "$second" >/dev/null \
+    || fail "deterministic Claude runtime rebuild failed"
+  cmp -s "$first" "$second" \
+    || fail "Claude runtime builds were not byte deterministic"
+  python3 - "$first" <<'PY' \
+    || fail "Claude runtime did not bind its exact provider artifact"
+import json
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    names = {member.name for member in archive.getmembers()}
+    manifest = json.load(archive.extractfile("runtime.json"))
+assert manifest["provider"] == "claude"
+assert manifest["provider_path"] == "bin/claude"
+assert "bin/claude" in names
+assert "bin/codex" not in names
+assert "bin/codex-code-mode-host" not in names
+PY
+  pass "Claude runtime production is byte deterministic and binds only the exact Claude provider artifact"
 }
 
 real_submit_and_mutation_contract() {
@@ -1279,6 +1324,7 @@ PY
 }
 
 build_shape_and_determinism_contract
+claude_provider_bundle_contract
 real_submit_and_mutation_contract
 input_refusal_and_atomic_output_contract
 concurrent_no_clobber_contract
