@@ -21,8 +21,10 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
+# Provision records the running primary session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
+# FM_HERDR_LAB_PRIMARY_SESSION, then inherited HERDR_SESSION, identifies a
+# named primary; absent either record, the primary remains literal default.
 set -u
 
 fm_herdr_lab_error() {
@@ -58,21 +60,41 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+fm_herdr_lab_primary_session() {
+  local primary=${FM_HERDR_LAB_PRIMARY_SESSION:-${HERDR_SESSION:-default}}
+  [ -n "$primary" ] || {
+    fm_herdr_lab_error "fleet-state tripwire requires a non-empty primary session record"
+    return 1
+  }
+  case "$primary" in
+    fm-lab-*)
+      fm_herdr_lab_error "fleet-state tripwire refuses lab session '$primary' as the primary"
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$primary"
+}
+
 fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 sessions snapshot
+  local name=$1 primary sessions snapshot
+  primary=$(fm_herdr_lab_primary_session) || return 1
+  [ "$primary" != "$name" ] || {
+    fm_herdr_lab_error "fleet-state tripwire refuses the lab session as its own primary"
+    return 1
+  }
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
-  snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
+  snapshot=$(printf '%s' "$sessions" | jq -c --arg primary "$primary" '
+    [.sessions[]? | select(.name == $primary and .running == true)]
+    | if length == 1
       then .[0] | {name, default, running, socket_path}
       else empty
       end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one running recorded primary session '$primary'"
     return 1
   }
   printf '%s\n' "$snapshot"
@@ -227,7 +249,7 @@ fm_herdr_lab_check_tripwire() { # <session>
   before=$(cat "$tripwire")
   after=$(fm_herdr_lab_fleet_state "$name") || return 1
   [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
+    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: primary session changed during lab work"
     fm_herdr_lab_error "before: $before"
     fm_herdr_lab_error "after:  $after"
     return 1
