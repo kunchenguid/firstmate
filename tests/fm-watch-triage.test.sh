@@ -350,6 +350,54 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, paused is not captain-relevant, and the two declared-wait verbs stay separable"
 }
 
+# A declared pause must not be overwritten by any later status line - only by an
+# actual resumption. The concrete leak: fm-send's --resolve-key (bin/fm-send.sh
+# header) appends "resolved [key=<k>]: answered: ..." to a task's OWN status log
+# to close some OTHER, earlier decision, at whatever moment firstmate answers it -
+# which can land after an unrelated `paused:` declaration and, read literally as
+# "the last status line", would make every pause consumer conclude the pause had
+# ended even though nothing about the declared wait changed.
+test_last_general_status_line_survives_unrelated_keyed_resolutions() {
+  local dir f
+  dir=$(make_case pause-survives-unrelated-resolve); f="$dir/state/task.status"
+
+  printf 'paused: waiting on the upstream release\n' > "$f"
+  [ "$(last_general_status_line "$f")" = 'paused: waiting on the upstream release' ] \
+    || fail "a bare declared pause was not read back as the current declaration"
+
+  # firstmate answers an EARLIER, unrelated decision after the pause was declared.
+  printf 'resolved [key=api-shape]: answered: use REST\n' >> "$f"
+  [ "$(last_general_status_line "$f")" = 'paused: waiting on the upstream release' ] \
+    || fail "an unrelated keyed resolve was read as ending the declared pause"
+  status_is_paused_or_captain_held "$(last_general_status_line "$f")" \
+    || fail "the pause was lost behind an unrelated keyed resolve"
+
+  # A SECOND unrelated keyed resolve stacks the same way - not just the first one.
+  printf 'resolved [key=other-thing]: answered: later\n' >> "$f"
+  [ "$(last_general_status_line "$f")" = 'paused: waiting on the upstream release' ] \
+    || fail "a second unrelated keyed resolve was read as ending the declared pause"
+
+  # A genuine resumption - the crew's own unkeyed line - still ends the pause
+  # exactly as before; this fix narrows what is skipped, it does not stop
+  # anything from ending a pause.
+  printf 'working: resumed, upstream landed\n' >> "$f"
+  [ "$(last_general_status_line "$f")" = 'working: resumed, upstream landed' ] \
+    || fail "a genuine unkeyed resumption was not read as the current declaration"
+  status_is_paused_or_captain_held "$(last_general_status_line "$f")" \
+    && fail "a genuine resumption was still read as a declared pause"
+
+  # A bare (unkeyed, default-bucket) resolved: is the crew's OWN way to end an
+  # undeclared wait as it resumes (bin/fm-brief.sh rule 6) and must still count.
+  printf 'paused: waiting again\n' > "$f"
+  printf 'resolved: it cleared on its own\n' >> "$f"
+  [ "$(last_general_status_line "$f")" = 'resolved: it cleared on its own' ] \
+    || fail "a bare unkeyed resolved: was skipped as if it were other-decision bookkeeping"
+  status_is_paused_or_captain_held "$(last_general_status_line "$f")" \
+    && fail "a bare resolved: line was still read as a declared pause"
+
+  pass "last_general_status_line survives any number of unrelated keyed resolutions, while a genuine resumption (keyed or bare) still ends the pause"
+}
+
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
 # reasons - working (active run/busy pane), paused (declared external wait), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
@@ -1972,6 +2020,110 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   pass "a write deferral re-surfaces once on the bounded pause cadence, so a churning worktree cannot stay invisible"
 }
 
+# --- quiet pane, foreground process still running: deferred, never wedge-escalated -
+# Measured 2026-08-22: a worker was flagged "possible wedge, escalation 1" while its
+# gate-response command had been running 19 minutes, visible immediately in the
+# process table. Pane quietness and the run step cannot see a long foreground
+# command with no screen output; a tmux pane whose CURRENT foreground process is
+# the same PID recorded when the idle window opened is deferred instead
+# (wedge_defer_foreground), the process-table analog of the worktree-write
+# deferral above. This is the one case in this file that needs a REAL private
+# tmux server rather than the fake stub every other case uses: a fake tmux cannot
+# truthfully answer `ps -t <pane-tty>`, and answering it truthfully is the whole
+# point of the fix under test.
+test_wedge_escalation_deferred_while_foreground_process_runs() {
+  local dir state fakebin out drain_out window key pane_hash sig pid wt back
+  local socket real_tmux target fg_pid tail dead
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; return 0; }
+  real_tmux=$(command -v tmux)
+  dir=$(make_case wedge-foreground-process); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  wt="$dir/wt"; mkdir -p "$wt"
+  socket="fm-fg-wedge-$$"
+  # shellcheck disable=SC2064 # $real_tmux/$socket must expand now, while both are set.
+  trap "\"$real_tmux\" -L \"$socket\" kill-server >/dev/null 2>&1 || true; fm_test_cleanup" EXIT
+
+  # Route every tmux call - $WATCH's own capture/list/display-message calls, and
+  # this fixture's own setup below - to one private, disposable server.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real_tmux" -L "$socket" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+
+  window="fg-wedge:worker"
+  target="fg-wedge:worker"
+  "$real_tmux" -L "$socket" new-session -d -s fg-wedge -n idle -c "$dir" \
+    || fail "could not start the private tmux server"
+  "$real_tmux" -L "$socket" new-window -d -t fg-wedge: -n worker -c "$dir" -- sleep 900 \
+    || fail "could not create the foreground-process window"
+  fg_pid=""
+  for _ in $(seq 1 50); do
+    fg_pid=$("$real_tmux" -L "$socket" list-panes -t "$target" -F '#{pane_pid}' 2>/dev/null)
+    [ -n "$fg_pid" ] && kill -0 "$fg_pid" 2>/dev/null && break
+    fg_pid=""
+    sleep 0.1
+  done
+  [ -n "$fg_pid" ] || fail "the sleep window never reported a live pane pid"
+
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/fgwedge.meta"
+  printf 'working: implementing\n' > "$state/fgwedge.status"
+  sig=$(seen_sig "$state/fgwedge.status"); printf '%s' "$sig" > "$state/.seen-fgwedge_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  tail=$("$real_tmux" -L "$socket" capture-pane -p -t "$target" -S -40 2>/dev/null)
+  pane_hash=$(hash_text "$tail")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  # The stale window's foreground process was snapshotted (by an earlier real
+  # reset poll) as the sleep still running in the pane right now.
+  printf '%s' "$fg_pid" > "$state/.fg-pid-$key"
+
+  # Phase A: the SAME foreground process is still running. Deferred.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher wedge-escalated a quiet pane whose foreground process was still running: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a foreground-process deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a foreground-process deferral enqueued a wake"; }
+  [ -e "$state/.fg-since-$key" ] || { reap "$pid"; fail "the foreground-deferral chain marker was not recorded"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a deferral advanced the wedge escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "a deferral did not restart the idle timer, so the next window cannot re-probe"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: same fixture, same real sleep still running in the pane (so the
+  # SCREEN looks identical either way - that is the entire defect this fix
+  # closes), but the RECORDED pid is no longer live. Only the process table can
+  # tell these two cases apart; the unchanged schedule must still escalate.
+  dead=$(dead_pid)
+  printf '%s' "$dead" > "$state/.fg-pid-$key"
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a pane whose recorded foreground process is dead did not wedge-escalate on the existing schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the escalation was not counted"
+  [ ! -e "$state/.fg-since-$key" ] || fail "the foreground-deferral chain outlived a real escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the escalation was not queued"
+  "$real_tmux" -L "$socket" kill-server >/dev/null 2>&1 || true
+  trap fm_test_cleanup EXIT
+  pass "a quiet pane whose recorded foreground process is still running is deferred, while a dead recorded process still wedge-escalates on the unchanged schedule"
+}
+
 # The worktree recorded for a secondmate is a provisioned firstmate home, and that
 # home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
 # heartbeats keep state/ churning whether or not the mate produced anything. Reading
@@ -2612,6 +2764,7 @@ test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
+test_last_general_status_line_survives_unrelated_keyed_resolutions
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
@@ -2651,6 +2804,7 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
+test_wedge_escalation_deferred_while_foreground_process_runs
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain

@@ -372,17 +372,24 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last pause_last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
-  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+  # A separate read for the pause/captain-held check: the literal last line can
+  # be firstmate's own "resolved [key=<k>]" bookkeeping for some OTHER, earlier
+  # decision (fm-send's --resolve-key), which must never read as "the pause
+  # ended" just because it landed after the pause declaration (fm-classify-lib.sh's
+  # last_general_status_line). Every other read below stays on the raw last line:
+  # captain-relevance and dedupe intentionally care about the literal last line.
+  pause_last=$(last_general_status_line "$state/$task.status")
+  if [ -n "$pause_last" ] && status_is_paused_or_captain_held "$pause_last"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
-    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$pause_last"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -503,7 +510,7 @@ migrate_watcher_pause_markers() {  # <state>
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
-    last=$(last_status_line "$state/$task.status")
+    last=$(last_general_status_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
@@ -517,7 +524,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
   for f in "${files[@]}"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
+    last=$(last_general_status_line "$f")
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
@@ -1012,7 +1019,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(last_general_status_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1046,7 +1053,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(last_general_status_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1058,7 +1065,7 @@ housekeeping() {  # <state>
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
       *)
-        last=$(last_status_line "$state/$task.status")
+        last=$(last_general_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
           escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"
           _now > "$marker"

@@ -657,6 +657,83 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+test_refuses_to_overwrite_recorded_pr_with_a_different_one() {
+  local dir rc
+  dir=$(make_case pr-overwrite-guard)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    >/dev/null 2>/dev/null || fail "first PR record failed"
+  grep -qxF 'pr=https://github.com/o/r/pull/5' "$dir/home/state/task-a.meta" \
+    || fail "first PR was not recorded"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recording a second, different PR against the same task was not refused"
+  grep -q REFUSED "$dir/stderr" || fail "refusal was not reported"
+  grep -qxF 'pr=https://github.com/o/r/pull/5' "$dir/home/state/task-a.meta" \
+    || fail "original pr= was overwritten despite refusal"
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$dir/home/state/task-a.meta" \
+    && fail "second PR was recorded despite refusal"
+
+  # Idempotent re-arm of the SAME PR must still work: bin/fm-pr-merge.sh depends
+  # on this to re-record pr= immediately before merging the task's own PR.
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    >/dev/null 2>/dev/null || fail "re-arming the same recorded PR was refused"
+  pass "a second, different PR recorded against the same task is refused, not silently overwritten"
+}
+
+test_concurrent_check_toctou_refuses_second_writer() {
+  local dir rc_a rc_b a_pid
+  dir=$(make_case pr-overwrite-race)
+  write_task_meta "$dir"
+
+  # Only the pull/5 resolution call sleeps, widening the window between A's
+  # pre-lock guard and its locked re-check long enough for a concurrent B to
+  # record a different PR and release the lock first. Both A and B therefore
+  # provably read no pr= before either writes one - the race the pre-lock-only
+  # guard could not close.
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"pull/5"*"headRefOid"*) sleep 1 ;;
+esac
+case " $* " in
+  *" headRefOid "*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    > "$dir/a.out" 2> "$dir/a.err" &
+  a_pid=$!
+  sleep 0.2
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/b.out" 2> "$dir/b.err"
+  rc_b=$?
+  set -e
+  [ "$rc_b" -eq 0 ] || fail "the concurrent second writer (B) was unexpectedly refused: $(cat "$dir/b.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$dir/home/state/task-a.meta" \
+    || fail "B's PR was not recorded"
+
+  set +e
+  wait "$a_pid"
+  rc_a=$?
+  set -e
+  [ "$rc_a" -ne 0 ] || fail "a stale pre-lock guard let concurrent invocation A overwrite the PR B recorded while A slept"
+  grep -q REFUSED "$dir/a.err" || fail "A's overwrite attempt was not reported as a refusal: $(cat "$dir/a.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$dir/home/state/task-a.meta" \
+    || fail "B's recorded PR was overwritten by A despite the refusal"
+  grep -qxF 'pr=https://github.com/o/r/pull/5' "$dir/home/state/task-a.meta" \
+    && fail "A's PR was recorded despite racing a concurrent writer"
+
+  pass "a concurrent invocation that read no pr= before a racing writer committed one is refused, not allowed to overwrite it"
+}
+
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   shift 2
@@ -3334,7 +3411,11 @@ test_retirement_queue_failure_and_receipt_tampering() {
     && fail "malformed receipt authorized poll deletion"
   [ "$(state_snapshot "$state")" = "$before" ] || fail "malformed receipt changed poll state"
   set +e
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 > "$dir/rearm.out" 2> "$dir/rearm.err"
+  # Same URL as already recorded (pull/9): this rearm must be refused by the
+  # tampered-receipt check below, not preempted by the same-task-different-PR
+  # guard (test_refuses_to_overwrite_recorded_pr_with_a_different_one covers
+  # that guard on its own).
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/rearm.out" 2> "$dir/rearm.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "rearm accepted an invalid pending retirement receipt"
@@ -3383,6 +3464,8 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_refuses_to_overwrite_recorded_pr_with_a_different_one
+test_concurrent_check_toctou_refuses_second_writer
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

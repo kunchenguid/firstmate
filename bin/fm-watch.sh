@@ -39,7 +39,19 @@
 #                          because files appearing there are liveness the pane and
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          that writes nothing keeps the unchanged schedule. A
+#                          tmux pane whose FOREGROUND PROCESS (not its screen
+#                          content) has kept running the whole quiet window is
+#                          deferred the same way (wedge_defer_foreground):
+#                          screen quiescence alone cannot tell a wedged worker
+#                          from one blocked on a long foreground command (a
+#                          gate-response call, a bounded poll loop) - measured
+#                          2026-08-22, a worker was flagged "possible wedge" while
+#                          its gate-response command had been running 19 minutes,
+#                          visible immediately in the process table. Every other
+#                          backend, and a tmux pane with no readable foreground
+#                          process, has no such evidence and keeps the unchanged
+#                          schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -49,7 +61,13 @@
 #                          pause recheck cadence; every other pane goes through
 #                          the same wedge timer and surfaces with the identical
 #                          "stale: ..." reason, escalation count, and
-#                          demand-deep-inspection marker, for human inspection
+#                          demand-deep-inspection marker - EXCEPT the
+#                          foreground-process defer above, which busy panes never
+#                          get: a busy pane's own foreground process is the
+#                          worker launcher itself, alive for the pane's whole
+#                          life regardless of whether the turn underway is
+#                          healthy, so treating it as evidence would defer every
+#                          busy-turn escalation forever. For human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
@@ -269,11 +287,12 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# .wedge-escalations-, .paused-*, .writing-*, .fg-pid-, .fg-since-,
+# .fg-resurfaced-), and live homes hold those markers on disk under the current
+# format, so the format lives here alone: a second copy is how a future change to
+# it silently orphans a window's markers instead of clearing them. The helpers
+# below take the derived key rather than re-deriving it, so one poll of one
+# window derives it once.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -349,12 +368,55 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
-# Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
-# the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
-# long-finished one cannot make the next deferral resurface immediately.
+# 0 when a tmux pane's CURRENT foreground process is still the same PID that was
+# recorded in <pid-file> when this stale window opened, and that PID is still
+# alive - positive evidence a long-running foreground command (not screen
+# activity) has kept running the whole time the pane looked idle. This is the
+# liveness input pane-quietness alone cannot supply: it cannot distinguish a
+# wedged worker from one blocked on a long foreground call. 1 for every other
+# outcome, including a missing/empty pid file, a dead recorded PID, a pane whose
+# foreground process cannot be read, and any backend other than tmux (which this
+# reads via the pane's own tty and has no analog for yet) - absence of evidence
+# always leaves the caller's existing escalation schedule untouched.
+crew_foreground_process_running_since() {  # <window> <pid-file>
+  local win=$1 f=$2 recorded current
+  [ -f "$f" ] || return 1
+  [ "$(window_backend "$win")" = tmux ] || return 1
+  recorded=$(cat "$f" 2>/dev/null || true)
+  case "$recorded" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$recorded" 2>/dev/null || return 1
+  current=$(fm_tmux_pane_foreground_pid "$win") || return 1
+  [ "$current" = "$recorded" ]
+}
+
+# Defer ONE wedge escalation for a tmux pane whose own foreground process (not
+# its screen content) has kept running since the idle window opened - the
+# process-table analog of wedge_defer_writing above, and shares its shape: a
+# DEFERRAL, not a cancellation, so the idle timer restarts and the pane still
+# re-surfaces once every PAUSE_RESURFACE_SECS through the shared
+# resurface_absorbed, throttled by its own .fg-resurfaced-<key> marker. The
+# escalation counter is left alone for the same reason wedge_defer_writing
+# leaves it alone.
+wedge_defer_foreground() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 key fsf fage
+  key=$(window_key "$win")
+  fsf="$STATE/.fg-since-$key"
+  [ -e "$fsf" ] || date +%s > "$fsf"
+  fage=$(age_of "$fsf")
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.fg-resurfaced-$key" "$fage" \
+    "stale: $win (idle ${age}s, same foreground process running for ${fage}s, rechecked on a long cadence not a wedge; confirm it is still making progress)"
+  triage_log "absorbed $label (foreground process running since the idle window opened, idle ${age}s): $win"
+}
+
+# Drop a window's write- and foreground-deferral chains wherever its stale
+# bookkeeping resets, so each bounded re-surface cadence is measured from the
+# CURRENT quiet stretch and a long-finished one cannot make the next deferral
+# resurface immediately.
 clear_write_tracking() {  # <window-key>
   local key=$1
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.fg-pid-$key" "$STATE/.fg-since-$key" "$STATE/.fg-resurfaced-$key"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -368,13 +430,28 @@ clear_write_tracking() {  # <window-key>
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+# <check-foreground> (default 1) gates the foreground-process defer only, never
+# the write-evidence one: busy_turn_bound_check passes 0 because a busy pane's
+# OWN foreground process is the persistent worker launcher itself, unchanged
+# for the pane's entire life regardless of whether the turn underway is
+# healthy or wedged - treating "the launcher is still alive" as evidence of a
+# legitimate long-running command would defer every busy-turn escalation
+# forever, the opposite of what this bound exists to catch. The plain
+# non-busy stale callers below leave it enabled: there the pane's foreground
+# process IS the bounded command in question (no launcher sitting on top), so
+# its continued presence is genuine liveness evidence.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [check-foreground=1]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 check_fg=${6:-1} since age n reason key
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
-      clear_write_tracking "$(window_key "$win")"
+      key=$(window_key "$win")
+      clear_write_tracking "$key"
+      if [ "$check_fg" = 1 ]; then
+        fm_tmux_pane_foreground_pid "$win" > "$STATE/.fg-pid-$key" 2>/dev/null \
+          || rm -f "$STATE/.fg-pid-$key"
+      fi
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
@@ -382,6 +459,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
+        if [ "$check_fg" = 1 ] \
+          && crew_foreground_process_running_since "$win" "$STATE/.fg-pid-$(window_key "$win")"; then
+          wedge_defer_foreground "$win" "$since_file" "$label" "$age"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -439,7 +521,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
+  if status_is_captain_held "$(last_general_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   else
@@ -463,14 +545,18 @@ handle_paused_stale() {  # <window> <task> <hash>
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
 # remains daemon-owned and receives the undecorated wake identity for its own
-# classification.
+# classification. The wedge_timer_check call below disables the
+# foreground-process defer (see its own comment): a busy pane's foreground
+# process is the worker launcher itself, alive for the pane's whole life
+# whether or not the turn underway is wedged, so it can never serve as
+# evidence one way or the other here.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  if ! afk_present && status_is_paused_or_captain_held "$(last_general_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" 0
   return 1
 }
 
@@ -493,7 +579,7 @@ clear_pause_tracking() {  # <window-key>
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
-  last=$(last_status_line "$STATE/$task.status")
+  last=$(last_general_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
@@ -554,7 +640,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
   task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
+  last=$(last_general_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
@@ -1132,7 +1218,7 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
-    last=$(last_status_line "$STATE/$task.status")
+    last=$(last_general_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
@@ -1251,7 +1337,7 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_general_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
@@ -1281,7 +1367,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_general_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1296,7 +1382,7 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if ! afk_present && status_is_paused_or_captain_held "$(last_general_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$key" ;;
