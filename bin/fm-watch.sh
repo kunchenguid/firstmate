@@ -54,8 +54,10 @@
 #                          of the worker or its tool process.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement;
-#                          quiet attempts themselves never wake firstmate
+#                          budget on an idle pane without an acknowledgement
+#   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
+#                          an unhandled record's ladder cannot advance; quiet
+#                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
@@ -304,7 +306,10 @@ window_key() {  # <window>
 # policy owner) reports a due action, a busy pane just waits - the record is
 # durable and the worker will reach a turn boundary - an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery. The attempt is data-plane typing or a
+# wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
+# its record remains unhandled, that unwritable state surfaces through the same
+# stale path instead of silently re-ringing forever; acknowledgement or teardown
+# still makes the race quiet. The attempt is data-plane typing or a
 # composer-protected skip, never a wake, so normal retries keep the watcher
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,

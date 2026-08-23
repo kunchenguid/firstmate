@@ -8,7 +8,8 @@
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
-#      including newlines, with a doorbell line naming the record and handled/.
+#      including newlines, with a doorbell naming the inbox glob, numeric order,
+#      and handled/.
 #   2. Sequencing dedups per worker lifetime: the handled mv retires a record,
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #   3. Concurrent writers serialize on the sequence lock: no clobbered records.
@@ -17,8 +18,9 @@
 #      acknowledgement resets the ladder for the next message.
 #   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
-#      pane, stays silent on a healthy/empty inbox, and emits exactly one
-#      stale wake once the ring budget is spent.
+#      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
+#      bookkeeping only while its record remains unhandled, and emits exactly
+#      one stale wake once the ring budget is spent.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh

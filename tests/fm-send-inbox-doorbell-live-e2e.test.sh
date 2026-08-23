@@ -3,8 +3,9 @@
 # (live-harness-optin family).
 #
 # The steering inbox's one behavioral assumption is that a real worker agent
-# follows the constant self-describing doorbell line: read the record, act on
-# it, then mv it into handled/. A stub can only confirm the assumption already
+# follows the constant self-describing doorbell line: list the inbox, read and
+# act on its records in numeric order, then mv each into handled/. A stub can
+# only confirm the assumption already
 # written into the stub, so per .agents/skills/firstmate-coding-guidelines
 # this is proven against every INSTALLED verified harness: each is launched
 # idle in an isolated tmux server, steered through the REAL fm-send (durable

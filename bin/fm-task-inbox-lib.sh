@@ -45,7 +45,10 @@
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy check (a busy pane just waits - the record is durable and
 # the worker reaches a turn boundary) and the wake emission; this library owns
-# only the schedule. Escalation deliberately queues the wake before writing the
+# only the schedule. If attempt bookkeeping cannot be persisted while the record
+# remains unhandled, the caller surfaces that failure instead of retrying
+# silently; a concurrently removed inbox is a quiet no-op. Escalation
+# deliberately queues the wake before writing the
 # deduplication marker: normal polls surface a message once, while a crash or
 # marker failure may produce a rare duplicate rather than silently lose a wake.
 #
@@ -276,7 +279,9 @@ EOF
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither a dead pane nor permanently
-# blocked composer can retry silently forever.
+# blocked composer can retry silently forever. A concurrently removed inbox is
+# a successful no-op; otherwise failure means the caller must surface the
+# unwritable ladder while the record remains unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   local dir base ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
