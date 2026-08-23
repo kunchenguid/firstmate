@@ -128,6 +128,10 @@ The preference persists for the effective Firstmate home, and toggling it off re
 > alright merge it
 ```
 
+### Then read the quickstart
+
+[docs/quickstart.md](docs/quickstart.md) walks through the first session, registering a project, dispatching your first ship or scout task, what supervision feels like, and landing work.
+
 ### More backends
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
@@ -198,6 +202,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 ## Documentation
 
+- [docs/quickstart.md](docs/quickstart.md) - the captain's day-one walkthrough from first launch to merged work.
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
