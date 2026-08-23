@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the verified harness (agent) process PID that identifies the session.
+# This ordinarily comes from the shell's ancestry; a Claude call served through
+# a reparented worker pool may instead retain its already-recorded published
+# session PID. Either PID lives as long as the firstmate session, unlike the
+# transient subshell PID of any one tool call.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
