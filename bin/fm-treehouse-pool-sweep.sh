@@ -57,7 +57,8 @@ Exit codes:
 Activation:
   The sweep is disabled by default. To enable, create:
     $HOME/.firstmate/config/worktree-pool-sweep
-  containing "on" (or any non-empty value).
+  containing "on" (or any non-empty value other than "off").
+  A missing file, an empty file, or the value "off" leaves the sweep disabled.
 
 This mitigation is distinct from the upstream Treehouse invariant:
   - MITIGATION: "Firstmate refuses to request a worktree when it observes unsafe pool state."
@@ -157,10 +158,11 @@ check_head_reachable() {
     fi
     return 2
   fi
-  local refs_list
-  refs_list=$(git -C "$wt" for-each-ref --format='%(refname)' \
-    'refs/heads/' 'refs/tags/' 'refs/firstmate/rescue/' 2>/dev/null)
-  unique_count=$(git -C "$wt" rev-list HEAD --not $refs_list 2>/dev/null | wc -l)
+  unique_count=$(git -C "$wt" rev-list --count HEAD --not --branches --tags \
+    --glob='refs/firstmate/rescue/*' 2>/dev/null) || return 2
+  case "$unique_count" in
+    '' | *[!0-9]*) return 2 ;;
+  esac
   if [ "$unique_count" -gt 0 ]; then
     return 2
   fi

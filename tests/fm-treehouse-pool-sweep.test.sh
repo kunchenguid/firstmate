@@ -38,22 +38,51 @@ fm_config_sweep_off() {
   echo "off" > "$config_dir/worktree-pool-sweep"
 }
 
+# The fixture must be one the sweep REFUSES when enabled, otherwise "exit 0"
+# proves only that the worktree was safe, not that the sweep stayed deactivated.
+fm_create_unsafe_dirty_repo() {
+  local path=$1
+  fm_create_test_repo "$path"
+  ( cd "$path" || exit 1
+    touch file.txt
+    git add file.txt
+    git commit -m "initial" 2>/dev/null
+    echo "modified" > file.txt )
+}
+
 test_disabled_by_default() {
-  local tmp config_dir
+  local tmp config_dir rc
   tmp=$(fm_test_tmproot sweep-disabled)
   config_dir="$tmp/config"
   mkdir -p "$config_dir"
+  [ ! -e "$config_dir/worktree-pool-sweep" ] \
+    || fail "disabled by default: fixture must not create the config file"
 
-  fm_create_test_repo "$tmp/repo"
-  cd "$tmp/repo" || exit 1
-  touch file.txt
-  git add file.txt
-  git commit -m "initial" 2>/dev/null
+  fm_create_unsafe_dirty_repo "$tmp/repo"
 
   FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
-  [ "$rc" -eq 0 ] || fail "disabled by default: expected exit 0, got $rc"
-  pass "sweep is disabled by default"
+  [ "$rc" -eq 0 ] || fail "disabled by default: expected exit 0 on an unsafe worktree, got $rc"
+
+  fm_config_sweep_on "$config_dir"
+  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "disabled by default: fixture is not actually unsafe (enabled sweep gave $rc)"
+  pass "sweep is disabled by default even for an unsafe worktree"
+}
+
+test_off_value_disables_sweep() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-off-value)
+  config_dir="$tmp/config"
+  fm_config_sweep_off "$config_dir"
+
+  fm_create_unsafe_dirty_repo "$tmp/repo"
+
+  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "off value: expected exit 0 on an unsafe worktree, got $rc"
+  pass "config value 'off' disables the sweep"
 }
 
 test_refuses_dirty_worktree() {
@@ -86,13 +115,38 @@ test_refuses_staged_changes() {
   cd "$tmp/repo" || exit 1
   touch file.txt
   git add file.txt
+  git commit -m "initial" 2>/dev/null
   echo "staged" > staged.txt
   git add staged.txt
 
   FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 1 ] || fail "staged changes: expected exit 1, got $rc"
-  pass "refuses staged changes"
+  pass "refuses staged changes against a real HEAD"
+}
+
+test_refuses_staged_change_restored_in_worktree() {
+  local tmp config_dir rc
+  tmp=$(fm_test_tmproot sweep-staged-restored)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  printf 'original\n' > file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  printf 'staged\n' > file.txt
+  git add file.txt
+  printf 'original\n' > file.txt
+  git update-index --refresh >/dev/null 2>&1
+  [ -n "$(git diff --cached --name-only)" ] \
+    || fail "staged-then-restored: fixture left no staged delta"
+
+  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "staged-then-restored: expected exit 1, got $rc"
+  pass "refuses an index that differs from HEAD even when the worktree matches HEAD"
 }
 
 test_refuses_untracked_files() {
@@ -291,6 +345,33 @@ test_allows_with_local_branch() {
   pass "allows HEAD when local branch exists alongside remote"
 }
 
+# A durable ref pointing at an object the shared store no longer has makes
+# rev-list exit 128. The sweep must treat an unanswerable reachability question
+# as unsafe rather than green-lighting the worktree.
+test_refuses_when_reachability_cannot_be_computed() {
+  local tmp config_dir rc git_dir
+  tmp=$(fm_test_tmproot sweep-broken-ref)
+  config_dir="$tmp/config"
+  fm_config_sweep_on "$config_dir"
+
+  fm_create_test_repo "$tmp/repo"
+  cd "$tmp/repo" || exit 1
+  touch file.txt
+  git add file.txt
+  git commit -m "initial" 2>/dev/null
+  git_dir=$(git rev-parse --git-dir)
+  mkdir -p "$git_dir/refs/heads"
+  printf '%s\n' "0000000000000000000000000000000000000001" \
+    > "$git_dir/refs/heads/dangling"
+  git rev-list --count HEAD --not --branches >/dev/null 2>&1 \
+    && fail "broken ref: fixture did not actually break rev-list"
+
+  FM_ROOT="$tmp" "$SWEEP" "$tmp/repo" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "broken ref: expected exit 2, got $rc"
+  pass "refuses when HEAD reachability cannot be computed"
+}
+
 test_nonexistent_worktree() {
   local tmp config_dir
   tmp=$(fm_test_tmproot sweep-nonexistent)
@@ -327,8 +408,10 @@ test_help_text() {
 }
 
 test_disabled_by_default
+test_off_value_disables_sweep
 test_refuses_dirty_worktree
 test_refuses_staged_changes
+test_refuses_staged_change_restored_in_worktree
 test_refuses_untracked_files
 test_allows_branch_reachable_head
 test_allows_tag_reachable_head
@@ -337,6 +420,7 @@ test_refuses_reflog_only_reachability
 test_historical_reproduction
 test_refuses_remote_only_refs
 test_allows_with_local_branch
+test_refuses_when_reachability_cannot_be_computed
 test_nonexistent_worktree
 test_missing_argument_is_a_usage_error
 test_help_text
