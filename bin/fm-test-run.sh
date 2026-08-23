@@ -990,6 +990,16 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-treehouse-lib.sh)
+      # Shared pool-path spelling reconciliation, sourced by bin/fm-teardown.sh's
+      # worktree return (pr-forge), bin/fm-home-seed.sh's seed rollback
+      # (secondmate), and the real-Herdr suites' own pool cleanup. Naming the
+      # portable consumers matters because the real-Herdr family gate-skips on any
+      # host without the pinned build.
+      printf '%s\n' pr-forge
+      printf '%s\n' secondmate
+      printf '%s\n' real-herdr-gated
+      ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the

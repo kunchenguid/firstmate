@@ -45,6 +45,10 @@ export FM_GATE_REFUSE_BYPASS=1
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# Cleanup returns the worktree by its recorded physical path, which treehouse's
+# own inventory may spell differently on a symlinked home.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-treehouse-lib.sh"
 # This suite asserts that HERDR_ENV=1 alone selects the backend, and it runs
 # against its own isolated lab session. A Herdr pane inherited from the terminal
 # it was launched in must not follow spawn into that session as a cross-session
@@ -69,7 +73,7 @@ ID="autodetectsmoke1"
 WT=
 cleanup_all() {
   local cleanup_status=0
-  [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
+  [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && fm_treehouse_return_force "" "$WT" >/dev/null 2>&1
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=$?
   rm -rf "$TMP_ROOT"
   return "$cleanup_status"

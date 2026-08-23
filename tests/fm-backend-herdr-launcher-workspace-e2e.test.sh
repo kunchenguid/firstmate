@@ -41,6 +41,10 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# Cleanup returns worktrees by their recorded physical path, which treehouse's
+# own inventory may spell differently on a symlinked home.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-treehouse-lib.sh"
 
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
@@ -65,7 +69,7 @@ cleanup_all() {
   [ "$CLEANED" = 0 ] || return 0
   CLEANED=1
   for wt in ${WORKTREES[@]+"${WORKTREES[@]}"}; do
-    [ -n "$wt" ] && treehouse return --force "$wt" >/dev/null 2>&1
+    [ -n "$wt" ] && fm_treehouse_return_force "" "$wt" >/dev/null 2>&1
   done
   WORKTREES=()
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?

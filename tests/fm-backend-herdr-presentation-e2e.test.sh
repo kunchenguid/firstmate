@@ -19,6 +19,33 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
+
+# This suite is only honest on the exact CI pin, because its assertions encode
+# one release's pane and workspace lifecycle. On herdr 0.8.2, for example,
+# closing a tab's last pane respawns a replacement pane, so a projected
+# workspace never becomes empty, the emptying-close plan in bin/backends/herdr.sh
+# never matches, a projected workspace is therefore never removed by a pane
+# close, and the ordering assertions below see a leftover fixture workspace.
+# That difference is a real product gap tracked as its own task. Skipping keeps
+# it visible rather than adapting these fixtures to whatever the local release
+# happens to do, which would print a green tick over a live defect.
+# bin/fm-install-herdr.sh stays the single owner of the pin, so ask it for the
+# number through its --required-version interface instead of repeating it here or
+# reading its source. An unreadable pin or an unreadable installed version is a
+# loud failure and never a silent skip, because a skip nobody can trust would
+# quietly disable this whole lane. The required Herdr CI lane also asserts the pin
+# before it runs any suite, so a skip here cannot hide a mispinned runner.
+HERDR_SUITE_PIN=$("$ROOT/bin/fm-install-herdr.sh" --required-version 2>/dev/null) || HERDR_SUITE_PIN=
+[ -n "$HERDR_SUITE_PIN" ] \
+  || { echo "not ok - could not read the exact Herdr pin from bin/fm-install-herdr.sh --required-version" >&2; exit 1; }
+HERDR_SUITE_VERSION=$("$REAL_HERDR" --version 2>/dev/null | awk '{print $2; exit}')
+[ -n "$HERDR_SUITE_VERSION" ] \
+  || { echo "not ok - could not read the installed Herdr version from $REAL_HERDR" >&2; exit 1; }
+if [ "$HERDR_SUITE_VERSION" != "$HERDR_SUITE_PIN" ]; then
+  echo "skip: herdr $HERDR_SUITE_VERSION is not the suite-verified pin $HERDR_SUITE_PIN; install it with bin/fm-install-herdr.sh"
+  exit 0
+fi
+
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -255,6 +282,8 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-treehouse-lib.sh"
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
 # as a cross-session parent identity. Every projection below is anchored on the
@@ -267,6 +296,17 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+
+# Give one pool worktree back, best effort. Recorded worktrees carry fm-spawn's
+# resolved physical spelling while treehouse's inventory holds the spelling its
+# as-written root produces, so a symlinked home makes a raw return silently
+# refuse and orphan the slot. Every return below goes through this so the suite
+# releases slots as it advances instead of exhausting the pool mid-run.
+return_pool_worktree() { # <recorded-worktree>
+  [ -n "${1:-}" ] || return 0
+  fm_treehouse_return_force "" "$1" "$REAL_TREEHOUSE" >/dev/null 2>&1 || true
+}
+
 cleanup_all() {
   local wt
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
@@ -277,7 +317,7 @@ cleanup_all() {
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
-    "$REAL_TREEHOUSE" return --force "$wt" >/dev/null 2>&1 || true
+    return_pool_worktree "$wt"
   done <<EOF
 $RECORDED_WORKTREES
 EOF
@@ -1224,15 +1264,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    return_pool_worktree "$PRIOR_RESTART_WT"
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
-  "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
+  return_pool_worktree "$OLD_RESTART_WT"
+  return_pool_worktree "$NEW_RESTART_WT"
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
@@ -1267,8 +1307,8 @@ CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
   || fail "cross-home reclaim changed the secondmate child's presentation label"
 teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-teardown.out" 2> "$TMP_ROOT/cross-restart-teardown.err" \
   || fail "cross-home reclaimed teardown failed: $(cat "$TMP_ROOT/cross-restart-teardown.err")"
-"$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
+return_pool_worktree "$CROSS_OLD_WT"
+return_pool_worktree "$CROSS_NEW_WT"
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
 # Two homes recovering concurrently serialize on the named session lock and
@@ -1320,10 +1360,10 @@ teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.
   || fail "concurrent primary recovery teardown failed"
 teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
   || fail "concurrent secondmate recovery teardown failed"
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
+return_pool_worktree "$PRIMARY_WAVE_OLD_WT"
+return_pool_worktree "$BRAVO_WAVE_OLD_WT"
+return_pool_worktree "$PRIMARY_WAVE_NEW_WT"
+return_pool_worktree "$BRAVO_WAVE_NEW_WT"
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.

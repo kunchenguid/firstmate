@@ -7,6 +7,7 @@
 #
 # Usage:
 #   fm-install-herdr.sh <destination-directory>
+#   fm-install-herdr.sh --required-version   print the exact Herdr pin
 #
 # Pins Herdr v0.7.4 (protocol 16), the suite-verified protocol-16 release.
 # Selects the official GitHub Releases asset for the host OS/arch, downloads
@@ -27,6 +28,14 @@ die() {
   printf 'fm-install-herdr.sh: %s\n' "$*" >&2
   exit 1
 }
+
+# Publish the pin through an interface so a suite that must match it never has to
+# read this file's source. Answered before the positional is consumed so it needs
+# no destination.
+if [ "${1:-}" = "--required-version" ]; then
+  printf '%s\n' "$FM_HERDR_CI_VERSION"
+  exit 0
+fi
 
 DESTINATION=${1:?usage: fm-install-herdr.sh <destination-directory>}
 

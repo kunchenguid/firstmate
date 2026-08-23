@@ -351,6 +351,9 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
 
+`tests/fm-backend-herdr-presentation-e2e.test.sh` runs only on the exact Herdr pin that `bin/fm-install-herdr.sh --required-version` publishes, and skips on any other installed release, because its fixtures encode one release's pane and workspace lifecycle; the suite's own gate comment owns that reasoning, and an unreadable pin or installed version fails loudly instead of skipping.
+The dated runs below on other releases therefore predate that gate: each remains the evidence for the behavior it records, while a rerun on anything but the pin now skips the suite rather than reproducing it.
+
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
 ```sh
@@ -496,7 +499,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh bin/fm-test-run.sh --lane real-herdr-gated
 ```
 
 Both runs reported `family=real-herdr-gated count=11 failed=0`.
-The projection suite's unconfigured-home case is release-aware rather than pinned to one outcome, so it proves the projected default on 0.8.0 and the flat fallback with its naming warning on 0.7.4:
+The projection suite's unconfigured-home case was release-aware rather than pinned to one outcome, so that run proved the projected default on 0.8.0 and the flat fallback with its naming warning on 0.7.4:
 
 ```text
 ok - real Herdr lab: a home that configured nothing is projected by default on herdr 0.8.0
@@ -504,6 +507,7 @@ ok - real Herdr lab: a home that configured nothing falls back flat on below-flo
 ```
 
 Every other case in that suite uses an explicit opt-in or opt-out, so the floor leaves them unchanged on both releases.
+Under the pin gate that unconfigured-home case can now reach only its below-floor 0.7.4 branch, so the at-or-above outcome stays enforced by the portable floor classifier above.
 
 Direct lab probes on 2026-07-28 established the removal rules the emptying-close plan relies on, each verified with `workspace list` focus reads around one mutation in a guarded `fm-lab-` session:
 

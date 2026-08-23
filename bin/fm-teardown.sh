@@ -59,6 +59,20 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Pool path spelling reconciliation (teardown-worktree-path): treehouse matches its
+# managed inventory by string and builds pool paths from its configured root exactly
+# as written, while firstmate records the fully resolved physical worktree path so its
+# liveness and worktree-isolation checks compare one exact directory. On a host whose
+# home is a symlink those two records name a single directory and differ as strings, so
+# the recorded path is refused with "is not managed by treehouse". teardown_treehouse_return
+# therefore tries each spelling that provably names the same directory, in the order
+# owned by bin/fm-treehouse-lib.sh, before spending the lock patience window below.
+# Only a spelling that resolves to the identical physical directory is ever tried, so
+# reconciliation can never return a different worktree. A total failure headlines the
+# recorded path's own refusal, then still reports any alternative spelling's failure
+# that is not merely an unmanaged-path refusal, so a real cause found under the
+# spelling treehouse does manage never hides behind the refusal of the one it does not.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -73,7 +87,8 @@
 #      attempts. Retries key off the error text, not whether the lock file still
 #      exists after the failed attempt - a lock that self-clears mid-check still
 #      deserves a retry of the return.
-#   2. Other treehouse return failures still abort immediately and loudly (no retry).
+#   2. Other treehouse return failures still abort immediately and loudly (no lock
+#      retry), once every equivalent spelling above has been tried.
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
@@ -152,6 +167,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1056,23 +1073,61 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
+teardown_treehouse_note_spelling() { # <label> <used> <recorded>
+  [ "$2" = "$3" ] || echo "teardown: $1 return matched treehouse's pool path $2 for recorded worktree $3 (same directory, different spelling)" >&2
+}
+
+# Return a worktree/home via `treehouse return --force`, reconciling the recorded
+# path spelling with the one treehouse manages and tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
+  local recorded=$dir spelling first_out='' first_seen=0 other_out='' lock_hit=0
 
-  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
-  # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
-    [ -n "$out" ] && printf '%s\n' "$out"
-    return 0
-  fi
-  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  # Try every spelling that provably names this same directory before spending
+  # the lock patience window on any one of them, because treehouse matches its
+  # managed inventory by string and accepts only the spelling built from its own
+  # as-written root. bin/fm-treehouse-lib.sh owns which spellings qualify and
+  # the invariant that each resolves to the identical physical directory, so an
+  # alternative spelling can never return a different worktree. Capture
+  # stdout+stderr so non-lock failures stay visible and lock failures can be
+  # matched by signature even when the lock file is already gone mid-check. An
+  # index.lock signature proves treehouse already recognized that spelling, so
+  # keep it and drop into the patience window rather than trying another.
+  while IFS= read -r spelling; do
+    [ -n "$spelling" ] || continue
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$spelling" ) 2>&1 ); then
+      [ -n "$out" ] && printf '%s\n' "$out"
+      teardown_treehouse_note_spelling "$label" "$spelling" "$recorded"
+      return 0
+    fi
+    if [ "$first_seen" -eq 0 ]; then
+      first_out=$out
+      first_seen=1
+    elif [ -n "$out" ] && ! fm_treehouse_is_unmanaged_refusal "$out"; then
+      other_out="$other_out$out"$'\n'
+    fi
+    if treehouse_return_is_index_lock_error "$out"; then
+      teardown_treehouse_note_spelling "$label" "$spelling" "$recorded"
+      lock_hit=1
+      dir=$spelling
+      break
+    fi
+  done <<EOF
+$(fm_treehouse_path_spellings "$recorded" || printf '%s\n' "$recorded")
+EOF
 
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if [ "$lock_hit" -eq 0 ]; then
+    # Headline the recorded path's own failure, since a refusal aimed at an
+    # alternative spelling describes a path the caller never recorded. Anything an
+    # alternative spelling failed with for a different reason is the real cause,
+    # so keep it too rather than pointing the operator at a spelling mismatch.
+    [ -n "$first_out" ] && printf '%s\n' "$first_out" >&2
+    [ -n "$other_out" ] && printf '%s' "$other_out" >&2
     return 1
   fi
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ]; then
