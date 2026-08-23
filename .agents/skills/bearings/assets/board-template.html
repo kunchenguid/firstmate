@@ -453,7 +453,11 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.title = text;
     return n;
   }
-  function badge(tone, text) { return titledEl("span", "fm-badge fm-badge--" + tone, text); }
+  function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  /* Fixed badge literals are short, nowrap, and always fully drawn, so they
+     stay tooltip-free; payload-derived badge text has no bounded length and
+     carries its exact full value like every other clampable node. */
+  function dynamicBadge(tone, text) { return titledEl("span", "fm-badge fm-badge--" + tone, text); }
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
@@ -493,7 +497,7 @@ __FM_BEARINGS_BOARD_DATA__
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
+      top.appendChild(dynamicBadge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
     } else {
       top.appendChild(badge("solid", "decision"));
       top.appendChild(titledEl("span", "bb-decision__repo", item.repo));
@@ -540,6 +544,10 @@ __FM_BEARINGS_BOARD_DATA__
       var ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
       ff.placeholder = item.freeform_hint || "or answer in your own words…";
+      /* a single-line field hard-clips its placeholder at the field edge, and
+         freeform_hint is unbounded payload text, so the supplied hint stays
+         reachable in full; the short built-in fallback needs no tooltip */
+      if (item.freeform_hint) ff.title = item.freeform_hint;
       form.appendChild(ff);
     }
 
@@ -624,7 +632,7 @@ __FM_BEARINGS_BOARD_DATA__
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
   data.underway.forEach(function (t) {
     var row = el("div", "bb-row");
-    row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
+    row.appendChild(dynamicBadge(t.state === "working" ? "online" : "info", t.state));
     var main = el("div", "bb-row__main");
     main.appendChild(titledEl("div", "bb-row__title", t.doing));
     /* captain-facing rows name the repo; the internal task id shows only when

@@ -221,6 +221,7 @@ const collect = (node) => node.children.forEach((child) => {
     classes: child.className ? child.className.split(/\s+/).filter(Boolean) : [],
     text: child.textContent,
     title: child.titleValue === undefined ? null : child.titleValue,
+    placeholder: child.placeholder === undefined ? null : child.placeholder,
   });
   collect(child);
 });
@@ -537,6 +538,100 @@ test_rendered_decision_body_text_exposes_full_values() {
   pass "decision card body text exposes its exact full value without hiding the label"
 }
 
+test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
+  local home data board hint render
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to render the board for the tooltip assertions"
+  home=$(make_home freeform-hint)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  # A hint far wider than a single-line field, with markup-like and unbreakable
+  # runs: the input clips its placeholder at the field edge with no ellipsis.
+  hint='or answer in your own words <e.g. "name the branch"> https://github.com/example/sample/compare/f170ced...aba38e6-and-an-unbreakable-tail'
+  write_valid_payload "$data"
+  jq --arg hint "$hint" '
+    .captains_call[0].allow_freeform = true |
+    .captains_call[0].freeform_hint = $hint |
+    .captains_call[1].allow_freeform = true |
+    del(.captains_call[1].freeform_hint)
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the long-freeform-hint board did not build"
+  grep -qF 'own words \u003ce.g.' "$board" \
+    || fail "the markup-like freeform hint was not \\u003c-escaped in the injected payload"
+
+  render=$(render_board_nodes "$board") \
+    || fail "the shipped renderer could not run over the built board"
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
+    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+
+  # The visible placeholder keeps the hint and the tooltip carries the same
+  # exact value, so the full text is reachable without relying on the browser
+  # drawing the whole placeholder.
+  printf '%s' "$render" | jq -e --arg hint "$hint" '
+    any(.nodes[]; (.classes | index("bb-freeform")) != null
+      and .placeholder == $hint and .title == $hint)
+  ' >/dev/null || fail "the freeform input did not expose its exact full hint"
+
+  # The built-in fallback placeholder is short, fixed, and fully shown, so it
+  # must not gain a tooltip - and an absent hint must never surface as "null".
+  printf '%s' "$render" | jq -e '
+    any(.nodes[]; (.classes | index("bb-freeform")) != null
+      and .placeholder == "or answer in your own words\u2026" and .title == null)
+  ' >/dev/null || fail "the default freeform placeholder gained a tooltip"
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
+    || fail "the rendered board exposed a stringified null as a tooltip"
+
+  pass "the freeform input exposes its exact full hint and none for the default"
+}
+
+test_rendered_static_badges_stay_tooltip_free() {
+  local home data board risk state render
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to render the board for the tooltip assertions"
+  home=$(make_home badge-tooltips)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  risk='elevated because the migration touches every tracked payload validator at once'
+  state='waiting on the authenticated fork push before the review gate can advance'
+  write_valid_payload "$data"
+  jq --arg risk "$risk" --arg state "$state" '
+    .captains_call[1].risk = $risk |
+    .underway = [{
+      "id": "underway-dynamic-state",
+      "repo": "sample",
+      "kind": "ship",
+      "state": $state,
+      "doing": "a short underway line"
+    }] |
+    .charted[0].reason = "blocked"
+  ' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the dynamic-badge board did not build"
+  render=$(render_board_nodes "$board") \
+    || fail "the shipped renderer could not run over the built board"
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
+    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+
+  # Payload-derived badge text is unbounded, so it carries its full value.
+  printf '%s' "$render" | jq -e --arg risk "risk $risk" --arg state "$state" '
+    ([.nodes[] | select((.classes | index("fm-badge")) != null)]) as $badges
+    | ($badges | any(.text == $risk and .title == $risk))
+      and ($badges | any(.text == $state and .title == $state))
+  ' >/dev/null || fail "a dynamic badge did not expose its exact full text"
+
+  # Fixed short badge literals are always fully drawn, so they stay tooltip-free.
+  printf '%s' "$render" | jq -e '
+    ([.nodes[] | select((.classes | index("fm-badge")) != null)]) as $badges
+    | (["decision", "checks green", "waiting"] | all(. as $literal
+        | $badges | any(.text == $literal) and all(.text != $literal or .title == null)))
+  ' >/dev/null || fail "a fixed, fully visible badge literal gained a redundant tooltip"
+
+  pass "dynamic badges expose full text while fixed badge literals stay tooltip-free"
+}
+
 test_registration_cannot_consume_before_any_origin_binding() {
   local home data runtime origin key hold board sid show
   home=$(make_home order-proof)
@@ -686,6 +781,8 @@ test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
 test_rendered_truncated_text_has_full_native_tooltips
 test_rendered_decision_body_text_exposes_full_values
+test_rendered_freeform_hint_is_reachable_beyond_the_placeholder
+test_rendered_static_badges_stay_tooltip_free
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
