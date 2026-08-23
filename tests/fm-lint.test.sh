@@ -227,7 +227,9 @@ fm_lint_write_diff_file() {
 # that answers --version with the pinned version and otherwise logs the file
 # roots it was asked to check (one per line) instead of actually analyzing
 # them, so changed-file mode tests can assert exactly which files fm-lint.sh
-# selected without depending on real ShellCheck findings.
+# selected without depending on real ShellCheck findings. When
+# FM_TEST_MODE_LOG is set, it records the effective analysis mode, treating
+# ShellCheck's default as full analysis.
 fm_lint_stub_shellcheck() {
   local fakebin=$1 log=$2
   : > "$log"
@@ -237,11 +239,88 @@ if [ "\${1:-}" = --version ]; then
   printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
   exit 0
 fi
-shift 3
+mode=on
+while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
+  [ "\$1" = --extended-analysis=false ] && mode=off
+  shift
+done
+if [ -n "\${FM_TEST_MODE_LOG:-}" ]; then
+  printf '%s\n' "\$mode" >> "\$FM_TEST_MODE_LOG"
+fi
+[ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
+}
+
+test_fast_mode_disables_extended_analysis() {
+  local tmp fakebin log mode_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-fast-mode)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" --fast "$fixture" 2>&1) \
+    || fail "fast lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = off ] \
+    || fail "fast lint mode did not disable extended analysis"
+  [ "$(cat "$log")" = "$fixture" ] \
+    || fail "fast lint mode did not lint the requested root"
+  pass "fm-lint.sh --fast disables ShellCheck extended analysis"
+}
+
+test_ci_defaults_to_full_analysis() {
+  local tmp fakebin log mode_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-ci-analysis)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" "$fixture" 2>&1) \
+    || fail "CI full lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "CI default did not keep full ShellCheck analysis"
+  pass "fm-lint.sh keeps full ShellCheck analysis by default in CI"
+}
+
+test_fast_mode_catches_a_real_lint_defect() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): fast lint-defect regression check"
+    return
+  fi
+  local tmp bad out rc
+  tmp=$(fm_test_tmproot fm-lint-fast-bad)
+  bad="$tmp/bad.sh"
+  cat > "$bad" <<'SH'
+#!/usr/bin/env bash
+foo() {
+  local a= b=
+  echo "$a$b"
+}
+foo
+SH
+  rc=0
+  out=$(GITHUB_ACTIONS='' CI='' "$LINT" --fast "$bad" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fast lint mode passed a known-bad fixture"$'\n'"$out"
+  assert_contains "$out" "SC1007" "fast lint mode did not report the expected ShellCheck finding"
+  pass "fm-lint.sh --fast catches an ordinary shell lint defect"
 }
 
 test_changed_mode_lints_only_the_changed_file() {
@@ -878,6 +957,9 @@ SH
 }
 
 test_list_files_reports_the_shell_inventory
+test_fast_mode_disables_extended_analysis
+test_ci_defaults_to_full_analysis
+test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_installer_selects_platform_archive_url_and_checksum
