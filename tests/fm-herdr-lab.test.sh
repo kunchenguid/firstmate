@@ -33,14 +33,27 @@ lab_state=absent
 
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
-    else
-      running=false
-      [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
-    fi
+    primary=${FM_FAKE_HERDR_PRIMARY_NAME:-default}
+    primary_running=${FM_FAKE_HERDR_PRIMARY_RUNNING:-true}
+    duplicate_primary=${FM_FAKE_HERDR_DUPLICATE_PRIMARY:-false}
+    running=false
+    [ "$lab_state" = running ] && running=true
+    lab_present=false
+    [ "$lab_state" = absent ] || [ "$lab_state" = deleted ] || lab_present=true
+    jq -nc \
+      --arg socket "$default_socket" \
+      --arg primary "$primary" \
+      --arg name "$session" \
+      --argjson primary_running "$primary_running" \
+      --argjson duplicate_primary "$duplicate_primary" \
+      --argjson running "$running" \
+      --argjson lab_present "$lab_present" '
+      ({default:($primary == "default"),name:$primary,running:$primary_running,socket_path:$socket}) as $primary_session
+      | (if $primary == "default" then [] else [{default:true,name:"default",running:false,socket_path:"/tmp/default.sock"}] end)
+        + [$primary_session]
+        + (if $duplicate_primary then [$primary_session] else [] end)
+        + (if $lab_present then [{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}] else [] end)
+      | {sessions:.}'
     ;;
   "server --session")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
@@ -82,6 +95,10 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_PRIMARY_NAME="${FM_FAKE_HERDR_PRIMARY_NAME:-default}" \
+    FM_FAKE_HERDR_PRIMARY_RUNNING="${FM_FAKE_HERDR_PRIMARY_RUNNING:-true}" \
+    FM_FAKE_HERDR_DUPLICATE_PRIMARY="${FM_FAKE_HERDR_DUPLICATE_PRIMARY:-false}" \
+    FM_HERDR_LAB_PRIMARY_SESSION="${FM_HERDR_LAB_PRIMARY_SESSION:-default}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -154,6 +171,30 @@ test_provision_run_and_guarded_teardown() {
   sed -n "$((delete_line - 1))p" "$FAKE_LOG" | grep -F "session list --json --session $name" >/dev/null \
     || fail "delete was not immediately preceded by a fresh refuse-default session list"
   pass "fm-herdr-lab: provisioning, scoped calls, guarded teardown, and fleet tripwire are deterministic"
+}
+
+test_named_primary_is_exact_and_unambiguous() {
+  local name="fm-lab-named-primary-$$" stopped="fm-lab-stopped-primary-$$" duplicate="fm-lab-duplicate-primary-$$" status=0
+  : > "$FAKE_LOG"
+  FM_HERDR_LAB_PRIMARY_SESSION=fm-wsl-minimal FM_FAKE_HERDR_PRIMARY_NAME=fm-wsl-minimal \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "named primary provision failed"
+  [ "$(jq -r '.name' "$TRIPWIRES/$name.fleet-state.json")" = fm-wsl-minimal ] \
+    || fail "tripwire did not record the exact named primary"
+  FM_HERDR_LAB_PRIMARY_SESSION=fm-wsl-minimal FM_FAKE_HERDR_PRIMARY_NAME=fm-wsl-minimal \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "named primary teardown failed"
+
+  status=0
+  FM_HERDR_LAB_PRIMARY_SESSION=fm-wsl-minimal FM_FAKE_HERDR_PRIMARY_NAME=fm-wsl-minimal \
+    FM_FAKE_HERDR_PRIMARY_RUNNING=false run_with_fake fm_herdr_lab_prepare "$stopped" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "stopped named primary must be refused"
+  assert_absent "$TRIPWIRES/$stopped.fleet-state.json" "stopped named primary left a tripwire"
+
+  status=0
+  FM_HERDR_LAB_PRIMARY_SESSION=fm-wsl-minimal FM_FAKE_HERDR_PRIMARY_NAME=fm-wsl-minimal \
+    FM_FAKE_HERDR_DUPLICATE_PRIMARY=true run_with_fake fm_herdr_lab_prepare "$duplicate" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "duplicate named primary candidates must be refused"
+  assert_absent "$TRIPWIRES/$duplicate.fleet-state.json" "ambiguous named primary left a tripwire"
+  pass "fm-herdr-lab: a recorded running named primary is accepted only when exact and unambiguous"
 }
 
 test_missing_tripwire_blocks_destruction() {
@@ -236,6 +277,7 @@ SH
 
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
+test_named_primary_is_exact_and_unambiguous
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
