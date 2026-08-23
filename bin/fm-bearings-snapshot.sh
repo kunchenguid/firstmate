@@ -61,7 +61,9 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contract: `fm-bearings.v1`. Read-only over fleet state: no locks, no
+# mutation, no reports; its only write is one private temporary directory of jq
+# input, removed on every exit path.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

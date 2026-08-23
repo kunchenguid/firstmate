@@ -5,6 +5,8 @@
 # `fm-fleet-snapshot.v1`.
 # The command is read-only: it does not acquire the session lock, drain wakes,
 # arm watchers, mutate backlog state, or write reports.
+# Its only write is one private temporary directory of jq input, created per
+# process and removed on every exit path, so `mktemp` is required beside `jq`.
 #
 # Top-level fields:
 #   schema: stable schema id.
