@@ -93,7 +93,7 @@ fm_routing_fs_boundary() {
 
 fm_routing_decision_resolve_inherited() {
   local receipt=$1 task_dir=$2 generation_dir generation expected brief intent
-  local expected_intent actual_intent expected_brief actual_brief
+  local expected_intent actual_intent expected_brief actual_brief source_brief
   [ "$(dirname "$(dirname "$receipt")")" = "$task_dir" ] || return 1
   [ "$(basename "$receipt")" = receipt.json ] || return 1
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
@@ -114,6 +114,8 @@ fm_routing_decision_resolve_inherited() {
   expected_brief=$(jq -er '.brief_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$intent" 2>/dev/null) || return 1
   actual_brief=$(fm_routing_fs_boundary hash "$(dirname "$receipt")" brief.md 2>/dev/null) || return 1
   [ "$actual_brief" = "$expected_brief" ] || return 1
+  source_brief=$(fm_routing_fs_boundary hash "$task_dir" brief.md 2>/dev/null) || return 1
+  [ "$source_brief" = "$expected_brief" ] || return 1
   FM_ROUTING_DECISION_FINAL=$receipt
   FM_ROUTING_BRIEF_FINAL=$brief
 }

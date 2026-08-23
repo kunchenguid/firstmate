@@ -196,7 +196,7 @@ routing_sha_text() {
 write_committed_routing_receipt() {
   local dir=$1 id=$2 task_dir="$1/home/data/$2" brief intent receipt generation generation_dir
   brief="$task_dir/committed-brief.md"
-  printf 'committed brief\n' > "$brief"
+  cp "$task_dir/brief.md" "$brief"
   intent="$task_dir/routing-intent.json"
   jq -cn --arg brief_hash "$(routing_sha_file "$brief")" '{brief_sha256: $brief_hash}' > "$intent"
   receipt="$task_dir/committed-receipt.json"
@@ -333,6 +333,20 @@ journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
 
+emitted_launch_input() {  # <emitted-launch-command>
+  local launch=$1 prelude
+  case "$launch" in
+    FM_LAUNCH_INPUT=*'encode launch-brief'*'env -u '*) ;;
+    *) return 1 ;;
+  esac
+  prelude=${launch%%env -u *}
+  (
+    unset FM_LAUNCH_INPUT
+    eval "$prelude"
+    printf '%s' "$FM_LAUNCH_INPUT"
+  )
+}
+
 make_git_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/git" <<'SH'
 #!/usr/bin/env bash
@@ -417,8 +431,8 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
-test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc receipt brief
+test_control_relaunch_preserves_unrelated_metadata_and_launches_the_progress_note() {
+  local dir out rc receipt brief launch launch_input
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   receipt=$(write_committed_routing_receipt "$dir" rl19)
@@ -442,11 +456,35 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  [ "$(meta_field "$dir" rl19 routing_decision)" = "$receipt" ] \
-    || fail "an unchanged relaunch must preserve its routing receipt pointer"
-  [ "$(meta_field "$dir" rl19 routing_brief)" = "$brief" ] \
-    || fail "an unchanged relaunch must preserve its routing brief pointer"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  [ -z "$(meta_field "$dir" rl19 routing_decision)" ] \
+    || fail "a progress-note mutation must invalidate inherited routing receipt metadata"
+  [ -z "$(meta_field "$dir" rl19 routing_brief)" ] \
+    || fail "a progress-note mutation must invalidate the immutable generation brief"
+  launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
+  launch_input=$(emitted_launch_input "$launch") \
+    || fail "the replacement's emitted launch input could not be evaluated"
+  assert_contains "$launch_input" "continuing review work" \
+    "the replacement's emitted launch input omitted the required progress note"
+  pass "fm-control relaunch: unrelated metadata survives while the replacement receives its progress note"
+}
+
+test_spawn_relaunch_preserves_coherent_routing_metadata() {
+  local dir out rc receipt brief
+  dir=$(new_case coherent-routing-meta rl46)
+  add_ship_task "$dir" rl46 claude
+  receipt=$(write_committed_routing_receipt "$dir" rl46)
+  brief="$(dirname "$receipt")/brief.md"
+  printf 'routing_decision=%s\n' "$receipt" >> "$dir/home/state/rl46.meta"
+  printf 'routing_brief=%s\n' "$brief" >> "$dir/home/state/rl46.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl46 --relaunch); rc=$?
+  expect_code 0 "$rc" "direct relaunch with coherent routing provenance should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 routing_decision)" = "$receipt" ] \
+    || fail "an unchanged source brief should preserve its coherent routing receipt pointer"
+  [ "$(meta_field "$dir" rl46 routing_brief)" = "$brief" ] \
+    || fail "an unchanged source brief should preserve its coherent routing brief pointer"
+  pass "fm-spawn relaunch: coherent inherited routing metadata is preserved"
 }
 
 test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning() {
@@ -1756,7 +1794,8 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
-test_relaunch_preserves_durable_task_metadata
+test_control_relaunch_preserves_unrelated_metadata_and_launches_the_progress_note
+test_spawn_relaunch_preserves_coherent_routing_metadata
 test_relaunch_drops_missing_routing_pointers_together_with_a_warning
 test_relaunch_drops_symlinked_routing_pointers_together_with_a_warning
 test_relaunch_drops_tampered_routing_brief_together_with_a_warning
