@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--no-mistakes]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -21,6 +21,8 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --no-mistakes marks a ship task for a user-explicit manual NoMistakes run.
+#   It is never inferred from registry state and is rejected for scouts/secondmates.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -29,8 +31,8 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement -> push + open PR via gh-axi (default; no pipeline) -> captain merge
+#   --no-mistakes implement -> bounded manual pipeline -> PR -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -73,6 +75,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+EXPLICIT_NM=0
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -80,6 +83,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --no-mistakes) EXPLICIT_NM=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -92,6 +96,10 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+if [ "$EXPLICIT_NM" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --no-mistakes applies only to ship briefs" >&2
   exit 1
 fi
 
@@ -274,6 +282,9 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+if [ "$EXPLICIT_NM" -eq 1 ]; then
+  MODE=no-mistakes
+fi
 
 case "$MODE" in
   direct-PR)
@@ -301,26 +312,22 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
 )
     ;;
-  *)  # no-mistakes (default)
+  no-mistakes)  # explicit --no-mistakes only
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+When implementation is committed, start validation only through \`$FM_ROOT/bin/fm-no-mistakes.sh run $ID --intent <the complete user intent>\`.
+Do not invoke \`no-mistakes axi run\`, \`axi respond\`, or /no-mistakes directly; the bounded driver owns the 20-minute ceiling, one review-fix-rereview cycle, supported cancellation, custody recovery, and preserved-head report.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+At an ask-user gate, append \`needs-decision [key=nm-$ID-<finding-id>]: {exact decision and options}\` and stop.
+Firstmate returns the answer to this exact worker; close that exact key, then call \`$FM_ROOT/bin/fm-no-mistakes.sh respond $ID ...\` with the matching supported AXI action.
+Never use \`--yes\`, and never implement pipeline findings by hand while the run is active.
 
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+If the bounded driver reports its ceiling or cycle limit, append \`failed: {preserved head and remaining findings}\` and stop without restarting the run.
+After it reports CI green, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
     ;;

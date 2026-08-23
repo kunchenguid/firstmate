@@ -491,7 +491,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
-  assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
+  assert_contains "$out" "spawned $id harness=claude kind=ship mode=direct-PR yolo=off window=fm-$id worktree=$wt" \
     "spawn output missing Orca window/worktree summary"
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"

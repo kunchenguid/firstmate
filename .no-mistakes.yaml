@@ -9,6 +9,13 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# Firstmate-managed manual runs use Codex and keep review fixes under the
+# bounded driver in bin/fm-no-mistakes.sh. The agent pin becomes authoritative
+# on the trusted default branch; the submitted branch keeps review auto-fix at 0.
+agent: codex
+auto_fix:
+  review: 0
+
 # Pin lint and the portable behavior suite to the same deterministic commands
 # the Linux CI jobs run, instead of leaving them to no-mistakes' default handling.
 # CI separately owns platform-specific compatibility lanes, including the stock

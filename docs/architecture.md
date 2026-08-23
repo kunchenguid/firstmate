@@ -116,7 +116,8 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+Ship tasks change projects and ship by project mode (`direct-PR` or `local-only`); an explicitly requested no-mistakes run is a bounded per-task override, never a registry-selected route.
+Scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 
 ## Dispatch profiles
 
@@ -166,7 +167,9 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
-`no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+`direct-PR` projects open PRs without a validation pipeline by default, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+A user-explicit no-mistakes task is marked on both brief and spawn, then the exact owning worker uses `bin/fm-no-mistakes.sh`; ordinary direct PR work does not call or monitor no-mistakes.
+The script header owns its conservative monotonic deadline, one review-fix-rereview limit, exact-run cancellation, terminal confirmation, and custody recovery.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
