@@ -291,7 +291,7 @@ HERDR_SECTION=$(printf '%s\n' \
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
+**HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF

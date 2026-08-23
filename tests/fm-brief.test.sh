@@ -439,6 +439,41 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+# Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
+# firstmate to replace EVERY `{TASK}` placeholder. The unguarded Herdr gate used
+# to quote `{TASK}` in its own prose, so that documented global replace spliced
+# the whole task body into the middle of the gate's sentence - silently
+# destroying the one contract that exists precisely because the scaffold cannot
+# see the task text. The placeholder must exist only at the genuine fill site,
+# so the documented fill leaves the gate intact and the body appears once.
+test_documented_global_replace_leaves_the_herdr_gate_intact() {
+  local home id brief kind count content filled body
+  home="$TMP_ROOT/task-fill-site-home"
+  mkdir -p "$home/data"
+  body='Restart the herdr session, then profile it'
+  for kind in ship scout; do
+    id="brief-fill-site-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    count=$(grep -c -F '{TASK}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {TASK} fill site, found $count"
+    content=$(cat "$brief")
+    filled=${content//'{TASK}'/$body}
+    count=$(printf '%s\n' "$filled" | grep -c -F "$body")
+    [ "$count" = 1 ] \
+      || fail "$kind brief: the documented global {TASK} replace duplicated the task body $count times"
+    printf '%s\n' "$filled" | grep -qF 'this scaffold cannot inspect the task text' \
+      || fail "$kind brief: the Herdr safety gate did not survive the documented global replace"
+  done
+  pass "fm-brief.sh: the documented {TASK} fill cannot corrupt the Herdr safety gate"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -725,6 +760,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
