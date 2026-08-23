@@ -381,6 +381,66 @@ inbox_steer_check() {  # <window> <task>
   esac
 }
 
+# 0 (benign/absorb) if EVERY file in a "signal:" wake is a BARE turn-end marker
+# whose task's pane content CHANGED since the previous poll; 1 otherwise. This is
+# the third form of positive work evidence behind the signal-block triage, after
+# an actively-running pipeline step and an affirmatively busy pane.
+#
+# It exists because the first two are unreachable for a harness whose semantic
+# busy state has no verified source: bin/fm-crew-state.sh can only answer unknown
+# for such an adapter, crew_is_provably_working is therefore never satisfiable,
+# and every worker turn boundary surfaced a wake with nothing to act on - the cost
+# scaling with the number of workers in flight. Pane churn needs no harness
+# cooperation, so it restores the absorb branch for those adapters without
+# fabricating a busy verdict any adapter has not earned.
+#
+# The evidence is the one the pane-staleness backbone below already trusts for
+# liveness: this compares a fresh capture against the .hash- marker that backbone
+# recorded on the previous poll, which is why the derivation lives here with the
+# marker format rather than in the shared classifier. Absorbing here DEFERS a wake
+# rather than swallowing it - a crew that stopped renders nothing more, so its pane
+# hash stops moving and the same backbone surfaces it within a couple of polls,
+# while any captain-relevant status verb still surfaces immediately through
+# signal_reason_is_actionable. That is also why this widens the proof instead of
+# bounding the wake rate, which would have suppressed genuinely stopped workers.
+#
+# Every negative outcome returns 1, so absence of evidence surfaces exactly as
+# before: an unresolvable task, a task with no recorded endpoint, no previous
+# hash to compare against (nothing has been polled yet), a capture that fails or
+# comes back empty, and of course an unchanged pane. A .status file anywhere in
+# the batch also returns 1: an authored append is content the supervisor may need
+# to read, so only the mechanical turn-end marker gets this fallback.
+#
+# NOT a pure read: one bounded pane capture per referenced task. Reached only for
+# a no-verb turn-end whose crew is not already provably working - precisely the
+# polls that would otherwise cost a full supervisor turn - so it never runs on the
+# ordinary per-wake path.
+signal_turnend_panes_churned() {  # <file> ...
+  local f base task meta w key prev now seen=""
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *)            return 1 ;;
+    esac
+    [ -n "$task" ] || return 1
+    case " $seen " in *" $task "*) continue ;; esac
+    seen="$seen $task"
+    meta="$STATE/$task.meta"
+    [ -f "$meta" ] || return 1
+    w=$(fm_backend_target_of_meta "$meta") || return 1
+    [ -n "$w" ] || return 1
+    key=$(window_key "$w")
+    prev=$(cat "$STATE/.hash-$key" 2>/dev/null) || return 1
+    [ -n "$prev" ] || return 1
+    now=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || return 1
+    [ -n "$now" ] || return 1
+    [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
+  done
+  return 0
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -1430,22 +1490,30 @@ EOF
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file gained a captain-relevant event since it was last
     #     classified (its whole new span, not merely its last line);
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
+    #   - or it is a no-verb wake (a bare turn-end, a working: note) with no
+    #     positive evidence the crew is still executing - the crew stopped its turn
+    #     with no actively-running pipeline and no busy pane, so it may be done
+    #     (even via an interactive menu that wrote no done: status), waiting on a
+    #     decision, or wedged. Absorbing such a turn-end is exactly the
+    #     swallowed-finish this change guards against.
+    # Positive evidence is either an authoritative provably-working verdict or, for
+    # a BARE turn-end alone, a pane that rendered something since the previous poll
+    # (signal_turnend_panes_churned) - the only proof available to a harness whose
+    # busy state has no verified semantic source. Absorb stays evidence-driven: with
+    # neither proof the wake surfaces exactly as before.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # whose crew is still executing) in always-on mode -> advance the markers so it
+    # will not re-fire, log, and keep blocking without enqueuing. Both evidence
+    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
+    # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
+    # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
     # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
+    if afk_present || [ "$signal_actionable" -eq 0 ] \
+      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1

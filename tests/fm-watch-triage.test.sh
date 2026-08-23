@@ -750,6 +750,93 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# --- bare turn-end, unverifiable harness: pane churn is the third proof --------
+# A harness whose semantic busy state has no verified source (codex) can never
+# report working, so the two proofs above are unreachable for it and EVERY worker
+# turn boundary woke firstmate. Pane content that changed since the previous poll
+# is harness-independent positive evidence the crew is still executing - the same
+# liveness input the stale backbone already trusts - so a bare turn-end from a
+# churning pane is benign. The pane going quiet afterwards is still caught by that
+# backbone, which is why this widens the proof rather than bounding the wake rate.
+
+# Wait until the watcher records an absorbed wake matching <needle> in its triage
+# log. 1 if the watcher exits first (i.e. it surfaced the wake instead), which is
+# exactly the unfixed behavior this case exists to catch. Polls the log rather
+# than a poll cycle so the assertion lands inside the FIRST poll, long before an
+# unchanging fixture pane could reach the stale backbone.
+wait_for_absorbed() {  # <state> <pid> <needle>
+  local state=$1 pid=$2 needle=$3 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -Fq "$needle" "$state/.watch-triage.log" 2>/dev/null && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_turn_ended_churning_pane_absorbed() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexer"
+  : > "$state/codexer.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexer.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The previous poll recorded DIFFERENT pane content, so this poll's capture is
+  # churn: the crew rendered output between the two polls.
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  # The codex verdict verbatim: a verified dispatch adapter with no verified
+  # semantic busy source, so crew_is_provably_working can never be satisfied.
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  # A slow poll leaves the first cycle's absorb assertion many ticks clear of the
+  # stale backbone, which this static fixture pane would otherwise reach.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a bare turn-end from a churning pane was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed churning-pane turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed churning-pane turn-end enqueued a durable wake record"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
+}
+
+# The safety half: the same unverifiable harness, the same fixture, but the pane
+# has NOT changed since the previous poll. There is no positive evidence, so the
+# wake must still surface - a stopped worker is exactly what the turn-end marker
+# earns its keep detecting, and widening the proof must not cost that.
+test_turn_ended_still_pane_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-still); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexstopped"
+  : > "$state/codexstopped.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexstopped.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The previous poll recorded THIS pane content: nothing rendered since.
+  printf '%s' "$(hash_text 'apply_patch: writing bin/thing.sh')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a bare turn-end from an unchanged pane"
+  grep -F "signal: $state/codexstopped.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced still-pane turn-end signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the still-pane turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexstopped.turn-ended" >/dev/null \
+    || fail "surfaced still-pane turn-end was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
+}
+
 test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3132,6 +3219,8 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_churning_pane_absorbed
+test_turn_ended_still_pane_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
