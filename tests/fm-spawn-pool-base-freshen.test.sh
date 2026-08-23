@@ -13,9 +13,13 @@
 # work, which no upstream is needed to detect.
 # A committed leftover reads as clean, so the same path also refuses a worktree
 # whose HEAD has left the local default branch tip, and never resets it away.
-# With no origin that default branch resolves locally, falling back to the
-# branch the repository's own HEAD names, so a custom-named default (no main or
-# master anywhere) still spawns instead of being refused as unverifiable.
+# With no origin that default branch resolves locally: main or master when
+# present, otherwise the repository's sole local branch, so a custom-named
+# default (no main or master anywhere) still spawns instead of being refused as
+# unverifiable.
+# The primary checkout's HEAD is never trusted for that reading, so a primary
+# stranded on a feature branch cannot bless its own feature tip as the default
+# and let a pool sitting on that committed work through.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -373,6 +377,42 @@ test_committed_leftover_in_remoteless_pool_refuses() {
   pass "a pooled worktree holding a previous task's committed work is refused, not reset"
 }
 
+test_stranded_primary_feature_branch_is_not_read_as_the_default() {
+  local rec id out status feature_tip
+  id='pool-no-origin-stranded-r11'
+  rec=$(make_remoteless_case no-origin-stranded "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet -b feature-work
+  printf 'the only copy of this feature work\n' > "$PROJECT_DIR/feature.txt"
+  git -C "$PROJECT_DIR" add feature.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'stranded feature work'
+  feature_tip=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$feature_tip"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref --short HEAD)" = feature-work ] \
+    || fail "fixture did not strand the primary checkout on the feature branch"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture must be committed, not dirty, or it would prove the wrong check"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn blessed the stranded primary's feature branch as the local default"
+  assert_contains "$out" "could not determine the local default branch" \
+    "spawn did not refuse an ambiguous local default branch loudly"
+  case "$out" in
+    *"has no origin remote configured"*) fail "spawn announced a skipped refresh on a run it refused" ;;
+  esac
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_tip" ] \
+    || fail "spawn moved HEAD away from the feature commit instead of refusing"
+  assert_grep 'the only copy of this feature work' "$POOL_DIR/feature.txt" \
+    "spawn discarded the stranded feature work while refusing"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed stranded-primary refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed preserved feature tip: %s\n' "$feature_tip"
+  fi
+  pass "a primary stranded on a feature branch never turns that branch into the local default"
+}
+
 test_unreachable_origin_is_not_read_as_a_missing_remote() {
   local rec id out status before after
   id='pool-unreachable-not-missing-r6'
@@ -409,6 +449,7 @@ test_remoteless_project_spawns_with_a_skip_notice
 test_remoteless_custom_default_branch_spawns
 test_dirty_remoteless_pool_still_refuses
 test_committed_leftover_in_remoteless_pool_refuses
+test_stranded_primary_feature_branch_is_not_read_as_the_default
 test_unreachable_origin_is_not_read_as_a_missing_remote
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

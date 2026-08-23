@@ -1745,23 +1745,27 @@ spawn_worktree_is_clean() {  # <worktree>
 
 # The local default branch of a repository with no origin remote.
 # origin/HEAD can never exist there, so the shared resolver's main/master
-# fallback is the first attempt, and a custom-named default then falls back to
-# the branch the repository's own HEAD names, read from the shared git dir so a
-# detached pooled worktree still resolves it.
+# fallback is the first attempt, and a custom-named default then resolves only
+# when the repository has exactly one local branch, because that lone branch is
+# the only thing "default" can mean without an upstream.
+# The primary checkout's HEAD is deliberately not consulted: it names whatever
+# branch happens to be checked out, so a primary stranded on a feature branch
+# would bless that feature tip as the default and let a pooled worktree sitting
+# on prior committed feature work slip past the leftover refusal below.
+# Several branches with no main or master is genuinely ambiguous, so it returns
+# nonzero and the caller refuses loudly instead of guessing.
 # Both readings are local; no network call is made.
 spawn_local_default_branch() {  # <worktree>
-  local worktree=$1 common ref
+  local worktree=$1 heads
   if default_branch "$worktree"; then
     return 0
   fi
-  common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
-  case $common in
-    /*) ;;
-    *) common="$worktree/$common" ;;
+  heads=$(git -C "$worktree" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null) || return 1
+  [ -n "$heads" ] || return 1
+  case $heads in
+    *$'\n'*) return 1 ;;
   esac
-  ref=$(git --git-dir "$common" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
-  [ -n "$ref" ] || return 1
-  printf '%s\n' "$ref"
+  printf '%s\n' "$heads"
 }
 
 # Freshening asks one question: is this worktree's base stale against its
