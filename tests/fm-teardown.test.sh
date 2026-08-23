@@ -1628,6 +1628,79 @@ test_scout_report_gate_still_enforced_without_retire_flag() {
   pass "the scout-deliverable gate remains enforced for an ordinary teardown"
 }
 
+# --retire-stale-record only makes sense for a plain treehouse-pool ship or
+# scout task: a secondmate's durable records (home, registry route) are never
+# what the treehouse pool leases, so the flag must refuse for one instead of
+# silently performing (or skipping part of) a real secondmate retirement -
+# whether the secondmate is local or placed on a remote host.
+
+test_retire_stale_record_refuses_for_local_secondmate() {
+  local case_dir home rc
+  case_dir=$(make_case retire-local-secondmate)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "retire-local-secondmate: --retire-stale-record should refuse"
+  assert_grep "REFUSED: --retire-stale-record only applies to a plain treehouse-pool ship or scout task" "$case_dir/stderr" \
+    "retire-local-secondmate: refusal did not name the secondmate restriction"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-local-secondmate: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$home" ] || fail "retire-local-secondmate: refused --retire-stale-record removed the secondmate home"
+  pass "--retire-stale-record refuses for a local secondmate task"
+}
+
+test_retire_stale_record_refuses_for_remote_secondmate() {
+  local case_dir rc
+  case_dir=$(make_case retire-remote-secondmate)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=local-only" \
+    "remote_host=remote-mac" \
+    "remote_root=$case_dir/remote-root" \
+    "home=$case_dir/remote-home"
+
+  set +e
+  run_teardown "$case_dir" --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "retire-remote-secondmate: --retire-stale-record should refuse"
+  assert_grep "REFUSED: --retire-stale-record only applies to a plain treehouse-pool ship or scout task, not kind=secondmate." "$case_dir/stderr" \
+    "retire-remote-secondmate: refusal did not name the secondmate restriction"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "retire-remote-secondmate: refused --retire-stale-record removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "retire-remote-secondmate: refused --retire-stale-record removed the worktree"
+  pass "--retire-stale-record refuses for a remote secondmate task without touching its endpoint"
+}
+
+test_teardown_rejects_stray_extra_argument() {
+  local case_dir rc
+  case_dir=$(make_case stray-extra-arg)
+  write_meta "$case_dir" no-mistakes ship
+
+  set +e
+  run_teardown "$case_dir" --force --retire-stale-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "stray-extra-arg: teardown should reject the extra argument"
+  assert_grep "error: unexpected extra argument" "$case_dir/stderr" \
+    "stray-extra-arg: rejection did not report the unexpected argument"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "stray-extra-arg: rejected invocation removed task-x1's own record"
+  [ -d "$case_dir/wt" ] || fail "stray-extra-arg: rejected invocation removed the worktree"
+  pass "fm-teardown.sh rejects a stray extra argument instead of silently honoring only \$2"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -2943,6 +3016,9 @@ test_retire_stale_record_refuses_when_pool_unreadable
 test_retire_stale_record_succeeds_via_pool_lease_signal
 test_retire_stale_record_exempts_scout_report_gate
 test_scout_report_gate_still_enforced_without_retire_flag
+test_retire_stale_record_refuses_for_local_secondmate
+test_retire_stale_record_refuses_for_remote_secondmate
+test_teardown_rejects_stray_extra_argument
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
