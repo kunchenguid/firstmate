@@ -914,6 +914,44 @@ test_both_gating_events_in_one_workflow_fails_closed() {
   pass "a workflow declaring both base-gating events fails closed"
 }
 
+# A finding names two files whose events can differ, and the default-branch
+# caveat belongs to whichever of them the event actually applies to.
+test_event_note_names_the_file_it_describes() {
+  local tmp out rc
+  tmp=$(gating_root fm-lint-wf-gate-note-offender)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request_target:' '    branches: [main, feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pull_request_target-gated base with no required check passed"$'\n'"$out"
+  assert_contains "$out" "ci.yml is triggered by pull_request_target" \
+    "the note did not attribute pull_request_target to the workflow that uses it"
+  case "$out" in
+    *"no-mistakes-required.yml is triggered by pull_request_target"*)
+      fail "the note credited the required check with an event it does not use"$'\n'"$out"
+      ;;
+  esac
+
+  tmp=$(gating_root fm-lint-wf-gate-note-required)
+  write_gating_workflow "$tmp/.github/workflows/ci.yml" CI \
+    'on:' '  pull_request:' '    branches: [main, feat/omp-adaptor]'
+  write_gating_workflow "$tmp/.github/workflows/no-mistakes-required.yml" Require \
+    'on:' '  pull_request_target:' '    branches: [main]'
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a base gated beyond a pull_request_target required check passed"$'\n'"$out"
+  assert_contains "$out" "no-mistakes-required.yml is triggered by pull_request_target" \
+    "the note did not warn that the recommended edit lands on the default branch"
+  case "$out" in
+    *"ci.yml is triggered by pull_request_target"*)
+      fail "the note credited the offending workflow with an event it does not use"$'\n'"$out"
+      ;;
+  esac
+  pass "the default-branch note names the file whose event it describes"
+}
+
 test_explicit_path_skips_set_level_gating() {
   local tmp out rc
   tmp=$(gating_root fm-lint-wf-gate-explicit)
@@ -966,4 +1004,5 @@ test_pull_request_target_base_is_gated
 test_pull_request_target_scalar_trigger_is_gated
 test_required_check_pull_request_target_paths_fails
 test_both_gating_events_in_one_workflow_fails_closed
+test_event_note_names_the_file_it_describes
 test_explicit_path_skips_set_level_gating

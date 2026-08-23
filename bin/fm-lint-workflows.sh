@@ -9,10 +9,13 @@
 # commands.lint both use.
 #
 # The directory-scan path then checks one gating invariant across the scanned
-# set: every PR base gated by any pull_request-triggered workflow must also be
-# gated by no-mistakes-required.yml, so a base can never get CI without the
-# check branch protection requires. See the comment above
-# REQUIRED_CHECK_WORKFLOW for why that is worth enforcing mechanically.
+# set: every PR base gated by any pull_request or pull_request_target workflow
+# must also be gated by no-mistakes-required.yml, so a base can never get CI
+# without the check branch protection requires. A required check narrowed by a
+# paths: or paths-ignore: filter fails too, because it then stops gating every
+# base it lists. Any on: form this gate cannot read confidently is refused by
+# name rather than guessed at. See the comment above REQUIRED_CHECK_WORKFLOW
+# for why that is worth enforcing mechanically.
 #
 # Usage:
 #   fm-lint-workflows.sh                 lint workflows under this repo
@@ -33,7 +36,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_workflows_usage() {
-  sed -n '2,22{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,25{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 EXPLICIT_ROOT=
@@ -165,17 +168,23 @@ function branch_list() {
 function pr_verdict() {
   return has_branches ? branch_list() : "all"
 }
+function refusal(v) { return substr(v, 1, 12) == "unsupported " }
 # The banked verdict for the base-gating event this file uses, if any. Scanning
 # continues past that block so a second gating event cannot go unread.
 function banked(v) {
   if (found_event == "") return "none"
   v = found_verdict
+  if (refusal(v)) return v
   if (found_paths != "") v = "paths " found_paths " " v
   return "event " found_event " " v
 }
-function bank() {
+# A refusal is terminal and never gains an event prefix, so the reason always
+# reaches the caller in the one shape the caller recognizes as a refusal.
+function bank(v) {
+  v = pr_verdict()
+  if (refusal(v)) emit(v)
   found_event = pr_event
-  found_verdict = pr_verdict()
+  found_verdict = v
   found_paths = pathsfilter
   pathsfilter = ""
 }
@@ -302,13 +311,22 @@ END {
 ' "$1"
 }
 
+# Every classification the gate refuses is reported the same way, so a caller
+# never has to recognize a refusal by more than one shape.
+fm_lint_workflows_refuse() {
+  printf 'fm-lint-workflows.sh: %s: cannot read the pull_request base filter (%s). Keep the on: block in block style with an explicit branches: list, or teach this gate the new form.\n' \
+    "$1" "$2" >&2
+}
+
 # `pull_request_target` reads the workflow file from the default branch, so a
 # reader acting on one of these findings must not assume the merge-commit
-# behavior `pull_request` has. Every diagnostic naming that event says so.
+# behavior `pull_request` has. The note names the file it describes, because a
+# finding involves two files whose events can differ.
 fm_lint_workflows_event_note() {
-  case "$1" in
+  case "$2" in
     pull_request_target)
-      printf ' Note: pull_request_target reads the workflow file from the default branch, not from the PR merge commit as pull_request does, so that edit only takes effect once it reaches the default branch.'
+      printf ' Note: %s is triggered by pull_request_target, which reads the workflow file from the default branch rather than from the PR merge commit as pull_request does, so an edit there only takes effect once it reaches the default branch.' \
+        "$1"
       ;;
   esac
 }
@@ -331,8 +349,7 @@ fm_lint_workflows_pr_gating() {
     }
     case "$verdict" in
       "unsupported "*)
-        printf 'fm-lint-workflows.sh: %s: cannot read the pull_request base filter (%s). Keep the on: block in block style with an explicit branches: list, or teach this gate the new form.\n' \
-          "$name" "${verdict#unsupported }" >&2
+        fm_lint_workflows_refuse "$name" "${verdict#unsupported }"
         return 1
         ;;
     esac
@@ -350,6 +367,13 @@ fm_lint_workflows_pr_gating() {
         verdict=${verdict#paths }
         paths_filter=${verdict%% *}
         verdict=${verdict#* }
+        ;;
+    esac
+    case "$verdict" in
+      none|all|"bases "*) ;;
+      *)
+        fm_lint_workflows_refuse "$name" "unrecognized classification: $verdict"
+        return 1
         ;;
     esac
     if [ "$name" = "$REQUIRED_CHECK_WORKFLOW" ]; then
@@ -401,7 +425,7 @@ fm_lint_workflows_pr_gating() {
       paths-ignore) skip_when='a PR touching only files the filter ignores' ;;
       *) skip_when='a PR touching no file the filter matches' ;;
     esac
-    note=$(fm_lint_workflows_event_note "$required_event")
+    note=$(fm_lint_workflows_event_note "$REQUIRED_CHECK_WORKFLOW" "$required_event")
     if [ "$required_verdict" = all ]; then
       printf 'fm-lint-workflows.sh: %s narrows its %s trigger with a %s filter, so on every PR base it gates, %s produces no run of the required check at all, which is indistinguishable from a passing one. Remove the %s filter from %s.%s\n' \
         "$REQUIRED_CHECK_WORKFLOW" "$required_event" "$required_paths" "$skip_when" \
@@ -430,7 +454,8 @@ fm_lint_workflows_pr_gating() {
     event=${wf_events[$i]}
     i=$((i + 1))
     [ "$verdict" != none ] || continue
-    note=$(fm_lint_workflows_event_note "$event")
+    note=$(fm_lint_workflows_event_note "$REQUIRED_CHECK_WORKFLOW" "$required_event")
+    note=$note$(fm_lint_workflows_event_note "$name" "$event")
     [ "$required_verdict" != all ] || continue
     if [ "$verdict" = all ]; then
       printf 'fm-lint-workflows.sh: %s gates every PR base through its %s trigger while %s requires checks only on:%s. Drop the base filter in %s or widen it there.%s%s\n' \
