@@ -714,6 +714,44 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_bootstrap_reregisters_recorded_worktrees_as_durable_leases() {
+  local case_dir home pool worktree fakebin out state_file
+  case_dir="$TMP_ROOT/durable-worktree-guard"
+  home="$case_dir/home"
+  pool="$case_dir/pool"
+  worktree="$pool/1/project"
+  state_file="$pool/treehouse-state.json"
+  mkdir -p "$home/config" "$home/state" "$worktree"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf 'worktree=%s\n' "$worktree" > "$home/state/live-task.meta"
+  cat > "$state_file" <<EOF
+{
+  "worktrees": [
+    {
+      "name": "1",
+      "path": "$worktree",
+      "owner_pid": 999999,
+      "owner_started_at": 1
+    }
+  ]
+}
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/node"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TREEHOUSE_GUARD:" "bootstrap failed to register the durable worktree guard"
+  node - "$state_file" "$worktree" <<'NODE' || fail "bootstrap did not write the expected pid-less durable lease"
+const fs = require('fs');
+const [stateFile, expectedPath] = process.argv.slice(2);
+const entry = JSON.parse(fs.readFileSync(stateFile, 'utf8')).worktrees[0];
+if (entry.path !== expectedPath || entry.leased !== true || !entry.lease_id ||
+    entry.lease_holder !== 'firstmate:live-task' || !entry.leased_at ||
+    'owner_pid' in entry || 'owner_started_at' in entry) process.exit(1);
+NODE
+  pass "bootstrap re-registers recorded worktrees as pid-less durable leases"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1163,6 +1201,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_bootstrap_reregisters_recorded_worktrees_as_durable_leases
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

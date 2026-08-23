@@ -242,6 +242,11 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
+  # The next assertion is an independent fresh spawn that reuses this fixture's
+  # one fake worktree. Retire the first simulated task so the collision guard
+  # sees the same sequential lifecycle the test intends to model.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
+
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
   : > "$LAUNCH_LOG"
