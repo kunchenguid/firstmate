@@ -658,6 +658,75 @@ test_symlinked_data_override_resolves_identically_for_both_spellings() {
   pass "fm-consult: both spellings of a symlinked data override resolve to the same destination"
 }
 
+test_searchable_data_root_refuses_only_the_listing() {
+  local home out rc
+  home=$(new_home data-root-0300)
+  run_consult "$home" scaffold alpha >/dev/null
+  printf '# Answer\nEvidence.\n' > "$home/data/alpha/consult-report.md"
+  chmod 0300 "$home/data"
+  if [ -r "$home/data" ]; then
+    chmod 0700 "$home/data"
+    pass "fm-consult: searchable data root (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" status alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "status <id> must not require read permission on the data root"
+  has_exact_line "$out" "alpha: report received" || fail "status <id> did not report through a searchable data root"
+
+  out=$(run_consult "$home" receive alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "receive must not require read permission on the data root"
+  assert_contains "$out" "UNTRUSTED EXTERNAL CONTENT" "receive omitted its banner"
+
+  out=$(run_consult "$home" scaffold beta 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold must not require read permission on the data root"
+  assert_present "$home/data/beta/consult-brief.md" "scaffold did not write through a searchable data root"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  chmod 0700 "$home/data"
+  [ "$rc" -ne 0 ] || fail "the listing exited zero on a data root it could not enumerate"
+  assert_contains "$out" "data directory is not readable" "the unreadable-data refusal was not explicit"
+  pass "fm-consult: a searchable data root refuses only the enumerating listing"
+}
+
+test_scaffold_refuses_an_unwritable_consultation_directory() {
+  local home out rc
+  home=$(new_home scaffold-unwritable)
+  mkdir -p "$home/data/delta"
+  chmod 0500 "$home/data/delta"
+  if [ -w "$home/data/delta" ]; then
+    chmod 0700 "$home/data/delta"
+    pass "fm-consult: unwritable consultation directory (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" scaffold delta 2>&1); rc=$?
+  chmod 0700 "$home/data/delta"
+  expect_code 2 "$rc" "scaffold must refuse an unwritable consultation directory through fm-consult"
+  assert_contains "$out" "fm-consult: " "scaffold leaked a bare shell error instead of an fm-consult refusal"
+  assert_contains "$out" "consultation directory is not writable" "the unwritable refusal was not explicit"
+  assert_not_contains "$out" "Permission denied" "scaffold leaked a bare shell permission error"
+  assert_absent "$home/data/delta/consult-brief.md" "the refused scaffold left a partial brief behind"
+  pass "fm-consult: scaffold refuses an unwritable consultation directory without leaking a shell error"
+}
+
+test_scaffold_bootstraps_a_missing_data_directory() {
+  local home out rc
+  home="$TMP_ROOT/bootstrap-home"
+  mkdir -p "$home"
+  home=$(cd "$home" && pwd -P)
+  assert_absent "$home/data" "the bootstrap fixture already had a data directory"
+
+  out=$(run_consult "$home" scaffold alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold must create a missing data/ beneath a valid FM_HOME"
+  assert_present "$home/data/alpha/consult-brief.md" "scaffold did not bootstrap the data directory"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "status must succeed against a bootstrapped data directory"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" || fail "the bootstrapped consultation was not listed"
+  pass "fm-consult: scaffold bootstraps a missing data directory under a valid home"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -683,5 +752,8 @@ test_status_of_an_absent_consult_id_is_refused
 test_searchable_but_unreadable_consultation_is_reported
 test_receive_refuses_an_unreadable_report_through_fm_consult
 test_symlinked_data_override_resolves_identically_for_both_spellings
+test_searchable_data_root_refuses_only_the_listing
+test_scaffold_refuses_an_unwritable_consultation_directory
+test_scaffold_bootstraps_a_missing_data_directory
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command

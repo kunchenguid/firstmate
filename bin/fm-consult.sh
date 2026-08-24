@@ -80,6 +80,11 @@ esac
 FM_HOME=$(CDPATH='' cd -- "$FM_HOME_INPUT" 2>/dev/null && pwd -P) \
   || die "FM_HOME directory cannot be resolved: $FM_HOME_INPUT"
 
+# Unlike bin/fm-brief.sh, which accepts an absolute override verbatim, a
+# resolved override must already exist: an override names another home that is
+# already there, so a typo would otherwise scaffold a phantom one. The default
+# FM_HOME/data is exempt because creating it beneath an already validated home
+# is ordinary bootstrap.
 resolve_directory_input() {
   local name=$1 path=$2 resolved
   case "$path" in
@@ -131,10 +136,10 @@ display_name() {
 
 # The role is both the noun in the refusal and the policy. The data root is
 # supplied by the operator and already canonicalized, so a symlinked spelling is
-# theirs to choose, but status_all enumerates it and so needs read as well as
-# search. A consultation directory is discovered rather than supplied, so a
-# symlink is refused unfollowed; only its two fixed artifact names are ever
-# statted, so search alone is enough to report it.
+# theirs to choose. A consultation directory is discovered rather than supplied,
+# so a symlink is refused unfollowed. Either way only fixed paths beneath the
+# directory are created or statted, so search alone is what every command needs;
+# read is demanded separately by the one caller that enumerates.
 consult_directory_ok() {
   local dir=$1 role=$2
   CONSULT_REFUSAL=
@@ -148,10 +153,6 @@ consult_directory_ok() {
   fi
   if [ -d "$dir" ] && [ ! -x "$dir" ]; then
     CONSULT_REFUSAL="$role directory is not searchable, so its consultations cannot be reported; fix its permissions: $(display_name "$dir")"
-    return 1
-  fi
-  if [ "$role" = data ] && [ -d "$dir" ] && [ ! -r "$dir" ]; then
-    CONSULT_REFUSAL="data directory is not readable, so consultations cannot be listed completely; fix its permissions: $(display_name "$dir")"
     return 1
   fi
   return 0
@@ -179,6 +180,13 @@ validate_data_directory() {
   consult_directory_ok "$DATA" data || die "$CONSULT_REFUSAL"
 }
 
+validate_data_directory_listable() {
+  validate_data_directory
+  if [ -d "$DATA" ] && [ ! -r "$DATA" ]; then
+    die "data directory is not readable, so consultations cannot be listed completely; fix its permissions: $(display_name "$DATA")"
+  fi
+}
+
 validate_consult_directory() {
   consult_directory_ok "$1" consultation || die "$CONSULT_REFUSAL"
 }
@@ -196,6 +204,8 @@ scaffold_consult() {
   validate_consult_directory "$dir"
   validate_consult_file "$brief" "consultation brief"
   [ ! -e "$brief" ] || die "consultation brief already exists: $brief"
+  [ ! -d "$dir" ] || [ -w "$dir" ] \
+    || die "consultation directory is not writable; fix its permissions: $(display_name "$dir")"
   (umask 077; mkdir -p -- "$dir") || die "could not create consultation directory: $dir"
 
   cat > "$brief" <<'EOF'
@@ -325,7 +335,7 @@ status_one() {
 
 status_all() {
   local dir verdict found=0 refused=0
-  validate_data_directory
+  validate_data_directory_listable
   [ -d "$DATA" ] || {
     printf '%s\n' 'no consultations'
     return 0
