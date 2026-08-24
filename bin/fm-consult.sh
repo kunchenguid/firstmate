@@ -16,9 +16,10 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
-# status with no id lists every consultation on exactly one line each, printing a
-# refused line with a reason for any data entry it cannot report safely, and
-# exits nonzero once the whole listing is printed. status with an id refuses such
+# status with no id lists every consultation on exactly one line each. data/ is
+# shared, so an entry that is not a consultation is passed over; an entry that
+# looks like one but cannot be reported safely gets a refused line with a reason,
+# and the listing finishes before exiting nonzero. status with an id refuses such
 # an entry immediately.
 #
 # Consultations live under data/ in the active firstmate home, or under
@@ -158,6 +159,9 @@ validate_consult_id() {
 
 validate_data_directory() {
   consult_directory_ok "$DATA" data || die "$CONSULT_REFUSAL"
+  if [ -d "$DATA" ] && { [ ! -r "$DATA" ] || [ ! -x "$DATA" ]; }; then
+    die "data directory is not readable, so consultations cannot be reported completely; fix its permissions: $(display_name "$DATA")"
+  fi
 }
 
 validate_consult_directory() {
@@ -266,13 +270,29 @@ consult_state_line() {
   return 0
 }
 
-# Whether an already-validated consultation directory holds consultation
-# artifacts at all. Asked only after the validator has cleared the entry, so it
-# decides what an entry *is*, never whether it was safe to look at.
+# A data/ entry is a consultation only if it can hold consult artifacts and does.
+# data/ is a shared home directory, so ordinary residents - secondmates.md,
+# backlog.md, an unrelated task directory - are simply not consultations and are
+# passed over in silence rather than reported as broken ones.
 consult_entry_present() {
   local dir=$1
   [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
     || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]
+}
+
+# Decide one listing entry: 0 report CONSULT_LINE, 1 refuse CONSULT_REFUSAL,
+# 2 ignore. A symlink is refused without being followed, because following it is
+# the only way to tell whether it conceals a consultation.
+consult_listing_entry() {
+  local dir=$1 id=${1##*/}
+  CONSULT_LINE=
+  CONSULT_REFUSAL=
+  [ -L "$dir" ] || [ -d "$dir" ] || return 2
+  consult_directory_ok "$dir" consultation || return 1
+  consult_entry_present "$dir" || return 2
+  consult_id_ok "$id" || return 1
+  consult_state_line "$id" || return 1
+  return 0
 }
 
 status_one() {
@@ -284,24 +304,26 @@ status_one() {
 }
 
 status_all() {
-  local dir id found=0 refused=0
+  local dir verdict found=0 refused=0
   validate_data_directory
   [ -d "$DATA" ] || {
     printf '%s\n' 'no consultations'
     return 0
   }
   for dir in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
-    [ -e "$dir" ] || [ -L "$dir" ] || continue
-    id=${dir##*/}
-    if consult_id_ok "$id" && consult_state_line "$id"; then
-      consult_entry_present "$DATA/$id" || continue
-      found=1
-      printf '%s\n' "$CONSULT_LINE"
-    else
-      found=1
-      refused=1
-      printf '%s: refused (%s)\n' "$(display_name "$id")" "$(display_name "$CONSULT_REFUSAL")"
-    fi
+    verdict=0
+    consult_listing_entry "$dir" || verdict=$?
+    case "$verdict" in
+      0)
+        found=1
+        printf '%s\n' "$CONSULT_LINE"
+        ;;
+      1)
+        found=1
+        refused=1
+        printf '%s: refused (%s)\n' "$(display_name "${dir##*/}")" "$(display_name "$CONSULT_REFUSAL")"
+        ;;
+    esac
   done
   [ "$found" -eq 1 ] || printf '%s\n' 'no consultations'
   [ "$refused" -eq 0 ] \

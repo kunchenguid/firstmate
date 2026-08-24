@@ -367,37 +367,31 @@ test_status_refuses_a_data_directory_that_is_a_symlink() {
   pass "fm-consult: a symlinked data directory is refused with its own label"
 }
 
-test_status_all_refuses_any_non_directory_data_entry() {
+test_status_all_ignores_non_consultation_data_entries() {
   local home out rc
   home=$(new_home status-non-directory)
   run_consult "$home" scaffold alpha >/dev/null
   run_consult "$home" scaffold gamma >/dev/null
   printf 'planted\n' > "$home/data/beta"
 
-  out=$(run_consult "$home" status 2>/dev/null); rc=$?
-  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
-    || fail "listing dropped the entry before the non-directory entry"
-  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
-    || fail "listing dropped the entry after the non-directory entry"
-  assert_contains "$out" "beta: refused (" "listing silently skipped a non-directory data entry"
-  assert_contains "$out" "consultation path is not a directory" \
-    "refused line did not name the non-directory reason"
-  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported data entry"
-  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a non-directory data entry"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "a plain file in data/ must not make status fail"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" || fail "listing dropped a consultation"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" || fail "listing dropped a consultation"
+  assert_not_contains "$out" "beta" "a plain file that cannot hold consult artifacts was reported"
+  expect_code 2 "$(stdout_line_count "$out")" "status listed a data entry that is not a consultation"
 
   rm "$home/data/beta"
   mkfifo "$home/data/beta"
-  out=$(run_consult "$home" status 2>/dev/null); rc=$?
-  assert_contains "$out" "beta: refused (" "listing silently skipped a non-regular, non-directory data entry"
-  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
-    || fail "listing dropped the entry after a non-regular data entry"
-  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported data entry"
-  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a non-regular data entry"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "a non-regular, non-directory data entry must not make status fail"
+  assert_not_contains "$out" "beta" "a non-directory data entry was reported as a consultation"
+  expect_code 2 "$(stdout_line_count "$out")" "status listed a data entry that is not a consultation"
 
   out=$(run_consult "$home" status beta 2>&1); rc=$?
-  [ "$rc" -ne 0 ] || fail "single status accepted a non-directory data entry"
+  [ "$rc" -ne 0 ] || fail "single status accepted a directly named non-directory data entry"
   assert_contains "$out" "consultation path is not a directory" "single status refusal was not explicit"
-  pass "fm-consult: status refuses any non-directory data entry without dropping the rest"
+  pass "fm-consult: status ignores data entries that cannot hold consult artifacts"
 }
 
 test_status_all_ignores_a_directory_holding_no_consultation() {
@@ -458,6 +452,45 @@ test_data_override_redirects_every_command() {
   pass "fm-consult: FM_DATA_OVERRIDE redirects scaffold, receive, and status"
 }
 
+test_status_all_reports_only_consultations_in_a_seeded_home() {
+  local home out rc
+  home=$(new_home status-seeded-home)
+  run_consult "$home" scaffold alpha >/dev/null
+  : > "$home/data/secondmates.md"
+  : > "$home/data/backlog.md"
+  : > "$home/data/projects.md"
+  : > "$home/data/captain.md"
+  : > "$home/data/.DS_Store"
+  mkdir -p "$home/data/handoff" "$home/data/remote-secondmates" "$home/data/.cache"
+  printf 'unrelated\n' > "$home/data/handoff/notes.md"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "status must succeed in a seeded firstmate home"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" || fail "listing dropped the only consultation"
+  expect_code 1 "$(stdout_line_count "$out")" "status reported a shared data/ resident as a consultation"
+  pass "fm-consult: status reports only consultations in a seeded firstmate home"
+}
+
+test_status_refuses_an_unreadable_data_directory() {
+  local home out rc
+  home=$(new_home status-unreadable)
+  run_consult "$home" scaffold alpha >/dev/null
+  chmod 000 "$home/data"
+  if [ -r "$home/data" ]; then
+    chmod 700 "$home/data"
+    pass "fm-consult: unreadable data directory (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  chmod 700 "$home/data"
+  [ "$rc" -ne 0 ] || fail "status exited zero on a data directory it could not read"
+  assert_not_contains "$out" "no consultations" \
+    "status claimed there are no consultations while a real one was unreadable"
+  assert_contains "$out" "data directory is not readable" "the unreadable-data refusal was not explicit"
+  pass "fm-consult: an unreadable data directory is refused, not reported as empty"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -475,6 +508,8 @@ test_status_all_reports_no_consultations_for_an_empty_data_directory
 test_status_all_cannot_forge_a_status_line
 test_status_all_refuses_a_symlinked_directory_with_no_consult_files
 test_status_refuses_a_data_directory_that_is_a_symlink
-test_status_all_refuses_any_non_directory_data_entry
+test_status_all_ignores_non_consultation_data_entries
+test_status_all_reports_only_consultations_in_a_seeded_home
+test_status_refuses_an_unreadable_data_directory
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command
