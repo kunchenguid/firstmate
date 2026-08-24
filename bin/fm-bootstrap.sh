@@ -1595,6 +1595,9 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # depend on them, so it starts in the background and overlaps their wall clock.
   fleet_sync_pid=
   fleet_sync_out=
+  # Never hand an unclassified registered origin to the clone-refresh worker:
+  # its remote transport is not a supported forge boundary, so fail closed for
+  # that project while leaving unrelated secondmate supervision sweeps intact.
   if network_phase && forge_report_unsupported && network_sweep_authorized 'project clone refresh'; then
     fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
     if [ -n "$fleet_sync_out" ]; then
