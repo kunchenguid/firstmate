@@ -235,6 +235,9 @@ bin/fm-teardown.sh <id>
 Retirement is executed on the configured host and refuses while the remote home has child work, while the primary has an unfinished backlog outbox, or while a routed reply remains unresolved.
 It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`; it never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
+A retry after the remote side already completed reports `already-retired` and finishes primary-side unregistration without touching the remote, which covers both an absent remote home and one that inheritance propagation recreated holding nothing but inheritance-owned residue: propagated material bound to its generation record, generation records whose commit the receiver never applied, the receiver's own lock and staging artifacts, shared-preference quarantine siblings, and contentless operational directories.
+Every one of those artifacts is primary-authoritative and reproducible from the primary home, so nothing home-unique can hide behind them.
+Any other unseeded directory is still refused and nothing is deleted.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 No generic remote delete or write surface exists: remote writes are confined to inherited allowlist files and backlog handoff scratch files, and remote home removal is reachable only through guarded secondmate retirement.
 
