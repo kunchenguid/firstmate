@@ -22,15 +22,16 @@
 # loop and the Linux restart supervisor stop instead of polling forever
 # reparented to init. FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS is how long the root
 # must stay missing before that counts, so an ordinary transient never stops a
-# healthy worker. The supervisor additionally refuses to restart a child that
-# keeps failing immediately: it backs off up to
+# healthy worker. The supervisor additionally bounds how many times it restarts
+# a failing child, whether or not the failures are immediate: it backs off
+# between immediate failures up to
 # FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS and gives up after
-# FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children, since a restart loop
-# only burns CPU and grows its log without bound. A child that stays up for
-# FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the consecutive-failure
-# backoff, but not the total restart guard, so a child that dies just past that
-# threshold cannot restart without bound either. fm-on's ensure path restarts a
-# worker that gave up.
+# FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children in total, since a
+# restart loop only burns CPU and grows its log without bound. A child that
+# stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# consecutive-failure backoff, but not that total restart guard, so a child
+# that dies just past the healthy threshold cannot restart without bound
+# either. fm-on's ensure path restarts a worker that gave up.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
