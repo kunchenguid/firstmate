@@ -204,47 +204,76 @@ SHIM
   pass "fm-consult: the fallback publish refuses a rival brief instead of replacing it"
 }
 
-# A fallback publish can still fail while copying the staged brief into place.
-# The copier's own diagnosis is the only account of why, so it must reach the
-# operator rather than being written into the half-published brief. Both
-# stand-ins are exactly that filesystem: ln cannot link, and the copy fails.
-test_scaffold_reports_a_failed_fallback_copy() {
+# A fallback publish can still fail while renaming the staged brief into place.
+# The rename's own diagnosis is the only account of why, so it must reach the
+# operator, and the destination reservation the failed publish left behind must
+# not survive as a brief nobody wrote. Both stand-ins are exactly that
+# filesystem: ln cannot link, and the rename fails.
+test_scaffold_reports_a_failed_fallback_publish() {
   local home shim brief out rc lines leftovers
-  home=$(new_home fallback-copy-failure)
-  shim="$TMP_ROOT/fallback-copy-failure-shim"
+  home=$(new_home fallback-publish-failure)
+  shim="$TMP_ROOT/fallback-publish-failure-shim"
   mkdir -p "$shim"
   cat > "$shim/ln" <<'SHIM'
 #!/usr/bin/env bash
 printf 'ln: %s: Operation not supported\n' "${*: -1}" >&2
 exit 1
 SHIM
-  # Only the copy out of the staged file fails; the staging fill, which reads a
-  # heredoc with no operands, still runs the real cat.
-  cat > "$shim/cat" <<'SHIM'
+  cat > "$shim/mv" <<'SHIM'
 #!/usr/bin/env bash
-if [ "$#" -eq 0 ]; then
-  command -p cat
-  exit $?
-fi
-printf 'cat: %s: Input/output error\n' "${*: -1}" >&2
+printf 'mv: %s: Input/output error\n' "${*: -1}" >&2
 exit 1
 SHIM
-  chmod +x "$shim/ln" "$shim/cat"
-  brief="$home/data/uncopyable/consult-brief.md"
-  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold uncopyable 2>&1); rc=$?
-  expect_code 2 "$rc" "a failed fallback copy must refuse (got: $out)"
+  chmod +x "$shim/ln" "$shim/mv"
+  brief="$home/data/unpublishable/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold unpublishable 2>&1); rc=$?
+  expect_code 2 "$rc" "a failed fallback publish must refuse (got: $out)"
   assert_contains "$out" "could not publish the consultation brief" \
-    "the failed fallback copy was not reported as a publish failure"
+    "the failed fallback rename was not reported as a publish failure"
   case "$out" in
-    *"could not publish the consultation brief: "*"(cat: "*"Input/output error)") : ;;
-    *) fail "scaffold discarded the underlying cause of the fallback copy failure"$'\n'"--- output ---"$'\n'"$out" ;;
+    *"could not publish the consultation brief: "*"(mv: "*"Input/output error)") : ;;
+    *) fail "scaffold discarded the underlying cause of the fallback publish failure"$'\n'"--- output ---"$'\n'"$out" ;;
   esac
   lines=$(stdout_line_count "$out")
-  expect_code 1 "$lines" "the fallback copy refusal must stay on one line"
-  assert_absent "$brief" "a failed fallback copy left a brief behind"
-  leftovers=$(find "$home/data/uncopyable" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
-  expect_code 0 "$leftovers" "the failed fallback copy left staged files behind (got: $out)"
-  pass "fm-consult: a failed fallback copy reports its cause and publishes nothing"
+  expect_code 1 "$lines" "the fallback publish refusal must stay on one line"
+  assert_absent "$brief" "a failed fallback publish left a brief behind"
+  leftovers=$(find "$home/data/unpublishable" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "the failed fallback publish left staged files behind (got: $out)"
+
+  out=$(run_consult "$home" scaffold unpublishable 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold could not retry after a failed publish (got: $out)"
+  assert_grep "{FALSIFIABLE_CLAIM}" "$brief" "the retried scaffold did not write the complete contract"
+  pass "fm-consult: a failed fallback publish reports its cause and publishes nothing"
+}
+
+# Scaffolding can be interrupted while it holds a staged brief. The stand-in
+# below signals the scaffolding shell exactly then, and the consultation must be
+# left with nothing published and nothing stranded, so a retry still works.
+test_scaffold_strands_nothing_when_interrupted_mid_publish() {
+  local home shim brief out rc leftovers
+  home=$(new_home interrupted-publish)
+  shim="$TMP_ROOT/interrupted-publish-shim"
+  mkdir -p "$shim"
+  cat > "$shim/ln" <<'SHIM'
+#!/usr/bin/env bash
+kill -TERM "$PPID" 2>/dev/null
+exit 1
+SHIM
+  chmod +x "$shim/ln"
+  brief="$home/data/interrupted/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold interrupted 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted scaffold reported success (got: $out)"
+  assert_absent "$brief" "an interrupted scaffold left a brief behind"
+  leftovers=$(find "$home/data/interrupted" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "an interrupted scaffold left staged files behind (got: $out)"
+
+  out=$(run_consult "$home" status interrupted 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status reported a consultation an interrupted scaffold never published"
+
+  out=$(run_consult "$home" scaffold interrupted 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold could not retry after an interruption (got: $out)"
+  assert_grep "{FALSIFIABLE_CLAIM}" "$brief" "the retried scaffold did not write the complete contract"
+  pass "fm-consult: an interrupted scaffold strands nothing and stays retryable"
 }
 
 test_receive_refuses_missing_and_empty_reports() {
@@ -1037,7 +1066,8 @@ test_scaffold_publishes_nothing_when_the_write_fails
 test_scaffold_never_replaces_a_brief_written_during_staging
 test_scaffold_publishes_a_brief_without_hard_link_support
 test_scaffold_without_hard_links_never_replaces_a_rival_brief
-test_scaffold_reports_a_failed_fallback_copy
+test_scaffold_reports_a_failed_fallback_publish
+test_scaffold_strands_nothing_when_interrupted_mid_publish
 test_receive_refuses_missing_and_empty_reports
 test_path_traversing_id_is_refused
 test_receive_emits_untrusted_input_banner_and_summary

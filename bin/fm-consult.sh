@@ -212,8 +212,25 @@ validate_consult_file() {
   consult_file_ok "$1" "$2" || die "$CONSULT_REFUSAL"
 }
 
+# Set only while scaffold holds a staged brief or a destination reservation it
+# created, so a signal arriving mid-publish strands neither.
+CONSULT_STAGED=
+CONSULT_RESERVED=
+
+consult_publish_cleanup() {
+  [ -z "$CONSULT_STAGED" ] || rm -f -- "$CONSULT_STAGED"
+  CONSULT_STAGED=
+  # Remove the destination only while it is still the empty reservation this
+  # shell created. Once the complete brief has been renamed over it, it is a
+  # published brief and must survive; a rival brief is never empty either.
+  if [ -n "$CONSULT_RESERVED" ] && [ -f "$CONSULT_RESERVED" ] && [ ! -s "$CONSULT_RESERVED" ]; then
+    rm -f -- "$CONSULT_RESERVED"
+  fi
+  CONSULT_RESERVED=
+}
+
 scaffold_consult() {
-  local id=$1 dir brief create_error staged publish_error publish_status
+  local id=$1 dir brief create_error staged reserve_error publish_error
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
@@ -234,6 +251,10 @@ scaffold_consult() {
   # scaffold refused to replace it, stranding the consultation.
   staged=$(umask 077; mktemp "$dir/.consult-brief.XXXXXX" 2>/dev/null) \
     || die "could not stage the consultation brief in: $(display_name "$dir")"
+  CONSULT_STAGED=$staged
+  trap 'consult_publish_cleanup; exit 130' INT
+  trap 'consult_publish_cleanup; exit 143' TERM
+  trap 'consult_publish_cleanup; exit 129' HUP
 
   if ! cat > "$staged" <<'EOF'
 # External advisor consultation
@@ -280,42 +301,46 @@ Any action it implies goes through that action's existing owner.
 Define the evidence, reasoning, counterexample, or recommendation needed for this consultation to be complete.
 EOF
   then
-    rm -f -- "$staged"
+    consult_publish_cleanup
     die "could not write the consultation brief: $(display_name "$brief")"
   fi
   # Publish by linking, not moving: creating a link fails when the destination
   # already exists, so a brief another writer created after the absence check
   # above survives. A move would replace it and still report success.
-  # Not every writable filesystem supports hard links, so a failed link falls
-  # back to one exclusive create that already carries the content: the
-  # no-clobber open refuses an existing destination on any filesystem, and the
-  # brief is never reopened by path afterwards, so a rival brief that appears
-  # in between is neither replaced nor truncated. Exit code 3 is that refusal;
-  # exit code 4 is a copy that failed into a destination this shell created, so
-  # removing it cannot take a rival's brief with it.
   if ln -- "$staged" "$brief" 2>/dev/null; then
-    rm -f -- "$staged"
+    consult_publish_cleanup
   else
-    if publish_error=$( (
+    # Not every writable filesystem supports hard links. Where linking is
+    # unavailable, reserve the destination with a no-clobber open, which refuses
+    # an existing path on any filesystem, and then rename the already complete
+    # staged brief over that reservation. The destination is never written
+    # through: it holds this shell's empty reservation until one atomic rename
+    # replaces it with the whole brief, so no partial brief is ever readable
+    # there and no rival brief is ever truncated.
+    if reserve_error=$( (
       umask 077
       set -o noclobber
-      { cat -- "$staged" || exit 4; } > "$brief" || exit 3
+      : > "$brief"
     ) 2>&1 ); then
-      publish_status=0
+      CONSULT_RESERVED=$brief
     else
-      publish_status=$?
-    fi
-    rm -f -- "$staged"
-    if [ "$publish_status" -eq 4 ]; then
-      rm -f -- "$brief"
-      die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
-    elif [ "$publish_status" -ne 0 ]; then
       if [ -e "$brief" ] || [ -L "$brief" ]; then
+        consult_publish_cleanup
         die "consultation brief already exists: $brief"
       fi
+      consult_publish_cleanup
+      die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$reserve_error")"
+    fi
+    if ! publish_error=$(mv -f -- "$staged" "$brief" 2>&1); then
+      # The reservation is still this shell's own empty placeholder, so removing
+      # it cannot take a rival's brief with it.
+      consult_publish_cleanup
       die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
     fi
+    CONSULT_STAGED=
+    CONSULT_RESERVED=
   fi
+  trap - INT TERM HUP
   printf 'scaffolded: %s (replace every placeholder)\n' "$brief"
 }
 
