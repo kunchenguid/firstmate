@@ -205,6 +205,26 @@ test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
   pass "an unreadable worktree inside another repository refuses instead of borrowing its HEAD"
 }
 
+test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
+  local case_dir other target out rc
+  case_dir="$TMP_ROOT/ambient-git-dir"
+  other="$case_dir/other-repo"
+  target="$case_dir/no-git-here"
+  mkdir -p "$target"
+  git init -q "$other"
+  git -C "$other" commit -q --allow-empty -m durable-elsewhere
+
+  set +e
+  out=$(GIT_DIR="$other/.git" GIT_WORK_TREE="$other" \
+    fm_treehouse_return_guard ambient-return "$target" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an ambient GIT_DIR made an unreadable worktree look durable: $out"
+  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "ambient GIT_DIR return did not report its concrete refusal"
+  pass "an inherited GIT_DIR cannot stand in for the returned worktree's repository"
+}
+
 test_unrescuable_commit_reports_the_concrete_git_reason() {
   local case_dir repo wt out rc
   case_dir="$TMP_ROOT/rescue-ref-blocked"
@@ -278,6 +298,7 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
 
 test_broken_ref_store_still_rescues_detached_commit
 test_worktree_inside_another_repo_refuses_instead_of_borrowing_it
+test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo
 test_unrescuable_commit_reports_the_concrete_git_reason
 test_durable_branch_returns_even_with_an_unusable_task_id
 test_unusable_task_id_refuses_unrescuable_committed_work

@@ -22,8 +22,11 @@ fm_treehouse_return_task_id_safe() {
 
 # Run git against exactly the given worktree: repository discovery is capped at
 # its parent so a missing or damaged .git pointer cannot silently resolve an
-# enclosing repository. Stdout and stderr are captured separately so diagnostics
-# printed by a damaged ref store never masquerade as command output.
+# enclosing repository, and every inherited repository override is cleared so
+# an ambient GIT_DIR (which skips discovery entirely) or GIT_NAMESPACE cannot
+# point the reachability check at another repository's refs. Stdout and stderr
+# are captured separately so diagnostics printed by a damaged ref store never
+# masquerade as command output.
 FM_TREEHOUSE_RETURN_GIT_OUT=
 FM_TREEHOUSE_RETURN_GIT_ERR=
 fm_treehouse_return_git() {  # <worktree> <git args...>
@@ -36,7 +39,9 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
     return 125
   fi
   FM_TREEHOUSE_RETURN_GIT_OUT=$(GIT_CEILING_DIRECTORIES=$(dirname -- "$worktree") \
-    git -C "$worktree" "$@" 2>"$errfile")
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_NAMESPACE \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      git -C "$worktree" "$@" 2>"$errfile")
   rc=$?
   FM_TREEHOUSE_RETURN_GIT_ERR=$(cat "$errfile" 2>/dev/null)
   rm -f -- "$errfile"
