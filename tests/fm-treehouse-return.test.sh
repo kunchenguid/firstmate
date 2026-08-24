@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regression tests for preserving committed work through an isolated Treehouse return.
 #
-# Each case creates a private scratch pool via TREEHOUSE_ROOT. It never inspects or
-# returns a worktree from the operator's live pool.
+# Each case creates a private scratch pool pinned in its own repo's treehouse.toml.
+# It never inspects or returns a worktree from the operator's live pool.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -34,13 +34,14 @@ make_case() {  # <name>
   pool="$case_dir/pool"
   home="$case_dir/home"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin" "$case_dir/fakehome"
   git init -q "$repo"
   git -C "$repo" commit -q --allow-empty -m baseline
-  (
-    cd "$repo" || exit 1
-    "$TREEHOUSE" init --root "$pool" >/dev/null
-  ) || return 1
+  # Pin the pool in the repo's own treehouse.toml rather than through `init
+  # --root` or TREEHOUSE_ROOT: the repo-level config is the one pool selector
+  # every supported Treehouse build honors, so this case stays isolated on the
+  # CI-pinned binary too instead of falling back to the operator's real pool.
+  printf 'max_trees = 4\nroot = "%s"\n' "$pool" > "$repo/treehouse.toml" || return 1
   fm_fake_exit0 "$fakebin" tmux no-mistakes gh gh-axi
   printf '%s\n' "$case_dir"
 }
@@ -49,7 +50,8 @@ lease_worktree() {  # <case-dir> <holder>
   local case_dir=$1 holder=$2
   (
     cd "$case_dir/repo" || exit 1
-    TREEHOUSE_ROOT="$case_dir/pool" "$TREEHOUSE" get --lease --lease-holder "$holder"
+    HOME="$case_dir/fakehome" TREEHOUSE_ROOT="$case_dir/pool" \
+      "$TREEHOUSE" get --lease --lease-holder "$holder"
   )
 }
 
@@ -66,6 +68,8 @@ write_teardown_meta() {  # <case-dir> <task-id> <worktree>
 
 run_teardown() {  # <case-dir> <task-id>
   local case_dir=$1 task_id=$2
+  mkdir -p "$case_dir/fakehome" || return 1
+  HOME="$case_dir/fakehome" \
   FM_HOME="$case_dir/home" \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/home/state" \
