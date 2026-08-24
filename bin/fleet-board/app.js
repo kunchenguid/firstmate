@@ -6,11 +6,14 @@ const {
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  dialogDraftFingerprint,
   draftIsAvailable,
+  normalizeActionText,
   reconcileBoardState,
   recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  shouldAnnounceLoadFailure,
   updateLiveStatus,
   updateValue,
 } = globalThis.FleetBoardState;
@@ -34,6 +37,7 @@ const state = {
   maxActionBytes: null,
   renderedBoard: "",
   loading: false,
+  loadFailures: { initialFailureAnnounced: false },
 };
 
 function persistActionOperations() {
@@ -133,7 +137,7 @@ function dialogFingerprint(card) {
   return JSON.stringify({
     card: cardPresentation(card),
     pending: state.pending.has(card.key),
-    draft: state.drafts.get(card.key) || null,
+    draft: dialogDraftFingerprint(state.drafts.get(card.key)),
   });
 }
 
@@ -495,7 +499,8 @@ function renderComposer(card, draft, focus) {
   composer.append(label, textarea, footer);
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
-    draft.text = textarea.value;
+    draft.text = normalizeActionText(textarea.value);
+    textarea.value = draft.text;
     if (action === "answer") {
       const selectedDecision = new FormData(composer).get("decision_key");
       if (selectedDecision) draft.decisionKey = selectedDecision;
@@ -554,6 +559,7 @@ function renderComposer(card, draft, focus) {
     }
   });
   elements.dialogBody.append(composer);
+  elements.dialog.dataset.renderFingerprint = dialogFingerprint(card);
   if (focus) textarea.focus();
 }
 
@@ -632,7 +638,9 @@ async function loadBoard(force = false) {
     }
   } catch (error) {
     setFreshness("error", error.message || "Fleet unavailable");
-    if (force || !hadBoard) showToast(error.message || "The fleet could not be loaded.", "error");
+    if (shouldAnnounceLoadFailure(state.loadFailures, force, hadBoard)) {
+      showToast(error.message || "The fleet could not be loaded.", "error");
+    }
   } finally {
     state.loading = false;
     elements.refresh.disabled = false;

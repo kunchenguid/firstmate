@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import secrets
+import selectors
 import signal
 import subprocess
 import sys
@@ -50,8 +51,11 @@ LANE_PRIORITY = {
 }
 SLUG = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 MAX_ACTION_BYTES = 8_192
-MAX_REQUEST_BYTES = 12_000
+MAX_REQUEST_BYTES = MAX_ACTION_BYTES * 6 + 2_048
 MAX_HEALTH_BYTES = 4_096
+DEFAULT_SNAPSHOT_STDOUT_BYTES = 32 * 1_024 * 1_024
+DEFAULT_SNAPSHOT_STDERR_BYTES = 64 * 1_024
+MAX_CONFIGURED_SNAPSHOT_BYTES = 256 * 1_024 * 1_024
 STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -73,6 +77,19 @@ def compact(value: Any, limit: int = 240) -> str | None:
     if not text:
         return None
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def configured_byte_limit(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise BoardError(f"{name} must be an integer byte count") from error
+    if not 1_024 <= value <= MAX_CONFIGURED_SNAPSHOT_BYTES:
+        raise BoardError(
+            f"{name} must be between 1024 and {MAX_CONFIGURED_SNAPSHOT_BYTES} bytes"
+        )
+    return value
 
 
 def home_key(namespace: str, home_id: str) -> str:
@@ -457,7 +474,12 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
                 f"{mate_label}: {omitted.get('count', 0)} {omitted.get('surface', 'records')} omitted by the snapshot bound"
             )
 
-        def mate_card(item: dict[str, Any], lane: str, title: str | None = None) -> dict[str, Any]:
+        def mate_card(
+            item: dict[str, Any],
+            lane: str,
+            title: str | None = None,
+            source: str | None = None,
+        ) -> dict[str, Any]:
             task_id = str(item.get("id") or item.get("key") or "")
             record = dict(item)
             if lane == "needs_you":
@@ -472,7 +494,7 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
                 "project": item.get("repo"),
                 "current_state": {
                     "state": item.get("state"),
-                    "source": item.get("source"),
+                    "source": item.get("source") or source,
                     "detail": item.get("doing") or item.get("reason"),
                 },
             }
@@ -497,7 +519,7 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
                 lane = "waiting"
             else:
                 lane = "backlog"
-            merge_card(cards, mate_card(item, lane))
+            merge_card(cards, mate_card(item, lane, source="backlog"))
         for item in mate.get("holds") or []:
             merge_card(cards, mate_card(item, "waiting"))
         for item in mate.get("active_children") or []:
@@ -506,7 +528,7 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         for item in mate.get("decisions_open") or []:
             merge_card(cards, mate_card(item, "needs_you"))
         for item in mate.get("landed") or []:
-            merge_card(cards, mate_card(item, "done"))
+            merge_card(cards, mate_card(item, "done", source="backlog"))
 
     rows = list(cards.values())
     rows.sort(
@@ -539,6 +561,95 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=0.5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def run_bounded_snapshot(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    timeout: float,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    streams = {
+        process.stdout: ("stdout", stdout_limit),
+        process.stderr: ("stderr", stderr_limit),
+    }
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + timeout
+    try:
+        for stream, metadata in streams.items():
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, metadata)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(command, timeout)
+            for key, _ in events:
+                stream_name, limit = key.data
+                buffer = buffers[stream_name]
+                read_size = min(65_536, limit - len(buffer) + 1)
+                try:
+                    chunk = os.read(key.fd, max(1, read_size))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer.extend(chunk)
+                if len(buffer) > limit:
+                    raise BoardError(f"Fleet snapshot {stream_name} exceeded {limit} bytes")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
+        returncode = process.wait(timeout=remaining)
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            bytes(buffers["stdout"]),
+            bytes(buffers["stderr"]),
+        )
+    except BaseException:
+        terminate_process_group(process)
+        raise
+    finally:
+        selector.close()
+        for stream in streams:
+            if not stream.closed:
+                stream.close()
+
+
 class SnapshotCache:
     def __init__(self, root: pathlib.Path, home: pathlib.Path) -> None:
         self.root = root
@@ -550,6 +661,12 @@ class SnapshotCache:
         self.last_error: str | None = None
         self.ttl = max(1.0, float(os.environ.get("FM_FLEET_BOARD_CACHE_SECONDS", "3")))
         self.timeout = max(3.0, float(os.environ.get("FM_FLEET_BOARD_SNAPSHOT_TIMEOUT", "18")))
+        self.stdout_limit = configured_byte_limit(
+            "FM_FLEET_BOARD_SNAPSHOT_STDOUT_BYTES", DEFAULT_SNAPSHOT_STDOUT_BYTES
+        )
+        self.stderr_limit = configured_byte_limit(
+            "FM_FLEET_BOARD_SNAPSHOT_STDERR_BYTES", DEFAULT_SNAPSHOT_STDERR_BYTES
+        )
 
     def get(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -569,18 +686,19 @@ class SnapshotCache:
                     "FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT",
                     str(max(1, int(self.timeout) - 2)),
                 )
-                completed = subprocess.run(
+                completed = run_bounded_snapshot(
                     [str(self.root / "bin" / "fm-fleet-snapshot.sh"), "--json"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
                     env=env,
+                    timeout=self.timeout,
+                    stdout_limit=self.stdout_limit,
+                    stderr_limit=self.stderr_limit,
                 )
+                stdout = completed.stdout.decode("utf-8")
+                stderr = completed.stderr.decode("utf-8")
                 if completed.returncode != 0:
-                    detail = compact(completed.stderr, 300) or f"exit {completed.returncode}"
+                    detail = compact(stderr, 300) or f"exit {completed.returncode}"
                     raise BoardError(f"Fleet snapshot failed: {detail}")
-                snapshot = json.loads(completed.stdout)
+                snapshot = json.loads(stdout)
                 try:
                     self.board = board_from_snapshot(snapshot)
                 except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -647,6 +765,8 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"fleet-board: {self.address_string()} {fmt % args}\n")
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        if self.path.split("?", 1)[0] == "/api/v1/board":
+            return
         if isinstance(code, int) and code >= 400:
             super().log_request(code, size)
 

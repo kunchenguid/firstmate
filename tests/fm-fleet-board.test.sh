@@ -35,6 +35,14 @@ if [ -f "${FM_HOME:?}/snapshot.bad-shape" ]; then
   printf '{"schema":"fm-fleet-snapshot.v1","backlog":{"records":[null]}}\n'
   exit 0
 fi
+if [ -f "${FM_HOME:?}/snapshot.large-stdout" ]; then
+  python3 -c 'import sys; sys.stdout.buffer.write(b"x" * 131072)'
+  exit 0
+fi
+if [ -f "${FM_HOME:?}/snapshot.large-stderr" ]; then
+  python3 -c 'import sys; sys.stderr.buffer.write(b"x" * 8192)'
+  exit 1
+fi
 filter_snapshot() {
   if [ -f "${FM_HOME:?}/snapshot.closed-rollout" ]; then
     jq '(.tasks[] | select(.id == "captain-task") | .hints.open_decisions) |= map(select(.key != "rollout"))'
@@ -176,7 +184,8 @@ cleanup_server() {
 trap cleanup_server EXIT
 
 FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
-  FM_FLEET_BOARD_CACHE_SECONDS=1 python3 "$SERVER" --serve --port 0 \
+  FM_FLEET_BOARD_CACHE_SECONDS=1 FM_FLEET_BOARD_SNAPSHOT_STDOUT_BYTES=65536 \
+  FM_FLEET_BOARD_SNAPSHOT_STDERR_BYTES=4096 python3 "$SERVER" --serve --port 0 \
   >"$HOME_ROOT/server.out" 2>"$HOME_ROOT/server.err" &
 SERVER_PID=$!
 
@@ -208,10 +217,16 @@ pass "server is loopback-ready and serves a protected application shell"
 
 : > "$HOME_ROOT/server.err"
 curl -fsS "${url}healthz" >/dev/null || fail "health poll failed during access-log check"
+touch "$HOME_ROOT/snapshot.fail"
+for _ in 1 2 3; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "${url}api/v1/board")
+  [ "$code" = 503 ] || fail "unavailable board poll returned $code"
+done
+rm "$HOME_ROOT/snapshot.fail"
 curl -fsS "${url}api/v1/board" >/dev/null || fail "board poll failed during access-log check"
 curl -fsS "$url" >/dev/null || fail "application poll failed during access-log check"
-[ ! -s "$HOME_ROOT/server.err" ] || fail "successful polling produced unbounded access-log output"
-pass "routine successful polling stays out of the always-on access log"
+[ ! -s "$HOME_ROOT/server.err" ] || fail "routine polling produced unbounded access-log output"
+pass "routine successful and unavailable polling stays out of the always-on access log"
 
 FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
   python3 "$SERVER" --serve --port 0 >"$HOME_ROOT/second.out" 2>"$HOME_ROOT/second.err" &
@@ -252,6 +267,7 @@ printf '%s' "$board" | jq -e '
        | .lane == "verification" and (.evidence | map(.kind) | index("pull_request") != null))
   and ([.cards[] | select(.id == "mate-working")][0]
        | .lane == "in_progress" and .home.namespace == "secondmate" and .home.id == "design-mate")
+  and ([.cards[] | select(.id == "mate-ready")][0].status.source == "backlog")
   and ([.cards[] | select(.id == "ready-task")]
        | length == 2
          and ([.[].home.namespace] | sort) == ["primary","secondmate"]
@@ -270,6 +286,7 @@ printf '%s' "$board" | jq -e '
        | .lane == "waiting" and .status.wait_reason == "Waiting on vendor API keys")
   and ([.cards[] | select(.id == "mate-done")][0]
        | .lane == "done"
+         and .status.source == "backlog"
          and .repo == "firstmate"
          and .kind == "ship"
          and .risk.level == "medium"
@@ -304,6 +321,19 @@ for malformed_snapshot in invalid-utf8 array bad-shape; do
     || fail "$malformed_snapshot recovery remained stale"
 done
 pass "malformed snapshot bytes and shapes stay inside the last-good boundary"
+
+for oversized_stream in large-stdout large-stderr; do
+  touch "$HOME_ROOT/snapshot.$oversized_stream"
+  oversized=$(curl -fsS "${url}api/v1/board?refresh=1") \
+    || fail "$oversized_stream snapshot escaped the last-good boundary"
+  printf '%s' "$oversized" | jq -e \
+    '.health.stale == true and (.health.error | contains("exceeded"))' >/dev/null \
+    || fail "$oversized_stream snapshot did not fail visibly at its byte boundary"
+  rm "$HOME_ROOT/snapshot.$oversized_stream"
+  board=$(curl -fsS "${url}api/v1/board?refresh=1") \
+    || fail "board did not recover after $oversized_stream snapshot data"
+done
+pass "snapshot stdout and stderr are bounded while preserving the last-good board"
 
 csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
 payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"migration","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
@@ -350,7 +380,8 @@ for _ in $(seq 1 100); do
 done
 [ ! -e "$runtime" ] || fail "stopped server retained its runtime identity"
 FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
-  FM_FLEET_BOARD_CACHE_SECONDS=1 python3 "$SERVER" --serve --port 0 \
+  FM_FLEET_BOARD_CACHE_SECONDS=1 FM_FLEET_BOARD_SNAPSHOT_STDOUT_BYTES=65536 \
+  FM_FLEET_BOARD_SNAPSHOT_STDERR_BYTES=4096 python3 "$SERVER" --serve --port 0 \
   >"$HOME_ROOT/server-restarted.out" 2>"$HOME_ROOT/server-restarted.err" &
 SERVER_PID=$!
 for _ in $(seq 1 100); do
@@ -473,6 +504,27 @@ printf '%s' "$response" | jq -e '.queued == true and .duplicate == false' >/dev/
 assert_contains "$(cat "$HOME_ROOT/request-request-namespaced-home.note")" "Home: secondmate:primary" \
   "namespaced action routed to the reserved primary home"
 pass "card and action identities keep primary and secondmate homes disjoint"
+
+python3 - "$HOME_ROOT/max-action.json" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "action": "request_details",
+    "task_id": "ready-task",
+    "home_namespace": "primary",
+    "home_id": "primary",
+    "text": "\\" * 8192,
+    "request_id": "request-max-escaped",
+}), encoding="utf-8")
+PY
+response=$(curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' --data-binary "@$HOME_ROOT/max-action.json" \
+  "${url}api/v1/actions") || fail "valid escaped action exceeded the transport envelope"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == false' >/dev/null \
+  || fail "valid escaped action was not durably queued"
+pass "every valid action fits the bounded JSON transport envelope"
 
 foreground_instance=$(jq -r '.instance' "$runtime")
 kill -STOP "$SERVER_PID" 2>/dev/null || fail "could not suspend the foreground server identity fixture"
@@ -737,10 +789,13 @@ const {
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  dialogDraftFingerprint,
+  normalizeActionText,
   reconcileBoardState,
   recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  shouldAnnounceLoadFailure,
   updateLiveStatus,
   updateValue,
 } = globalThis.FleetBoardState;
@@ -777,7 +832,7 @@ if (result.selectedKey !== null || result.selectedCard !== null) process.exit(1)
 
 const actionDrafts = new Map([[card.key, {
   action: "answer",
-  text: "Keep the reversible route.",
+  text: "  Keep the reversible route.  \n",
   decisionKey: "migration",
   requestId: null,
   attempted: false,
@@ -785,7 +840,12 @@ const actionDrafts = new Map([[card.key, {
 }]]);
 let generated = 0;
 const first = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
-if (actionDrafts.get(card.key) !== first || !first.inFlight || generated !== 1) process.exit(1);
+if (
+  actionDrafts.get(card.key) !== first
+  || first.text !== "Keep the reversible route."
+  || !first.inFlight
+  || generated !== 1
+) process.exit(1);
 first.inFlight = false;
 const retry = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
 if (retry.requestId !== "request-1" || generated !== 1) process.exit(1);
@@ -801,6 +861,28 @@ if (restoreActionOperations("not json", 8192).size !== 0) process.exit(1);
 if (actionTextError("😀".repeat(2048), 8192) !== null) process.exit(1);
 if (!actionTextError("😀".repeat(2049), 8192)) process.exit(1);
 if (actionStorageKey("a".repeat(64)) === actionStorageKey("b".repeat(64))) process.exit(1);
+if (normalizeActionText("  Send this.  \n") !== "Send this.") process.exit(1);
+
+const loadFailures = { initialFailureAnnounced: false };
+if (!shouldAnnounceLoadFailure(loadFailures, false, false)) process.exit(1);
+if (shouldAnnounceLoadFailure(loadFailures, false, false)) process.exit(1);
+if (!shouldAnnounceLoadFailure(loadFailures, true, false)) process.exit(1);
+
+const composing = {
+  action: "answer",
+  text: "Original text",
+  decisionKey: "migration",
+  requestId: null,
+  attempted: false,
+  inFlight: false,
+  saved: false,
+};
+const composingFingerprint = JSON.stringify(dialogDraftFingerprint(composing));
+composing.text = "Edited text";
+composing.decisionKey = "rollout";
+if (JSON.stringify(dialogDraftFingerprint(composing)) !== composingFingerprint) process.exit(1);
+composing.attempted = true;
+if (JSON.stringify(dialogDraftFingerprint(composing)) === composingFingerprint) process.exit(1);
 
 let liveWrites = 0;
 const liveRegion = {

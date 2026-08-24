@@ -11,12 +11,17 @@ function actionStorageKey(scope) {
   return `${ACTION_OPERATIONS_SCHEMA}:${scope}`;
 }
 
+function normalizeActionText(text) {
+  return typeof text === "string" ? text.trim() : text;
+}
+
 function actionTextError(text, maxBytes) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
     throw new Error("Fleet board action limit is invalid");
   }
-  if (typeof text !== "string" || !text.trim()) return "Action text is required";
-  if (UTF8_ENCODER.encode(text.trim()).byteLength > maxBytes) {
+  const normalized = normalizeActionText(text);
+  if (typeof normalized !== "string" || !normalized) return "Action text is required";
+  if (UTF8_ENCODER.encode(normalized).byteLength > maxBytes) {
     return `Keep the instruction at or below ${maxBytes.toLocaleString()} UTF-8 bytes`;
   }
   return null;
@@ -44,6 +49,7 @@ function draftIsAvailable(draft, card) {
 function beginAction(drafts, cardKey, makeRequestId) {
   const draft = drafts.get(cardKey);
   if (!draft) throw new Error("Action draft is unavailable");
+  draft.text = normalizeActionText(draft.text);
   if (!draft.requestId) draft.requestId = makeRequestId();
   draft.attempted = true;
   draft.inFlight = true;
@@ -72,20 +78,39 @@ function updateLiveStatus(stateTarget, labelTarget, status, label) {
   return stateChanged;
 }
 
+function shouldAnnounceLoadFailure(loadState, force, hadBoard) {
+  if (force) return true;
+  if (hadBoard || loadState.initialFailureAnnounced) return false;
+  loadState.initialFailureAnnounced = true;
+  return true;
+}
+
+function dialogDraftFingerprint(draft) {
+  if (!draft) return null;
+  return {
+    action: draft.action,
+    requestId: draft.requestId ?? null,
+    attempted: draft.attempted === true,
+    inFlight: draft.inFlight === true,
+    saved: draft.saved === true,
+  };
+}
+
 function serializeActionOperations(drafts, maxBytes) {
   const operations = [];
   for (const [cardKey, draft] of drafts) {
+    const text = normalizeActionText(draft?.text);
     if (
       operations.length >= MAX_ACTION_OPERATIONS
       || typeof cardKey !== "string"
       || !draft?.attempted
-      || actionTextError(draft.text, maxBytes) !== null
+      || actionTextError(text, maxBytes) !== null
       || !OPERATION_ID.test(draft.requestId || "")
     ) continue;
     operations.push({
       cardKey,
       action: draft.action,
-      text: draft.text,
+      text,
       decisionKey: draft.decisionKey ?? null,
       requestId: draft.requestId,
       saved: draft.saved === true,
@@ -117,7 +142,7 @@ function restoreActionOperations(serialized, maxBytes) {
     ) continue;
     drafts.set(operation.cardKey, {
       action: operation.action,
-      text: operation.text,
+      text: normalizeActionText(operation.text),
       decisionKey: operation.decisionKey,
       requestId: operation.requestId,
       attempted: true,
@@ -159,11 +184,14 @@ globalThis.FleetBoardState = Object.freeze({
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  dialogDraftFingerprint,
   draftIsAvailable,
+  normalizeActionText,
   reconcileBoardState,
   recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  shouldAnnounceLoadFailure,
   updateLiveStatus,
   updateValue,
 });

@@ -14,6 +14,8 @@
 #   FM_FLEET_BOARD_PORT             Fixed loopback port, or 0 for the home's saved port.
 #   FM_FLEET_BOARD_CACHE_SECONDS    Snapshot cache lifetime, default 3 seconds.
 #   FM_FLEET_BOARD_SNAPSHOT_TIMEOUT Snapshot command timeout, default 18 seconds.
+#   FM_FLEET_BOARD_SNAPSHOT_STDOUT_BYTES Maximum snapshot output, default 32 MiB.
+#   FM_FLEET_BOARD_SNAPSHOT_STDERR_BYTES Maximum snapshot error output, default 64 KiB.
 #
 # The application binds only 127.0.0.1, reads fm-fleet-snapshot.sh as its sole
 # task source, and routes captain actions through fm-inbox.sh.
