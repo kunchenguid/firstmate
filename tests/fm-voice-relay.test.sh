@@ -850,11 +850,15 @@ class Down:
 class Stub:
     """A session that records what it was asked, or raises where the model would."""
 
+    class Ended:
+        def is_set(self):
+            return False
+
     def __init__(self, raises=None):
         self.raises = raises
         self.replies = 0
         self.failed = False
-        self.ended = asyncio.Event()
+        self.ended = self.Ended()
         self.turn = {}
         self.calls = []
 
