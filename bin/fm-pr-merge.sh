@@ -80,5 +80,11 @@ merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
+delete_args=(--delete-branch)
+for arg in "$@"; do
+  [ "$arg" != --delete-branch ] || delete_args=()
+done
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+  "${merge_args[@]+"${merge_args[@]}"}" "$@" \
+  "${delete_args[@]+"${delete_args[@]}"}"

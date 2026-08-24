@@ -208,7 +208,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
+    fm-branch-cleanup.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -961,6 +961,10 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-branch-merge-lib.sh|bin/fm-branch-cleanup.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pr-forge
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

@@ -119,19 +119,7 @@ resolve_project_arg() {
 }
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_branch_default_branch "$PROJ"
 }
 
 first_line() {
@@ -234,21 +222,19 @@ prune_gone_branches() {
   # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
   [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
 
-  local worktree_branches current refline branch track
-  worktree_branches=$(git -C "$PROJ" worktree list --porcelain 2>/dev/null \
-    | sed -n 's#^branch refs/heads/##p')
-  current=$(git -C "$PROJ" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  local refline branch track tip
 
   while IFS= read -r refline; do
     branch=${refline%% *}
     track=${refline#* }
     [ "$track" = "[gone]" ] || continue
     [ -n "$branch" ] || continue
-    [ "$branch" != "$current" ] || continue
-    if printf '%s\n' "$worktree_branches" | grep -Fxq -- "$branch"; then
-      continue
+    tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$branch") || continue
+    fm_branch_is_safely_gone "$PROJ" "$branch" "$tip" || continue
+    if fm_branch_delete_remote_proven_tip "$PROJ" no-mistakes "$branch" "$tip"; then
+      echo "$label: pruned no-mistakes/$branch"
     fi
-    if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
+    if fm_branch_delete_if_safely_gone "$PROJ" "$branch"; then
       echo "$label: pruned $branch"
     fi
   done < <(git -C "$PROJ" for-each-ref \
@@ -274,12 +260,19 @@ prune_gone_branches() {
 # fast-forward below advances it. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
 prune_merged_fm_branches() {
   [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
-  local default branch
+  local default branch tip remote
   default=$(default_branch) || return 0
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$default^{commit}" >/dev/null || return 0
   while IFS= read -r branch; do
     [ -n "$branch" ] || continue
     [ "$branch" != "$default" ] || continue
+    tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$branch") || continue
+    fm_branch_is_safely_merged "$PROJ" "$branch" "refs/heads/$default" "$tip" || continue
+    for remote in origin no-mistakes; do
+      if fm_branch_delete_remote_proven_tip "$PROJ" "$remote" "$branch" "$tip"; then
+        echo "$label: pruned $remote/$branch (merged into $default)"
+      fi
+    done
     if fm_branch_delete_if_safely_merged "$PROJ" "$branch" "refs/heads/$default"; then
       echo "$label: pruned $branch (merged into $default)"
     fi

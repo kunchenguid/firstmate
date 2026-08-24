@@ -728,6 +728,41 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+test_teardown_prunes_landed_task_from_both_remotes() {
+  local case_dir rc pr_head no_mistakes
+  case_dir=$(make_case teardown-remote-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  no_mistakes="$case_dir/no-mistakes.git"
+  git init -q --bare "$no_mistakes"
+  git -C "$case_dir/project" remote add no-mistakes "$no_mistakes"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "teardown-remote-cleanup: landed teardown should succeed"
+  git --git-dir="$case_dir/origin.git" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "teardown-remote-cleanup: origin task branch survived"
+  git --git-dir="$no_mistakes" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    && fail "teardown-remote-cleanup: no-mistakes task branch survived"
+  task_branch_exists "$case_dir" \
+    && fail "teardown-remote-cleanup: local task branch survived"
+  assert_grep 'teardown: pruned origin/fm/task-x1' "$case_dir/stdout" \
+    "teardown-remote-cleanup: origin cleanup was not reported"
+  assert_grep 'teardown: pruned no-mistakes/fm/task-x1' "$case_dir/stdout" \
+    "teardown-remote-cleanup: no-mistakes cleanup was not reported"
+  pass "ordinary teardown removes the exact landed task tip from origin and no-mistakes"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -2629,6 +2664,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_teardown_prunes_landed_task_from_both_remotes
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker

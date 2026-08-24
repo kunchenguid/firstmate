@@ -435,6 +435,29 @@ test_no_origin_prunes_merged_task_branch() {
   pass "the backstop sweep runs with no origin remote at all (pure local-only clone, not just local-only mode)"
 }
 
+test_merged_sweep_prunes_matching_no_mistakes_remote() {
+  local home clone no_mistakes out
+  home=$(new_home)
+  clone=$(build_pair "$home" no_mistakes_sweep)
+  no_mistakes="$home/remotes/no-mistakes-sweep.git"
+  git init -q --bare "$no_mistakes"
+  git -C "$clone" remote add no-mistakes "$no_mistakes"
+  ff_merge_task_branch "$clone" fm/task-no-mistakes feature.txt hello
+  git -C "$clone" push -q no-mistakes fm/task-no-mistakes
+  mkdir -p "$home/data"
+  printf -- '- no_mistakes_sweep [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "pruned no-mistakes/fm/task-no-mistakes" \
+    "merged sweep did not prune the matching no-mistakes ref"
+  git --git-dir="$no_mistakes" show-ref --verify --quiet refs/heads/fm/task-no-mistakes \
+    && fail "merged sweep left no-mistakes/fm/task-no-mistakes"
+  branch_exists "$clone" fm/task-no-mistakes \
+    && fail "merged sweep left the corresponding local branch"
+  pass "fleet sync extends its ancestor proof to an exact matching no-mistakes remote tip"
+}
+
 test_detached_project_prunes_merged_task_branch() {
   local home clone out
   home=$(new_home)
@@ -879,6 +902,7 @@ test_no_origin_skipped
 test_local_only_skipped
 test_local_only_prunes_merged_task_branch
 test_no_origin_prunes_merged_task_branch
+test_merged_sweep_prunes_matching_no_mistakes_remote
 test_detached_project_prunes_merged_task_branch
 test_unrelated_checkout_prunes_branch_merged_into_default
 test_unmerged_task_branch_is_left_alone
