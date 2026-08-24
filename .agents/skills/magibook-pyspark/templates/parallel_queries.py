@@ -198,7 +198,13 @@ class MagiBookCLI:
                 if timed_out and process.poll() is not None and not events:
                     for stream in list(selector.get_map().values()):
                         selector.unregister(stream.fileobj)
-            returncode = process.wait()
+            remaining = deadline - self.monotonic()
+            try:
+                returncode = process.wait(timeout=max(0.0, remaining))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._stop_local_child(process)
+                returncode = process.wait()
         except KeyboardInterrupt:
             self._stop_local_child(process)
             raise
@@ -909,6 +915,9 @@ def _run_parallel_queries_locked(
                         capability_mode = "serialized-fallback"
                 elif submitted_count >= 2 and len(active) < 2:
                     capability_mode = "sequential-inconclusive"
+
+            if stop_reason and not active:
+                break
 
             if active:
                 sleep(poll_interval)

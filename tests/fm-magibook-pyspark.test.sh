@@ -359,6 +359,8 @@ if args[:2] == ["cell", "task-status"]:
         statuses = ["cancelled"]
     elif scenario == "mixed" and cell_id == "2":
         statuses = ["failed"]
+    elif scenario == "first-fails" and cell_id == "1":
+        statuses = ["failed"]
     elif scenario == "serialized" and cell_id == "1":
         statuses = ["running", "running", "success"]
     elif scenario == "serialized" and cell_id == "2":
@@ -627,6 +629,24 @@ statuses = {item["status"] for item in aggregate["queries"]}
 check("mixed_result_preserved", statuses == {"success", "failure"})
 check("mixed_overall_failure", aggregate["overallStatus"] == "partial-failure")
 
+# A peer failure with a still-pending query stops submissions and exits promptly.
+aggregate, failed_state, _, _ = run_case(
+    "peer-fail-pending", "first-fails", queries(2), 1, overall_timeout=2.0
+)
+check("peer_failure_recorded", aggregate["queries"][0]["status"] == "failure")
+check("peer_failure_stops_submission", aggregate["queries"][1]["status"] == "not-submitted")
+check(
+    "peer_failure_reason_is_peer",
+    aggregate["queries"][1].get("reason") == "peer-failure",
+)
+check(
+    "peer_failure_exit_bounded",
+    aggregate["elapsedSeconds"] < 2.0,
+)
+check("peer_failure_single_submission", len(failed_state["submissions"]) == 1)
+check("peer_failure_overall", aggregate["overallStatus"] == "partial-failure")
+check("peer_failure_no_remote_work", aggregate["remoteWorkRemaining"] == [])
+
 # Remote cancellation is terminal and a local timeout leaves the exact task reported.
 aggregate, _, _, _ = run_case("cancelled", "cancelled", queries(1), 1)
 check("cancellation_preserved", aggregate["queries"][0]["status"] == "cancelled")
@@ -641,6 +661,82 @@ aggregate, _, _, _ = run_case(
 )
 check("timeout_preserved", aggregate["queries"][0]["status"] == "timeout")
 check("timeout_remote_work", aggregate["remoteWorkRemaining"][0]["taskId"] == "task-1")
+
+# A child whose stdio reaches EOF before exit still waits only until the deadline.
+class DetachedStdioProcess:
+    """Local child that closes stdout and stderr while still running."""
+
+    def __init__(self):
+        out_read, out_write = os.pipe()
+        err_read, err_write = os.pipe()
+        self.stdout = os.fdopen(out_read, "rb", buffering=0)
+        self.stderr = os.fdopen(err_read, "rb", buffering=0)
+        os.close(out_write)
+        os.close(err_write)
+        self.pid = 4242
+        self.exited = False
+        self.terminated = False
+        self.killed = False
+        self.unbounded_wait_violations = 0
+
+    def poll(self):
+        return 0 if self.exited else None
+
+    def terminate(self):
+        self.terminated = True
+        self.exited = True
+
+    def kill(self):
+        self.killed = True
+        self.exited = True
+
+    def wait(self, timeout=None):
+        if self.exited:
+            return 0
+        if timeout is None:
+            self.unbounded_wait_violations += 1
+            raise RuntimeError("unbounded wait on a live local child")
+        raise subprocess.TimeoutExpired(["detached-stdio-fake"], timeout)
+
+
+detached_root = root / "detached-stdio"
+detached_root.mkdir()
+detached_state = detached_root / "fake-state.json"
+write_fake_state(detached_state, "default")
+detached_process = DetachedStdioProcess()
+detached_cli = pq.MagiBookCLI(
+    "sg",
+    executable="unused-magibook",
+    command_timeout=0.2,
+    popen_factory=lambda argv, **kwargs: detached_process,
+)
+detached_error = None
+try:
+    detached_cli.invoke_json("view-cell", "query-detached", None, "cell", "view", "1")
+except pq.CLICommandError as exc:
+    detached_error = exc
+check(
+    "detached_stdio_bounded",
+    detached_error is not None and detached_error.timed_out is True,
+)
+check(
+    "detached_stdio_timeout_category",
+    detached_error is not None and detached_error.category == "timeout",
+)
+check(
+    "detached_stdio_not_remote_cancellation",
+    detached_error is not None
+    and "did not cancel remote work" in detached_error.summary,
+)
+check(
+    "detached_stdio_child_stopped",
+    detached_process.terminated
+    and detached_process.unbounded_wait_violations == 0,
+)
+check(
+    "detached_stdio_audit_recorded",
+    detached_cli.children and detached_cli.children[0]["timedOut"] is True,
+)
 
 # Queued overlap downgrades remaining work to sequential execution.
 aggregate, serialized_state, _, _ = run_case(
