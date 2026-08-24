@@ -58,6 +58,12 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Separately from those landed-work proofs, every worktree/home return and the
+# Orca worktree removal first run bin/fm-treehouse-return-lib.sh's committed-work
+# guard, which --force does not skip: an unnamed HEAD commit is rescued into
+# refs/firstmate/rescue/<task-id>/<timestamp>, and an uncertifiable reachability
+# check refuses, preserving the worktree instead of reclaiming its pool slot.
+# That library's header owns the durability rule and its refusal status.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
