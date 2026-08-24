@@ -273,7 +273,9 @@ fm_pr_sha256() {
 FM_PR_MODE_PROBE_DIR=
 FM_PR_MODE_PROBE_RESULT=
 fm_pr_mode_capable() {
-  local dir=$1 tmp first= second=
+  local dir=$1 tmp first second
+  first=''
+  second=''
   [ "$dir" = "$FM_PR_MODE_PROBE_DIR" ] && return "$FM_PR_MODE_PROBE_RESULT"
   tmp=$(mktemp "$dir/.fm-pr-mode-probe.XXXXXX" 2>/dev/null) || return 0
   # Probe both directions. A single chmod would be fooled by the caller's umask
