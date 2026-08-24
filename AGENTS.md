@@ -292,7 +292,8 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 
-Decompose before briefing when the work needs it: when an authorized ship task spans multiple meaningful changes or crews, or its unresolved decisions could materially change what gets built, load `task-planning` and obtain captain approval of the resulting ticket graph before writing briefs; simple tasks skip planning entirely.
+Route non-Simple ship intake through the planning family before any brief is written: when an authorized ship task spans multiple meaningful changes or crews, or its unresolved decisions could materially change what gets built, run `task-grill` first as the hard gate, then `task-design` when a design question exists, then `task-planning` for spec and tickets.
+Every approved ticket graph ends in the terminal captain-review ticket, and captain approval of the graph precedes writing briefs; simple tasks skip planning entirely.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -536,6 +537,8 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
 - `task-planning` - load at ship-task intake when authorized work spans multiple meaningful changes or crews, or when unresolved decisions could materially change what is built; it owns wayfinder/spec/ticket documents under the target project's `docs/features/<feature-slug>/`, requires captain approval of the ticket graph before any implementation dispatch, and then hands each ready ticket to the ordinary brief/spawn lifecycle.
+- `task-grill` - load at non-Simple ship intake before any planning artifacts; it owns the frontier interrogation loop and the hard gate.
+- `task-design` - load when `task-grill` or the captain identifies a design question needing a prototype; it owns the Lavish prototype review.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.

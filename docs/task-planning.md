@@ -57,7 +57,7 @@ Planning documents live inside the target project's clone at `projects/<project>
 
 ## Integration boundaries
 
-The planning skill composes with existing Firstmate procedures rather than replacing them:
+The planning family composes with existing Firstmate procedures rather than replacing them:
 
 - `diagnostic-reasoning` remains authoritative for bug causality and reproduction.
 - `captain-hold-lifecycle` remains authoritative for unresolved decisions and approval.
@@ -81,7 +81,7 @@ Likewise, ticket existence does not imply a separate review-agent call. Verifica
 
 Source-audited against this repository:
 
-- **Discovery.** `.claude/skills` is a symlink to `.agents/skills`, so every harness that scans project skills sees `task-planning`; `metadata.internal: true` keeps it out of installer discovery. The behavioral load path is the AGENTS.md section 13 trigger - a running firstmate loads the skill only at that named trigger, now present in sections 7 and 13.
+- **Discovery.** `.claude/skills` is a symlink to `.agents/skills`, so every harness that scans project skills sees `task-planning`; `metadata.internal: true` keeps it out of installer discovery. The behavioral load path is the AGENTS.md section 13 trigger - a running firstmate loads each skill only at its named trigger, now present in sections 7 and 13.
 - **Artifact location and lifecycle.** Feature documents live at `projects/<project>/docs/features/<feature-slug>/` in the primary clone, authorized by hard rule 1's enumerated `task-planning` exception and bounded to that path. Uncommitted documents do not block guarded fleet sync (fast-forward ignores untracked files) and teardown never touches the primary clone. `ls projects/<project>/docs/features/` is the per-project inventory of planned work; progress truth remains the backlog.
 - **Parent/child identity.** The parent request is one ordinary task whose backlog note records the `<project>:<feature-slug>` pair. Each ready ticket becomes its own Firstmate task with id `<parent-id>-t<TNN>` (valid per `fm_task_id_creation_valid`: `[A-Za-z0-9._-]`, at most 64 chars); its brief embeds the ticket content and points at `projects/<project>/docs/features/<feature-slug>/spec.md`.
 - **Dependency-aware dispatch.** Each ready ticket is filed as its own Queued backlog item with an explicit blocked-by note; the ordinary backlog re-evaluation after each teardown and heartbeat unlocks dependents. No new dispatch machinery is introduced.
