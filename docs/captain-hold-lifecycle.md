@@ -13,6 +13,21 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
+An optional structured body is supplied with `hold --structured-file <path>` and is stored as `data/<task-id>/captain-decision.json`.
+The record uses schema `fm-captain-decision.v1` and contains `project`, `question`, `options` with `label` and `consequence`, `recommendation` with `label` and `reason`, and boolean `free_response`.
+For example, a real record can be:
+
+```json
+{"schema":"fm-captain-decision.v1","task_id":"sample-route-call","project":"sample","question":"Qual rota deve ser usada?","options":[{"label":"Norte","consequence":"Mantem o fluxo atual."},{"label":"Sul","consequence":"Exige revisar a integracao."}],"recommendation":{"label":"Norte","reason":"Preserva o caminho ja validado."},"free_response":true}
+```
+
+`bin/fm-captain-hold.sh structured --json` is the consumable read surface.
+It returns schema `fm-captain-decisions.v1` with valid `records`, task ids in `orphaned` when their file survives without a backlog task, and non-fatal `errors` for malformed records.
+Each valid record includes `status`, `task_state`, and `hold_kind` so a consumer can distinguish an active captain hold from a closed or merely linked task.
+A missing record is normal and does not change the behavior of an older captain hold.
+The file is keyed by the immutable task id rather than a title, so moving a task between backlog files does not change its association.
+If a future operation replaces an id, the old file remains visible as an orphan until it is deliberately removed or associated with the surviving task.
+
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
 It requires a non-empty captain decision file of at most 8192 bytes, writes a resolution block carrying the decision digest and a `Resolution mode:` at the top of the task body (the previous body is preserved below the block and archived through tasks-axi `--archive-body`), then runs `tasks-axi done` - or `tasks-axi unhold` under `--release`, so a captain-gated work item resumes instead of closing.
 An exact retry is idempotent only when the requested close mode matches the newest record; a drifted answer or mode mismatch is rejected, while a re-held task accepts a new answer as a new record on top.
@@ -44,6 +59,9 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 `bin/fm-procevent-lavish.sh answers` is one such adapter command; it reads only rows tagged `choice`, relays a card's declared close mode, and can never let freeform captain prose forge a task id or a mode.
 
 ## Structured read surfaces
+
+`bin/fm-captain-hold.sh structured --json` is the authoritative projection for optional decision bodies.
+Its output is read-only and reports malformed or orphaned files without preventing valid records from being returned.
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies a captain hold as `captain_actionable` - waiting on the captain now - only when it is queued, unblocked, and due, whatever kind its row carries.

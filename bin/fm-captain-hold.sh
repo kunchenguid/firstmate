@@ -20,8 +20,10 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--structured-file <path>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#   fm-captain-hold.sh structured [<task-id>] [--json]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -38,6 +40,10 @@
 # idempotent; a task already closed is refused rather than reopened. `--until`
 # records the captain's own deferral date through `tasks-axi hold --until`, so
 # a "revisit later" answer is stored as a date instead of a live card.
+# `--structured-file` atomically stores an optional validated
+# `fm-captain-decision.v1` record at `data/<task-id>/captain-decision.json`.
+# Repeating `hold` without that flag preserves an existing record, while
+# supplying it replaces the record with the new validated body.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -115,6 +121,13 @@
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task.
 #
+# `structured` is the read-only JSON projection of those optional records.
+# It reports malformed records in `errors` and records whose task no longer
+# exists in `orphaned`, without failing the whole read. Valid records carry
+# `status` as `active`, `closed`, `linked`, `orphaned`, or `unknown`, plus the
+# observed task state and hold kind. A missing record is normal for pre-existing
+# captain holds and is not reported as an error.
+#
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -143,6 +156,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
+STRUCTURED_SCHEMA=fm-captain-decision.v1
+STRUCTURED_FILENAME=captain-decision.json
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
@@ -177,6 +192,56 @@ validate_one_line() {  # <label> <value>
   case "$value" in
     *$'\n'*|*$'\r'*) fail "$label must be one line" ;;
   esac
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || fail "jq is required for structured captain decisions"
+}
+
+structured_record_path() {  # <task-id>
+  printf '%s/%s/%s\n' "$DATA" "$1" "$STRUCTURED_FILENAME"
+}
+
+structured_body_filter() {
+  cat <<'EOF'
+type == "object"
+  and (.question | type == "string" and length > 0 and (test("[\\r\\n]") | not))
+  and (.project | type == "string" and length > 0 and (test("[\\r\\n]") | not))
+  and (.options | type == "array" and length > 0
+    and all(.[]; type == "object"
+      and (.label | type == "string" and length > 0 and (test("[\\r\\n]") | not))
+      and (.consequence | type == "string" and length > 0 and (test("[\\r\\n]") | not))))
+  and (([.options[].label] | unique | length) == (.options | length))
+  and (.recommendation | type == "object"
+    and (.label | type == "string" and length > 0)
+    and (.reason | type == "string" and length > 0 and (test("[\\r\\n]") | not)))
+  and (.recommendation.label as $label | ([.options[].label] | index($label)) != null)
+  and (.free_response | type == "boolean")
+EOF
+}
+
+structured_input_valid() {  # <task-id> <path>
+  local id=$1 path=$2
+  require_jq
+  jq -e --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    '((has("schema") | not) or .schema == $schema)
+      and ((has("task_id") | not) or .task_id == $id)
+      and ('"$(structured_body_filter)"')' "$path" >/dev/null 2>&1
+}
+
+structured_record_valid() {  # <task-id> <path>
+  local id=$1 path=$2
+  require_jq
+  jq -e --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    '.schema == $schema and .task_id == $id and ('"$(structured_body_filter)"')' \
+    "$path" >/dev/null 2>&1
+}
+
+canonical_structured_record() {  # <task-id> <path>
+  local id=$1 path=$2
+  jq -c --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    '{schema:$schema, task_id:$id, project, question, options, recommendation, free_response}' \
+    "$path"
 }
 
 sha256_text() {  # <text>
@@ -376,8 +441,30 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
 }
 
+write_structured_record() {  # <task-id> <input-path>
+  local id=$1 input=$2 dir path tmp record
+  [ -f "$input" ] || fail "structured decision file does not exist: $input"
+  structured_input_valid "$id" "$input" \
+    || fail "structured decision body is invalid: $input"
+  dir="$DATA/$id"
+  [ -e "$dir" ] || mkdir -p -- "$dir" || fail "cannot create structured decision directory: $dir"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || fail "structured decision directory is unsafe: $dir"
+  path=$(structured_record_path "$id")
+  if [ -e "$path" ] && { [ ! -f "$path" ] || [ -L "$path" ]; }; then
+    fail "structured decision record is unsafe: $path"
+  fi
+  record=$(canonical_structured_record "$id" "$input") \
+    || fail "could not canonicalize structured decision body: $input"
+  tmp=$(umask 077; mktemp "$dir/.captain-decision.XXXXXX") \
+    || fail "cannot stage structured decision record"
+  if ! { printf '%s\n' "$record" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; }; then
+    rm -f -- "$tmp"
+    fail "could not store structured decision record: $path"
+  fi
+}
+
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' structured_file='' show state existing_title body='' hold_kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -387,6 +474,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --structured-file) shift; structured_file=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -394,6 +482,11 @@ command_hold() {
   validate_slug task-id "$id"
   validate_one_line reason "$reason"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
+  if [ -n "$structured_file" ]; then
+    [ -f "$structured_file" ] || fail "structured decision file does not exist: $structured_file"
+    structured_input_valid "$id" "$structured_file" \
+      || fail "structured decision body is invalid: $structured_file"
+  fi
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
   fi
@@ -441,6 +534,9 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  if [ -n "$structured_file" ]; then
+    write_structured_record "$id" "$structured_file"
+  fi
   printf '%s\n' "$id"
 }
 
@@ -565,6 +661,103 @@ command_answer() {
 }
 
 # --- the one keyed-answer intake, and the source bindings that feed it --------
+
+structured_record_error_detail() {  # <task-id> <path>
+  local id=$1 path=$2 detail
+  detail=$(jq -e --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    '.schema == $schema and .task_id == $id and ('"$(structured_body_filter)"')' \
+    "$path" >/dev/null 2>&1 || true)
+  detail=$(printf '%s' "$detail" | tr '\n\r\t' '   ' | cut -c1-512)
+  [ -n "$detail" ] || detail='does not match fm-captain-decision.v1'
+  printf '%s' "$detail"
+}
+
+structured_record_json() {  # <task-id> <path>
+  local id=$1 path=$2 status=unknown task_state='' hold_kind='' show record
+  structured_record_valid "$id" "$path" || return 1
+  if command -v tasks-axi >/dev/null 2>&1; then
+    if show=$(task_show "$id"); then
+      task_state=$(show_field "$show" state)
+      hold_kind=$(show_field_value "$show" hold_kind)
+      if [ "$task_state" = "done" ]; then
+        status=closed
+      elif [ "$hold_kind" = captain ]; then
+        status=active
+      else
+        status=linked
+      fi
+    else
+      status=orphaned
+    fi
+  fi
+  record=$(jq -c . "$path") || return 1
+  jq -c --arg status "$status" --arg task_state "$task_state" --arg hold_kind "$hold_kind" \
+    '. + {status:$status,task_state:$task_state,hold_kind:$hold_kind}' <<<"$record"
+}
+
+append_structured_record() {  # <task-id> <path> <records-file> <errors-file>
+  local id=$1 path=$2 records=$3 errors=$4 detail
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    jq -nc --arg id "$id" --arg error 'unsafe structured decision record' \
+      '{task_id:$id,error:$error}' >> "$errors"
+    return 0
+  fi
+  if structured_record_json "$id" "$path" >> "$records" 2>/dev/null; then
+    return 0
+  fi
+  detail=$(structured_record_error_detail "$id" "$path")
+  jq -nc --arg id "$id" --arg path "$path" --arg error 'malformed structured decision body' \
+    --arg detail "$detail" '{task_id:$id,path:$path,error:$error,detail:$detail}' >> "$errors"
+}
+
+command_structured() {
+  local id='' path records errors record_json error_json
+  [ "$#" -le 2 ] || { usage >&2; exit 2; }
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) : ;;
+      --*) usage >&2; exit 2 ;;
+      *) [ -z "$id" ] || { usage >&2; exit 2; }; id=$1 ;;
+    esac
+    shift
+  done
+  require_jq
+  if [ -n "$id" ]; then
+    validate_slug task-id "$id"
+  fi
+  records=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-structured-decisions.XXXXXX") \
+    || fail "cannot stage structured decision results"
+  errors=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-structured-decision-errors.XXXXXX") \
+    || { rm -f -- "$records"; fail "cannot stage structured decision diagnostics"; }
+  if [ -n "$id" ]; then
+    path=$(structured_record_path "$id")
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      append_structured_record "$id" "$path" "$records" "$errors"
+    fi
+  elif [ -d "$DATA" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      id=$(basename "$(dirname "$path")")
+      case "$id" in
+        ''|*[!A-Za-z0-9._-]*)
+          jq -nc --arg path "$path" --arg error 'structured decision path has an invalid task id' \
+            '{path:$path,error:$error}' >> "$errors"
+          continue
+          ;;
+      esac
+      append_structured_record "$id" "$path" "$records" "$errors"
+    done < <(find "$DATA" -mindepth 2 -maxdepth 2 -name "$STRUCTURED_FILENAME" -print 2>/dev/null | LC_ALL=C sort)
+  fi
+  record_json=$(jq -s '.' "$records")
+  error_json=$(jq -s '.' "$errors")
+  rm -f -- "$records" "$errors"
+  jq -n --arg schema 'fm-captain-decisions.v1' \
+    --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson records "$record_json" --argjson errors "$error_json" \
+    '{schema:$schema,generated:$generated,records:$records,
+      orphaned:[$records[] | select(.status == "orphaned") | .task_id],
+      errors:$errors}'
+}
 
 BINDING_DIR="$STATE/decision-bindings"
 BINDING_SCHEMA=fm-decision-binding.v1
@@ -989,6 +1182,7 @@ EOF
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
+  structured) shift; command_structured "$@" ;;
   answers) shift; command_answers "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;

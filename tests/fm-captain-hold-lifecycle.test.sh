@@ -1106,6 +1106,58 @@ EOF
   pass "a status resolution over a still-open captain-held task is signalled, not closed"
 }
 
+# Structured records are optional, read-only projections over the existing task
+# primitive, so a valid record, a legacy hold, an orphan, and malformed input
+# must be distinguishable without making the reader fail as a whole.
+test_structured_decision_body_read_and_errors() {
+  local home json
+  home=$(make_home structured-decision)
+  cat > "$home/structured.json" <<'EOF'
+{
+  "project": "sample",
+  "question": "Qual rota deve ser usada?",
+  "options": [
+    {"label": "Norte", "consequence": "Mantem o fluxo atual."},
+    {"label": "Sul", "consequence": "Exige revisar a integracao."}
+  ],
+  "recommendation": {"label": "Norte", "reason": "Preserva o caminho ja validado."},
+  "free_response": true
+}
+EOF
+  run_captain "$home" hold sample-structured-call \
+    --title "Escolher rota" --reason "captain route choice pending" --repo sample \
+    --structured-file "$home/structured.json" >/dev/null \
+    || fail "could not register a structured captain call"
+  run_captain "$home" hold sample-plain-call \
+    --title "Legacy captain call" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register a legacy captain call"
+  mkdir -p "$home/data/sample-malformed-call" "$home/data/sample-orphan-call"
+  printf '{"project":"sample","options":' > "$home/data/sample-malformed-call/captain-decision.json"
+  jq '.task_id = "sample-orphan-call"' \
+    "$home/data/sample-structured-call/captain-decision.json" \
+    > "$home/data/sample-orphan-call/captain-decision.json"
+
+  json=$(run_captain "$home" structured --json) || fail "structured read failed"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-captain-decisions.v1"
+    and (.records | any(.task_id == "sample-structured-call"
+      and .schema == "fm-captain-decision.v1"
+      and .project == "sample"
+      and .recommendation.label == "Norte"
+      and .options[1].consequence == "Exige revisar a integracao."
+      and .status == "active"))
+    and (.records | any(.task_id == "sample-orphan-call" and .status == "orphaned"))
+    and (.orphaned | index("sample-orphan-call"))
+    and (.errors | any(.task_id == "sample-malformed-call"
+      and .error == "malformed structured decision body"))
+  ' >/dev/null || fail "structured read did not preserve valid, orphaned, and malformed records: $json"
+  printf '%s' "$json" | jq -e '.records | any(.task_id == "sample-plain-call") | not' >/dev/null \
+    || fail "a legacy captain call without a body was treated as malformed"
+  [ -f "$home/data/sample-structured-call/captain-decision.json" ] \
+    || fail "structured body was not stored under the task data directory"
+  pass "structured captain decisions are readable without breaking legacy holds, and bad or orphaned records are reported"
+}
+
 # The false-signal boundary, driven by the shapes that are genuinely fine. A
 # captain call whose deliverable IS the decision has no routed work item at all,
 # and that is legitimate: routed work must never be part of the test. Nor may a
@@ -1184,4 +1236,5 @@ test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
+test_structured_decision_body_read_and_errors
 test_legitimate_holds_produce_no_divergence_signal
