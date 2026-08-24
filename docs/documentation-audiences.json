@@ -361,6 +361,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/pr-landing-target.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },

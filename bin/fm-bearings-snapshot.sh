@@ -12,8 +12,10 @@
 # which stays complete.
 #
 # LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
-# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
-# performs no live discovery or checks. Live PR discovery/checks happen ONLY under
+# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), each
+# carrying the canonical snapshot's recorded pr.landing verdict so a row that is not
+# a confirmed landing path can never be read as one, but it performs no live
+# discovery or checks. Live PR discovery/checks happen ONLY under
 # --include-prs, which is the sole path that touches the network; all gh coupling
 # lives in that branch and never in the canonical snapshot. The default output states
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
@@ -117,7 +119,7 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url,landing},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
@@ -445,7 +447,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url, landing:(.pr.landing // "unverified")} ]) as $recorded_prs_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",

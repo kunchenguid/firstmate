@@ -37,8 +37,14 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   def endpoint_of($t):
     if $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
     else endpoint_exists($t) end;
+  # A pull request whose landing target is not confirmed is still shown - hiding
+  # it would lose a real artifact - but it is never shown bare, because a bare
+  # URL in this column reads as work awaiting a merge decision. Saying it is not
+  # a confirmed landing path is the whole point of the marker.
   def artifact($t):
-    if $t.pr.url != null then $t.pr.url
+    if $t.pr.url != null then
+      (if $t.pr.landing == "confirmed" then $t.pr.url
+       else "\($t.pr.url) (landing \($t.pr.landing // "unverified"); not a confirmed landing path)" end)
     elif $t.paths.report.present then $t.paths.report.path
     else "-" end;
   def path_of($t):

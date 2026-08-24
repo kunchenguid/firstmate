@@ -39,6 +39,14 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
+#     pr.landing is the recorded landing-target verdict for pr.url:
+#       "confirmed" (bin/fm-pr-check.sh had the forge confirm this machine can
+#       merge into that repository), "unchecked" (that forge has no verified
+#       viewer-permission source), or "unverified" (no recorded verdict, which
+#       includes every URL scraped from the status log). Only "confirmed" is a
+#       landing path; the others must not be reported as awaiting a merge
+#       decision. This is a recorded read, not a live one: the snapshot makes no
+#       forge call, and bin/fm-pr-landing-lib.sh stays the one place that does.
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
@@ -427,7 +435,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source pr_landing event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -458,13 +466,26 @@ task_json_lines() {
     report_path="$DATA/$id/report.md"
     pr=$(meta_value "$meta" pr)
     pr_source=meta
+    # The landing verdict travels with the URL so no reader has to infer it.
+    # bin/fm-pr-check.sh is the one command that consults the forge and records
+    # it; every other value here is "unverified", which explicitly is not a
+    # confirmed landing path and must never be reported as one. A URL scraped
+    # from the status log has never been through that check at all, which is how
+    # an upstream pull request reaches a reader in the first place.
+    pr_landing=$(meta_value "$meta" pr_landing)
+    case "$pr_landing" in
+      confirmed|unchecked) ;;
+      *) pr_landing=unverified ;;
+    esac
     if [ -z "$pr" ]; then
       pr_from_status=$(first_pr_url_in_file "$status_log" || true)
       pr=$pr_from_status
       pr_source=status_event
+      pr_landing=unverified
     fi
     if [ -z "$pr" ]; then
       pr_source=absent
+      pr_landing=
     fi
 
     current_json=$(crew_state_json "$id")
@@ -568,6 +589,7 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg pr_landing "$pr_landing" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -605,7 +627,8 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,
+            landing:($pr_landing | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
