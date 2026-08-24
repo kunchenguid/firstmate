@@ -219,7 +219,7 @@ crew_busy_verdict() {  # <target>
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
-  fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+  fm_nm_run_bounded "$WT" "$NM_TIMEOUT" "$@"
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -373,7 +373,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   fi
   RUN_ID=$FM_NM_RUN_ID
   RUN_OUT=
-  [ -z "$RUN_ID" ] || RUN_OUT=$(nm_run axi status --run "$RUN_ID")
+  if [ -n "$RUN_ID" ]; then
+    run_out_file=$(mktemp "${TMPDIR:-/tmp}/fm-crew-state.XXXXXX")
+    if nm_run axi status --run "$RUN_ID" >"$run_out_file" 2>/dev/null; then
+      RUN_OUT=$(cat "$run_out_file")
+      rm -f "$run_out_file"
+    else
+      nm_status=$?
+      RUN_OUT=$(cat "$run_out_file")
+      rm -f "$run_out_file"
+      if [ "$nm_status" -eq 124 ]; then
+        emit unknown run-step "run-step lookup timed out after ${NM_TIMEOUT}s (no-mistakes axi status --run $RUN_ID)"
+      fi
+    fi
+  fi
   if [ -n "$RUN_OUT" ]; then
     run_id=$(strip_quotes "$(nm_field id)")
     run_branch=$(strip_quotes "$(nm_field branch)")
