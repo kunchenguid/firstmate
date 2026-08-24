@@ -249,6 +249,8 @@ A ticket should contain:
 - ...
 ```
 
+A ticket markdown file carries no status field - execution state lives in the backlog as separate work items with blocked-by edges, and consumers such as gootte join tickets by `<parent-id>-t<TNN>` id.
+
 Keep each ticket small enough for one crew, but large enough to produce a meaningful, testable vertical slice.
 Do not split merely to increase the crew count.
 The size ceiling is one fresh agent context window per ticket: if the honest work cannot fit one clean context, the ticket is too big.
