@@ -26,19 +26,24 @@ case "${1##*/}" in
     ;;
 esac
 
-FABRIC_ACCESS_TOKEN=
-if command -v az >/dev/null 2>&1; then
-  FABRIC_ACCESS_TOKEN=$(az account get-access-token \
+launch_with_fabric_token() {
+  local fabric_access_token_fresh=
+  export -n fabric_access_token_fresh
+  fabric_access_token_fresh=$(az account get-access-token \
     --resource https://api.fabric.microsoft.com \
     --query accessToken \
     --output tsv \
-    --only-show-errors 2>/dev/null) || FABRIC_ACCESS_TOKEN=
-fi
+    --only-show-errors 2>/dev/null) || return 1
+  [ -n "$fabric_access_token_fresh" ] || return 1
 
-if [ -n "$FABRIC_ACCESS_TOKEN" ]; then
-  export FABRIC_CORE_BEARER_TOKEN=$FABRIC_ACCESS_TOKEN
-  export FABRIC_DW_GLOBAL_BEARER_TOKEN=$FABRIC_ACCESS_TOKEN
+  export FABRIC_CORE_BEARER_TOKEN=$fabric_access_token_fresh
+  export FABRIC_DW_GLOBAL_BEARER_TOKEN=$fabric_access_token_fresh
+  unset fabric_access_token_fresh
+  exec "$@"
+}
+
+if command -v az >/dev/null 2>&1; then
+  launch_with_fabric_token "$@"
 fi
-unset FABRIC_ACCESS_TOKEN
 
 exec "$@"

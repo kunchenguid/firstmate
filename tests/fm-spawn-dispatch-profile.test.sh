@@ -502,12 +502,16 @@ SH
 #!/bin/sh
 [ "${FABRIC_CORE_BEARER_TOKEN+x}" != x ] || exit 43
 [ "${FABRIC_DW_GLOBAL_BEARER_TOKEN+x}" != x ] || exit 44
+[ "${FABRIC_ACCESS_TOKEN+x}" = x ] || exit 45
+[ "$FABRIC_ACCESS_TOKEN" = inherited-fabric-access ] || exit 46
+export -p | grep -q '^export FABRIC_ACCESS_TOKEN=' || exit 47
 printf '%s\n' worker-fallback-ok
 SH
   chmod +x "$fakebin/az" "$fakebin/codex"
 
   out=$(env -u FABRIC_CORE_BEARER_TOKEN -u FABRIC_DW_GLOBAL_BEARER_TOKEN \
     PATH="$fakebin:$PATH" FM_TEST_AZ_ARGS="$dir/az.args" \
+    FABRIC_ACCESS_TOKEN=inherited-fabric-access \
     "$ROOT/bin/fm-codex-fabric-env.sh" "$fakebin/codex" 2>&1)
   status=$?
   expect_code 0 "$status" "Codex Fabric bridge should preserve launch behavior when Azure CLI cannot answer"
