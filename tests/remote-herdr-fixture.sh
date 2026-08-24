@@ -17,6 +17,12 @@
 # one turn: the next agent read reports working and the pane settles back to
 # idle, which is the native transition the adapter confirms a submit with.
 #
+# A registration is reported the way a real host reports it: `agent get` names
+# the registered agent executable, and `pane process-info` reports that same
+# executable holding the pane's foreground process group, which is the
+# agreement the lifecycle liveness proof reads before calling a pane alive. A
+# pane nothing was ever launched into reports its own lone login shell instead.
+#
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 #   install_remote_herdr_fixture <remote-root> <state-file> <log-file> \
@@ -41,13 +47,27 @@ SH
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
-ws=""; label=""; cwd=""
+# The one agent executable this fake host runs. `agent get` registers it and
+# `pane process-info` reports the same name in the pane's foreground process
+# group, which is the registry/process-table agreement a real Herdr host shows
+# for a running agent (docs/verification/runtime-backends.md).
+FIXTURE_AGENT=codex
+# Deterministic per-pane pids derived from the pane id, so repeated reads of
+# the same pane agree with each other the way a real host's do.
+pane_pids() {  # <pane-id> -> SHELL_PID, AGENT_PID
+  local n=${1##*p}
+  case "$n" in ''|*[!0-9]*) n=1 ;; esac
+  SHELL_PID=$((4000 + n * 2))
+  AGENT_PID=$((SHELL_PID + 1))
+}
+ws=""; label=""; cwd=""; pane_opt=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
     --cwd) cwd=${args[$((i+1))]:-} ;;
+    --pane) pane_opt=${args[$((i+1))]:-} ;;
   esac
 done
 case "${1:-} ${2:-}" in
@@ -97,14 +117,32 @@ case "${1:-} ${2:-}" in
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
-  "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
+  "pane process-info")
+    pane=${pane_opt:-${3:-}}
+    if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
+      printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
+    elif [ "$(jq_state -r --arg p "$pane" '.typed[$p] // false')" = true ]; then
+      # A launched pane: its login shell is still the pane's shell, while the
+      # registered agent executable holds the foreground process group. This is
+      # the shape bin/backends/herdr.sh's liveness proof reads, and the agent
+      # name matches what `agent get` registers for the same pane.
+      pane_pids "$pane"
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s"}]}}}\n' \
+        "$pane" "$SHELL_PID" "$AGENT_PID" "$AGENT_PID" "$FIXTURE_AGENT" "$FIXTURE_AGENT"
+    else
+      # Nothing was ever launched here: the pane sits at its own login shell.
+      pane_pids "$pane"
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv0":"-bash"}]}}}\n' \
+        "$pane" "$SHELL_PID" "$SHELL_PID" "$SHELL_PID"
+    fi
+    ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
       jq_state --arg p "$pane" '.working |= with_entries(select(.key != $p))' | save
-      printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"working"}}}\n' "$FIXTURE_AGENT"
     elif [ "$(jq_state -r --arg p "$pane" '.typed[$p] // false')" = true ]; then
-      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$FIXTURE_AGENT"
     else
       printf '{"error":{"code":"agent_not_found","message":"%s"}}\n' "$pane"
     fi
