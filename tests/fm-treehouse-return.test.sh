@@ -13,9 +13,15 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-treehouse-return)
 TREEHOUSE=$(command -v treehouse 2>/dev/null || true)
 
-[ -n "$TREEHOUSE" ] || {
-  printf '%s\n' 'skip: treehouse not found'
-  exit 0
+fake_treehouse_bin() {  # <fakebin-dir>
+  cat > "$1/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  : > "${FM_TREEHOUSE_RETURN_MARKER:?}"
+fi
+exit 0
+SH
+  chmod +x "$1/treehouse"
 }
 
 make_case() {  # <name>
@@ -119,14 +125,7 @@ test_unreadable_reachability_refuses_before_treehouse_return() {
   mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
     "$case_dir/fakebin" "$case_dir/repo" "$case_dir/pool" "$unreadable"
   fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
-  cat > "$case_dir/fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = return ]; then
-  : > "${FM_TREEHOUSE_RETURN_MARKER:?}"
-fi
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  fake_treehouse_bin "$case_dir/fakebin"
   write_teardown_meta "$case_dir" unreadable-return "$unreadable"
 
   set +e
@@ -141,6 +140,75 @@ SH
     "unreadable return removed task metadata after refusal"
   pass "unreadable committed-work reachability refuses before Treehouse return"
 }
+
+# --- guard-level regressions (no live Treehouse binary required) -------------
+
+make_guard_case() {  # <name>
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
+    "$case_dir/fakebin"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+  printf '%s\n' "$case_dir"
+}
+
+test_broken_ref_store_still_rescues_detached_commit() {
+  local case_dir repo wt head marker out rescue_refs
+  case_dir=$(make_guard_case broken-ref-store)
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  marker="$case_dir/treehouse-return-called"
+  git init -q "$repo"
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q --detach "$wt" HEAD
+  git -C "$wt" commit -q --allow-empty -m detached-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  # A truncated loose ref left by a killed process: `git for-each-ref` still
+  # exits 0 but prints a diagnostic while matching nothing.
+  printf 'not-a-sha\n' > "$repo/.git/refs/heads/broken"
+  write_teardown_meta "$case_dir" broken-refs-return "$wt"
+
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" broken-refs-return 2>&1) \
+    || fail "teardown over a damaged ref store failed: $out"
+  rescue_refs=$(git -C "$repo" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue/broken-refs-return)
+  [ -n "$rescue_refs" ] || fail "damaged ref store made the durability check fail open: $out"
+  assert_contains "$out" 'RESCUED: committed work' \
+    "damaged ref store return did not report its rescue"
+  assert_present "$marker" "rescued return never reached Treehouse"
+  pass "a damaged ref store does not fake durability for detached committed work"
+}
+
+test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
+  local case_dir outer broken marker out rc
+  case_dir=$(make_guard_case nested-repo)
+  outer="$case_dir/outer"
+  broken="$outer/pool/broken-worktree"
+  marker="$case_dir/treehouse-return-called"
+  mkdir -p "$broken" "$case_dir/repo"
+  git init -q "$outer"
+  git -C "$outer" commit -q --allow-empty -m enclosing
+  write_teardown_meta "$case_dir" nested-return "$broken"
+
+  set +e
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" nested-return 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "worktree with no git dir borrowed the enclosing repository: $out"
+  [ ! -e "$marker" ] || fail "enclosing-repository HEAD was accepted as durable: $out"
+  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "nested unreadable worktree did not report its concrete refusal"
+  pass "an unreadable worktree inside another repository refuses instead of borrowing its HEAD"
+}
+
+test_broken_ref_store_still_rescues_detached_commit
+test_worktree_inside_another_repo_refuses_instead_of_borrowing_it
+
+if [ -z "$TREEHOUSE" ]; then
+  printf '%s\n' 'skip: treehouse not found'
+  exit 0
+fi
 
 test_detached_head_commit_is_rescued_before_real_return
 test_attached_branch_returns_without_rescue_ref

@@ -20,32 +20,57 @@ fm_treehouse_return_task_id_safe() {
   git check-ref-format "refs/firstmate/rescue/$id/task" >/dev/null 2>&1
 }
 
+# Run git against exactly the given worktree: repository discovery is capped at
+# its parent so a missing or damaged .git pointer cannot silently resolve an
+# enclosing repository. Stdout and stderr are captured separately so diagnostics
+# printed by a damaged ref store never masquerade as command output.
+FM_TREEHOUSE_RETURN_GIT_OUT=
+FM_TREEHOUSE_RETURN_GIT_ERR=
+fm_treehouse_return_git() {  # <worktree> <git args...>
+  local worktree=$1 errfile rc
+  shift
+  FM_TREEHOUSE_RETURN_GIT_OUT=
+  FM_TREEHOUSE_RETURN_GIT_ERR=
+  if ! errfile=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-return.XXXXXX" 2>/dev/null); then
+    FM_TREEHOUSE_RETURN_GIT_ERR='could not create a temporary file to capture git diagnostics'
+    return 125
+  fi
+  FM_TREEHOUSE_RETURN_GIT_OUT=$(GIT_CEILING_DIRECTORIES=$(dirname -- "$worktree") \
+    git -C "$worktree" "$@" 2>"$errfile")
+  rc=$?
+  FM_TREEHOUSE_RETURN_GIT_ERR=$(cat "$errfile" 2>/dev/null)
+  rm -f -- "$errfile"
+  return "$rc"
+}
+
 fm_treehouse_return_guard() {
-  local task_id=$1 worktree=$2 head refs err timestamp base_ref rescue_ref suffix=0
+  local task_id=$1 worktree=$2 worktree_path head refs timestamp base_ref rescue_ref suffix=0
 
   if ! fm_treehouse_return_task_id_safe "$task_id"; then
     printf 'REFUSED: cannot return %s because task id %s is unsafe for a rescue ref.\n' \
       "$worktree" "${task_id:-<empty>}" >&2
     return 1
   fi
-  if [ ! -d "$worktree" ]; then
+  if ! worktree_path=$(cd -P -- "$worktree" 2>/dev/null && pwd -P) || [ -z "$worktree_path" ]; then
     printf 'REFUSED: cannot determine committed-work reachability for %s: worktree directory is unavailable.\n' \
       "$worktree" >&2
     return 1
   fi
 
-  if ! head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>&1); then
+  if ! fm_treehouse_return_git "$worktree_path" rev-parse --verify 'HEAD^{commit}'; then
     printf 'REFUSED: cannot determine committed-work reachability for %s: git could not resolve HEAD (%s).\n' \
-      "$worktree" "$head" >&2
+      "$worktree" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
     return 1
   fi
+  head=$FM_TREEHOUSE_RETURN_GIT_OUT
 
-  if ! refs=$(git -C "$worktree" for-each-ref --contains="$head" --format='%(refname)' \
-    refs/heads refs/tags refs/firstmate/rescue 2>&1); then
+  if ! fm_treehouse_return_git "$worktree_path" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/heads refs/tags refs/firstmate/rescue; then
     printf 'REFUSED: cannot determine committed-work reachability for %s at %s: git ref scan failed (%s).\n' \
-      "$worktree" "$head" "$refs" >&2
+      "$worktree" "$head" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
     return 1
   fi
+  refs=$FM_TREEHOUSE_RETURN_GIT_OUT
   [ -z "$refs" ] || return 0
 
   if ! timestamp=$(date -u +%Y%m%dT%H%M%SZ 2>&1); then
@@ -57,13 +82,13 @@ fm_treehouse_return_guard() {
   rescue_ref=$base_ref
 
   while :; do
-    if err=$(git -C "$worktree" update-ref "$rescue_ref" "$head" '' 2>&1); then
+    if fm_treehouse_return_git "$worktree_path" update-ref "$rescue_ref" "$head" ''; then
       printf 'RESCUED: committed work at %s had no durable ref; created %s before returning %s.\n' \
         "$head" "$rescue_ref" "$worktree"
       return 0
     fi
 
-    if git -C "$worktree" show-ref --verify --quiet "$rescue_ref"; then
+    if fm_treehouse_return_git "$worktree_path" show-ref --verify --quiet "$rescue_ref"; then
       suffix=$((suffix + 1))
       if [ "$suffix" -gt 99 ]; then
         printf 'REFUSED: cannot create a unique rescue ref for %s at %s after 100 timestamp collisions.\n' \
@@ -75,7 +100,7 @@ fm_treehouse_return_guard() {
     fi
 
     printf 'REFUSED: cannot create rescue ref %s for %s at %s: %s.\n' \
-      "$rescue_ref" "$worktree" "$head" "$err" >&2
+      "$rescue_ref" "$worktree" "$head" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
     return 1
   done
 }
