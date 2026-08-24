@@ -22,18 +22,18 @@ An absent `config/wedge-alarm` behaves as `auto`, which is default-on wherever `
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
 When `auto` resolves to nothing, the daemon logs that the durable marker is the only signal; on a Linux host with no `herdr` CLI, write a `command:` directive into `config/wedge-alarm` so the wedge reaches someone off-host.
 
-## Entry verification
-
-An alarm only helps once away mode is already running.
-`bin/fm-afk-launch.sh verify` closes the gap at entry: the daemon proves one injection reaches the captain pane and records the verdict in `state/.subsuper-delivery-selftest`, and `verify` fails away-mode entry when that proof is absent.
-Away mode must not be reported active before that verdict is `ok`.
-
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
 Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `herdr`, and the test seam.
 On timeout or daemon shutdown, the notifier process group is terminated and the next configured channel may run.
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+
+## Entry verification
+
+An alarm only helps once away mode is already running.
+`bin/fm-afk-launch.sh verify` closes the gap at entry: the daemon proves one injection reaches the captain pane and records the verdict in `state/.subsuper-delivery-selftest`, and `verify` fails away-mode entry when that proof is absent.
+Away mode must not be reported active before that verdict is `ok`.
 
 ## Test safety
 
