@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# Shared tasks-axi backend selection and compatibility probe for bootstrap,
-# teardown, and secondmate backlog handoff.
+# Shared tasks-axi backend selection, compatibility probe, and archived-record
+# read for bootstrap, teardown, secondmate backlog handoff, and the captain
+# decision gate.
 # Usage: . bin/fm-tasks-axi-lib.sh
 #
 # Compatible means tasks-axi --version reports FM_TASKS_AXI_MIN or newer,
@@ -18,6 +19,32 @@
 #
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
 # failing check into the operator-facing MISSING diagnostic.
+#
+# ARCHIVED RECORDS. `tasks-axi prune` sweeps closed rows out of the active
+# backlog into the archive file and offers no read path back: `show` and `list`
+# see the active backlog only, `--file` cannot name the archive (its own default
+# archive would then collide with it), and no flag or environment variable
+# exposes the archive path. A closed row keeps every field it had, so a caller
+# that asks whether a durable record EXISTS must look in both files or it will
+# report a retained record as missing the moment retention runs. This file is the
+# single owner of that read, so no caller reimplements tasks-axi's config
+# resolution or its markdown grammar.
+#
+# fm_tasks_axi_archive_show reads the archive by handing tasks-axi a private
+# throwaway copy whose `## Archived <stamp>` block headers are rewritten to the
+# `## Done` section header its grammar recognises. Everything past that - entry
+# parsing, body decoding, field rendering - stays owned by tasks-axi, so an
+# archived record renders byte-identically to a live `show <id> --full`. Only
+# closed rows are readable this way, which is what the decision gate needs;
+# `prune --state queued` output stays invisible rather than being guessed at.
+#
+# fm_tasks_axi_backlog_path and fm_tasks_axi_archive_path mirror tasks-axi's own
+# config precedence: the project `.tasks.toml` in the home, then
+# `~/.tasks-axi/config.toml`, then tasks-axi's built-in defaults, with relative
+# values resolved against the home exactly as tasks-axi resolves them against its
+# working directory. They exist only because that path is the one part of the
+# contract tasks-axi never prints; keep them in step with it. `docs/configuration.md`
+# stays the operator-facing owner of what the tracked `.tasks.toml` selects.
 #
 # COMPATIBILITY VERDICT REUSE. fm_tasks_axi_compatible costs three tasks-axi
 # subprocesses, and one session start needs the same verdict twice: once in
@@ -120,4 +147,157 @@ fm_tasks_axi_backend_available() {
   local config_dir=$1
   fm_backlog_backend_manual "$config_dir" && return 1
   fm_tasks_axi_compatible
+}
+
+# The last `<key> = "<value>"` assignment inside the `[markdown]` table of a
+# tasks-axi config file, or nothing when the file, table, or key is absent.
+# tasks-axi accepts only quoted strings for these keys, so an unquoted value is
+# left unread here exactly as it is rejected there.
+fm_tasks_axi_toml_markdown_value() {  # <toml-path> <key>
+  local file=$1 key=$2
+  [ -f "$file" ] || return 0
+  awk -v want="$key" '
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      sub(/^[ \t]+/, "", line)
+      sub(/[ \t]+$/, "", line)
+    }
+    line ~ /^\[.*\]$/ {
+      section = substr(line, 2, length(line) - 2)
+      sub(/^[ \t]+/, "", section)
+      sub(/[ \t]+$/, "", section)
+      in_markdown = (section == "markdown")
+      next
+    }
+    !in_markdown { next }
+    {
+      if (!match(line, "^" want "[ \t]*=[ \t]*")) next
+      rest = substr(line, RLENGTH + 1)
+      quote = substr(rest, 1, 1)
+      if (quote != "\"" && quote != "'"'"'") next
+      rest = substr(rest, 2)
+      end = index(rest, quote)
+      if (end < 1) next
+      value = substr(rest, 1, end - 1)
+      found = 1
+    }
+    END { if (found) print value }
+  ' "$file" 2>/dev/null || true
+}
+
+# Absolute form of a configured path, resolved against <home> when relative,
+# matching how tasks-axi resolves the same value against its working directory.
+fm_tasks_axi_resolve_under() {  # <home> <path>
+  case "$2" in
+    /*) printf '%s\n' "$2" ;;
+    *) printf '%s/%s\n' "${1%/}" "$2" ;;
+  esac
+}
+
+# The active backlog file tasks-axi would use for <home>.
+fm_tasks_axi_backlog_path() {  # <home>
+  local home=$1 chosen='' candidate
+  if [ -n "${TASKS_AXI_FILE:-}" ]; then
+    chosen=$TASKS_AXI_FILE
+  else
+    chosen=$(fm_tasks_axi_toml_markdown_value "${home%/}/.tasks.toml" path)
+    [ -n "$chosen" ] || chosen=$(fm_tasks_axi_toml_markdown_value "${HOME:-}/.tasks-axi/config.toml" path)
+  fi
+  if [ -n "$chosen" ]; then
+    fm_tasks_axi_resolve_under "$home" "$chosen"
+    return 0
+  fi
+  for candidate in backlog.md data/backlog.md; do
+    if [ -f "${home%/}/$candidate" ]; then
+      printf '%s/%s\n' "${home%/}" "$candidate"
+      return 0
+    fi
+  done
+  printf '%s/backlog.md\n' "${home%/}"
+}
+
+# The archive file tasks-axi would prune <home>'s closed rows into.
+fm_tasks_axi_archive_path() {  # <home>
+  local home=$1 archive
+  archive=$(fm_tasks_axi_toml_markdown_value "${home%/}/.tasks.toml" archive)
+  [ -n "$archive" ] || archive=$(fm_tasks_axi_toml_markdown_value "${HOME:-}/.tasks-axi/config.toml" archive)
+  if [ -n "$archive" ]; then
+    fm_tasks_axi_resolve_under "$home" "$archive"
+    return 0
+  fi
+  printf '%s/done-archive.md\n' "$(dirname "$(fm_tasks_axi_backlog_path "$home")")"
+}
+
+# 0 when this home can examine <path> well enough for its absence to mean
+# something, 1 when a directory above it cannot be searched, so a stat that
+# reports the path as missing establishes nothing at all.
+fm_tasks_axi_path_examinable() {  # <path>
+  local dir=$1
+  while :; do
+    case "$dir" in
+      */*) dir=${dir%/*}; [ -n "$dir" ] || dir=/ ;;
+      *) return 0 ;;
+    esac
+    if [ -d "$dir" ]; then
+      [ -x "$dir" ] || return 1
+      return 0
+    fi
+    # An ancestor that does not appear to exist is either genuinely missing or
+    # hidden behind one that cannot be searched, so keep climbing until a
+    # directory this home can see answers the question.
+    [ "$dir" != / ] || return 0
+  done
+}
+
+# `tasks-axi show <id> --full` for a row retention has already archived, rendered
+# by tasks-axi itself against a private throwaway copy. Nonzero with no output
+# whenever <home> has no archived record for that id, and the two failures are
+# kept apart: 1 means the archive was read and does not hold that id, including
+# the home whose retention has never written an archive file at all, and 2 means
+# the archive could not be read, so absence was never established. A caller that
+# turns this into a message must never report 2 as proof of absence.
+fm_tasks_axi_archive_show() {  # <home> <id>
+  local home=$1 id=$2 archive dir view output status=0
+  case "$id" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  command -v tasks-axi >/dev/null 2>&1 || return 2
+  archive=$(fm_tasks_axi_archive_path "$home")
+  [ -n "$archive" ] || return 2
+  if [ ! -f "$archive" ]; then
+    # No archive file is the ordinary state of a home retention has not pruned
+    # into yet, and that is a genuine absence. A path this home cannot examine
+    # is not: it proves nothing either way, so it reports as an unread archive.
+    fm_tasks_axi_path_examinable "$archive" || return 2
+    return 1
+  fi
+  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-tasks-archive.XXXXXX") || return 2
+  view="$dir/archived-backlog.md"
+  # The copy lives in its own directory so tasks-axi's default archive path for
+  # it can never resolve back onto the real archive, and the read runs from that
+  # directory so no project config joins in.
+  if sed 's/^## Archived /## Done archived /' "$archive" > "$view" 2>/dev/null; then
+    output=$(cd "$dir" && tasks-axi show "$id" --full --file "$view" 2>/dev/null) || status=3
+  else
+    status=2
+  fi
+  rm -rf -- "$dir"
+  [ "$status" -ne 2 ] || return 2
+  # A miss prints nothing at all: tasks-axi reports NOT_FOUND on stdout, and that
+  # text names the throwaway copy, so it must never reach a caller as a record.
+  # That same NOT_FOUND code is what marks a read that did search the archive, so
+  # any other tasks-axi failure is an unread archive rather than an absent row.
+  if [ "$status" -ne 0 ]; then
+    case $'\n'"$output" in
+      *$'\n'"code: NOT_FOUND"*) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  # The identity line every rendered record carries is what tells a record apart
+  # from anything else a successful read could have produced.
+  case $'\n'"$output" in
+    *$'\n'"  id: $id"$'\n'*|*$'\n'"  id: $id") printf '%s\n' "$output" ;;
+    *) return 1 ;;
+  esac
 }
