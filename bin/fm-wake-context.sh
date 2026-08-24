@@ -367,7 +367,10 @@ normalize_timeouts() {
 }
 
 prepare_presentation() {
-  fm_session_lock_owned_by_self "$STATE" || fail_before_presentation "this session does not own the fleet lock"
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    printf 'WAKE_CONTEXT_READ_ONLY: this session does not own the fleet lock; wake state must remain read-only.\n'
+    exit 3
+  fi
   replay_cached && exit 0
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
     || rm -f -- "$CACHE_CURSOR" || fail_before_presentation "an orphaned cursor stage could not be retired"

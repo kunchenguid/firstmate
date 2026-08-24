@@ -1301,6 +1301,13 @@ test_pi_actionable_close_rechecks_session_lock() {
   release="$TMP_ROOT/pi-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  cp \
+    "$ROOT/bin/fm-wake-context.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-classify-lib.sh" \
+    "$ROOT/bin/fm-backend.sh" \
+    "$ROOT/bin/fm-timeout-lib.sh" \
+    "$repo/bin/"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1341,6 +1348,12 @@ try {
   const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
   if (rows.length !== 1) throw new Error(`successor launched after lock loss: ${rows.join(" | ")}`);
   if (!prompt.includes("no longer owns the lock")) throw new Error(`missing lock-loss failure: ${prompt}`);
+  if (!prompt.includes("WAKE_CONTEXT_READ_ONLY: this session does not own the fleet lock")) {
+    throw new Error(`missing read-only wake-context refusal: ${prompt}`);
+  }
+  if (prompt.includes("run bin/fm-wake-drain.sh once")) {
+    throw new Error(`lock-loss prompt ordered a mutating drain: ${prompt}`);
+  }
 } finally {
   other.kill("SIGTERM");
 }
