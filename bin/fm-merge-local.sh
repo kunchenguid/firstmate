@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's fm/<id> branch.
+# project's default branch to the crewmate's recorded branch.
+# The recorded name is `Crew branch: branch=<name>` in data/<id>/brief.md
+# (written by bin/fm-brief.sh --branch-name). When that line is absent, this
+# script still uses fm/<id>, so omitted --branch-name stays identical to today.
+# An invalid recorded name refuses rather than falling back to fm/<id>.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -16,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 # Role partition: landing local-only work is MAIN-owned; the Pi supervision
 # branch reports readiness and never lands (contract: bin/fm-lease-lib.sh;
@@ -47,7 +52,18 @@ default_branch() {
   return 1
 }
 
+BRIEF="$DATA/$ID/brief.md"
 BRANCH="fm/$ID"
+if [ -f "$BRIEF" ]; then
+  recorded_branch=$(sed -n 's/^Crew branch: branch=//p' "$BRIEF" | head -n 1)
+  if [ -n "$recorded_branch" ]; then
+    git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
+      echo "error: $BRIEF records an invalid crew branch: $recorded_branch" >&2
+      exit 1
+    }
+    BRANCH=$recorded_branch
+  fi
+fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }

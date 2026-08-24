@@ -53,9 +53,9 @@
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
 # still use `fm/<task-id>` exactly as today. --secondmate refuses the flag.
 # A custom name is recorded as `Crew branch: branch=<name>` on ship briefs.
-# Other scripts that reconstruct `fm/<id>` instead of reading a recorded branch:
-# bin/fm-merge-local.sh (local-only merge looks up `fm/<id>`), bin/fm-promote.sh
-# (next-step hint tells the scout to create `fm/<id>`), and
+# bin/fm-merge-local.sh reads that recorded line and falls back to `fm/<id>`
+# only when it is absent. Other scripts that still reconstruct `fm/<id>`:
+# bin/fm-promote.sh (next-step hint tells the scout to create `fm/<id>`), and
 # bin/fm-review-diff.sh (prefers `fm/<id>`, then falls back to the worktree HEAD).
 # bin/fm-spawn.sh, bin/fm-teardown.sh, bin/fm-control.sh, and
 # bin/fm-crew-state.sh do not reconstruct that pattern.
