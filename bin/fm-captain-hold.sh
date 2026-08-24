@@ -163,10 +163,59 @@ STRUCTURED_TX_PATH=
 STRUCTURED_TX_BACKUP=
 STRUCTURED_TX_HAD_RECORD=0
 STRUCTURED_TX_CREATED_DIR=0
+STRUCTURED_TX_TASK_ID=
+STRUCTURED_TX_TASK_EXISTED=0
+STRUCTURED_TX_ADD_ATTEMPTED=0
+STRUCTURED_TX_HOLD_ATTEMPTED=0
+STRUCTURED_TX_PRIOR_HOLD_REASON=
+STRUCTURED_TX_PRIOR_HOLD_KIND=
+STRUCTURED_TX_PRIOR_HOLD_UNTIL=
+
+structured_backlog_rollback() {
+  local inventory
+  local -a hold_args
+  if [ "$STRUCTURED_TX_TASK_EXISTED" = 1 ]; then
+    [ "$STRUCTURED_TX_HOLD_ATTEMPTED" = 1 ] || return 0
+    if [ -z "$STRUCTURED_TX_PRIOR_HOLD_REASON" ]; then
+      if tasks_axi unhold "$STRUCTURED_TX_TASK_ID" >/dev/null; then
+        return 0
+      fi
+    else
+      hold_args=(hold "$STRUCTURED_TX_TASK_ID" --reason "$STRUCTURED_TX_PRIOR_HOLD_REASON")
+      [ -z "$STRUCTURED_TX_PRIOR_HOLD_KIND" ] \
+        || hold_args+=(--kind "$STRUCTURED_TX_PRIOR_HOLD_KIND")
+      [ -z "$STRUCTURED_TX_PRIOR_HOLD_UNTIL" ] \
+        || hold_args+=(--until "$STRUCTURED_TX_PRIOR_HOLD_UNTIL")
+      if tasks_axi "${hold_args[@]}" >/dev/null; then
+        return 0
+      fi
+    fi
+    printf 'fm-captain-hold: could not restore the previous hold after verification failure: %s\n' \
+      "$STRUCTURED_TX_TASK_ID" >&2
+    return 1
+  fi
+  [ "$STRUCTURED_TX_ADD_ATTEMPTED" = 1 ] || return 0
+  if inventory=$(task_inventory) \
+    && ! printf '%s\n' "$inventory" | task_inventory_has_id "$STRUCTURED_TX_TASK_ID"; then
+    return 0
+  fi
+  if tasks_axi rm "$STRUCTURED_TX_TASK_ID" >/dev/null; then
+    return 0
+  fi
+  printf 'fm-captain-hold: could not remove the task created before verification failed: %s\n' \
+    "$STRUCTURED_TX_TASK_ID" >&2
+  return 1
+}
 
 structured_record_rollback() {
   local dir
   [ "$STRUCTURED_TX_ACTIVE" = 1 ] || return 0
+  if ! structured_backlog_rollback; then
+    printf 'fm-captain-hold: preserving structured decision record because backlog rollback failed: %s\n' \
+      "$STRUCTURED_TX_PATH" >&2
+    structured_record_commit
+    return 0
+  fi
   dir=$(dirname "$STRUCTURED_TX_PATH")
   if [ "$STRUCTURED_TX_HAD_RECORD" = 1 ]; then
     if ! mv -f -- "$STRUCTURED_TX_BACKUP" "$STRUCTURED_TX_PATH"; then
@@ -547,7 +596,7 @@ write_structured_record() {  # <task-id> <input-path>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' structured_file='' show state existing_title body='' hold_kind inventory task_exists=0
+  local id=${1:-} title='' reason='' repo='' origin='' until='' structured_file='' show state existing_title body='' hold_kind inventory task_exists=0 prior_hold_reason='' prior_hold_kind='' prior_hold_until=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -589,6 +638,9 @@ command_hold() {
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
+    prior_hold_reason=$(show_field_value "$show" hold_reason)
+    prior_hold_kind=$(show_field_value "$show" hold_kind)
+    prior_hold_until=$(show_field_value "$show" hold_until)
   else
     inventory=$(task_inventory) || fail "could not inspect the task inventory in $FM_HOME/data/backlog.md"
     ! printf '%s\n' "$inventory" | task_inventory_has_id "$id" \
@@ -605,9 +657,15 @@ command_hold() {
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
   fi
   if [ -n "$structured_file" ]; then
+    STRUCTURED_TX_TASK_ID=$id
+    STRUCTURED_TX_TASK_EXISTED=$task_exists
+    STRUCTURED_TX_PRIOR_HOLD_REASON=$prior_hold_reason
+    STRUCTURED_TX_PRIOR_HOLD_KIND=$prior_hold_kind
+    STRUCTURED_TX_PRIOR_HOLD_UNTIL=$prior_hold_until
     write_structured_record "$id" "$structured_file"
   fi
   if [ "$task_exists" = 0 ]; then
+    [ -z "$structured_file" ] || STRUCTURED_TX_ADD_ATTEMPTED=1
     if [ -n "$body" ]; then
       tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"
@@ -616,6 +674,7 @@ command_hold() {
         || fail "could not create task $id"
     fi
   fi
+  [ -z "$structured_file" ] || STRUCTURED_TX_HOLD_ATTEMPTED=1
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"

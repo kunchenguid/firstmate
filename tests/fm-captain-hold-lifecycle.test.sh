@@ -1206,7 +1206,46 @@ SH
     || fail "failed backlog hold did not restore the previous structured record"
   assert_contains "$(tasks_in "$home" show sample-hold-failure-call --full)" "held: no" \
     "failed backlog hold unexpectedly retained a captain hold"
+  tasks_in "$home" add sample-post-verification-hold-call "Post-verification hold failure" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the post-verification hold fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  show:sample-post-verification-create-call|show:sample-post-verification-hold-call)
+    [ ! -f "$FM_HOME/post-verification-$2" ] || exit 9
+    ;;
+  hold:sample-post-verification-create-call|hold:sample-post-verification-hold-call)
+    "$REAL_TASKS_AXI" "$@" || exit
+    : > "$FM_HOME/post-verification-$2"
+    exit 0
+    ;;
+esac
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_captain "$home" hold sample-post-verification-create-call \
+    --title "Post-verification create failure" --reason "captain verification fixture" --repo sample \
+    --structured-file "$home/structured.json" \
+    > "$home/post-verification-create.out" 2> "$home/post-verification-create.err"; then
+    fail "structured hold accepted a failed post-creation verification"
+  fi
+  if run_captain "$home" hold sample-post-verification-hold-call \
+    --reason "captain verification fixture" --repo sample \
+    --structured-file "$home/structured.json" \
+    > "$home/post-verification-hold.out" 2> "$home/post-verification-hold.err"; then
+    fail "structured hold accepted a failed post-hold verification"
+  fi
   rm -f "$home/fakebin/tasks-axi"
+  if tasks_in "$home" show sample-post-verification-create-call --full >/dev/null 2>&1; then
+    fail "failed post-creation verification retained the newly created task"
+  fi
+  assert_absent "$home/data/sample-post-verification-create-call/captain-decision.json" \
+    "failed post-creation verification retained an orphaned structured record"
+  assert_contains "$(tasks_in "$home" show sample-post-verification-hold-call --full)" "held: no" \
+    "failed post-hold verification retained the new captain hold"
+  assert_absent "$home/data/sample-post-verification-hold-call/captain-decision.json" \
+    "failed post-hold verification retained the structured record"
   tasks_in "$home" add sample-title-mismatch-call "Original title" \
     --kind ship --repo sample >/dev/null \
     || fail "could not create the title mismatch fixture"
