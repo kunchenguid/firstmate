@@ -39,6 +39,7 @@ It says nothing about whether the resulting brief, project, or delivery mode is 
 `bin/fm-subagent-pretool-check.sh` is the shipped layer.
 It classifies the tool NAME by shape rather than against a fixed list.
 The tracked Claude PreToolUse matcher is `.*`, so every Claude tool name reaches the script and the script is the single owner of classification.
+The tracked Copilot `PreToolUse` registration forwards its `Agent` and `Task` tool names to the same classifier and renders a native denied permission decision.
 A stem-enumerating matcher would reintroduce the fail-open-by-enumeration problem this guard exists to solve, because any future tool name outside the matcher would be silently missed before the script could inspect it.
 A tool is delegation-shaped when its normalized lowercase name contains one of these stems:
 
@@ -182,6 +183,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
+| GitHub Copilot CLI | `Agent` and `Task` | Scoped guard wired in `.github/hooks/firstmate.json`; both names reach the same native Copilot deny renderer through matcher `Agent|Task`. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |

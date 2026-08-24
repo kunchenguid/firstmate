@@ -16,7 +16,7 @@
 // it inspects lexical command positions only.
 
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const REASONS = {
@@ -100,18 +100,25 @@ function decision(command) {
 }
 
 function parseArguments(argv) {
-  const result = { command: "", commandSet: false };
+  const result = { command: "", commandArgumentSet: false, commandSet: false, commandStdin: false };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--command-stdin") {
+      result.commandStdin = true;
+      result.commandSet = true;
+      continue;
+    }
     if (name === "--command") {
       if (i + 1 >= argv.length) throw new Error("--command requires a value");
       result.command = argv[i + 1];
+      result.commandArgumentSet = true;
       result.commandSet = true;
       i += 1;
       continue;
     }
     if (name.startsWith("--command=")) {
       result.command = name.slice("--command=".length);
+      result.commandArgumentSet = true;
       result.commandSet = true;
       continue;
     }
@@ -134,6 +141,8 @@ function invokedDirectly() {
 if (invokedDirectly()) {
   try {
     const args = parseArguments(process.argv.slice(2));
+    if (args.commandStdin && args.commandArgumentSet) throw new Error("--command and --command-stdin are mutually exclusive");
+    if (args.commandStdin) args.command = readFileSync(0, "utf8");
     if (!args.commandSet || !args.command) {
       process.stdout.write("allow\n");
     } else {

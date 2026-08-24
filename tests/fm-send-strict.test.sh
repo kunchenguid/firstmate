@@ -39,6 +39,10 @@ case "${1:-}" in
       && [ "${1:-}" = "$FM_FAKE_TMUX_SEND_KEY_FAIL" ]; then
       exit 1
     fi
+    if [ "$literal" = 0 ] && [ "${1:-}" = Enter ] \
+      && [ -n "${FM_FAKE_COPILOT_ACK_FILE:-}" ]; then
+      printf 'new-prompt-token\n' > "$FM_FAKE_COPILOT_ACK_FILE"
+    fi
     exit 0 ;;
   display-message)
     target=
@@ -57,6 +61,10 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
+    if [ "${FM_FAKE_TMUX_UNSTRUCTURED:-0}" = 1 ]; then
+      printf 'unstructured terminal output\n'
+      exit 0
+    fi
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
@@ -197,6 +205,34 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_copilot_hook_confirms_unstructured_submit() {
+  local dir fb home err log token rc
+  dir="$TMP_ROOT/copilot-submit"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home copilot-submit)
+  err="$dir/send.err"; log="$dir/tmux.log"; token="$home/state/copilot-lane.copilot-prompt-submitted"
+  : > "$log"
+  printf 'old-prompt-token\n' > "$token"
+  fm_write_meta "$home/state/copilot-lane.meta" \
+    "window=sess:fm-copilot-lane" "kind=ship" "harness=copilot"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_UNSTRUCTURED=1 FM_FAKE_COPILOT_ACK_FILE="$token" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 "$SEND" copilot-lane "semantic send" \
+    >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "Copilot's prompt hook should confirm a submit when its composer is unstructured"
+  assert_contains "$(cat "$log")" "literal=1 arg=semantic send" "Copilot semantic send should type the message once"
+  assert_contains "$(cat "$log")" "literal=0 arg=Enter" "Copilot semantic send should still submit with Enter"
+
+  printf 'old-prompt-token\n' > "$token"
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_UNSTRUCTURED=1 FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
+    "$SEND" copilot-lane "unconfirmed send" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unstructured Copilot submit succeeded without a new prompt-hook token"
+  assert_contains "$(cat "$err")" "delivery unconfirmed" "missing Copilot prompt acknowledgement should remain loud"
+  pass "fm-send Copilot: semantic prompt hooks confirm submission without screen-shape guesses"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -233,3 +269,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_copilot_hook_confirms_unstructured_submit

@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -161,6 +161,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __COPILOTBIN__ resolved GitHub Copilot CLI executable
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -439,7 +440,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1046,7 +1047,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1074,7 +1075,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1085,6 +1086,16 @@ resolve_pi_executable() {
       printf '%s/%s\n' "$dir" "$(basename "$candidate")"
       ;;
   esac
+}
+
+resolve_pi_executable() {
+  resolve_executable "$1"
+}
+
+powershell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/''/g"
+  printf "'"
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
@@ -1119,6 +1130,7 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
+    copilot) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS __COPILOTBIN__ --allow-all --no-ask-user __MODELFLAG____EFFORTFLAG__--interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
@@ -1256,6 +1268,12 @@ case "$HARNESS" in
       fi
     fi
     ;;
+  copilot)
+    COPILOT_BIN=$(resolve_executable copilot) || {
+      echo "error: copilot executable not found on PATH; install GitHub Copilot CLI or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -1361,7 +1379,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1372,6 +1390,11 @@ effort_flag_for_harness() {
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    copilot)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -2301,9 +2324,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] || [ "$HARNESS" = copilot ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
-  # adapter with a verified semantic source. The launch brief sent below IS a
+  # adapter with a verified semantic source. Copilot secondmates are included
+  # because their generated lifecycle hooks also give fm-send a backend-neutral
+  # submission acknowledgement. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
@@ -2319,7 +2344,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|copilot*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2359,6 +2384,25 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      ;;
+    copilot*)
+      mkdir -p "$WT/.github/hooks"
+      busy_cmd="bash $(shell_quote "$FM_ROOT/bin/fm-ghcp-hook.sh") worker-event $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN")"
+      hook_ps="$FM_ROOT/bin/fm-ghcp-hook.ps1"
+      if command -v cygpath >/dev/null 2>&1; then
+        hook_ps=$(cygpath -w "$hook_ps" 2>/dev/null || printf '%s' "$hook_ps")
+      fi
+      ps_cmd="& $(powershell_quote "$hook_ps") worker-event $(powershell_quote "$STATE_REAL") $(powershell_quote "$ID") $(powershell_quote "$BUSY_GEN")"
+      j_submit_bash=$(json_escape "$busy_cmd busy user-prompt-submitted -")
+      j_stop_bash=$(json_escape "$busy_cmd idle agent-stop $(shell_quote "$TURNEND")")
+      j_end_bash=$(json_escape "$busy_cmd idle session-end $(shell_quote "$TURNEND")")
+      j_submit_ps=$(json_escape "$ps_cmd busy user-prompt-submitted -")
+      j_stop_ps=$(json_escape "$ps_cmd idle agent-stop $(powershell_quote "$TURNEND")")
+      j_end_ps=$(json_escape "$ps_cmd idle session-end $(powershell_quote "$TURNEND")")
+      cat > "$WT/.github/hooks/zz-firstmate-$ID.json" <<EOF
+{"version":1,"hooks":{"userPromptSubmitted":[{"type":"command","bash":"$j_submit_bash","powershell":"$j_submit_ps","timeoutSec":10}],"agentStop":[{"type":"command","bash":"$j_stop_bash","powershell":"$j_stop_ps","timeoutSec":10}],"sessionEnd":[{"type":"command","bash":"$j_end_bash","powershell":"$j_end_ps","timeoutSec":10}]}}
+EOF
+      exclude_path '.github/hooks/zz-firstmate-*.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2725,13 +2769,17 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  copilot) LAUNCH=${LAUNCH//__COPILOTBIN__/"$(shell_quote "$COPILOT_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+  claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID $LAUNCH"
     ;;
 esac
+if [ -n "${FM_COPILOT_PARENT_STATE:-}${FM_COPILOT_PARENT_TASK_ID:-}${FM_COPILOT_PARENT_BUSY_GEN:-}" ]; then
+  LAUNCH="env -u FM_COPILOT_PARENT_STATE -u FM_COPILOT_PARENT_TASK_ID -u FM_COPILOT_PARENT_BUSY_GEN $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -2749,7 +2797,7 @@ if [ "$KIND" = secondmate ]; then
   # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
   case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
+    claude|copilot|cursor) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
@@ -2760,6 +2808,9 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  if [ "$HARNESS" = copilot ]; then
+    LAUNCH="FM_COPILOT_PARENT_STATE=$(shell_quote "$STATE_REAL") FM_COPILOT_PARENT_TASK_ID=$(shell_quote "$ID") FM_COPILOT_PARENT_BUSY_GEN=$(shell_quote "$BUSY_GEN") $LAUNCH"
+  fi
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

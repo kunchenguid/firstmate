@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "bash ./bin/fm-ghcp-hook.sh session-start",
+        "powershell": "& './bin/fm-ghcp-hook.ps1' session-start",
+        "cwd": ".",
+        "timeoutSec": 180
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "type": "command",
+        "bash": "bash ./bin/fm-ghcp-hook.sh pretool arm",
+        "powershell": "& './bin/fm-ghcp-hook.ps1' pretool arm",
+        "cwd": ".",
+        "timeoutSec": 10
+      },
+      {
+        "matcher": "Bash",
+        "type": "command",
+        "bash": "bash ./bin/fm-ghcp-hook.sh pretool cd",
+        "powershell": "& './bin/fm-ghcp-hook.ps1' pretool cd",
+        "cwd": ".",
+        "timeoutSec": 10
+      },
+      {
+        "matcher": "Agent|Task",
+        "type": "command",
+        "bash": "bash ./bin/fm-ghcp-hook.sh pretool subagent",
+        "powershell": "& './bin/fm-ghcp-hook.ps1' pretool subagent",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "bash ./bin/fm-ghcp-hook.sh primary-stop",
+        "powershell": "& './bin/fm-ghcp-hook.ps1' primary-stop",
+        "cwd": ".",
+        "timeoutSec": 28800
+      }
+    ]
+  }
+}

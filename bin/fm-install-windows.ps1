@@ -3,10 +3,10 @@
 # Run from PowerShell:
 #   .\bin\fm-install-windows.ps1
 #
-# Installs Git for Windows and the other native tools with winget, installs
-# Treehouse and no-mistakes through their official PowerShell installers,
-# installs the required AXI packages globally with npm, configures their hooks,
-# and disables this repository's Claude project hooks by renaming
+# Installs Git for Windows, Python, and the other native tools with winget,
+# installs Treehouse and no-mistakes through their official PowerShell
+# installers, installs the required AXI packages globally with npm, configures
+# their hooks, and disables this repository's Claude project hooks by renaming
 # .claude/settings.json to .claude/settings.json.disabled.
 [CmdletBinding()]
 param()
@@ -78,6 +78,21 @@ function Get-CommandVersion {
 
             return ($versionOutput | Select-Object -First 1).Trim()
         }
+        "py" {
+            $versionOutput = & $Command "-3.13" "--version" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "$Command -3.13 --version failed with exit code $LASTEXITCODE."
+            }
+
+            $versionLine = $versionOutput |
+                Where-Object { $_ -match "^Python\s+" } |
+                Select-Object -First 1
+            if (-not $versionLine) {
+                throw "Could not determine the installed Python 3.13 version."
+            }
+
+            return ($versionLine -replace "^Python\s+", "").Trim()
+        }
         default {
             throw "No version probe is defined for $Command."
         }
@@ -103,14 +118,24 @@ function Install-WingetCommand {
             return
         }
 
-        $installedVersion = Get-CommandVersion $Command
-        if ($installedVersion -eq $Version) {
+        try {
+            $installedVersion = Get-CommandVersion $Command
+        }
+        catch {
+            Write-Host "$Command is present but its required version could not be verified."
+            $forceVersionInstall = $true
+        }
+        if ($forceVersionInstall) {
+            Write-Host "Installing the required $Command version $Version."
+        }
+        elseif ($installedVersion -eq $Version) {
             Write-Host "$Command $Version is already installed."
             return
         }
-
-        Write-Host "Replacing $Command $installedVersion with required version $Version."
-        $forceVersionInstall = $true
+        else {
+            Write-Host "Replacing $Command $installedVersion with required version $Version."
+            $forceVersionInstall = $true
+        }
     }
 
     $wingetArguments = @(
@@ -147,6 +172,87 @@ function Install-WingetCommand {
         if ($installedVersion -ne $Version) {
             throw "$Command $Version is required, but version $installedVersion is first on PATH."
         }
+    }
+}
+
+function Add-UserPathEntry {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $normalizedPath = $Path.TrimEnd("\")
+    $remainingEntries = @(
+        $currentPath -split ";" |
+            Where-Object {
+                $_ -and -not [string]::Equals(
+                    $_.TrimEnd("\"),
+                    $normalizedPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    $updatedPath = (@($Path) + $remainingEntries) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
+    Refresh-ProcessPath
+}
+
+function Install-Python3Command {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Version,
+
+        [Parameter(Mandatory)]
+        [string]$GitBashPath
+    )
+
+    $shimDirectory = Join-Path $env:LOCALAPPDATA "Firstmate\bin"
+    [IO.Directory]::CreateDirectory($shimDirectory) | Out-Null
+
+    # PowerShell needs a cmd shim while Git Bash needs an extensionless script.
+    $bashShim = @'
+#!/usr/bin/env bash
+exec py -3.13 "$@"
+'@ -replace "`r`n", "`n"
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText(
+        (Join-Path $shimDirectory "python3"),
+        "$bashShim`n",
+        $utf8NoBom
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $shimDirectory "python3.cmd"),
+        "@echo off`r`npy -3.13 %*`r`n",
+        [Text.Encoding]::ASCII
+    )
+
+    Add-UserPathEntry $shimDirectory
+    $powerShellVersionOutput = & "python3" "--version" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "python3 --version failed in PowerShell with exit code $LASTEXITCODE."
+    }
+    $powerShellVersion = (
+        $powerShellVersionOutput |
+            Where-Object { $_ -match "^Python\s+" } |
+            Select-Object -First 1
+    ) -replace "^Python\s+", ""
+    if ($powerShellVersion.Trim() -ne $Version) {
+        throw "python3 $Version is required, but version $powerShellVersion is first on PowerShell PATH."
+    }
+
+    $versionOutput = & $GitBashPath -lc "python3 --version" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "python3 --version failed in Git Bash with exit code $LASTEXITCODE."
+    }
+
+    $installedVersion = (
+        $versionOutput |
+            Where-Object { $_ -match "^Python\s+" } |
+            Select-Object -First 1
+    ) -replace "^Python\s+", ""
+    if ($installedVersion.Trim() -ne $Version) {
+        throw "python3 $Version is required, but version $installedVersion is first on Git Bash PATH."
     }
 }
 
@@ -225,6 +331,8 @@ Write-Host "Git Bash is available at $gitBashPath."
 Install-WingetCommand "jqlang.jq" "jq"
 Install-WingetCommand "koalaman.shellcheck" "shellcheck" "0.11.0"
 Install-WingetCommand "rhysd.actionlint" "actionlint" "1.7.12"
+Install-WingetCommand "Python.Python.3.13" "py" "3.13.15"
+Install-Python3Command "3.13.15" $gitBashPath
 Install-WingetCommand "OpenJS.NodeJS.LTS" "node"
 Assert-Command "npm"
 

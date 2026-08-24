@@ -78,6 +78,7 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
+- GitHub Copilot CLI sends stdin JSON at `.tool_input.command` and adds `--copilot`, which renders its native permission decision.
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi and pi-signed send the exact command string through `--command <exact string>`.
@@ -89,6 +90,7 @@ The quoting-decoder marker set is coupled to the classifier's decoder set in `bi
 
 Empty stdin, unparseable JSON, missing `jq` on the stdin path, missing Node, a missing policy owner, or an invalid policy response all fail open with exit 0 and no output.
 A broken hook must never deny every shell tool call.
+The wrapper streams the extracted command to the Node policy over stdin rather than an argument, preserving exact multiline shell bytes across Git Bash and native Windows Node.
 
 ## Output contract
 
@@ -101,6 +103,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
+- GitHub Copilot CLI reads `{"permissionDecision":"deny","permissionDecisionReason":"..."}` from stdout and therefore returns exit 0 in `--copilot` mode.
 
 ## Shared classifier ownership
 
@@ -115,6 +118,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | --- | --- | --- |
 | Claude | `.claude/settings.json` PreToolUse Bash hook forwarding stdin with `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
+| GitHub Copilot CLI | `.github/hooks/firstmate.json` `PreToolUse` hook matching `Bash`, through the Bash or PowerShell transport | Consumes the returned native `permissionDecision=deny` object. |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
@@ -127,6 +131,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+`tests/fm-copilot-harness.test.sh` separately pins Copilot's native response and full Windows PowerShell transport.
 The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:

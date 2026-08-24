@@ -35,7 +35,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex copilot
   printf '%s\n' "$fakebin"
 }
 
@@ -310,6 +310,45 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+run_copilot_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].bash" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 Copilot hook command in $1"
+  COPILOT_CLI=1 bash -c "$cmd"
+}
+
+test_copilot_hooks_semantic_lifecycle() {
+  local rec id=busy-ghcp-1 out state hooks
+  rec=$(make_spawn_case copilot-lifecycle copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/zz-firstmate-$id.json"
+  assert_present "$hooks" "copilot spawn did not write repository hooks"
+  jq -e . "$hooks" >/dev/null || fail "copilot hook settings are not valid JSON"
+  for ev in userPromptSubmitted agentStop sessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$hooks" >/dev/null || fail "copilot hooks lack $ev"
+  done
+
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+  rm -f "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop || fail "agentStop hook command failed"
+  assert_present "$state/$id.turn-ended" "agentStop no longer touches the notification marker"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "agentStop must classify idle, got '$out'"
+
+  run_copilot_hook "$hooks" userPromptSubmitted || fail "userPromptSubmitted hook failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "userPromptSubmitted must classify busy, got '$out'"
+
+  run_copilot_hook "$hooks" sessionEnd || fail "sessionEnd hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "idle copilot-hook" ] || fail "sessionEnd must classify idle, got '$out'"
+  pass "copilot hooks open on userPromptSubmitted and close on agentStop and sessionEnd"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -349,6 +388,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_copilot_hooks_semantic_lifecycle
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"
