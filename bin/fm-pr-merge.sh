@@ -37,6 +37,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
+# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
+# without a branch actor).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2

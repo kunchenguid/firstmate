@@ -1,8 +1,9 @@
 Mode: Codex foreground checkpoint.
 
 When this session owns supervision and away mode is not active:
-1. On a manual recovery or handling turn without an attached packet, drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+1. On a manual recovery or handling turn with neither an attached packet nor an attached fallback presentation, drain first with `bin/fm-wake-drain.sh`.
+   An attached complete fallback presentation has already been drained, so handle it directly without draining again.
+   After handling the presented wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
 4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, handle its attached `fm-wake-context.v1` packet without draining or rebuilding the same context, run the packet's exact acknowledgement command after handling, then start the next checkpoint.

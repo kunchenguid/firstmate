@@ -22,20 +22,24 @@ install_fixture() { # <home>
   install_stubs "$home"
 }
 
-install_stubs() { # <home>
-  local bin=$1/bin
-  printf '%s\n' 'fm_session_lock_owned_by_self() { return 0; }' > "$bin/fm-session-lock-lib.sh"
-  cat > "$bin/fm-classify-lib.sh" <<'SH'
+write_classify_stub() { # <bin>
+  cat > "$1/fm-classify-lib.sh" <<'SH'
 status_open_decisions() {
   printf 'choice\tneeds-decision\tchoose safely\n'
 }
 SH
-  cat > "$bin/fm-backend.sh" <<'SH'
+}
+
+write_backend_stub() { # <bin>
+  cat > "$1/fm-backend.sh" <<'SH'
 fm_backend_is_known() { return 0; }
 fm_backend_agent_state() { printf 'alive\n'; }
 fm_run_timed() { printf '%s\n' "$1" >> "$FM_HOME/backend-timeout"; shift; "$@"; }
 SH
-cat > "$bin/fm-crew-state.sh" <<'SH'
+}
+
+write_crew_state_stub() { # <bin>
+  cat > "$1/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 [ -f "$FM_HOME/drain.calls" ] || exit 9
 printf '%s\n' "$1" >> "$FM_HOME/crew-state.calls"
@@ -43,12 +47,20 @@ if [ -n "${FM_CREW_STATE_HANG:-}" ] && [ -e "$FM_CREW_STATE_HANG" ]; then
   printf '%s\n' "$$" > "$FM_CREW_STATE_HANG.entered"
   while [ -e "$FM_CREW_STATE_HANG" ]; do sleep 0.05; done
 fi
+case "$1" in
+  alpha) sleep "${FM_CREW_STATE_ALPHA_SECONDS:-0}" ;;
+  beta) sleep "${FM_CREW_STATE_BETA_SECONDS:-0}" ;;
+esac
 if [ -n "${FM_CREW_STATE_LARGE:-}" ]; then head -c 70000 /dev/zero | tr '\0' x; exit 0; fi
 printf 'state: working · source: pane · implementing\n'
 SH
-cat > "$bin/fm-wake-drain.sh" <<'SH'
+}
+
+write_drain_stub() { # <bin>
+  cat > "$1/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'drained\n' >> "$FM_HOME/drain.calls"
+sleep "${FM_DRAIN_SECONDS:-0}"
 if [ "${FM_DRAIN_MANY_STATUS:-0}" = 1 ]; then
   printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n'
   for n in $(seq 1 10); do printf 'alpha note: status-%s\n' "$n"; done
@@ -56,6 +68,13 @@ fi
 [ "${FM_DRAIN_APPEND_WAKE:-0}" != 1 ] || printf '1\t17\tsignal\talpha.status\tlate wake\n' >> "$FM_STATE_OVERRIDE/.wake-queue"
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-1\n' "${FM_DRAIN_ACK_THROUGH:-1}" >&2
 SH
+}
+
+install_stubs() { # <home>
+  local bin=$1/bin
+  printf '%s\n' 'fm_session_lock_owned_by_self() { return 0; }' > "$bin/fm-session-lock-lib.sh"
+  write_classify_stub "$bin"; write_backend_stub "$bin"
+  write_crew_state_stub "$bin"; write_drain_stub "$bin"
   chmod +x "$bin"/*.sh
 }
 
@@ -289,9 +308,71 @@ test_backend_timeout_normalizes_to_a_positive_decimal() {
     install_fixture "$home"; append_wake "$home" 1
     FM_WAKE_CONTEXT_BACKEND_TIMEOUT="$value" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
       "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "timeout fixture $value failed"
-    [ "$(cat "$home/backend-timeout")" = "$expected" ] || fail "timeout $value did not normalize to $expected"
+    [ "$(tail -1 "$home/backend-timeout")" = "$expected" ] || fail "timeout $value did not normalize to $expected"
   done
   pass "backend liveness timeout stays strictly positive after normalization"
+}
+
+test_collection_timeout_accepts_leading_zero_decimal() {
+  local value home packet
+  for value in 08 09; do
+    home="$TMP_ROOT/collection-timeout-$value"
+    install_fixture "$home"; append_wake "$home" 1
+    FM_WAKE_CONTEXT_COLLECTION_TIMEOUT="$value" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+      "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "collection timeout $value failed"
+    packet=$(packet_json "$home/out")
+    assert_packet_content "$packet"
+  done
+  pass "collection timeout accepts leading-zero decimal values"
+}
+
+test_collection_timeout_bounds_drain_before_ack() {
+  local home="$TMP_ROOT/slow-drain" started finished status=0
+  install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1
+  started=$SECONDS
+  FM_DRAIN_SECONDS=5 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=2 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  finished=$SECONDS
+  [ "$status" -ne 0 ] || fail "un drain lent a produit un paquet"
+  [ $((finished - started)) -lt 5 ] || fail "le drain lent a dépassé la borne agrégée"
+  grep -Fx 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: wake context collection timed out; run bin/fm-wake-drain.sh once.' "$home/out" >/dev/null \
+    || fail "le timeout avant ACK n’a pas demandé un drain unique"
+  [ ! -s "$home/err" ] || fail "le timeout avant ACK a inventé un ACK"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "le timeout du drain a publié un cache"
+  pass "le drain partage la borne agrégée et retombe avant présentation"
+}
+
+test_collection_timeout_falls_back_after_crew_state_hang() {
+  local home="$TMP_ROOT/collection-timeout" started finished status=0
+  install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1; : > "$home/hang"
+  started=$(date +%s)
+  FM_CREW_STATE_HANG="$home/hang" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=2 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  finished=$(date +%s); rm -f "$home/hang"
+  [ "$status" -ne 0 ] || fail "une collecte bloquée a produit un paquet"
+  [ $((finished - started)) -le 4 ] || fail "le fallback a dépassé le délai agrégé"
+  grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback canonique manque"
+  grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback a perdu son ACK"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "le timeout a publié un cache"
+  pass "une sonde crew-state bloquée respecte le délai agrégé et le fallback"
+}
+
+test_collection_timeout_spans_slow_crew_probes() {
+  local home="$TMP_ROOT/slow-probes" started finished status=0
+  install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1
+  printf 'window=fleet:beta\nbackend=tmux\nworktree=%s\nkind=ship\n' "$home/worktree" > "$home/state/beta.meta"
+  printf 'working: beta\n' > "$home/state/beta.status"; printf '1\t2\tsignal\tbeta.status\tsignal: beta.status\n' >> "$home/state/.wake-queue"
+  started=$(date +%s)
+  FM_CREW_STATE_ALPHA_SECONDS=1 FM_CREW_STATE_BETA_SECONDS=5 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=3 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  finished=$(date +%s); [ "$status" -ne 0 ] || fail "deux sondes lentes ont produit un paquet"
+  [ $((finished - started)) -lt 6 ] || fail "les sondes lentes ont dépassé la borne agrégée"
+  { grep -Fx 'alpha' "$home/crew-state.calls" >/dev/null && grep -Fx 'beta' "$home/crew-state.calls" >/dev/null; } \
+    || fail "la borne agrégée n’a pas couvert deux vraies sondes lentes"
+  grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback des sondes lentes manque"
+  grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback des sondes lentes a perdu l’ACK"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "les sondes lentes ont publié un cache"
+  pass "plusieurs sondes crew-state partagent une borne agrégée"
 }
 
 test_cursor_merge_follows_live_rotation_without_regression() {
@@ -384,6 +465,10 @@ test_absolute_check_key_maps_to_task
 test_status_only_recovery_uses_zero_ack
 test_post_drain_overflow_falls_back
 test_backend_timeout_normalizes_to_a_positive_decimal
+test_collection_timeout_accepts_leading_zero_decimal
+test_collection_timeout_bounds_drain_before_ack
+test_collection_timeout_falls_back_after_crew_state_hang
+test_collection_timeout_spans_slow_crew_probes
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor

@@ -15,6 +15,8 @@ MAX_STATUS_FILES=64
 MAX_DECISIONS=24
 MAX_PACKET_BYTES=65536
 BACKEND_TIMEOUT=${FM_WAKE_CONTEXT_BACKEND_TIMEOUT:-3}
+COLLECTION_TIMEOUT=${FM_WAKE_CONTEXT_COLLECTION_TIMEOUT:-10}
+COLLECTION_DEADLINE=0
 CACHE="$STATE/.wake-context-cache"
 CACHE_CURSOR="$CACHE.status-cursor"
 FALLBACK_RECEIPT="$STATE/.wake-context-fallback-receipt"
@@ -182,24 +184,38 @@ status_tail_json() { # <task>
   tail -n "$MAX_STATUS_LINES" "$file" | cut -c "1-$MAX_STATUS_CHARS" | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
+remaining_collection_timeout() {
+  local remaining=$((COLLECTION_DEADLINE - SECONDS))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
 endpoint_json() { # <meta>
-  local backend target remote live
+  local backend target remote live timeout status
   backend=$(meta_value "$1" backend); [ -n "$backend" ] || backend=tmux
   target=$(meta_value "$1" window); remote=$(meta_value "$1" remote_host)
   [ -n "$target" ] || { printf 'null\n'; return; }
   live=unknown
   if [ -z "$remote" ] && fm_backend_is_known "$backend"; then
-    live=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$BACKEND_TIMEOUT" fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unknown)
+    timeout=$(remaining_collection_timeout) || return 124
+    [ "$timeout" -le "$BACKEND_TIMEOUT" ] || timeout=$BACKEND_TIMEOUT
+    live=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$timeout" fm_backend_agent_state "$backend" "$target" 2>/dev/null); status=$?
+    [ "$status" -ne 124 ] || [ "$timeout" -eq "$BACKEND_TIMEOUT" ] || return 124
+    [ "$status" -eq 0 ] || live=unknown
   fi
   jq -cn --arg backend "$backend" --arg target "$target" --arg liveness "$live" \
     '{backend:$backend,target:$target,liveness:$liveness}'
 }
 
 current_state_json() { # <task> <meta>
-  local remote line
+  local remote line timeout status
   remote=$(meta_value "$2" remote_host)
   [ -z "$remote" ] || { printf 'null\n'; return; }
-  line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-crew-state.sh" "$1" 2>/dev/null) || line=
+  timeout=$(remaining_collection_timeout) || return 124
+  line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_run_timed "$timeout" "$SCRIPT_DIR/fm-crew-state.sh" "$1" 2>/dev/null); status=$?
+  [ "$status" -ne 124 ] || return 124
+  [ "$status" -eq 0 ] || line=
   jq -cn --arg line "$line" '{summary:(if $line == "" then null else $line end)}'
 }
 
@@ -212,8 +228,9 @@ report_json() { # <task>
 
 write_task() { # <task> <out>
   local task=$1 meta="$STATE/$1.meta" current endpoint status report
-  current=$(current_state_json "$task" "$meta")
-  endpoint=$(endpoint_json "$meta")
+  current=$(current_state_json "$task" "$meta") || return
+  endpoint=$(endpoint_json "$meta") || return
+  remaining_collection_timeout >/dev/null || return 124
   status=$(status_tail_json "$task")
   report=$(report_json "$task")
   jq -cn --arg id "$task" --argjson current "$current" --argjson endpoint "$endpoint" \
@@ -252,7 +269,7 @@ monitoring_json() {
 }
 
 extract_ack() { # <stderr>
-  sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run //p' "$1" | tail -1
+  sed -n 's|^WAKE_ACK_REQUIRED: after handling completes run \(bin/fm-wake-drain\.sh --ack-through [0-9][0-9]* --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*\)$|\1|p' "$1" | tail -1
 }
 
 bounds_json() {
@@ -298,6 +315,7 @@ compose_packet() { # <ack> <generation> <additional> <drain-out> <drain-err>
 
 build_packet() { # <queue> <tasks> <drain-out> <drain-err>
   local ack_command additional=false packet ack_through generation bytes
+  remaining_collection_timeout >/dev/null || return 124
   ack_command=$(extract_ack "$4"); [ -n "$ack_command" ] || return 1
   ack_through=$(printf '%s' "$ack_command" | sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p')
   generation=$(printf '%s' "$ack_command" | sed -n 's/.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p')
@@ -306,6 +324,7 @@ build_packet() { # <queue> <tasks> <drain-out> <drain-err>
   write_raw_wakes "$1" "$ack_through" "$TMP_DIR/raw.jsonl" || return 1
   write_tasks "$2" "$TMP_DIR/tasks.jsonl" || return 1
   write_decisions "$TMP_DIR/decisions.jsonl" || return 1
+  remaining_collection_timeout >/dev/null || return 124
   [ "$(awk -F '\t' -v ack="$ack_through" '$2 > ack { found=1 } END { print found+0 }' "$1")" -eq 0 ] || additional=true
   project_presentation "$3" "$TMP_DIR/drain.projected" || return 1
   packet=$(compose_packet "$ack_command" "$generation" "$additional" "$TMP_DIR/drain.projected" "$4") || return 1
@@ -325,8 +344,7 @@ finish_presentation() {
     || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
 }
 
-main() {
-  [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
+normalize_timeouts() {
   case "$BACKEND_TIMEOUT" in
     ''|*[!0-9]*) BACKEND_TIMEOUT=3 ;;
     *)
@@ -334,6 +352,16 @@ main() {
       [ -n "$BACKEND_TIMEOUT" ] || BACKEND_TIMEOUT=3
       ;;
   esac
+  case "$COLLECTION_TIMEOUT" in
+    ''|*[!0-9]*) COLLECTION_TIMEOUT=10 ;;
+    *)
+      COLLECTION_TIMEOUT=$(printf '%s' "$COLLECTION_TIMEOUT" | sed 's/^0*//')
+      [ -n "$COLLECTION_TIMEOUT" ] || COLLECTION_TIMEOUT=10
+      ;;
+  esac
+}
+
+prepare_presentation() {
   fm_session_lock_owned_by_self "$STATE" || fail_before_presentation "this session does not own the fleet lock"
   replay_cached && exit 0
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
@@ -343,11 +371,44 @@ main() {
   copy_queue "$TMP_DIR/queue" || fail_before_presentation "the wake queue could not be read safely"
   validate_queue "$TMP_DIR/queue" || fail_before_presentation "the queue is malformed"
   preflight "$TMP_DIR/queue"
+}
+
+drain_presentation() {
   if ! FM_WAKE_CONTEXT_NONMUTATING=1 FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE="$TMP_DIR/status-cursor.after" \
     "$SCRIPT_DIR/fm-wake-drain.sh" > "$TMP_DIR/drain.out" 2> "$TMP_DIR/drain.err"; then
     emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; exit 1
   fi
+}
+
+collect_presentation() {
+  drain_presentation
   finish_presentation
+}
+
+run_collection() {
+  COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_run_timed "$COLLECTION_TIMEOUT" collect_presentation
+}
+
+finish_collection() {
+  local status
+  run_collection; status=$?
+  if [ "$status" -eq 124 ]; then
+    if [ -f "$TMP_DIR/drain.err" ] && [ -n "$(extract_ack "$TMP_DIR/drain.err")" ]; then
+      emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"
+    else
+      fail_before_presentation "wake context collection timed out"
+    fi
+  fi
+  return "$status"
+}
+
+main() {
+  [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
+  normalize_timeouts
+  prepare_presentation
+  finish_collection
 }
 
 main "$@"

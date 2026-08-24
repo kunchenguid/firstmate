@@ -17,6 +17,11 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  createBranchDispatchOffer,
+  FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
+} from "./lib/fm-branch-dispatch.ts";
+import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
@@ -89,7 +94,6 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
-const wakeContextTimeoutMs = positiveInteger("FM_WAKE_CONTEXT_TIMEOUT_MS", 5000);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -194,12 +198,12 @@ function wakeContextPresentation(): string {
     env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
     encoding: "utf8",
     maxBuffer: 128 * 1024,
-    timeout: wakeContextTimeoutMs,
   });
-  if (["ENOBUFS", "ETIMEDOUT"].includes((result.error as NodeJS.ErrnoException | undefined)?.code || "")) return fallback;
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return fallback;
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
   if (result.status === 0 && output) return output;
   if (output.includes("WAKE_CONTEXT_FALLBACK:")) return output;
+  if (/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain\.sh --ack-through [0-9]+ --recovery-generation [A-Za-z0-9._-]+$/m.test(output)) return output;
   return output ? `${output}\n${fallback}` : fallback;
 }
 
@@ -310,9 +314,19 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
+  function offerWakeToBranch(message: string): boolean {
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    const isCheckTrigger = /^check:/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, !isCheckTrigger && scope.eligible);
+    pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
+    return offer.accepted;
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
+    repairFailed: boolean,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
@@ -327,6 +341,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
     }
+    if (!repairFailed && offerWakeToBranch(message)) return;
     await sendWake(owner, message);
   }
 
@@ -524,7 +539,7 @@ export default function (pi: ExtensionAPI) {
             const restoration = await restoreAfterActionableClose(owner, predecessor);
             if (!generationIsLive(owner)) return;
             const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            await deliverActionableWake(owner, message, restoration.recovery);
+            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);

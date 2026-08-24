@@ -63,7 +63,7 @@
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
 #                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
+#                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
@@ -1379,7 +1379,11 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done/blocked pi proves an empty composer.
+# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# pi is parked on an interactive prompt waiting for a human keystroke: its menu
+# is drawn above the separator pair, so the composer region looks free while the
+# keys would answer the prompt instead of composing (issue #2797). Structure
+# cannot disprove that, so a blocked pi defers rather than claiming empty.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1406,7 +1410,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     return 0
   fi
   case "$agent_status" in
-    idle|done|blocked) printf 'empty' ;;
+    idle|done) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
 }
