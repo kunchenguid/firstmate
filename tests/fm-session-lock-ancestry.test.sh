@@ -275,6 +275,53 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_foreign_omp_pid_does_not_borrow_the_checkers_own_claudecode_marker() {
+  local dir fakebin
+  dir="$TMP_ROOT/foreign-omp"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  500:comm=) printf '%s\n' omp ;;
+  500:args=) printf '%s\n' omp ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' claude ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 650 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # pid 500 is an omp process outside this ancestry entirely - this checking
+  # process descends from the unrelated harness 650 instead. $CLAUDECODE=1
+  # here describes THIS session's own backend, not pid 500's: trusting it
+  # would let any Claude-marked checker treat an unrelated omp process (which
+  # may not even be Claude-backed - omp is also the name of an unrelated
+  # popular shell-prompt tool) as a live competing session forever, and
+  # trusting its absence would let an unmarked checker declare a genuinely
+  # live Claude-backed omp session stale and steal its lock.
+  printf '500\n' > "$dir/state/.lock"
+  if CLAUDECODE=1 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a foreign omp pid outside this ancestry was claimed as this session's own"
+  fi
+  if CLAUDECODE=1 lib_eval "$fakebin" 'fm_harness_pid_alive 500'; then
+    fail "a foreign omp pid was classified as alive using the checker's own CLAUDECODE marker instead of its own"
+  fi
+  pass "session-lock: a foreign omp pid outside this ancestry is never classified as alive from the checker's own CLAUDECODE marker"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -416,6 +463,7 @@ test_ordinary_paths_are_never_harness_processes
 test_omp_is_claude_identified_only_with_claudecode_marker
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_foreign_omp_pid_does_not_borrow_the_checkers_own_claudecode_marker
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

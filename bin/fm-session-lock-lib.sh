@@ -30,8 +30,10 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 # would misclaim an omp session running a different backend. Its Claude
 # identity is instead recognized in fm_harness_process_matches() below, gated
 # strictly on the CLAUDECODE=1 marker the same way fm-harness.sh's own
-# detect_own() already trusts it (env markers before ancestry). Do not widen
-# this to a bare name match.
+# detect_own() already trusts it (env markers before ancestry), and only while
+# identifying the caller's own ancestry - never for an arbitrary foreign pid
+# such as a recorded lock holder, whose actual backend the caller's own
+# environment cannot describe. Do not widen this to a bare name match.
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -63,11 +65,13 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   3. omp (Oh My Pi), but only when $3 marks this as the caller's own
+#      ancestry walk - see the note below.
+#   4. a bare interpreter (node, python) running a harness script path.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [self=0]
+  local comm=$1 args=$2 self=${3:-0} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -83,12 +87,19 @@ fm_harness_process_matches() {  # <comm> <args>
   # underlying Claude Agent SDK and sets CLAUDECODE=1 for downstream
   # compatibility, but its own process name is "omp" with no separate
   # "claude"-named process anywhere in its ancestry - there is no nested
-  # worker chain to climb the way native Claude Code has one. Every caller in
-  # this file runs as a descendant of the primary session's own process tree
-  # (the Stop/PreToolUse hook scripts, fm-lock.sh, fm-session-start.sh), so
-  # the marker is reliably inherited here too. Gate strictly on the marker,
-  # never the bare name alone (see the FM_HARNESS_NAMES comment above).
-  if [ "$base" = omp ] && [ "${CLAUDECODE:-}" = "1" ]; then
+  # worker chain to climb the way native Claude Code has one. Gate strictly on
+  # the marker, never the bare name alone (see the FM_HARNESS_NAMES comment
+  # above) - AND gate on $self=1. $CLAUDECODE is always read from the CALLING
+  # process's environment, never the examined pid's: that is sound evidence
+  # only while the examined pid is a verified member of the caller's own
+  # ancestry, since env vars are inherited top-down and the caller would then
+  # carry the same value that pid set. Every caller is responsible for that
+  # verification: fm_harness_ancestry_pids's own walk always passes self=1
+  # because it discovers $pid by climbing $$'s kernel-reported ppid chain, and
+  # fm_harness_pid_alive checks membership in that same walk before passing
+  # self=1 for a lock-file pid, so a pid from a genuinely different session
+  # never borrows the caller's marker.
+  if [ "$base" = omp ] && [ "$self" -eq 1 ] && [ "${CLAUDECODE:-}" = "1" ]; then
     FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
@@ -132,7 +143,10 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    # self=1: $pid was reached by walking $$'s own kernel-reported ppid chain,
+    # so it is a verified ancestor of the caller - the one case where the
+    # caller's own $CLAUDECODE is sound evidence about $pid's backend.
+    if fm_harness_process_matches "$comm" "$args" 1; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -165,12 +179,30 @@ EOF
 }
 
 # True if $1 is a live process that looks like a verified harness.
-fm_harness_pid_alive() {
-  local pid=$1 comm args
+#
+# $1 is read from a lock file and may belong to an entirely different session
+# than the caller - the whole point of this check is telling a live competing
+# session apart from a dead one. fm_harness_process_matches's omp branch trusts
+# the caller's own $CLAUDECODE, which is sound only when $1 actually IS a
+# verified ancestor of the caller (env vars are inherited top-down, so the
+# caller would carry the same value that ancestor set); it says nothing about
+# an unrelated pid that merely happens to be recorded in the lock file. So
+# self is computed here by checking $1 for membership in this process's own
+# fm_harness_ancestry_pids(), the same membership test fm_session_lock_owned_by_self
+# already uses to answer the identical question - never assumed from the
+# caller's context.
+fm_harness_pid_alive() {  # <pid>
+  local pid=$1 comm args self=0 ancestry ap
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  ancestry=$(fm_harness_ancestry_pids 2>/dev/null) || true
+  while IFS= read -r ap; do
+    [ "$ap" = "$pid" ] && { self=1; break; }
+  done <<EOF
+$ancestry
+EOF
+  fm_harness_process_matches "$comm" "$args" "$self"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
