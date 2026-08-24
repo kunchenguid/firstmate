@@ -195,6 +195,11 @@ printf '%s' "$health" | jq -e --argjson pid "$SERVER_PID" '.ok == true and .pid 
 headers=$(curl -fsSI "$url") || fail "application shell was unavailable"
 assert_contains "$headers" "Content-Security-Policy:" "application omitted its content security policy"
 assert_contains "$headers" "X-Frame-Options: DENY" "application omitted frame protection"
+shell=$(curl -fsS "$url") || fail "application shell body was unavailable"
+assert_contains "$shell" 'id="freshness-announcement"' \
+  "application omitted the state-change announcement channel"
+assert_not_contains "$shell" 'class="freshness" aria-live' \
+  "visual freshness changes remained inside a repeatedly announced live region"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "${url}api/v1/board")
 [ "$code" = 403 ] || fail "board with a foreign Host header returned $code"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "$url")
@@ -809,7 +814,7 @@ if (liveWrites !== 1) process.exit(1);
 const liveState = {};
 if (!updateLiveStatus(liveState, liveRegion, "fresh", "Updated just now")) process.exit(1);
 if (updateLiveStatus(liveState, liveRegion, "fresh", "Updated 10s ago")) process.exit(1);
-if (liveRegion.textContent !== "Updated just now" || liveWrites !== 1) process.exit(1);
+if (liveRegion.textContent !== "Updated 10s ago" || liveWrites !== 2) process.exit(1);
 
 const unsent = new Map([[card.key, {
   action: "answer",

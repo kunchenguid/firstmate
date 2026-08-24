@@ -59,10 +59,11 @@
           </select>
         </label>
         <button class="refresh-button" id="refresh" type="button">Refresh</button>
-        <div class="freshness" aria-live="polite">
+        <div class="freshness">
           <span class="freshness-dot" id="freshness-dot" aria-hidden="true"></span>
           <span id="freshness-label">Loading the fleet…</span>
         </div>
+        <span class="visually-hidden" id="freshness-announcement" role="status" aria-live="polite"></span>
       </section>
 
       <section class="warning-stack" id="warnings" aria-live="polite" hidden></section>

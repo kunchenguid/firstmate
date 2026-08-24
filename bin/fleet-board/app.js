@@ -70,6 +70,7 @@ const elements = {
   refresh: document.querySelector("#refresh"),
   freshnessDot: document.querySelector("#freshness-dot"),
   freshnessLabel: document.querySelector("#freshness-label"),
+  freshnessAnnouncement: document.querySelector("#freshness-announcement"),
   warnings: document.querySelector("#warnings"),
   needsYouCount: document.querySelector("#needs-you-count"),
   openCount: document.querySelector("#open-count"),
@@ -588,7 +589,9 @@ function showToast(message, kind = "success") {
 }
 
 function setFreshness(status, label) {
-  updateLiveStatus(elements.freshnessDot.dataset, elements.freshnessLabel, status, label);
+  if (updateLiveStatus(elements.freshnessDot.dataset, elements.freshnessLabel, status, label)) {
+    updateValue(elements.freshnessAnnouncement, "textContent", label);
+  }
 }
 
 async function loadBoard(force = false) {

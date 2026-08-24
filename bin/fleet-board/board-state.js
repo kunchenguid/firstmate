@@ -67,9 +67,9 @@ function updateValue(target, key, value) {
 }
 
 function updateLiveStatus(stateTarget, labelTarget, status, label) {
-  if (!updateValue(stateTarget, "state", status)) return false;
+  const stateChanged = updateValue(stateTarget, "state", status);
   updateValue(labelTarget, "textContent", label);
-  return true;
+  return stateChanged;
 }
 
 function serializeActionOperations(drafts, maxBytes) {
