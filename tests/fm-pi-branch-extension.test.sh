@@ -531,8 +531,8 @@ const storedNoop = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
   .split("\n")
   .map((line) => JSON.parse(line))
   .find((row) => row.task === "fleet" && row.summary === "fleet reviewed, nothing changed");
-if (!storedNoop || storedNoop.verdict !== "routine") {
-  throw new Error("the silent no-op heartbeat outcome was not stored durably");
+if (!storedNoop || storedNoop.verdict !== "routine" || storedNoop.silent !== true) {
+  throw new Error("the silent no-op heartbeat disposition was not stored durably");
 }
 await heartbeatReport.execute(
   "fleet-routine-action",

@@ -75,6 +75,7 @@ rows = [json.loads(line) for line in open(sys.argv[1])]
 assert [row["seq"] for row in rows] == [1, 2], rows
 assert rows[0]["verdict"] == "routine" and rows[1]["verdict"] == "captain", rows
 assert rows[0]["summary"] == 'worker healthy, "quoted" text kept', rows[0]
+assert rows[0]["silent"] is False and rows[1]["silent"] is False, rows
 PY
 
   # mark-read moves only the cursor sidecar; the log bytes never change.
@@ -110,6 +111,33 @@ PY
   assert_contains "$out" "malformed final record" "torn-tail refusal lost its diagnostic"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the torn outcome store"
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
+}
+
+test_outcome_startup_replay_preserves_silence() {
+  local home replay
+  home="$TMP_ROOT/store-silent-home"
+  mkdir -p "$home/state"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
+    || fail "silent outcome append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'worker recovered automatically' >/dev/null \
+    || fail "visible outcome append failed"
+
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
+  assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
+  assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
+    || fail "startup replay did not mark the silent and visible rows read"
+
+  printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
+    >> "$home/state/branch-outcomes.jsonl"
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
+  assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
+    || fail "startup replay did not mark the legacy row read"
+  pass "startup replay skips silent outcomes and preserves visible and legacy rows"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -506,6 +534,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
+test_outcome_startup_replay_preserves_silence
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
