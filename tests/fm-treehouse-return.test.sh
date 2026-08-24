@@ -348,6 +348,8 @@ test_guard_refusal_preserves_child_worktree_commits() {
   git -C "$childwt" checkout -q --detach
   git -C "$childwt" commit -q --allow-empty -m unnamed-child-work
   head=$(git -C "$childwt" rev-parse HEAD)
+  mkdir -p "$childwt/.claude"
+  printf '{}\n' > "$childwt/.claude/settings.local.json"
   # A file at refs/firstmate/rescue/<child-id> blocks the <id>/<timestamp> ref
   # below it, so this detached commit can be neither certified nor rescued. It
   # points at the baseline, so it never makes HEAD durable by itself.
@@ -379,6 +381,8 @@ test_guard_refusal_preserves_child_worktree_commits() {
   [ -d "$childwt" ] || fail "guard refusal deleted the child worktree holding unreferenced commits: $out"
   [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
     || fail "child worktree no longer holds its unreferenced commit"
+  assert_present "$childwt/.claude/settings.local.json" \
+    "guard refusal stripped the preserved child worktree's harness hook file"
   assert_contains "$out" "$childwt" \
     "guard refusal did not name the preserved child worktree"
   assert_contains "$out" 'REFUSED: cannot create rescue ref' \
@@ -570,21 +574,35 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
   pass "an unusable task id still refuses to return unnamed committed work"
 }
 
-# A PATH with every directory that provides a `treehouse` executable removed, so
-# a case can exercise the no-Treehouse host fallback on a machine that does have
-# Treehouse installed.
-path_without_treehouse() {
-  local dir out= saved_ifs=$IFS
+# A PATH that cannot resolve `treehouse`, so a case can exercise the
+# no-Treehouse host fallback on a machine that does have Treehouse installed.
+# Directories are dropped whole, so any tool sharing a directory with Treehouse
+# (Homebrew ships git beside it) is re-provided from its pre-filter location in
+# a case-local bin dir; the result is verified to still run git and to no longer
+# find treehouse, so a case can never fail for a PATH reason it does not name.
+make_no_treehouse_path() {  # <case-dir>
+  local case_dir=$1 toolbin dir tool resolved out= built saved_ifs=$IFS
+  toolbin="$case_dir/toolbin"
+  mkdir -p "$toolbin" || return 1
+  for tool in git bash env sh; do
+    resolved=$(command -v "$tool" 2>/dev/null) || continue
+    case "$resolved" in
+      /*) ln -sf "$resolved" "$toolbin/$tool" || return 1 ;;
+    esac
+  done
   IFS=:
   for dir in $PATH; do
     IFS=$saved_ifs
-    [ -n "$dir" ] || { IFS=:; continue; }
-    if [ -x "$dir/treehouse" ]; then IFS=:; continue; fi
-    out="${out:+$out:}$dir"
+    if [ -n "$dir" ] && [ ! -x "$dir/treehouse" ]; then
+      out="${out:+$out:}$dir"
+    fi
     IFS=:
   done
   IFS=$saved_ifs
-  printf '%s\n' "$out"
+  built="$case_dir/fakebin:$toolbin${out:+:$out}"
+  ( PATH=$built; command -v treehouse >/dev/null 2>&1 ) && return 1
+  ( PATH=$built; command -v git >/dev/null 2>&1 ) || return 1
+  printf '%s\n' "$built"
 }
 
 # A forced-secondmate teardown whose non-Orca child worktree cannot be returned
@@ -605,6 +623,8 @@ make_no_treehouse_child_case() {  # <name>
   fm_git_worktree "$childproj" "$childwt" fm/child-branch
   git -C "$childwt" checkout -q --detach
   git -C "$childwt" commit -q --allow-empty -m unnamed-child-work
+  mkdir -p "$childwt/.claude"
+  printf '{}\n' > "$childwt/.claude/settings.local.json"
 
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
@@ -623,22 +643,24 @@ make_no_treehouse_child_case() {  # <name>
   printf '%s\n' "$case_dir"
 }
 
-run_no_treehouse_teardown() {  # <case-dir>
-  local case_dir=$1
+run_no_treehouse_teardown() {  # <case-dir> <path>
+  local case_dir=$1 sandbox_path=$2
   FM_HOME="$case_dir/home" \
-  PATH="$case_dir/fakebin:$(path_without_treehouse)" \
+  PATH="$sandbox_path" \
     "$TEARDOWN" domain --force 2>&1
 }
 
 test_child_worktree_without_treehouse_rescues_committed_work() {
-  local case_dir childproj childwt head out rescue_refs
+  local case_dir childproj childwt head out rescue_refs sandbox_path
   case_dir=$(make_no_treehouse_child_case no-treehouse-child-rescue)
   childproj="$case_dir/projects/alpha"
   childwt="$case_dir/child-worktree"
   head=$(git -C "$childwt" rev-parse HEAD)
+  sandbox_path=$(make_no_treehouse_path "$case_dir") \
+    || fail "could not build a git-capable PATH that cannot resolve treehouse"
 
   errexit_off
-  out=$(run_no_treehouse_teardown "$case_dir")
+  out=$(run_no_treehouse_teardown "$case_dir" "$sandbox_path")
   errexit_restore
   [ ! -d "$childwt" ] \
     || fail "the no-Treehouse fallback never deleted the child worktree: $out"
@@ -652,7 +674,7 @@ test_child_worktree_without_treehouse_rescues_committed_work() {
 }
 
 test_child_worktree_without_treehouse_refuses_unrescuable_work() {
-  local case_dir childproj childwt head out rc
+  local case_dir childproj childwt head out rc sandbox_path
   case_dir=$(make_no_treehouse_child_case no-treehouse-child-refusal)
   childproj="$case_dir/projects/alpha"
   childwt="$case_dir/child-worktree"
@@ -663,9 +685,11 @@ test_child_worktree_without_treehouse_refuses_unrescuable_work() {
   mkdir -p "$childproj/.git/refs/firstmate/rescue"
   git -C "$childproj" rev-parse refs/heads/fm/child-branch \
     > "$childproj/.git/refs/firstmate/rescue/child"
+  sandbox_path=$(make_no_treehouse_path "$case_dir") \
+    || fail "could not build a git-capable PATH that cannot resolve treehouse"
 
   errexit_off
-  out=$(run_no_treehouse_teardown "$case_dir")
+  out=$(run_no_treehouse_teardown "$case_dir" "$sandbox_path")
   rc=$?
   errexit_restore
   [ "$rc" -ne 0 ] || fail "forced teardown ignored an unrescuable child commit: $out"
@@ -673,6 +697,8 @@ test_child_worktree_without_treehouse_refuses_unrescuable_work() {
     || fail "the no-Treehouse fallback deleted a child worktree holding unreferenced commits: $out"
   [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
     || fail "preserved child worktree no longer holds its unreferenced commit"
+  assert_present "$childwt/.claude/settings.local.json" \
+    "guard refusal stripped the preserved child worktree's harness hook file"
   assert_present "$case_dir/subhome/state/child.meta" \
     "guard refusal removed the child task record"
   assert_contains "$out" 'REFUSED: cannot create rescue ref' \

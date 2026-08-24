@@ -2526,6 +2526,10 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      # Both legs below end this worktree, so the committed-work guard runs
+      # once here, before any of its contents are touched: a refusal then
+      # preserves the worktree exactly as the worker left it.
+      guard_child_worktree_removal "$child_id" "$child_wt" "child worktree" || return $?
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -2544,9 +2548,6 @@ cleanup_firstmate_home_children() {
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
         fi
       else
-        # No pooled return is possible here, so this branch deletes the child
-        # worktree outright and must certify its committed work first.
-        guard_child_worktree_removal "$child_id" "$child_wt" "child worktree" || return $?
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
