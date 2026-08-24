@@ -80,11 +80,11 @@ cat <<'JSON' | filter_snapshot
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
     "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
-    "programs":[{"id":"mate-program","title":"Coordinate the design program","repo":"firstmate","kind":"program","state":"working","source":"backlog","risk":{"level":"low","rationale":"Coordination only.","source":"task-body"},"context":"Program context."}],
+    "programs":[{"id":"mate-program","title":"Coordinate the design program","repo":"firstmate","kind":"program","state":"working","source":"backlog","risk":{"level":"low","rationale":"Coordination only.","source":"task-body"},"context":"Program context."},{"id":"mate-deferred-program","title":"Revisit the deferred program","repo":"firstmate","kind":"program","state":"deferred","source":"backlog","deferred_marker":true,"risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"context":"Deferred program context."}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
     "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]}],
     "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
-    "counts":{"programs":1,"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
+    "counts":{"programs":2,"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
   },{
     "id":"primary","remote":false,"current":{"state":"ready","reason":null},
     "queued":[{"id":"ready-task","title":"Secondmate task with a reserved id","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Namespace fixture.","source":"task-body"},"context":"Secondmate namespace context.","captain_actionable":false,"unresolved_blocker_ids":[]}],
@@ -277,8 +277,8 @@ printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
   and (.actions.operation_scope | test("^[a-f0-9]{64}$"))
   and .actions.max_text_bytes == 8192
-  and .counts == {backlog:3,in_progress:7,verification:1,needs_you:2,waiting:3,done:2}
-  and .summary == {open:16,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:3,in_progress:7,verification:1,needs_you:2,waiting:4,done:2}
+  and .summary == {open:17,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
          and .home.namespace == "primary"
@@ -304,6 +304,8 @@ printf '%s' "$board" | jq -e '
        | .lane == "in_progress" and .status.source == "backlog")
   and ([.cards[] | select(.id == "mate-program")][0]
        | .lane == "in_progress" and .home.id == "design-mate" and .status.source == "backlog")
+  and ([.cards[] | select(.id == "mate-deferred-program")][0]
+       | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "deferred-task")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "mate-held")][0]

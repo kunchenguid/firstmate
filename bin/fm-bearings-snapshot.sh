@@ -349,13 +349,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold"
             and .deferred_marker != true)]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | ([.programs[]? | select(.deferred_marker != true)]) as $active_programs
        | . + {
            bearings_captain_holds:$captain_holds,
            bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_programs:$active_programs,
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
-               elif ((.programs | length) + (.active_children | length)) > 0 then "active_child_work"
+               elif (($active_programs | length) + (.active_children | length)) > 0 then "active_child_work"
                elif ($backlog_holds | length) > 0 then "externally_held"
                else "unknown" end
              else .current.state end)
@@ -370,7 +372,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id,state:.bearings_state,
           doing:((if .bearings_state == "active_child_work" then
                     ([.active_children[] | .id + ": " + (.doing // .state)]
-                     + [.programs[] | .id + ": " + (.title // "program")]
+                     + [.bearings_programs[] | .id + ": " + (.title // "program")]
                      | join("; "))
                   elif .bearings_state == "captain_decision" then
                     ([.bearings_captain_holds[] | .summary] | join("; "))
@@ -394,7 +396,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)]
-                   + [.programs[] | .id + ": " + (.title // "program")]
+                   + [.bearings_programs[] | .id + ": " + (.title // "program")]
                    | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)

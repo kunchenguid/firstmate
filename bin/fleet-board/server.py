@@ -524,7 +524,8 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         for item in mate.get("holds") or []:
             merge_card(cards, mate_card(item, "waiting"))
         for item in mate.get("programs") or []:
-            merge_card(cards, mate_card(item, "in_progress", source="backlog"))
+            lane = "waiting" if item.get("deferred_marker") else "in_progress"
+            merge_card(cards, mate_card(item, lane, source="backlog"))
         for item in mate.get("active_children") or []:
             lane = "verification" if item.get("source") == "run-step" else "in_progress"
             merge_card(cards, mate_card(item, lane))

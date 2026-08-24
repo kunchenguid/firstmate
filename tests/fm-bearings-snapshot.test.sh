@@ -2155,7 +2155,30 @@ EOF
       and (.in_flight | any(.id == "program-only" and .state == "active_child_work"
         and (.doing | contains("rollout-program"))))
   ' >/dev/null || fail "Bearings omitted a program-only secondmate from current work: $json"
-  pass "program-only secondmates remain visible as current work"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] rollout-program - Coordinate the rollout (repo: sample) (kind: program)
+  DEFERRED - revisit after the next planning cycle.
+
+## Queued
+
+## Done
+EOF
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "program-only")
+    | .current.state == "no_active_work"
+      and ([.programs[] | select(.id == "rollout-program")][0]
+        | .state == "deferred" and .deferred_marker == true)
+  ' >/dev/null || fail "a deferred secondmate program remained canonical current work: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "program-only" and .state == "no_active_work"))
+      and (.in_flight | any(.id == "program-only") | not)
+  ' >/dev/null || fail "Bearings treated a deferred secondmate program as current work: $json"
+  pass "program-only secondmates distinguish active and deferred work"
 }
 
 test_main_captain_readiness_matches_secondmate_projection() {

@@ -865,7 +865,11 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[] as $work
          | select($work.current_role == "program")
          | card_fields($work; task_record($work.id)) +
-           {id:$work.id,state:"working",source:"backlog",doing:null} ]) as $programs_all
+           {id:$work.id,
+            state:(if $work.deferred_marker == true then "deferred" else "working" end),
+            source:"backlog",doing:null,
+            deferred_marker:($work.deferred_marker // false)} ]) as $programs_all
+    | ([ $programs_all[] | select(.deferred_marker != true) ]) as $active_programs_all
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[] as $task
@@ -912,7 +916,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        else {kind:null,ids:[]} end) as $invalidity
     | (if $valid | not then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
-       elif (($programs_all | length) + ($active_all | length)) > 0 then "active_child_work"
+       elif (($active_programs_all | length) + ($active_all | length)) > 0 then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
