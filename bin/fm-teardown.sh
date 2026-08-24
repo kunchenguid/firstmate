@@ -1300,25 +1300,41 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# One Treehouse return attempt, shared by the first try and every retry branch
+# below. It prints the captured output on the right stream and maps the guard's
+# reserved status onto TEARDOWN_TREEHOUSE_GUARD_REFUSED, so no retry path can
+# forget that uncertified committed work must never be discarded.
+TEARDOWN_TREEHOUSE_RETURN_OUT=
+teardown_treehouse_return_attempt() {  # <dir> <cd_dir> <label> <task-id> [when]
+  local dir=$1 cd_dir=$2 label=$3 task_id=$4 when=${5:-} rc
+
+  TEARDOWN_TREEHOUSE_RETURN_OUT=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) \
+    && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -n "$TEARDOWN_TREEHOUSE_RETURN_OUT" ] && printf '%s\n' "$TEARDOWN_TREEHOUSE_RETURN_OUT"
+    return 0
+  fi
+  [ -n "$TEARDOWN_TREEHOUSE_RETURN_OUT" ] && printf '%s\n' "$TEARDOWN_TREEHOUSE_RETURN_OUT" >&2
+
+  if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
+    echo "teardown: $label return refused by the committed-work guard$when; preserving $dir and every commit it still holds" >&2
+    return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} task_id=${5:-$ID}
   local out rc lock attempt=0 max_retries lock_desc
 
-  # Capture stdout+stderr so non-lock failures stay visible and lock failures can
+  # Output is captured so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
-  if [ "$rc" -eq 0 ]; then
-    [ -n "$out" ] && printf '%s\n' "$out"
-    return 0
-  fi
-  [ -n "$out" ] && printf '%s\n' "$out" >&2
-
-  if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
-    echo "teardown: $label return refused by the committed-work guard; preserving $dir and every commit it still holds" >&2
-    return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
-  fi
+  teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
+  out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
@@ -1339,18 +1355,13 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
+    teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
-      [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
-    [ -n "$out" ] && printf '%s\n' "$out" >&2
-
-    if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
-      echo "teardown: $label return refused by the committed-work guard; preserving $dir and every commit it still holds" >&2
-      return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
-    fi
+    [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
+    out=$TEARDOWN_TREEHOUSE_RETURN_OUT
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
@@ -1372,17 +1383,13 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
+      teardown_treehouse_return_attempt "$dir" "$cd_dir" "$label" "$task_id" \
+        " after stale-lock cleanup" && rc=0 || rc=$?
       if [ "$rc" -eq 0 ]; then
-        [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi
-      [ -n "$out" ] && printf '%s\n' "$out" >&2
-      if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
-        echo "teardown: $label return refused by the committed-work guard after stale-lock cleanup; preserving $dir and every commit it still holds" >&2
-        return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
-      fi
+      [ "$rc" -ne "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ] || return "$rc"
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi

@@ -66,6 +66,15 @@ fm_treehouse_return_guard() {
   fi
   head=$FM_TREEHOUSE_RETURN_GIT_OUT
 
+  # A symbolic HEAD under refs/heads is durable without any revision walk: HEAD
+  # resolved above, so that branch exists and its tip IS this commit. Detached
+  # HEADs and symbolic refs outside refs/heads fall through to the scan below.
+  if fm_treehouse_return_git "$worktree_path" symbolic-ref -q HEAD; then
+    case "$FM_TREEHOUSE_RETURN_GIT_OUT" in
+      refs/heads/?*) return 0 ;;
+    esac
+  fi
+
   if ! fm_treehouse_return_git "$worktree_path" for-each-ref --contains="$head" --format='%(refname)' \
     refs/heads refs/tags refs/firstmate/rescue; then
     printf 'REFUSED: cannot determine committed-work reachability for %s at %s: git ref scan failed (%s).\n' \
