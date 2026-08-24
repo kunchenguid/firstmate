@@ -111,7 +111,11 @@ cat > "$dest/crosscheck-ledger.json" <<JSON
       "state": "$mode",
       "summary": "fixture review summary",
       "reviewer": $reviewer_json,
-      "usage": $usage_json
+      "usage": $usage_json,
+      "telemetry": {
+        "tokens": {"input": 100000, "output": 10000, "cache_read": 50000, "cache_write": 0},
+        "costs_usd": {"provider_reported": null, "pi_calculated": 3.5, "declared": 3.5}
+      }
     }
   ]
 }
@@ -511,13 +515,13 @@ test_completed_review_names_the_lane_and_writes_gate_metadata() {
   before=$(fixture_run_count)
   event="$TMP_ROOT/event-clear.json"
   write_event "$event" C0TESTCHAN U0ALICE 1755640004.000100 "$GOOD_PR_TEXT"
-  FM_FIXTURE_REVIEWER_JSON='{"harness":"pi","model":"accounts/fireworks/routers/glm-5p2-fast","effort":"xhigh","account_home":"/tmp/x","review_family_mode":"cross-family-primary"}' \
+  FM_FIXTURE_REVIEWER_JSON='{"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"/tmp/x","review_family_mode":"cross-family-primary"}' \
     run_mention ev-clear-1 "$CONFIG_MAIN" "$event" clear \
     || fail "clear review errored: $RUN_MENTION_OUTPUT"
   assert_contains "$RUN_MENTION_OUTPUT" "action: completed:clear" "expected completed:clear"
   reply=$(last_post_text)
   assert_contains "$reply" "Crosscheck CLEAR" "verdict reply missing state"
-  assert_contains "$reply" "Lane: glm-5p2-fast primary" \
+  assert_contains "$reply" "Lane: glm-5p2 primary" \
     "verdict reply did not name the cross-family lane"
   assert_contains "$reply" "crosscheck.md" "verdict reply did not point at the full report"
   assert_contains "$reply" "Host report path for the operator:" \
@@ -566,12 +570,9 @@ test_duplicate_event_id_starts_one_review() {
   pass "the same event id delivered twice starts exactly one review"
 }
 
-# FORWARD CONTRACT: today's crosscheck ledger schema records no usage/cost, so
-# this unit injects a `usage` object through the FIXTURE to exercise the USD
-# path that will bind once the lane records cost. It is deliberately not a
-# claim that the USD bound binds in production today; the unit after it proves
-# the production-shaped ledger yields null cost and no bound trip, and
-# test_request_cap_binds_today covers the control that actually binds now.
+# FORWARD CONTRACT: observational telemetry does not activate the USD cap.
+# This unit injects the legacy `usage` object explicitly to exercise the dormant
+# contract, while the next unit proves ordinary telemetry stays informational.
 test_usd_meter_forward_contract_with_fixture_injected_usage() {
   before=$(fixture_run_count)
   export FM_FIXTURE_USAGE_JSON='{"total_tokens": 120000, "estimated_usd": 3.5}'
@@ -621,10 +622,9 @@ print(len(rows), len(tokens), len(lanes))' "$meter_day")
 }
 
 test_production_shaped_ledger_never_trips_usd_bound() {
-  # The default fixture ledger carries NO usage field, exactly like today's
-  # crosscheck schema. Under a tiny USD budget, reviews must still run:
-  # estimated_usd stays null, the recorded day total stays 0.0, and the
-  # bound never fires falsely.
+  # The default fixture carries current economics telemetry but no legacy
+  # `usage` field. Under a tiny USD budget, reviews must still run because
+  # this upgrade deliberately adds observability without activating a cap.
   trip_before=$(grep -c "Daily crosscheck budget reached" "$POSTS" || true)
   event="$TMP_ROOT/event-prod-shape.json"
   write_event "$event" C0TESTCHAN U0PRODSHAPE 1755640020.000100 "$GOOD_PR_TEXT"
@@ -647,7 +647,7 @@ rows = [r for r in value["requests"] if r["submitter"] == "U0PRODSHAPE"]
 nulls = [r for r in rows if r["estimated_usd"] is None and r["tokens"] is None]
 print(len(rows), len(nulls))' "$meter_day")
   [ "$shape" = "2 2" ] || fail "production-shaped meter rows wrong: $shape"
-  pass "a production-shaped ledger yields null cost, zero recorded spend, and no false USD bound trip"
+  pass "economics telemetry stays observational and does not activate the Slack USD cap"
 }
 
 test_request_cap_binds_today() {

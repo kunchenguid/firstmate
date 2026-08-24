@@ -472,7 +472,7 @@ The two remedies were owner-owned: put a payment method on the subscription (the
 on file is charged instead of credits), or reach the model without Azure Marketplace. The owner
 took the second. This section exists so nobody re-litigates the Azure partner lane in three weeks.
 
-### The lane is a named registry, now selecting GLM 5.2 Fast direct from Fireworks
+### The lane is a named registry selecting regular GLM 5.2 direct from Fireworks
 
 The owner opened a direct Fireworks account, which bypasses Azure Marketplace entirely, so GLM-5.2
 is the reviewer again on its merits rather than on what Azure would serve.
@@ -490,22 +490,19 @@ The registered lane:
 | field | value |
 |---|---|
 | provider slot | `fireworks-glm` |
-| model selector | `accounts/fireworks/routers/glm-5p2-fast` |
+| model selector | `accounts/fireworks/models/glm-5p2` |
 | endpoint | `https://api.fireworks.ai/inference/v1` (chat completions only) |
 | api | `openai-completions` |
-| pinned model-level compat | none |
-| declared cost | input 2.10, cached input 0.21, output 6.60 per MILLION tokens |
-| provider serving contract | same GLM 5.2 model and quality, Fast path targeting more than 100 generated tokens/second |
+| pinned model-level compat | strict mode, OpenAI-format session-affinity header |
+| declared cost | input 1.40, cached input 0.14, cache write 1.40, output 4.40 per million tokens |
+| provider serving contract | regular GLM 5.2 through direct Fireworks chat completions |
 
-The selector is Fireworks' documented GLM 5.2 Fast serving path, not a generic model router chosen by policy at run time.
-Fireworks states that Fast is not a different model and that model quality remains the same: https://docs.fireworks.ai/serverless/serving-paths.
-The exact Fast selector is code-pinned and is therefore the reviewer identity the gate records.
-The final Pi terminal event must read back the same `fireworks-glm` provider and Fast selector before a verdict is accepted.
-The former Standard selector `accounts/fireworks/models/glm-5p2` remains readable only for durable records produced before this C1 change and is refused for every new roster entry.
+The exact regular selector is code-pinned and is therefore the reviewer identity the gate records.
+The final Pi terminal event must read back the same `fireworks-glm` provider and regular selector before a verdict is accepted.
+The former Fast selector `accounts/fireworks/routers/glm-5p2-fast` remains readable only for historical durable records and is refused for every new roster entry.
 
-Reviewer identity binds the provider slot, the pinned host, and the Fast selector
-(`fireworks-glm:api.fireworks.ai/accounts/fireworks/routers/glm-5p2-fast`), and the recorded credential
-identifier is a digest of host + model + endpoint.
+Reviewer identity binds the provider slot, the pinned host, and the regular selector `fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2`.
+The recorded credential identifier is a digest of host, model, and endpoint.
 Neither contains nor is derived from the api key: two credentials differing only in `apiKey` produce byte-identical identifiers.
 
 The Azure `azure-glm` slot, the `FW-GLM-5.2` deployment, and the two Azure R6 attempt deployments
@@ -530,25 +527,22 @@ registered lane is its own family; `gpt-*`/`o1-`/`o3-`/`o4-`/`codex-*` are one O
 `claude-*` one Anthropic family; an unrecognized model stays its own family, so nothing that
 previously passed starts failing while everything recognized is strictly tightened.
 
-**Truncation is a failed review, not a verdict.** GLM-5.2 is a reasoning model and will spend the
-output budget on reasoning first: measured live at `max_tokens=600`, the response came back
-`finish_reason: length` with EMPTY visible content, while 4000 completed cleanly. The lane
-therefore declares `maxTokens` 32000, and a truncated turn is refused on two independent grounds
-that both already existed: the Pi stream parser refuses any final assistant turn whose `stopReason`
-is not `stop` (pi maps `finish_reason: length` to `stopReason: "length"`), and the verdict must
-then parse as JSON against the review schema, which truncated output cannot. Both are pinned by
-tests, including an end-to-end case that emits a COMPLETE, schema-valid clear verdict with only the
-stop reason set to `length` and requires the run to record `tool-failure` with no citations.
+**Truncation is a failed review, not a verdict.**
+GLM-5.2 is a reasoning model and can spend its output budget on reasoning before a verdict is complete.
+The lane declares `maxTokens` 32000, requires a final `toolUse` stop, and accepts exactly one strict verdict call from the successful final attempt.
+The Pi generation schema uses optional non-null structured update fields and a bounded path/content evidence array so both local and Azure schemas pass Pi strict-schema preparation.
+The host restores nullable fields, refuses duplicate evidence paths, and applies the unchanged full verdict and evidence validation.
+A `length`, `error`, missing, multiple, malformed, or truncated submission records no verdict.
+The narrow stringified tool-argument recovery accepts only exactly one complete top-level object and never weakens the outer schema or terminal-state validation.
 
-**The USD budget control is inert, and R10 must stop claiming it.** The Fast selector's declared cost is
-2.10 input, 0.21 cached input, and 6.60 output per million tokens; pi's unit convention is per million, confirmed in its own source at
-`@earendil-works/pi-ai/dist/models.js`, `usage.cost.input = (rates.input / 1000000) * usage.input`.
-But `bin/fm-crosscheck.py` records no token usage
-at all: there is no `prompt_tokens`/`completion_tokens` handling anywhere in it, and the ledger
-reviewer record carries no usage or cost field. A `daily_budget_usd` control therefore has nothing
-to meter regardless of what the cost field says. Fixing that is not in this change; C3's daily
-Cost-Management bound remains the only guard, with its own caveat that it is a backstop on recorded
-spend rather than a real-time meter.
+**Crosscheck now records review economics but does not impose a new spend cap.**
+The regular selector's declared rates are 1.40 input, 0.14 cached input, and 4.40 output per million tokens.
+The declaration tracks Fireworks serverless pricing at https://docs.fireworks.ai/serverless/pricing.
+Fireworks publishes no separate cache-write rate, so emitted cache-write tokens use the uncached input rate of 1.40 per million.
+Each new ledger run records Pi usage tokens when available, Pi-calculated cost, declared-rate cost, and provider-reported cost as separate provenance fields.
+Pi's event stream does not currently expose a provider billing value, so that field remains null instead of being inferred.
+`bin/fm-crosscheck.sh economics <task-id>` reports the durable values without taking a task lock or changing state.
+This observability does not turn R10 `daily_budget_usd` into a real-time control and does not add a new spend cap.
 
 The Work list below is retained as the record of what was asked for; the state of each item is in
 "What landed" or "Still owed" below.
@@ -816,10 +810,9 @@ the end of a long session.
   per-review context cap actually SIZED to the serving model, does not exist:
   `MAX_LEDGER_PROMPT_BYTES` (64,000) and `MAX_PROJECTED_FINDINGS` (512) are fixed constants, and
   nothing reads the lane's declared `contextWindow`. This change does not re-size them.
-- A per-review spend meter. The provider slot declares the Fast selector's real per-million costs (input 2.10, cached input 0.21, output
-  6.60) instead of the old slot's zeros, but that number lives in pi's own config and this change
-  does NOT make the crosscheck ledger's cost non-zero, because the ledger records no token usage at
-  all. R10's `daily_budget_usd` therefore still has nothing to bind to.
+- A per-review spend meter is now durable telemetry rather than a live budget control.
+  New Pi runs record input, output, cache-read, and cache-write tokens when available, Pi-calculated cost, declared-rate cost, and explicit provider-cost provenance.
+  R10's `daily_budget_usd` still has no real-time enforcement path and must not be described as one.
 
 Still owed, and honestly so:
 
@@ -862,16 +855,11 @@ Still owed, and honestly so:
   substring assertions, which is why that was invisible. The serving lane
   today is the local pi reviewer. The reason recorded here previously, that the `fm-ccm` image
   carries no `pi` binary and needs a rebake, is stale and is corrected below.
-- A spend signal for the primary reviewer, HALF closed and honestly so. The cost declaration is no
-  longer fake: the Fireworks Fast lane declares input 2.10, cached input 0.21, and output 6.60 per million, and pi's unit
-  convention is per million (`@earendil-works/pi-ai/dist/models.js`:
-  `usage.cost.input = (rates.input / 1000000) * usage.input`), so those values are correct as
-  written. What is still missing is the meter. `bin/fm-crosscheck.py` records no token usage at
-  all - no `prompt_tokens`/`completion_tokens` handling anywhere in it, and no usage or cost field
-  on the ledger reviewer record - so R10's `daily_budget_usd` has nothing to bind to whatever the
-  cost field says. R10 must stop describing that as a control it has. C3's daily bound remains the
-  only guard over this lane's spend, and C3's own caveat is that the bound is a backstop on
-  Cost-Management-recorded spend rather than a real-time meter.
+- The spend signal for the primary reviewer is closed as durable per-run observability, not as a budget control.
+  The regular Fireworks lane declares input 1.40, cached input 0.14, cache write 1.40, and output 4.40 per million tokens.
+  The ledger stores available Pi token usage, Pi-calculated cost, declared-rate cost, and explicit provider-reported provenance.
+  The read-only `economics` command reports those values and finding disposition without a dashboard.
+  R10 still has no real-time enforcement path, and C3's daily bound remains a recorded-spend backstop rather than a live per-review cap.
 - Of three formerly untracked Work-list items, two are now closed. #287 added the lock-free,
   state-free `bin/fm-crosscheck.sh status` read of serving family, same-model policy, and latest
   durable ledger family. Pi's handling of `reasoning_content` was verified live as recorded above.
@@ -1086,27 +1074,25 @@ They put effectively the whole clock inside the synchronous model reviewer rathe
 Warm Azure VMs, a faster Azure SKU, and additional lanes do not shorten that measured critical path: they affect compartment startup or concurrency, not one local reviewer's model turns.
 The family that produced those two historical readings was not retained, so this document does not manufacture an attribution for them.
 
-At the exact code revision this remediation started from, the registered primary selector was `accounts/fireworks/models/glm-5p2` on the `fireworks-glm` custom Pi provider.
-The globally enabled Pi Fast Mode did not accelerate that reviewer.
-Crosscheck disables extensions, and the installed `pi-openai-fast-mode` package targets only OpenAI providers by injecting `service_tier: priority`.
-Fireworks documents Priority as peak-load reliability and Fast as a separate high-speed serving path, so an enabled generic toggle was configuration without effect on the exact serving reviewer.
+At the exact code revision this remediation started from, the registered primary selector was the Fast router `accounts/fireworks/routers/glm-5p2-fast` on the `fireworks-glm` custom Pi provider.
+The standing decision is to use regular GLM 5.2 instead.
+The globally enabled Pi Fast Mode is not part of this lane because Crosscheck loads only its explicit verdict extension and the installed fast-mode package targets OpenAI providers.
 
 ### Remediation
 
-New reviews now admit only Fireworks' documented GLM 5.2 Fast selector `accounts/fireworks/routers/glm-5p2-fast` at the same direct Fireworks chat-completions endpoint.
-Fireworks states that Fast is not a different model, keeps model quality unchanged, and targets more than 100 generated tokens per second: https://docs.fireworks.ai/serverless/serving-paths.
+New reviews now admit only the regular Fireworks GLM 5.2 selector `accounts/fireworks/models/glm-5p2` at the same direct Fireworks chat-completions endpoint.
 The reasoning level remains `xhigh`, the complete exact-base/exact-head review stays intact, and every reproduction, mutation, ledger, family, fallback, and refusal contract is unchanged.
-The final Pi terminal event must report the exact `fireworks-glm` provider and Fast selector requested by the roster before its verdict is accepted.
-A terminal event reporting the former Standard selector, another provider, or no model identity becomes a tool failure.
+The final Pi terminal event must report the exact `fireworks-glm` provider and regular selector requested by the roster before its verdict is accepted.
+A terminal event reporting the historical Fast selector, another provider, or no model identity becomes a tool failure.
 The same readback check runs in both the local Pi lane and the Azure model guest.
 
-The former Standard selector remains readable only as historical provenance, including accepted local and Azure ledgers written before this change.
+The former Fast selector remains readable only as historical provenance, including local and Azure ledgers written before this change.
 It is not in the new-review allowlist and cannot silently continue serving from an old roster.
-The status read names the exact selector at roster entry one, so rollout can distinguish the Fast path from both the former Standard path and the Codex fallback before spending on acceptance.
+The status read names the exact selector at roster entry one, so rollout can distinguish the regular path from both the historical Fast path and the Codex fallback before spending on acceptance.
 
-The Fast selector is priced at 2.10 dollars per million input tokens, 0.21 dollars per million cached input tokens, and 6.60 dollars per million output tokens in Fireworks' current serverless pricing: https://docs.fireworks.ai/serverless/pricing.
-That is higher than Standard but remains bounded by the completion program's spend authority for one acceptance run and does not use `FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE`.
-Crosscheck still lacks a per-review token meter, so C3's existing guard and its recorded-spend caveat remain unchanged.
+The regular selector is declared at 1.40 dollars per million input tokens, 0.14 dollars per million cached input tokens, and 4.40 dollars per million output tokens.
+Cache-write tokens use the uncached input rate because Fireworks publishes no separate cache-write rate.
+Crosscheck records token and cost telemetry but adds no spend cap, so C3's recorded-spend caveat remains unchanged.
 
 ### Instrumentation and acceptance still owed
 
@@ -1114,11 +1100,14 @@ Every run record retains integer-millisecond `durations_ms` measured with `time.
 The local lane records `snapshot`, `reviewer`, `proofs`, `ledger`, and `total`.
 The compartment lane additionally records `create`, `stage`, `boot`, and `collect` only when that lane performed them.
 A missing phase means the work did not run rather than that it took zero time, and `bin/fm-crosscheck.sh timings <task-id>` remains the read-only table.
+`bin/fm-crosscheck.sh economics <task-id>` is the parallel read-only table for tokens, costs, turns, reviewer latency, finding disposition, outcomes, and reuse provenance.
 
-After this implementation lands on public `main`, the acceptance owner must update the operator roster and the dedicated `models.json` to the exact Fast selector and its current declared costs, then read `bin/fm-crosscheck.sh status` back before launch.
+After this implementation lands on public `main`, the acceptance owner must update the operator roster and the dedicated `models.json` to the exact regular selector, compat, and declared costs, then read `bin/fm-crosscheck.sh status` back before launch.
 The owner must run one real fresh adversarial review of a current exact PR head, retain the complete phase breakdown, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, and cross-family primary identity.
 Only a genuine 20-to-30-minute completion closes C1.
-A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NOT MET; the implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, reuses a verdict, or weakens a gate.
+A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NOT MET.
+The implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, or weakens a gate.
+Acceptance must use a fresh review rather than the exact-head reuse optimization.
 
 ## C2. Many crewmates, no-mistakes, and crosschecks run in parallel without contention
 

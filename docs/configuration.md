@@ -106,7 +106,7 @@ The gate does not reproduce CI's concurrent shard fan-out because it does not se
 `config/crosscheck-reviewer.json` selects the local dedicated account pool for the PR merge-gate reviewer.
 It is gitignored and is not inferred from lane metadata or ambient provider configuration.
 The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
-The accepted policy profiles are Pi at `xhigh` effort on every registered cross-family model (today `accounts/fireworks/routers/glm-5p2-fast`; the primary review family, R6) plus Codex `gpt-5.6-sol` and Pi `gpt-5.6-sol` at `xhigh` effort as the loud degraded fallback family; Claude is never an eligible Crosscheck reviewer (the interim claude lane is retired).
+The accepted policy profiles are Pi at `xhigh` effort on every registered cross-family model (today the regular selector `accounts/fireworks/models/glm-5p2`; the primary review family, R6) plus Codex `gpt-5.6-sol` and Pi `gpt-5.6-sol` at `xhigh` effort as the loud degraded fallback family; Claude is never an eligible Crosscheck reviewer (the interim claude lane is retired).
 Every reviewer `account_home` must be an existing absolute directory.
 
 [`crosscheck.md`](crosscheck.md) owns the reviewer-independence policy, including the removal of author-identity checks and the legacy admission workaround.

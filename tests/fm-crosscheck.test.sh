@@ -393,6 +393,9 @@ ephemeral=no
 isolated=0
 context_isolated=no
 prompt=
+extension=
+session_id=
+system_prompt=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) mode=$2; shift 2 ;;
@@ -400,6 +403,10 @@ while [ "$#" -gt 0 ]; do
     --model) model=$2; shift 2 ;;
     --thinking) thinking=$2; shift 2 ;;
     --tools) tools=$2; shift 2 ;;
+    --extension) extension=$2; shift 2 ;;
+    --system-prompt) system_prompt=$2; shift 2 ;;
+    --session-id) session_id=$2; shift 2 ;;
+    --offline) shift ;;
     --no-session) ephemeral=yes; shift ;;
     --no-context-files)
       context_isolated=yes; isolated=$((isolated + 1)); shift ;;
@@ -412,15 +419,18 @@ done
 [ "$provider" = "${FM_TEST_PI_EXPECT_PROVIDER:-openai-codex}" ] || exit 65
 [ "$model" = "${FM_TEST_PI_EXPECT_MODEL:-gpt-5.6-sol}" ] || exit 66
 [ "$thinking" = xhigh ] || exit 67
-[ "$tools" = read,bash,grep,find,ls ] || exit 68
+[ "$tools" = read,bash,grep,find,ls,submit_crosscheck_verdict ] || exit 68
+[ -f "$extension" ] && [ -f "${FM_CROSSCHECK_REVIEW_SCHEMA:-}" ] \
+  && [ -n "$session_id" ] && [ -n "$system_prompt" ] || exit 97
 [ "$context_isolated" = yes ] || {
   [ ! -f "$PWD/AGENTS.md" ] || cat "$PWD/AGENTS.md" > "$FM_TEST_CONTEXT_LOG"
   exit 69
 }
-[ "$ephemeral" = yes ] && [ "$isolated" -eq 6 ] && [ -n "$prompt" ] || exit 69
+[ "$ephemeral" = yes ] && [ "$isolated" -eq 6 ] \
+  && [ "${prompt#@}" != "$prompt" ] && [ -f "${prompt#@}" ] || exit 69
 temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-pi.XXXXXX") || exit 70
 python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 71
-python3 - "$temporary" "${FM_TEST_PI_STOP_REASON:-stop}" <<'PY'
+python3 - "$temporary" "${FM_TEST_PI_STOP_REASON:-toolUse}" <<'PY'
 import json
 import os
 import sys
@@ -434,8 +444,27 @@ print(json.dumps({
         "role": "assistant",
         "provider": os.environ.get("FM_TEST_PI_EXPECT_PROVIDER", "openai-codex"),
         "model": os.environ.get("FM_TEST_PI_EXPECT_MODEL", "gpt-5.6-sol"),
-        "content": [{"type": "text", "text": json.dumps(structured)}],
+        "content": [{
+            "type": "toolCall",
+            "id": "crosscheck-verdict-1",
+            "name": "submit_crosscheck_verdict",
+            "arguments": structured,
+        }],
         "stopReason": sys.argv[2],
+        "usage": {
+            "input": 100,
+            "output": 20,
+            "cacheRead": 80,
+            "cacheWrite": 0,
+            "totalTokens": 200,
+            "cost": {
+                "input": 0.00014,
+                "output": 0.000088,
+                "cacheRead": 0.0000112,
+                "cacheWrite": 0,
+                "total": 0.0002392,
+            },
+        },
     },
     "toolResults": [{"toolName": "bash", "isError": False}],
 }))
@@ -1042,12 +1071,12 @@ EOF
 write_cross_family_models_json() {
   local destination=$1 slot=$2 model=$3 api_key=${4:-test-lane-key}
   cat > "$destination" <<EOF
-{"providers":{"$slot":{"baseUrl":"https://api.fireworks.ai/inference/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"$model","name":"cross-family reviewer","reasoning":true,"input":["text"],"cost":{"input":2.10,"output":6.60,"cacheRead":0.21,"cacheWrite":0.0},"contextWindow":1000000,"maxTokens":32000}]}}}
+{"providers":{"$slot":{"baseUrl":"https://api.fireworks.ai/inference/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"$model","name":"cross-family reviewer","reasoning":true,"input":["text"],"cost":{"input":1.40,"output":4.40,"cacheRead":0.14,"cacheWrite":1.40},"contextWindow":1000000,"maxTokens":32000,"compat":{"supportsStrictMode":true,"sendSessionAffinityHeaders":true,"sessionAffinityFormat":"openai"}}]}}}
 EOF
 }
 
 select_cross_family_reviewer() {
-  local case_dir=$1 slot=${2:-fireworks-glm} model=${3:-accounts/fireworks/routers/glm-5p2-fast}
+  local case_dir=$1 slot=${2:-fireworks-glm} model=${3:-accounts/fireworks/models/glm-5p2}
   rm -f "$case_dir/pi-home/auth.json"
   write_cross_family_models_json "$case_dir/pi-home/models.json" "$slot" "$model"
   cat > "$case_dir/reviewer.json" <<EOF
@@ -1085,9 +1114,9 @@ codex_prompt = module.make_prompt(
 # Golden bytes captured immediately before the lane addendum landed. This
 # makes an accidental edit to the shared Codex prompt observable even when a
 # refactor leaves the cross-family assertions below green.
-assert len(codex_prompt.encode("utf-8")) == 5404, len(codex_prompt.encode("utf-8"))
+assert len(codex_prompt.encode("utf-8")) == 5358, len(codex_prompt.encode("utf-8"))
 assert hashlib.sha256(codex_prompt.encode("utf-8")).hexdigest() == (
-    "1fd424d1d16c7d09f3b0da232591559e4ebc33786a1fb5ae861aaaa7fe951bbe"
+    "97599f6a8fb3415847c70cc046130993d643ad831ddcb468d7b10ce8e95e3bc0"
 )
 
 addendum = f"""
@@ -1108,7 +1137,7 @@ cross_family_prompt = module.make_prompt(
     ledger,
     {
         "account_selector": "PI_CODING_AGENT_DIR",
-        "model": "accounts/fireworks/routers/glm-5p2-fast",
+        "model": "accounts/fireworks/models/glm-5p2",
     },
 )
 assert cross_family_prompt == pi_codex_prompt + addendum
@@ -1203,21 +1232,21 @@ test_status_reports_serving_family_relaxation_and_latest_run() {
     "$fallback/codex-home" "$fallback/data/task-fallback"
   cat > "$primary/home/config/crosscheck-reviewer.json" <<EOF
 {"reviewers":[
-  {"harness":"pi","model":"accounts/fireworks/routers/glm-5p2-fast","effort":"xhigh","account_home":"$primary/lane-home"},
+  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$primary/lane-home"},
   {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$primary/codex-home"}
 ]}
 EOF
   cat > "$fallback/home/config/crosscheck-reviewer.json" <<EOF
 {"reviewers":[
   {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$fallback/codex-home"},
-  {"harness":"pi","model":"accounts/fireworks/routers/glm-5p2-fast","effort":"xhigh","account_home":"$fallback/lane-home"}
+  {"harness":"pi","model":"accounts/fireworks/models/glm-5p2","effort":"xhigh","account_home":"$fallback/lane-home"}
 ]}
 EOF
   printf 'off\n' > "$primary/home/config/crosscheck-same-model"
   printf 'on\n' > "$fallback/home/config/crosscheck-same-model"
   "$CROSSCHECK_PYTHON" - \
     "$primary/data/historical-directory-name/crosscheck-ledger.json" task-primary \
-    2026-08-21T10:00:00Z accounts/fireworks/routers/glm-5p2-fast cross-family-primary \
+    2026-08-21T10:00:00Z accounts/fireworks/models/glm-5p2 cross-family-primary \
     "$fallback/data/task-fallback/crosscheck-ledger.json" task-fallback \
     2026-08-21T11:00:00Z gpt-5.6-sol codex-fallback <<'PY'
 import json
@@ -1256,7 +1285,7 @@ PY
     FM_STATE_OVERRIDE="$state_path" \
     "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" status) \
     || fail "status refused the cross-family-serving fixture"
-  [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/routers/glm-5p2-fast, roster entry 1)
+  [ "$primary_out" = "crosscheck lane: cross-family serving (pi accounts/fireworks/models/glm-5p2, roster entry 1)
 crosscheck same-model relaxation: off
 crosscheck last review family: cross-family-primary (task-primary at 2026-08-21T10:00:00Z)" ] \
     || fail "cross-family-serving status was unexpected: $primary_out"
@@ -1310,7 +1339,7 @@ config_path = root / "reviewer.json"
 os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
 
 profiles = [
-    ("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home"),
+    ("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home"),
     ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
     ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
 ]
@@ -1345,7 +1374,7 @@ validation_author = {
     "account_home": str(homes["author-home"]),
 }
 expected_family = {
-    "accounts/fireworks/routers/glm-5p2-fast": "cross-family-primary",
+    "accounts/fireworks/models/glm-5p2": "cross-family-primary",
     "gpt-5.6-sol": "codex-fallback",
 }
 for harness, model, effort, home_name in profiles:
@@ -1371,7 +1400,7 @@ write_config(
 unlisted = expect_refused(validation_author, "must be")
 for accepted in (
     "codex gpt-5.6-sol xhigh",
-    "pi accounts/fireworks/routers/glm-5p2-fast xhigh",
+    "pi accounts/fireworks/models/glm-5p2 xhigh",
     "pi gpt-5.6-sol xhigh",
 ):
     assert accepted in unlisted, unlisted
@@ -1393,27 +1422,27 @@ write_config(
 )
 retired = expect_refused(
     validation_author,
-    "must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/routers/glm-5p2-fast xhigh or pi gpt-5.6-sol xhigh",
+    "must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/models/glm-5p2 xhigh or pi gpt-5.6-sol xhigh",
 )
 print(f"REFUSED retired claude profile: {retired}")
 
-# C1 changes the serving path, not the model family. The former Standard
+# The serving-path reversal does not change the model family. The former Fast
 # selector remains readable in durable ledgers but must not launch a new run;
-# otherwise an operator roster left behind during rollout silently misses the
-# latency remediation while still claiming the primary family.
+# otherwise an operator roster left behind during rollout silently keeps using
+# the path the reviewed policy retired while still claiming the primary family.
 write_config(
     [
         reviewer(
             "pi",
-            "accounts/fireworks/models/glm-5p2",
+            "accounts/fireworks/routers/glm-5p2-fast",
             "xhigh",
             "lane-home",
         )
     ]
 )
-standard_path = expect_refused(validation_author, "must be")
-assert "accounts/fireworks/routers/glm-5p2-fast" in standard_path, standard_path
-print(f"REFUSED retired Standard serving path: {standard_path}")
+fast_path = expect_refused(validation_author, "must be")
+assert "accounts/fireworks/models/glm-5p2" in fast_path, fast_path
+print(f"REFUSED retired Fast serving path: {fast_path}")
 
 claude_author = {
     "harness": "claude",
@@ -1439,10 +1468,10 @@ for lane in module.CROSS_FAMILY_LANES.values():
 # family screen, and the provider-slot prefix pi records does not hide it.
 lane_author = {
     "harness": "pi",
-    "model": "fireworks-glm/accounts/fireworks/routers/glm-5p2-fast",
+    "model": "fireworks-glm/accounts/fireworks/models/glm-5p2",
     "account_home": str(homes["author-home"]),
 }
-write_config([reviewer("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home")])
+write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
 lane_same_model = expect_refused(lane_author, "outside the model family")
 print(f"REFUSED same-family cross-family reviewer: {lane_same_model}")
 
@@ -1458,7 +1487,7 @@ write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
 codex_family = expect_refused(older_codex_author, "outside the model family")
 print(f"REFUSED codex-family reviewer for a differently versioned codex author: {codex_family}")
 # The same author is admitted the cross-family lane, with no same-model mark.
-write_config([reviewer("pi", "accounts/fireworks/routers/glm-5p2-fast", "xhigh", "lane-home")])
+write_config([reviewer("pi", "accounts/fireworks/models/glm-5p2", "xhigh", "lane-home")])
 selected = module.reviewer_candidates(root, older_codex_author)[0]
 assert "model_independence" not in selected, selected
 assert selected["review_family_mode"] == "cross-family-primary", selected
@@ -1826,25 +1855,25 @@ assert turn_count == 1
 
 # A launch flag is configuration, not serving evidence. The production call
 # requires Pi's terminal event to read back the exact provider and model; this
-# is what makes the Fast router visible on the review that actually completed.
+# is what makes the regular selector visible on the review that completed.
 route_turn = assistant_turn(verdict_text, "stop")
 route_turn["message"].update(
     {
         "provider": "fireworks-glm",
-        "model": "accounts/fireworks/routers/glm-5p2-fast",
+        "model": "accounts/fireworks/models/glm-5p2",
     }
 )
 module.pi_review_result(
     event_stream([route_turn]),
     expected_provider="fireworks-glm",
-    expected_model="accounts/fireworks/routers/glm-5p2-fast",
+    expected_model="accounts/fireworks/models/glm-5p2",
 )
 for field, observed, expected, diagnostic in (
     ("provider", "openai-codex", "fireworks-glm", "reported provider"),
     (
         "model",
-        "accounts/fireworks/models/glm-5p2",
         "accounts/fireworks/routers/glm-5p2-fast",
+        "accounts/fireworks/models/glm-5p2",
         "reported model",
     ),
 ):
@@ -1858,7 +1887,7 @@ for field, observed, expected, diagnostic in (
             expected_model=(
                 expected
                 if field == "model"
-                else "accounts/fireworks/routers/glm-5p2-fast"
+                else "accounts/fireworks/models/glm-5p2"
             ),
         )
     except module.CrosscheckToolError as exc:
@@ -2189,7 +2218,7 @@ test_pi_reviewer_executes_bound_policy_profile() {
     || fail "Pi reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' \
     "Pi reviewer did not earn a clear result"
-  assert_grep '--mode json --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools read,bash,grep,find,ls --no-session' \
+  assert_grep '--mode json --offline --provider openai-codex --model gpt-5.6-sol --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension' \
     "$case_dir/pi.log" \
     "Pi reviewer was not invoked with its pinned provider, model, effort, and tools"
   assert_grep '--no-context-files' "$case_dir/pi.log" \
@@ -2313,7 +2342,7 @@ test_missing_author_identity_reaches_normal_verdict() {
   IFS=$'\t' read -r case_dir base head <<< "$record"
   sed -i.bak \
     -e 's/harness=claude/harness=pi/' \
-    -e 's#model=claude-opus-5#model=fireworks-glm/accounts/fireworks/routers/glm-5p2-fast#' \
+    -e 's#model=claude-opus-5#model=fireworks-glm/accounts/fireworks/models/glm-5p2#' \
     -e '/^account_home=/d' \
     "$case_dir/state/task-x1.meta"
   rm "$case_dir/state/task-x1.meta.bak"
@@ -2352,7 +2381,7 @@ EOF
   expect_code 1 "$rc" "retired claude reviewer profile"
   assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed' \
     "$case_dir/err" "the retired claude profile was not refused at reviewer preflight"
-  assert_grep 'must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/routers/glm-5p2-fast xhigh or pi gpt-5.6-sol xhigh' \
+  assert_grep 'must be codex gpt-5.6-sol xhigh or pi accounts/fireworks/models/glm-5p2 xhigh or pi gpt-5.6-sol xhigh' \
     "$case_dir/err" "the retired claude profile was not refused with the exact profile message"
   assert_absent "$case_dir/fakebin/claude" "Claude reviewer machinery was installed by the fixture"
   assert_absent "$case_dir/pi.log" "a reviewer launched despite the retired profile"
@@ -2390,7 +2419,7 @@ PY
       || fail "$model reviewer did not complete"
     assert_contains "$output" 'crosscheck clear' \
       "$model reviewer did not earn a clear result"
-    assert_grep "--mode json --provider $slot --model $model --thinking xhigh --tools read,bash,grep,find,ls --no-session" \
+    assert_grep "--mode json --offline --provider $slot --model $model --thinking xhigh --tools read,bash,grep,find,ls,submit_crosscheck_verdict --extension" \
       "$case_dir/pi.log" \
       "$model reviewer was not invoked on the $slot provider with its pinned model, effort, and tools"
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
@@ -2440,7 +2469,7 @@ test_truncated_cross_family_verdict_is_never_a_verdict() {
   set +e
   FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
     FM_TEST_PI_EXPECT_PROVIDER=fireworks-glm \
-    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/routers/glm-5p2-fast \
+    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/models/glm-5p2 \
     FM_TEST_PI_STOP_REASON=length \
     run_case "$case_dir" "$base" "$head" clear run \
     > "$case_dir/out" 2> "$case_dir/err"
@@ -2495,7 +2524,13 @@ def write_home(name, api_key="key-one", base_url=PINNED, api="openai-completions
     # plain names.
     home = root / name
     home.mkdir()
-    model = {"id": model_id, "name": "cross-family reviewer", "reasoning": True}
+    model = {
+        "id": model_id,
+        "name": "cross-family reviewer",
+        "reasoning": True,
+        "compat": LANE["compat"],
+        "cost": LANE["cost"],
+    }
     model.update(model_extra or {})
     providers = {
         slot: {
@@ -2548,7 +2583,7 @@ assert module.cross_family_lane_for_model("evil/models/glm-5p2") is None
 assert module.cross_family_lane_for_model(None) is None
 # Historical Standard-path records remain attributable to this family without
 # making their model selectable for a new review.
-legacy_model = "accounts/fireworks/models/glm-5p2"
+legacy_model = "accounts/fireworks/routers/glm-5p2-fast"
 assert module.cross_family_lane_for_model(legacy_model) is None
 assert module.recorded_cross_family_lane_for_model(legacy_model) is LANE
 assert module.recorded_cross_family_lane_for_model(SLOT + "/" + legacy_model) is LANE
@@ -2655,15 +2690,16 @@ print("REFUSED retired azure slot: " + expect_tool_failure(
 
 # `compat` is the other model-level object pi honors, and some of its keys
 # weaken this gate's own defenses, so the lane owns it exactly. The pinned
-# lane declares none, so any compat at all refuses.
-assert LANE["compat"] == {}, LANE
+# lane pins strict tools and Fireworks session affinity, so any drift refuses.
+assert LANE["compat"]["supportsStrictMode"] is True, LANE
+assert LANE["compat"]["sendSessionAffinityHeaders"] is True, LANE
 print("REFUSED model-level compat weakening the truncation guard: "
       + expect_tool_failure(
           write_home("compat-finish-home",
                      model_extra={"compat": {"supportsFinishReason": False}}),
           "model-level compat that is not the pinned lane compat",
       ))
-print("REFUSED any model-level compat when the lane pins none: "
+print("REFUSED any model-level compat outside the pin: "
       + expect_tool_failure(
           write_home("compat-any-home",
                      model_extra={"compat": {"supportsDeveloperRole": False}}),
@@ -2682,7 +2718,12 @@ def write_raw(name, provider_extra=None, document_extra=None):
         "baseUrl": PINNED,
         "api": "openai-completions",
         "apiKey": "key-one",
-        "models": [{"id": MODEL, "name": "cross-family reviewer"}],
+        "models": [{
+            "id": MODEL,
+            "name": "cross-family reviewer",
+            "compat": LANE["compat"],
+            "cost": LANE["cost"],
+        }],
     }
     provider.update(provider_extra or {})
     document = {"providers": {SLOT: provider}}
@@ -2926,12 +2967,12 @@ def ledger_with(model, family):
 # Honest pairings load; the field also remains optional for older ledgers,
 # and the legacy glm-primary value stays readable for durable records.
 for model, family in (
-    ("accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
-    ("fireworks-glm/accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
-    # Accepted reviews from before C1 selected Fireworks' Standard path. They
-    # stay readable even though the roster can no longer launch that selector.
     ("accounts/fireworks/models/glm-5p2", "cross-family-primary"),
     ("fireworks-glm/accounts/fireworks/models/glm-5p2", "cross-family-primary"),
+    # Accepted reviews from before this reversal selected Fireworks' Fast path. They
+    # stay readable even though the roster can no longer launch that selector.
+    ("accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
+    ("fireworks-glm/accounts/fireworks/routers/glm-5p2-fast", "cross-family-primary"),
     ("FW-GLM-5.2", "glm-primary"),
     ("azure-glm/FW-GLM-5.2", "glm-primary"),
     ("gpt-5.6-sol", "codex-fallback"),
@@ -2944,10 +2985,10 @@ for model, family in (
 for model, family in (
     ("gpt-5.6-sol", "cross-family-primary"),
     ("gpt-5.6-sol", "glm-primary"),
-    ("accounts/fireworks/routers/glm-5p2-fast", "codex-fallback"),
-    ("accounts/fireworks/routers/glm-5p2-fast", "glm-primary"),
     ("accounts/fireworks/models/glm-5p2", "codex-fallback"),
     ("accounts/fireworks/models/glm-5p2", "glm-primary"),
+    ("accounts/fireworks/routers/glm-5p2-fast", "codex-fallback"),
+    ("accounts/fireworks/routers/glm-5p2-fast", "glm-primary"),
     ("FW-GLM-5.2", "cross-family-primary"),
 ):
     try:
@@ -5560,6 +5601,265 @@ PY
   pass "a measurement failing its own contract is dropped loudly, never written into the ledger"
 }
 
+test_explicit_pi_tool_loads_with_discovery_disabled() {
+  local agent_root dependency_root node_bin pi_bin pi_real probe_dir strict_module
+  probe_dir="$TMP_ROOT/pi-explicit-extension"
+  mkdir -p "$probe_dir"
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" \
+    "$ROOT/bin/fm-crosscheck-azure.py" "$probe_dir" <<'PY'
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def assert_strict_subset(value, label):
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            assert_strict_subset(item, f"{label}[{index}]")
+        return
+    if not isinstance(value, dict):
+        return
+    forbidden = {
+        "$ref", "$defs", "definitions", "allOf", "oneOf",
+        "patternProperties", "dependentSchemas", "dependencies",
+        "unevaluatedProperties", "propertyNames", "contains",
+        "prefixItems", "not", "if", "then", "else",
+    }
+    assert not forbidden.intersection(value), (label, value)
+    additional = value.get("additionalProperties")
+    assert additional is None or additional is False, (label, additional)
+    for variant in value.get("anyOf", []):
+        structured = isinstance(variant, dict) and (
+            variant.get("type") in {"object", "array"}
+            or "properties" in variant
+            or "items" in variant
+        )
+        assert not structured, (label, variant)
+    for key, item in value.items():
+        assert_strict_subset(item, f"{label}.{key}")
+
+
+core = load("crosscheck_schema_probe", sys.argv[1])
+azure = load("azure_schema_probe", sys.argv[2])
+destination = Path(sys.argv[3])
+local = core.pi_review_output_schema("/account", "/home")
+outer = azure.azure_pi_review_schema(
+    core.pi_review_output_schema("/account", "/home")
+)
+assert_strict_subset(local, "local")
+assert_strict_subset(outer, "azure")
+update = local["properties"]["finding_updates"]["items"]
+for name in ("reproduction", "mutation_proof", "equivalent_to"):
+    assert name not in update["required"], update
+normalized = core.normalize_pi_review(
+    {
+        "executing_account_home": "/model/guessed-account",
+        "execution_home": "/model/guessed-home",
+        "finding_updates": [{"id": "cc-test"}],
+    },
+    "/host/bound-account",
+    "/host/bound-home",
+)
+assert normalized["executing_account_home"] == "/host/bound-account"
+assert normalized["execution_home"] == "/host/bound-home"
+assert normalized["finding_updates"][0] == {
+    "id": "cc-test", "reproduction": None,
+    "mutation_proof": None, "equivalent_to": None,
+}
+(destination / "local-schema.json").write_text(json.dumps(local), encoding="utf-8")
+(destination / "azure-schema.json").write_text(json.dumps(outer), encoding="utf-8")
+PY
+  pi_bin=$(command -v pi 2>/dev/null || true)
+  if [ -z "$pi_bin" ]; then
+    echo "# note: installed Pi unavailable; deterministic strict-schema fallback passed"
+    return
+  fi
+  printf '%s\n' '{"type":"object","additionalProperties":false,"properties":{}}' \
+    > "$probe_dir/schema.json"
+  if ! FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+    "$pi_bin" --offline --no-extensions \
+      --extension "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" \
+      --tools submit_crosscheck_verdict --help \
+      > "$probe_dir/tracked-help" 2> "$probe_dir/tracked-help.err"; then
+    echo "# note: installed Pi is not runnable; deterministic strict-schema fallback passed"
+    return
+  fi
+  node_bin=$(command -v node 2>/dev/null || true)
+  [ -n "$node_bin" ] || fail "installed Pi has no Node runtime for its extension"
+  pi_real=$("$CROSSCHECK_PYTHON" - "$pi_bin" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve())
+PY
+)
+  if [ -n "${FM_PI_PACKAGE_DIR:-}" ]; then
+    agent_root=$(cd "$FM_PI_PACKAGE_DIR" && pwd -P)
+  else
+    agent_root=$(cd "$(dirname "$pi_real")/.." && pwd -P)
+  fi
+  strict_module=
+  for dependency_root in \
+    "$agent_root/node_modules" "$(dirname "$(dirname "$agent_root")")"; do
+    if [ -f "$dependency_root/@earendil-works/pi-ai/dist/api/constrained-sampling.js" ]; then
+      strict_module="$dependency_root/@earendil-works/pi-ai/dist/api/constrained-sampling.js"
+      break
+    fi
+  done
+  [ -f "$strict_module" ] || fail "installed Pi has no strict-schema implementation"
+  "$node_bin" --input-type=module - "$strict_module" "$agent_root/package.json" \
+    "$probe_dir/local-schema.json" "$probe_dir/azure-schema.json" <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const strict = await import(pathToFileURL(process.argv[2]));
+const version = JSON.parse(readFileSync(process.argv[3], "utf8")).version;
+if (typeof strict.makeStrictJsonSchema === "function") {
+  for (const path of process.argv.slice(4)) {
+    strict.makeStrictJsonSchema(JSON.parse(readFileSync(path, "utf8")));
+  }
+} else if (version !== "0.84.1") {
+  throw new Error(`Pi ${version} unexpectedly lacks makeStrictJsonSchema`);
+}
+JS
+  FM_CROSSCHECK_REVIEW_SCHEMA="$probe_dir/schema.json" \
+    "$node_bin" --input-type=module - \
+      "$ROOT/bin/fm-crosscheck-pi-verdict-extension.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+let tool;
+const extension = await import(pathToFileURL(process.argv[2]));
+extension.default({ registerTool(value) { tool = value; } });
+if (tool?.name !== "submit_crosscheck_verdict") throw new Error("tool name drifted");
+if (tool?.constrainedSampling?.type !== "json_schema") throw new Error("tool is unconstrained");
+if (tool?.constrainedSampling?.strict !== "require") throw new Error("tool is not strict");
+const result = await tool.execute("probe", {});
+if (result?.terminate !== true) throw new Error("tool requires another model turn");
+JS
+  cat > "$probe_dir/probe.mjs" <<'JS'
+export default function (pi) {
+  pi.registerTool({
+    name: "crosscheck_explicit_tool_probe",
+    label: "Crosscheck explicit tool probe",
+    description: "Prove one explicit tool loads while discovery is disabled.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    constrainedSampling: { type: "json_schema", strict: "require" },
+    async execute() { return { content: [], terminate: true }; },
+  });
+  pi.registerFlag("crosscheck-explicit-tool-probe", {
+    description: "The explicit tool extension loaded.", type: "boolean", default: false,
+  });
+}
+JS
+  "$pi_bin" --offline --no-extensions --extension "$probe_dir/probe.mjs" \
+    --tools crosscheck_explicit_tool_probe --help > "$probe_dir/help"
+  assert_grep '--crosscheck-explicit-tool-probe' "$probe_dir/help" \
+    "installed Pi did not load the explicit tool extension with discovery disabled"
+  pass "installed Pi prepares both generated strict schemas and loads the explicit tool with discovery disabled"
+}
+
+run_economics() {
+  local case_dir=$1
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE-$ROOT}" \
+  FM_HOME="${FM_TEST_HOME-$case_dir/home}" \
+  FM_STATE_OVERRIDE="${FM_TEST_STATE_OVERRIDE-$case_dir/state}" \
+  FM_DATA_OVERRIDE="${FM_TEST_DATA_OVERRIDE-$case_dir/data}" \
+    "$CROSSCHECK_PYTHON" "$CROSSCHECK_PY" economics task-x1
+}
+
+test_telemetry_economics_and_exact_head_reuse() {
+  local record case_dir base head before after output verified rc
+  record=$(make_case telemetry-reuse)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_cross_family_reviewer "$case_dir"
+  FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_EXPECT_PROVIDER=fireworks-glm \
+    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/models/glm-5p2 \
+    run_case "$case_dir" "$base" "$head" clear run > "$case_dir/first.out" \
+    || fail "the metered source review failed"
+  before=$(wc -l < "$case_dir/pi.log")
+  FM_TEST_PI_BIN=pi PATH="$case_dir/fakebin:$PATH" \
+    FM_TEST_PI_EXPECT_PROVIDER=fireworks-glm \
+    FM_TEST_PI_EXPECT_MODEL=accounts/fireworks/models/glm-5p2 \
+    run_case "$case_dir" "$base" "$head" clear run > "$case_dir/reuse.out" \
+    || fail "the exact-head reuse failed"
+  after=$(wc -l < "$case_dir/pi.log")
+  [ "$before" -eq 1 ] && [ "$after" -eq 1 ] \
+    || fail "exact-head reuse launched another paid reviewer"
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" \
+    "$case_dir/data/task-x1/crosscheck-ledger.json" "$head" <<'PY' \
+    || fail "telemetry or exact-head reuse ledger validation failed"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+path, head = sys.argv[2:]
+raw = json.load(open(path))
+ledger = module.validate_ledger(raw, "task-x1", raw["pull_request"])
+source, reused = ledger["runs"]
+assert source["state"] == reused["state"] == "clear"
+assert reused["telemetry"]["reuse"]["source_run_sha256"] == module.run_sha256(source)
+tokens = source["telemetry"]["tokens"]
+assert tokens == {"input": 100, "output": 20, "cache_read": 80,
+                  "cache_write": 0, "source": "pi-turn-end-message-usage"}
+costs = source["telemetry"]["costs_usd"]
+assert costs["provider_reported"] is None
+assert costs["pi_calculated"] == 0.0002392
+assert costs["declared"] == 0.0002392
+assert source["telemetry"]["turns"] == 1
+assert source["telemetry"]["reviewer_latency_ms"] >= 0
+config = dict(source["reviewer"])
+snapshot = {"head_sha": head, "base_sha": source["base_sha"],
+            "claims_sha256": source["claims_sha256"]}
+assert module.reusable_clear_run(ledger, snapshot, config) is source
+config["reviewer_identity_sha256"] = "f" * 64
+assert module.reusable_clear_run(ledger, snapshot, config) is None
+config = dict(source["reviewer"]); config["review_contract_sha256"] = "e" * 64
+assert module.reusable_clear_run(ledger, snapshot, config) is None
+failed = json.loads(json.dumps(reused))
+failed["state"] = failed["telemetry"]["outcome"] = "tool-failure"
+ledger["runs"].append(failed)
+assert module.reusable_clear_run(ledger, snapshot, dict(source["reviewer"])) is None
+forged = json.loads(json.dumps(ledger))
+forged["runs"][0]["reviewer"]["model"] = "model\nforged-row"
+try:
+    module.render_economics(forged)
+except module.CrosscheckError as exc:
+    assert "forge an economics row" in str(exc)
+else:
+    raise AssertionError("economics accepted a model that forges another row")
+PY
+  output=$(run_economics "$case_dir") || fail "the read-only economics report failed"
+  assert_contains "$output" "provider-reported total: \$0.000000 across 0 run(s)." \
+    "economics hid provider-cost provenance"
+  assert_contains "$output" "Pi-calculated total: \$0.000239 across 1 run(s)." \
+    "economics omitted Pi-calculated cost"
+  assert_contains "$output" "declared-rate total: \$0.000239 across 2 run(s)." \
+    "economics omitted declared regular-lane cost and zero-cost reuse"
+  verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
+    || fail "verify did not follow the reused run to its source proof"
+  [ "$verified" = "$head" ] || fail "reused verification emitted the wrong head"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path)); value["runs"][0]["summary"] += " tampered"
+open(path, "w").write(json.dumps(value) + "\n")
+PY
+  set +e
+  run_case "$case_dir" "$base" "$head" clear verify \
+    > "$case_dir/tampered.out" 2> "$case_dir/tampered.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tampered reuse source"
+  assert_grep 'does not resolve to exactly one source run' "$case_dir/tampered.err" \
+    "verify accepted a reused run whose exact source digest changed"
+  pass "telemetry, economics, and exact-head reuse remain provenance-bound and fail closed"
+}
+
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_non_codex_prompt_addendum_preserves_codex_prompt_bytes|\
@@ -5638,7 +5938,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_timings_reads_every_run_and_refuses_a_missing_ledger|\
     test_untimed_run_record_still_validates_and_renders|\
     test_recorded_run_stamp_cannot_forge_a_timings_row|\
-    test_unwritable_measurement_is_dropped_not_the_ledger)
+    test_unwritable_measurement_is_dropped_not_the_ledger|\
+    test_explicit_pi_tool_loads_with_discovery_disabled|\
+    test_telemetry_economics_and_exact_head_reuse)
       "$FM_TEST_CASE"
       exit 0
       ;;
@@ -5775,3 +6077,5 @@ test_timings_reads_every_run_and_refuses_a_missing_ledger
 test_untimed_run_record_still_validates_and_renders
 test_recorded_run_stamp_cannot_forge_a_timings_row
 test_unwritable_measurement_is_dropped_not_the_ledger
+test_explicit_pi_tool_loads_with_discovery_disabled
+test_telemetry_economics_and_exact_head_reuse

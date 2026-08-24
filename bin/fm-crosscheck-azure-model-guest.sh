@@ -41,7 +41,9 @@ curl --fail --silent --show-error --max-filesize 2097152 --output "$INPUT" "$INP
 curl --fail --silent --show-error --max-filesize 131072 --output "$CREDENTIAL" "$CREDENTIAL_URL"
 unset INPUT_URL CREDENTIAL_URL
 
-python3 - "$INPUT" "$REVIEW_GENERATION" "$GUEST_DIGEST" <<'PY'
+VERDICT_EXTENSION=$BASE/verdict-extension.mjs
+PI_REVIEWER_RUNTIME=$BASE/pi-reviewer.py
+python3 - "$INPUT" "$REVIEW_GENERATION" "$GUEST_DIGEST" "$VERDICT_EXTENSION" "$PI_REVIEWER_RUNTIME" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -64,8 +66,34 @@ if value.get("identity", {}).get("review_generation") != generation:
     raise SystemExit("model guest: review generation mismatch")
 if value.get("protocol", {}).get("model_guest_digest") != guest_digest:
     raise SystemExit("model guest: guest digest mismatch")
+extension = value.get("verdict_extension")
+source = extension.get("source") if isinstance(extension, dict) else None
+digest = extension.get("sha256") if isinstance(extension, dict) else None
+if not isinstance(source, str) or digest != "sha256:" + hashlib.sha256(source.encode()).hexdigest():
+    raise SystemExit("model guest: verdict extension digest mismatch")
+if value.get("protocol", {}).get("verdict_extension_digest") != digest:
+    raise SystemExit("model guest: verdict extension protocol mismatch")
+pathlib.Path(sys.argv[4]).write_text(source, encoding="utf-8")
 if value.get("tool_protocol", {}).get("network_bytes") != 0:
     raise SystemExit("model guest: repository tool contract is not networkless")
+expected_tools = (
+    ["submit_crosscheck_verdict"]
+    if value.get("reviewer", {}).get("harness") == "pi"
+    else []
+)
+if value.get("tool_protocol", {}).get("model_tools") != expected_tools:
+    raise SystemExit("model guest: model tool allowlist mismatch")
+runtime = value.get("pi_reviewer_runtime")
+runtime_source = runtime.get("source") if isinstance(runtime, dict) else None
+runtime_digest = runtime.get("sha256") if isinstance(runtime, dict) else None
+if (
+    not isinstance(runtime_source, str)
+    or runtime_digest != "sha256:" + hashlib.sha256(runtime_source.encode()).hexdigest()
+):
+    raise SystemExit("model guest: Pi reviewer runtime digest mismatch")
+if value.get("protocol", {}).get("pi_reviewer_runtime_digest") != runtime_digest:
+    raise SystemExit("model guest: Pi reviewer runtime protocol mismatch")
+pathlib.Path(sys.argv[5]).write_text(runtime_source, encoding="utf-8")
 PY
 
 # The pinned image owns only the reviewer CLI closure needed in this
@@ -103,11 +131,16 @@ if "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != identity["cred
 # bin/fm-crosscheck.py: model -> (provider slot, pinned chat-completions
 # base URL, non-secret executing identity, pinned model-level compat).
 CROSS_FAMILY_LANES = {
-    "accounts/fireworks/routers/glm-5p2-fast": (
+    "accounts/fireworks/models/glm-5p2": (
         "fireworks-glm",
         "https://api.fireworks.ai/inference/v1",
-        "fireworks-glm:api.fireworks.ai/accounts/fireworks/routers/glm-5p2-fast",
-        {},
+        "fireworks-glm:api.fireworks.ai/accounts/fireworks/models/glm-5p2",
+        {
+            "supportsStrictMode": True,
+            "sendSessionAffinityHeaders": True,
+            "sessionAffinityFormat": "openai",
+        },
+        {"input": 1.40, "cacheRead": 0.14, "cacheWrite": 1.40, "output": 4.40},
     ),
 }
 lane = (
@@ -148,7 +181,7 @@ if lane is not None:
     # R6 cross-family lane: the api-key credential must stay inside that
     # lane's pinned chat-completions endpoint allowlist, and the executing
     # identity is the non-secret provider host/model binding.
-    slot, allowed_base_url, account, allowed_compat = lane
+    slot, allowed_base_url, account, allowed_compat, allowed_cost = lane
     providers = credential.get("providers") if isinstance(credential, dict) else None
     entry = (
         providers.get(slot)
@@ -173,6 +206,12 @@ if lane is not None:
         # response, so the lane owns them exactly.
         if isinstance(model_entry, dict) and model_entry.get("compat", {}) != allowed_compat:
             raise SystemExit("model guest: cross-family credential model-level compat override")
+        if (
+            isinstance(model_entry, dict)
+            and model_entry.get("id") == reviewer["model"]
+            and model_entry.get("cost") != allowed_cost
+        ):
+            raise SystemExit("model guest: cross-family credential model-level pricing mismatch")
 elif reviewer["harness"] == "codex":
     # The PREFIXED identity, byte-identical to
     # `account_identity_from_credential` on the host. This is the third place
@@ -227,327 +266,12 @@ case "$HARNESS" in
     # runs on its own provider slot, the gpt fallback family stays on
     # openai-codex, and an unmapped model refuses rather than guessing.
     case "$MODEL" in
-      accounts/fireworks/routers/glm-5p2-fast) PI_PROVIDER=fireworks-glm ;;
+      accounts/fireworks/models/glm-5p2) PI_PROVIDER=fireworks-glm ;;
       gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
       *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;
     esac
-    # BEGIN PI_PROTOCOL_ATTEMPTS
-    PI_EVENTS=$BASE/pi-events.jsonl
-    PI_DIAGNOSTIC=$BASE/pi-artifact.diagnostic
-    PI_STDERR_1=$BASE/pi-attempt-1.stderr
-    PI_STDERR_2=$BASE/pi-attempt-2.stderr
-    PI_RETRYABLE_ARTIFACT_STATUS=42
-
-    parse_pi_artifact() {
-      python3 - "$@" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-source = pathlib.Path(sys.argv[1])
-destination = pathlib.Path(sys.argv[2])
-diagnostic = pathlib.Path(sys.argv[3])
-RETRYABLE_ARTIFACT_STATUS = 42
-DIAGNOSTIC_LIMIT = 1024
-
-
-def bounded_escaped(value) -> bytes:
-    raw = value if isinstance(value, bytes) else value.encode(
-        "utf-8", errors="backslashreplace"
-    )
-    escaped = bytearray()
-    for byte in raw:
-        if byte == 0x5C:
-            chunk = b"\\\\"
-        elif byte == 0x0A:
-            chunk = b"\\n"
-        elif byte == 0x0D:
-            chunk = b"\\r"
-        elif byte == 0x09:
-            chunk = b"\\t"
-        elif 0x20 <= byte <= 0x7E:
-            chunk = bytes((byte,))
-        else:
-            chunk = f"\\x{byte:02x}".encode("ascii")
-        if len(escaped) + len(chunk) > DIAGNOSTIC_LIMIT:
-            break
-        escaped.extend(chunk)
-    return bytes(escaped)
-
-
-def fail(message: str, status: int = 125) -> None:
-    # Reviewer/provider text is untrusted. Keep one escaped, byte-bounded line
-    # for the shell to combine across the two deterministic attempts.
-    diagnostic.write_bytes(bounded_escaped(message) + b"\n")
-    raise SystemExit(status)
-
-
-if len(sys.argv) == 5 and sys.argv[4] == "stderr-summary":
-    with source.open("rb") as stderr_stream:
-        stderr_prefix = stderr_stream.read(DIAGNOSTIC_LIMIT)
-    sys.stdout.buffer.write(bounded_escaped(stderr_prefix or b"(empty)") + b"\n")
-    raise SystemExit(0)
-
-# BEGIN PI_VERDICT_BODY_CONTRACT
-PI_FENCED_BLOCK_RE = re.compile(
-    r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
-    re.DOTALL,
-)
-
-
-def pi_verdict_body(final_text: str) -> str:
-    """Return the JSON body of a Pi reviewer's final assistant text.
-
-    An UNTERMINATED fence anywhere in the message refuses outright, before the
-    block count is even consulted. That ordering is the whole safety property.
-    A truncated verdict fence contributes ZERO complete blocks, so a model that
-    emitted any complete fence earlier in the same message - a draft, an
-    example, a quoted snippet - left the count at exactly one, and this
-    returned THAT EARLIER BLOCK as the verdict while silently discarding the
-    truncated real one. `stopReason` is `stop` in that shape (the exact live
-    condition seen on attempt 3), and the parse SUCCEEDS on the wrong block, so
-    nothing else downstream catches it: a superseded draft gets certified as
-    the review. That is strictly worse than the failure it replaced, which at
-    least failed loudly.
-    """
-
-    stripped = final_text.strip()
-    # An odd number of fence markers means one was opened and never closed.
-    # Refusing on the marker count rather than on "no complete block found"
-    # is what makes a preceding complete fence unable to rescue a truncated
-    # one; returning the raw text sends it to the parser, which fails.
-    if stripped.count("```") % 2:
-        return stripped
-    blocks = PI_FENCED_BLOCK_RE.findall(stripped)
-    if len(blocks) != 1:
-        return stripped
-    # The block must be the ONLY JSON-bearing content in the message. An even
-    # fence count is not enough on its own: a COMPLETE example fence followed
-    # by a truncated BARE verdict also counts one block, and unwrapping there
-    # would certify the example and discard the real answer. Prose carries no
-    # braces, so this still tolerates a wrapper while refusing every shape
-    # where a second candidate verdict exists.
-    remainder = PI_FENCED_BLOCK_RE.sub("", stripped, count=1)
-    if "{" in remainder or "}" in remainder:
-        return stripped
-    return blocks[0].strip()
-# END PI_VERDICT_BODY_CONTRACT
-
-
-expected_provider = sys.argv[4] if len(sys.argv) == 6 else None
-expected_model = sys.argv[5] if len(sys.argv) == 6 else None
-turn_count = 0
-attempt_turn_count = 0
-agent_ended = False
-final_text = None
-final_stop_reason = None
-final_error = None
-final_provider = None
-final_model = None
-for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
-    if not line.strip():
-        continue
-    try:
-        event = json.loads(line)
-    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
-        fail(
-            f"model guest: Pi returned malformed JSON events at line {line_number}: {exc}"
-        )
-    if not isinstance(event, dict):
-        fail(
-            f"model guest: Pi returned a non-object event at line {line_number}"
-        )
-    event_type = event.get("type")
-    if event_type == "turn_end":
-        if agent_ended:
-            fail("model guest: Pi emitted a turn after agent completion")
-        turn_count += 1
-        attempt_turn_count += 1
-        final_text = None
-        final_stop_reason = None
-        final_error = None
-        final_provider = None
-        final_model = None
-        message = event.get("message")
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            provider = message.get("provider")
-            if isinstance(provider, str):
-                final_provider = provider
-            model = message.get("model")
-            if isinstance(model, str):
-                final_model = model
-            stop_reason = message.get("stopReason")
-            if isinstance(stop_reason, str):
-                final_stop_reason = stop_reason
-            error_message = message.get("errorMessage")
-            if isinstance(error_message, str) and error_message.strip():
-                final_error = error_message.strip()
-            content = message.get("content")
-            if isinstance(content, str):
-                final_text = content
-            elif isinstance(content, list):
-                text_parts = [
-                    part["text"]
-                    for part in content
-                    if isinstance(part, dict)
-                    and part.get("type") == "text"
-                    and isinstance(part.get("text"), str)
-                ]
-                if text_parts:
-                    final_text = "".join(text_parts)
-    elif event_type == "agent_end":
-        if agent_ended:
-            fail("model guest: Pi emitted duplicate agent completion")
-        agent_ended = True
-    elif event_type == "auto_retry_start":
-        if not agent_ended:
-            fail(
-                "model guest: Pi announced a retry while its agent was still running"
-            )
-        if attempt_turn_count == 0:
-            fail(
-                "model guest: Pi announced a retry after an attempt that executed no turn"
-            )
-        if final_stop_reason == "stop":
-            fail(
-                "model guest: Pi announced a retry after a successful assistant turn"
-            )
-        agent_ended = False
-        attempt_turn_count = 0
-        final_text = None
-        final_stop_reason = None
-        final_error = None
-        final_provider = None
-        final_model = None
-if turn_count == 0:
-    fail("model guest: Pi completed without executing a turn")
-if not agent_ended:
-    fail("model guest: Pi stopped before agent completion")
-if attempt_turn_count == 0:
-    fail("model guest: Pi final attempt completed without executing a turn")
-if final_stop_reason != "stop":
-    fail(
-        "model guest: Pi final assistant turn did not stop successfully: "
-        f"stopReason={final_stop_reason!r}"
-        + (f": {final_error[:500]!r}" if final_error else "")
-    )
-if expected_provider is not None and final_provider != expected_provider:
-    fail(
-        "model guest: Pi final assistant turn reported provider "
-        f"{final_provider!r}, expected {expected_provider!r}"
-    )
-if expected_model is not None and final_model != expected_model:
-    fail(
-        "model guest: Pi final assistant turn reported model "
-        f"{final_model!r}, expected {expected_model!r}"
-    )
-if final_text is None or not final_text.strip():
-    fail(
-        "model guest: Pi completed without a verdict artifact",
-        RETRYABLE_ARTIFACT_STATUS,
-    )
-body = pi_verdict_body(final_text)
-try:
-    value = json.loads(body)
-except (json.JSONDecodeError, ValueError, RecursionError) as exc:
-    fail(
-        f"model guest: Pi returned a malformed verdict artifact: {exc}; "
-        f"final assistant text began {body[:4096]}",
-        RETRYABLE_ARTIFACT_STATUS,
-    )
-if not isinstance(value, dict):
-    fail(
-        "model guest: Pi verdict artifact must be an object",
-        RETRYABLE_ARTIFACT_STATUS,
-    )
-if not isinstance(value.get("verdict"), dict):
-    fail(
-        "model guest: reviewer omitted its verdict",
-        RETRYABLE_ARTIFACT_STATUS,
-    )
-if not isinstance(value.get("evidence_files"), dict):
-    fail(
-        "model guest: reviewer omitted its evidence manifest",
-        RETRYABLE_ARTIFACT_STATUS,
-    )
-destination.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-PY
-    }
-
-    pi_stderr_summary() {
-      parse_pi_artifact "$1" /dev/null /dev/null stderr-summary
-    }
-
-    rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-    if pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
-      --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
-      --no-themes --no-context-files --no-approve \
-      "$(<"$PROMPT")" >"$BASE/pi-events.jsonl" 2>"$PI_STDERR_1"; then
-      PI_FIRST_COMMAND_STATUS=0
-    else
-      PI_FIRST_COMMAND_STATUS=$?
-    fi
-    if [ "$PI_FIRST_COMMAND_STATUS" -ne 0 ]; then
-      PI_FIRST_STDERR=$(pi_stderr_summary "$PI_STDERR_1")
-      rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-      printf 'model guest: Pi failed: pi-exit-%s; stderr=%s\n' \
-        "$PI_FIRST_COMMAND_STATUS" "$PI_FIRST_STDERR" >&2
-      exit "$PI_FIRST_COMMAND_STATUS"
-    fi
-    PI_PARSE_STATUS=0
-    parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" \
-      "$PI_PROVIDER" "$MODEL" || PI_PARSE_STATUS=$?
-    if [ "$PI_PARSE_STATUS" -eq 0 ]; then
-      rm -f "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-    elif [ "$PI_PARSE_STATUS" -ne "$PI_RETRYABLE_ARTIFACT_STATUS" ]; then
-      head -c 1024 "$PI_DIAGNOSTIC" >&2
-      rm -f "$RESULT" "$PI_STDERR_1" "$PI_STDERR_2"
-      exit 125
-    else
-      PI_FIRST_DIAGNOSTIC=$(head -c 1024 "$PI_DIAGNOSTIC")
-      # The correction is a fixed trusted prefix. It carries no byte from the
-      # first reviewer response, and the untouched original prompt follows it,
-      # leaving that prompt's exact compact outer schema as the final bytes.
-      PI_PROTOCOL_CORRECTION_PREFIX='TRUSTED PI OUTPUT-PROTOCOL CORRECTION:
-The previous response failed only the required output protocol. Do not repeat or discuss it.
-Reason silently and emit no analysis, preface, or Markdown fence.
-The first output byte MUST be {.
-Return exactly one JSON object satisfying the complete outer schema at the end of the original request.
-
-'
-      # Both files are deliberately reused, so deletion is load-bearing: the
-      # correction may never accept a first-attempt result or event byte.
-      rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_2"
-      if pi --mode json --provider "$PI_PROVIDER" --model "$MODEL" --thinking "$EFFORT" \
-        --no-tools --no-session --no-extensions --no-skills --no-prompt-templates \
-        --no-themes --no-context-files --no-approve \
-        "$PI_PROTOCOL_CORRECTION_PREFIX$(<"$PROMPT")" \
-        >"$PI_EVENTS" 2>"$PI_STDERR_2"; then
-        PI_SECOND_COMMAND_STATUS=0
-      else
-        PI_SECOND_COMMAND_STATUS=$?
-      fi
-      if [ "$PI_SECOND_COMMAND_STATUS" -ne 0 ]; then
-        PI_SECOND_STDERR=$(pi_stderr_summary "$PI_STDERR_2")
-        rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-        printf 'model guest: Pi protocol correction failed: attempt-1=%s; attempt-2=pi-exit-%s stderr=%s\n' \
-          "$PI_FIRST_DIAGNOSTIC" "$PI_SECOND_COMMAND_STATUS" "$PI_SECOND_STDERR" >&2
-        exit 125
-      fi
-      PI_PARSE_STATUS=0
-      parse_pi_artifact "$PI_EVENTS" "$RESULT" "$PI_DIAGNOSTIC" \
-        "$PI_PROVIDER" "$MODEL" || PI_PARSE_STATUS=$?
-      if [ "$PI_PARSE_STATUS" -ne 0 ]; then
-        PI_SECOND_DIAGNOSTIC=$(head -c 1024 "$PI_DIAGNOSTIC")
-        rm -f "$RESULT" "$PI_EVENTS" "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-        printf 'model guest: Pi protocol correction failed: attempt-1=%s; attempt-2=%s\n' \
-          "$PI_FIRST_DIAGNOSTIC" "$PI_SECOND_DIAGNOSTIC" >&2
-        exit 125
-      fi
-      rm -f "$PI_DIAGNOSTIC" "$PI_STDERR_1" "$PI_STDERR_2"
-    fi
-    # END PI_PROTOCOL_ATTEMPTS
+    python3 "$PI_REVIEWER_RUNTIME" "$ACCOUNT" "$MODEL" "$EFFORT" \
+      "$PI_PROVIDER" "$VERDICT_EXTENSION" "$PROMPT" "$SCHEMA" "$RESULT"
     ;;
   *)
     echo "model guest: unsupported reviewer harness" >&2
@@ -569,7 +293,9 @@ review = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 identity = request["identity"]
 if not isinstance(review, dict) or not isinstance(review.get("verdict"), dict):
     raise SystemExit("model guest: reviewer omitted its verdict")
-if not isinstance(review.get("evidence_files"), dict):
+harness = request.get("reviewer", {}).get("harness")
+expected_evidence_type = list if harness == "pi" else dict
+if not isinstance(review.get("evidence_files"), expected_evidence_type):
     raise SystemExit("model guest: reviewer omitted its evidence manifest")
 output = {
     "schema": "fm.azure-crosscheck-result/v1",
@@ -579,6 +305,7 @@ output = {
     "model_vm_instance_id": sys.argv[5],
     "verdict": review["verdict"],
     "evidence_files": review["evidence_files"],
+    "telemetry": review.get("telemetry"),
 }
 path = pathlib.Path(sys.argv[3])
 path.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")

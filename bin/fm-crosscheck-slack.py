@@ -36,9 +36,9 @@ Posture, in one place:
 - Team usage is metered per submitter per UTC day in a durable JSON ledger
   (the C3 hook). Two bounds exist and both reply in thread instead of
   silently dropping: `daily_request_cap` counts started reviews and is the
-  BINDING control today; `daily_budget_usd` is a forward contract that can
-  only bind once the crosscheck ledger records per-review cost, which
-  today's ledger schema does not (estimated USD stays null until it does).
+  BINDING control today; `daily_budget_usd` remains a forward contract and
+  does not consume the new observational telemetry because this change does
+  not add a spend cap.
   Null for either means that bound is off; requests are still ledgered.
 
 The review itself belongs to bin/fm-crosscheck.sh; this file never
@@ -774,10 +774,11 @@ class ReviewOutcome:
 
 
 def usage_from_run(run: dict[str, Any]) -> tuple[dict[str, int] | None, float | None]:
-    """Read token usage and estimated USD when the crosscheck output exposes it.
+    """Read only the legacy Slack budget contract, not economics telemetry.
 
-    Today's ledger schema does not record usage; the sibling GLM lane work may
-    add it. Absent or malformed usage is null, never guessed.
+    Crosscheck telemetry is observational and must not silently activate this
+    lane's existing `daily_budget_usd` cap. Absent or malformed legacy usage
+    is null, never guessed.
     """
 
     usage = run.get("usage")
@@ -1132,10 +1133,9 @@ def handle_mention(event_id: str, event: dict[str, Any], ctx: MentionContext) ->
             )
             return "agent-branch-refused"
 
-    # The request-count cap is the bound that actually binds today; the USD
-    # bound below is a forward contract that can only bind once the
-    # crosscheck ledger records per-review cost (today it does not, so the
-    # recorded day total stays 0.0 until that lands).
+    # The request-count cap is the bound that actually binds today. The USD
+    # bound remains a forward contract; observational Crosscheck telemetry
+    # does not activate a spend cap in this change.
     cap = ctx.config.daily_request_cap
     if cap is not None:
         count = ctx.meter.submitter_day_count(user)
@@ -1605,7 +1605,7 @@ def selftest(config_path: Path) -> int:
         ),
         "daily_budget_usd: "
         + (
-            f"{config.daily_budget_usd:.2f} (binds only once the crosscheck ledger records cost)"
+            f"{config.daily_budget_usd:.2f} (forward contract; economics telemetry does not activate it)"
             if config.daily_budget_usd is not None
             else "null (unmetered pass-through, still ledgered)"
         ),
@@ -1664,7 +1664,7 @@ def main() -> int:
             + "; budget: "
             + (
                 f"${config.daily_budget_usd:.2f}/submitter/day "
-                "(binds only once the ledger records cost)"
+                "(forward contract; economics telemetry does not activate it)"
                 if config.daily_budget_usd is not None
                 else "unmetered (null)"
             )
