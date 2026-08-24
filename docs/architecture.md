@@ -329,7 +329,7 @@ Feishu and TUI use the same normal Pi tool path with no channel-specific tool fe
 
 The transport authenticates through the SDK's app-credential mechanism, verifies the safe app fingerprint and P2P chat, and durably publishes accepted SDK callbacks before returning.
 The callback never waits for Pi or executes a model or tool.
-The SDK owns protocol reconnect and replay, while durable `event_id` and `message_id` indexes converge redelivery without history polling or an invented replay service.
+The SDK owns protocol reconnect and replay within the transport's bounded recovery fence, which suspends dispatch until the exact owner, generation, and P2P identity are reverified; durable `event_id` and `message_id` indexes converge redelivery without history polling or an invented replay service.
 A reconnect, malformed event, disk failure, authorization mismatch, or unsupported message type becomes body-free health or quarantine evidence rather than an in-memory success.
 
 Direct egress is a deterministic persisted-session projection rather than a second reasoning path.

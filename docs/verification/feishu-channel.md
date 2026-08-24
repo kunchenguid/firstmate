@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The configuration-driven lifecycle, native inbound image path, and outbound post Markdown path were verified on 2026-08-19 against Pi `0.84.2` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.2` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
@@ -19,6 +19,7 @@ $ npm view @larksuiteoapi/node-sdk version dist-tags --json
 
 The package README's long-connection section documents `WSClient.start({ eventDispatcher })` with `EventDispatcher.register({ "im.message.receive_v1": ... })`.
 The package declarations expose `WSClient` lifecycle callbacks and `close()`, `Client.im.v1.chat.get`, `Client.im.v1.message.create`, `Client.im.v1.messageResource.get({ params: { type }, path: { message_id, file_key } })`, and message `uuid` fields used for idempotency.
+The installed `WSClient` implementation routes socket close into its automatic reconnect loop, distinguishes pre-ready success through `onReady` from post-ready success through `onReconnected`, accepts server-provided unbounded retry counts, and exposes `onError` for terminal initial or exhausted retry outcomes.
 The resource response exposes a one-consumption `getReadableStream()` and response headers.
 The official message-create contract accepts `msg_type: "post"` with a JSON-stringified locale/content matrix, and the post content contract accepts an `md` element carrying Markdown text.
 Pi's installed declarations expose `sendUserMessage(content: string | (TextContent | ImageContent)[], options)` and native image content as `{ type: "image", data: string, mimeType: string }`.
@@ -67,7 +68,7 @@ The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-ch
 It proves absent-config inertness without private state creation, strict key parsing, missing-field refusal, duplicate and unsupported-field refusal, exact `0600` enforcement, symlink and wrong-owner refusal, credential and P2P probing before binding mutation, silent first activation, unchanged-session idempotence, exact-session replacement with generation increment, prior-owner shutdown, stopped-transport recovery without generation churn, config-persisted disable, process-argument redaction, state-record redaction, and credential-rejection failure before binding state exists.
 
 The SDK section uses a local module implementing the documented `Client`, `WSClient`, `EventDispatcher`, and `messageResource.get` calls.
-It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, authorized image download only after admission, no download for an unauthorized image event, bounded stream consumption and actual-image verification, reconnect callback handling, replay deduplication, canonical bound-chat SDK `message.create`, the exact post locale/content matrix, supported and literal-preserved Markdown in the `md` element, routine-response zero-send with ordinary sibling delivery, stable UUID retry, unsupported-response refusal without card or plain-text fallback, Retry-After preservation, structured multi-chunk delivery, outbound single-flight serialization, body-free health, and owner-verified graceful stop.
+It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, authorized image download only after admission, no download for an unauthorized image event, bounded stream consumption and actual-image verification, healthy and pre-ready transient recovery under one unchanged owner, counted reconnect callbacks, bounded stalled recovery, terminal HTTP authentication and ownership-generation failures, terminal reconnect identity refusal, sanitized connection diagnostics, no client close or outbound attempt while reconnecting, one exact pending send after verified recovery, duplicate-timer cleanup, clean deliberate stop, replay deduplication, canonical bound-chat SDK `message.create`, the exact post locale/content matrix, supported and literal-preserved Markdown in the `md` element, routine-response zero-send with ordinary sibling delivery, stable UUID retry, unsupported-response refusal without card or plain-text fallback, Retry-After preservation, structured multi-chunk delivery, outbound single-flight serialization, body-free health, and owner-verified graceful stop.
 A sentinel executable on `PATH` proves the transport does not invoke the former command transport.
 
 ## Pi compatibility results

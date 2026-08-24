@@ -7,6 +7,25 @@ set -eu
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-feishu-channel)
+TEST_DAEMON_PIDS=()
+cleanup_feishu_test() {
+  local pid
+  for pid in "${TEST_DAEMON_PIDS[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+untrack_feishu_daemon() {
+  local target=$1 pid
+  local remaining=()
+  for pid in "${TEST_DAEMON_PIDS[@]}"; do
+    [ "$pid" = "$target" ] || remaining+=("$pid")
+  done
+  TEST_DAEMON_PIDS=("${remaining[@]}")
+}
+trap cleanup_feishu_test EXIT
+trap 'cleanup_feishu_test; exit 130' INT
+trap 'cleanup_feishu_test; exit 143' TERM
 HOME_DIR="$TMP_ROOT/home"
 SESSION_DIR="$TMP_ROOT/session"
 SESSION_FILE="$SESSION_DIR/current.jsonl"
@@ -1226,7 +1245,11 @@ export class Client {
     this.im = { v1: {
       chat: { get: async ({ path }) => {
         log({ type: "chat-get", chatId: path.chat_id });
-        return { code: 0, data: { chat_id: path.chat_id, chat_mode: process.env.FM_FAKE_SDK_CHAT_MODE || "p2p" } };
+        const reconnectMark = process.env.FM_FAKE_SDK_RECONNECT_MARK;
+        const chatMode = reconnectMark && existsSync(reconnectMark)
+          ? process.env.FM_FAKE_SDK_RECONNECT_CHAT_MODE || "p2p"
+          : process.env.FM_FAKE_SDK_CHAT_MODE || "p2p";
+        return { code: 0, data: { chat_id: path.chat_id, chat_mode: chatMode } };
       } },
       message: {
         create: async (payload) => send("create", payload),
@@ -1263,20 +1286,54 @@ export class WSClient {
   constructor(options) { this.options = options; log({ type: "ws-client", autoReconnect: options.autoReconnect, source: options.source }); }
   async start({ eventDispatcher }) {
     log({ type: "ws-start", event: "im.message.receive_v1" });
-    this.options.onReady?.();
-    for (const action of actions()) {
-      if (action.kind === "reconnect") {
-        this.options.onReconnecting?.();
-        await sleep(20);
-        this.options.onReconnected?.();
-        await sleep(20);
-        continue;
+    const runActions = async () => {
+      if (process.env.FM_FAKE_SDK_AUTO_READY !== "0") this.options.onReady?.();
+      for (const action of actions()) {
+        if (action.kind === "ready") {
+          this.options.onReady?.();
+          continue;
+        }
+        if (action.kind === "error") {
+          const error = new Error(action.message || "fake SDK connection error");
+          if (action.code !== undefined) error.code = action.code;
+          if (action.status !== undefined) error.response = { status: action.status, data: { code: action.sdkCode, body: action.body } };
+          this.options.onError?.(error);
+          continue;
+        }
+        if (action.kind === "sleep") {
+          await sleep(action.ms);
+          continue;
+        }
+        if (action.kind === "wait-for-release") {
+          const release = process.env.FM_FAKE_SDK_RELEASE_MARK;
+          for (let attempt = 0; release && !existsSync(release) && attempt < 500; attempt += 1) await sleep(10);
+          if (!release || !existsSync(release)) throw new Error("fake SDK release was not published");
+          continue;
+        }
+        if (action.kind === "reconnect") {
+          this.options.onReconnecting?.();
+          await sleep(20);
+          this.options.onReconnected?.();
+          await sleep(20);
+          continue;
+        }
+        if (action.kind === "reconnecting") {
+          this.options.onReconnecting?.();
+          continue;
+        }
+        if (action.kind === "reconnected") {
+          if (process.env.FM_FAKE_SDK_RECONNECT_MARK) writeFileSync(process.env.FM_FAKE_SDK_RECONNECT_MARK, "reconnected\n");
+          this.options.onReconnected?.();
+          continue;
+        }
+        if (action.kind === "event") {
+          try { await eventDispatcher.handlers["im.message.receive_v1"]?.(action.data); }
+          catch { log({ type: "event-refused" }); }
+        }
       }
-      if (action.kind === "event") {
-        try { await eventDispatcher.handlers["im.message.receive_v1"]?.(action.data); }
-        catch { log({ type: "event-refused" }); }
-      }
-    }
+    };
+    if (process.env.FM_FAKE_SDK_ASYNC_ACTIONS === "1") void runActions();
+    else await runActions();
   }
   close() { log({ type: "ws-close" }); }
 }
@@ -1332,6 +1389,53 @@ wait_for_transport_phase() {
     phase=$(FM_HOME="$home" node bin/fm-feishu-state.mjs status --public 2>/dev/null |
       node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).transport_phase||"")}catch{}})' || true)
     [ "$phase" = "$expected" ] && return 0
+    sleep 0.03
+  done
+  return 1
+}
+
+prepare_bound_transport_home() {
+  local home=$1
+  mkdir -p "$home/data" "$home/state"
+  write_feishu_config "$home" true
+  FM_HOME="$home" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" APP_FINGERPRINT="$APP_FINGERPRINT" node --input-type=module <<'JS'
+import { bindSession, createPairing } from "./bin/fm-feishu-state.mjs";
+createPairing(process.env.FM_HOME, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
+bindSession(process.env.FM_HOME, { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR, headerId: process.env.SID, headerCwd: process.env.SESSION_DIR });
+JS
+}
+
+register_test_outbound() {
+  local home=$1 entry=$2 text=$3
+  FM_HOME="$home" SESSION_ID="$SID" ENTRY_ID="$entry" OUTBOUND_TEXT="$text" node --input-type=module <<'JS'
+import { readActiveBinding, registerAssistantOutbound } from "./bin/fm-feishu-state.mjs";
+const binding = readActiveBinding(process.env.FM_HOME);
+const result = registerAssistantOutbound(process.env.FM_HOME, {
+  text: process.env.OUTBOUND_TEXT,
+  assistantEntryId: process.env.ENTRY_ID,
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-24T00:00:00.000Z",
+  sessionId: process.env.SESSION_ID,
+  bindingGeneration: binding.generation,
+});
+if (result.status !== "registered") throw new Error(JSON.stringify(result));
+JS
+}
+
+wait_for_send_count() {
+  local path=$1 expected=$2
+  for _ in $(seq 1 150); do
+    [ -f "$path" ] && [ "$(cat "$path")" = "$expected" ] && return 0
+    sleep 0.03
+  done
+  return 1
+}
+
+wait_for_reconnect_count() {
+  local home=$1 expected=$2 count
+  for _ in $(seq 1 150); do
+    count=$(node -e 'const fs=require("fs");try{process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1])).reconnects))}catch{}' "$home/state/feishu/transport/health.json")
+    [ "$count" = "$expected" ] && return 0
     sleep 0.03
   done
   return 1
@@ -1577,6 +1681,192 @@ if PATH="$FAKE_BIN:$PATH" FM_HOME="$TRANSPORT_HOME" FM_FEISHU_SDK_MODULE="$MOCK_
 fi
 node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);if(!rows.some(r=>r.type==="chat-get")||rows.some(r=>r.type==="ws-start"))process.exit(1)' "$SDK_LOG" \
   || fail "SDK long connection started before independent P2P verification"
+
+RECOVERY_HOME="$TMP_ROOT/recovery-home"
+RECOVERY_EVENTS="$TMP_ROOT/recovery-events.json"
+RECOVERY_LOG="$TMP_ROOT/recovery-sdk.log"
+RECOVERY_RELEASE="$TMP_ROOT/recovery-release"
+RECOVERY_SEND_COUNT="$TMP_ROOT/recovery-send-count"
+prepare_bound_transport_home "$RECOVERY_HOME"
+cat > "$RECOVERY_EVENTS" <<JSON
+[
+  {"kind":"sleep","ms":100},
+  {"kind":"error","code":"ECONNRESET","message":"transient socket failure $APP_SECRET private body"},
+  {"kind":"reconnecting"},
+  {"kind":"error","code":"EPIPE","message":"second transient failure $APP_SECRET private body"},
+  {"kind":"reconnecting"},
+  {"kind":"wait-for-release"},
+  {"kind":"reconnected"}
+]
+JSON
+: > "$RECOVERY_LOG"
+env FM_HOME="$RECOVERY_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_LOG="$RECOVERY_LOG" FM_FAKE_SDK_EVENTS="$RECOVERY_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 \
+  FM_FAKE_SDK_RELEASE_MARK="$RECOVERY_RELEASE" FM_FAKE_SDK_SEND_COUNT="$RECOVERY_SEND_COUNT" \
+  FM_FEISHU_OUTBOX_POLL_MS=20 FM_FEISHU_RECOVERY_TIMEOUT_MS=500 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/recovery.out" 2>"$TMP_ROOT/recovery.err" &
+RECOVERY_PID=$!
+TEST_DAEMON_PIDS+=("$RECOVERY_PID")
+wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "recovery fixture did not first become healthy"
+RECOVERY_OWNER=$(owner_pid "$RECOVERY_HOME")
+wait_for_transport_phase "$RECOVERY_HOME" reconnecting || fail "transient SDK connection error terminated instead of entering recovery"
+wait_for_reconnect_count "$RECOVERY_HOME" 2 || fail "SDK reconnect callbacks were not counted and persisted"
+[ "$(owner_pid "$RECOVERY_HOME")" = "$RECOVERY_OWNER" ] || fail "transient SDK errors replaced the transport owner"
+register_test_outbound "$RECOVERY_HOME" face0001 "pending until verified reconnect"
+sleep 0.1
+[ ! -e "$RECOVERY_SEND_COUNT" ] || fail "reconnecting transport attempted an outbound send before identity verification"
+FM_HOME="$RECOVERY_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=JSON.parse(s);if(v.outbound_pending!==1||v.outbound_uncertain!==0)process.exit(1)})' \
+  || fail "reconnecting transport changed pending outbound state without a send attempt"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="reconnecting"||h.healthy!==false||h.reconnects!==2||h.last_error_type!=="sdk-connection-closed")process.exit(1)' \
+  "$RECOVERY_HOME/state/feishu/transport/health.json" || fail "reconnecting health did not preserve bounded structural diagnostics"
+grep -RqF "$APP_SECRET" "$RECOVERY_HOME/state/feishu/transport" "$TMP_ROOT/recovery.err" \
+  && fail "transient SDK diagnostics persisted a credential"
+grep -RqF "private body" "$RECOVERY_HOME/state/feishu/transport" "$TMP_ROOT/recovery.err" \
+  && fail "transient SDK diagnostics persisted a private error body"
+node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse);if(rows.some(r=>r.type==="ws-close"))process.exit(1)' "$RECOVERY_LOG" \
+  || fail "transient SDK error closed the reconnecting client"
+: > "$RECOVERY_RELEASE"
+wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "transient SDK connection error did not recover"
+[ "$(owner_pid "$RECOVERY_HOME")" = "$RECOVERY_OWNER" ] || fail "SDK reconnect replaced the transport owner process"
+wait_for_send_count "$RECOVERY_SEND_COUNT" 1 || fail "pending outbound did not drain after verified reconnect"
+sleep 0.6
+wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "a stale duplicate recovery timer degraded a verified reconnection"
+[ "$(cat "$RECOVERY_SEND_COUNT")" = 1 ] || fail "verified reconnect sent a pending outbound more than once"
+kill -TERM "$RECOVERY_PID"
+wait "$RECOVERY_PID"
+untrack_feishu_daemon "$RECOVERY_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.healthy!==false||h.last_error_type!==null)process.exit(1)' \
+  "$RECOVERY_HOME/state/feishu/transport/health.json" || fail "deliberate stop after reconnect was not clean"
+
+PRE_READY_HOME="$TMP_ROOT/pre-ready-home"
+PRE_READY_EVENTS="$TMP_ROOT/pre-ready-events.json"
+prepare_bound_transport_home "$PRE_READY_HOME"
+cat > "$PRE_READY_EVENTS" <<JSON
+[
+  {"kind":"error","code":"ETIMEDOUT","message":"pre-ready transient $APP_SECRET private body"},
+  {"kind":"sleep","ms":100},
+  {"kind":"ready"}
+]
+JSON
+env FM_HOME="$PRE_READY_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_EVENTS="$PRE_READY_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 FM_FAKE_SDK_AUTO_READY=0 \
+  FM_FEISHU_RECOVERY_TIMEOUT_MS=500 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/pre-ready.out" 2>"$TMP_ROOT/pre-ready.err" &
+PRE_READY_PID=$!
+TEST_DAEMON_PIDS+=("$PRE_READY_PID")
+wait_for_transport_phase "$PRE_READY_HOME" reconnecting || fail "pre-ready transient error did not enter bounded recovery"
+wait_for_transport_phase "$PRE_READY_HOME" healthy || fail "pre-ready transient error did not recover through onReady"
+wait_for_reconnect_count "$PRE_READY_HOME" 0 || fail "pre-ready recovery invented an onReconnecting attempt"
+kill -TERM "$PRE_READY_PID"
+wait "$PRE_READY_PID"
+untrack_feishu_daemon "$PRE_READY_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.last_error_type!==null)process.exit(1)' \
+  "$PRE_READY_HOME/state/feishu/transport/health.json" || fail "pre-ready recovered transport did not stop cleanly"
+
+STALL_HOME="$TMP_ROOT/stall-home"
+STALL_EVENTS="$TMP_ROOT/stall-events.json"
+prepare_bound_transport_home "$STALL_HOME"
+cat > "$STALL_EVENTS" <<JSON
+[{"kind":"error","code":"ECONNRESET","message":"stalled recovery $APP_SECRET private body"}]
+JSON
+env FM_HOME="$STALL_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_EVENTS="$STALL_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 FM_FAKE_SDK_AUTO_READY=0 \
+  FM_FEISHU_READY_TIMEOUT_MS=500 FM_FEISHU_RECOVERY_TIMEOUT_MS=80 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/stall.out" 2>"$TMP_ROOT/stall.err" &
+STALL_PID=$!
+TEST_DAEMON_PIDS+=("$STALL_PID")
+wait_for_transport_phase "$STALL_HOME" degraded || fail "stalled SDK recovery did not reach its bounded terminal state"
+if wait "$STALL_PID"; then fail "stalled SDK recovery exited successfully"; fi
+untrack_feishu_daemon "$STALL_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-recovery-timeout"||h.healthy!==false)process.exit(1)' \
+  "$STALL_HOME/state/feishu/transport/health.json" || fail "stalled recovery did not persist its distinct terminal bound"
+[ ! -e "$STALL_HOME/state/feishu/transport/owner.json" ] || fail "stalled recovery retained transport ownership after terminal failure"
+[ "$(cat "$TMP_ROOT/stall.err")" = "fm-feishu-transport: sdk-recovery-timeout" ] || fail "stalled recovery emitted an unbounded or private diagnostic"
+
+AUTH_HOME="$TMP_ROOT/auth-home"
+AUTH_EVENTS="$TMP_ROOT/auth-events.json"
+prepare_bound_transport_home "$AUTH_HOME"
+cat > "$AUTH_EVENTS" <<JSON
+[
+  {"kind":"sleep","ms":80},
+  {"kind":"error","status":401,"sdkCode":99991663,"body":"$APP_SECRET private auth body","message":"private authentication response"}
+]
+JSON
+env FM_HOME="$AUTH_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_EVENTS="$AUTH_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 FM_FEISHU_RECOVERY_TIMEOUT_MS=500 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/auth.out" 2>"$TMP_ROOT/auth.err" &
+AUTH_PID=$!
+TEST_DAEMON_PIDS+=("$AUTH_PID")
+wait_for_transport_phase "$AUTH_HOME" healthy || fail "terminal-auth fixture did not first become healthy"
+wait_for_transport_phase "$AUTH_HOME" degraded || fail "proven HTTP authentication error did not remain terminal"
+if wait "$AUTH_PID"; then fail "proven HTTP authentication error exited successfully"; fi
+untrack_feishu_daemon "$AUTH_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-http-401"||h.reconnects!==0)process.exit(1)' \
+  "$AUTH_HOME/state/feishu/transport/health.json" || fail "terminal HTTP authentication error entered a reconnect loop or lost its status"
+grep -RqF "$APP_SECRET" "$AUTH_HOME/state/feishu/transport" "$TMP_ROOT/auth.err" \
+  && fail "terminal SDK authentication diagnostics persisted a credential"
+[ "$(cat "$TMP_ROOT/auth.err")" = "fm-feishu-transport: sdk-http-401" ] || fail "terminal HTTP error did not emit its bounded safe status"
+
+IDENTITY_HOME="$TMP_ROOT/identity-home"
+IDENTITY_EVENTS="$TMP_ROOT/identity-events.json"
+IDENTITY_MARK="$TMP_ROOT/identity-reconnected"
+prepare_bound_transport_home "$IDENTITY_HOME"
+cat > "$IDENTITY_EVENTS" <<JSON
+[
+  {"kind":"sleep","ms":80},
+  {"kind":"error","code":"ECONNRESET"},
+  {"kind":"reconnecting"},
+  {"kind":"sleep","ms":40},
+  {"kind":"reconnected"}
+]
+JSON
+env FM_HOME="$IDENTITY_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_EVENTS="$IDENTITY_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 \
+  FM_FAKE_SDK_RECONNECT_MARK="$IDENTITY_MARK" FM_FAKE_SDK_RECONNECT_CHAT_MODE=group \
+  FM_FEISHU_RECOVERY_TIMEOUT_MS=500 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/identity.out" 2>"$TMP_ROOT/identity.err" &
+IDENTITY_PID=$!
+TEST_DAEMON_PIDS+=("$IDENTITY_PID")
+wait_for_transport_phase "$IDENTITY_HOME" healthy || fail "reconnect-identity fixture did not first become healthy"
+wait_for_transport_phase "$IDENTITY_HOME" degraded || fail "reconnect P2P identity failure did not remain terminal"
+if wait "$IDENTITY_PID"; then fail "reconnect P2P identity failure exited successfully"; fi
+untrack_feishu_daemon "$IDENTITY_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="configured-chat-is-not-p2p"||h.healthy!==false)process.exit(1)' \
+  "$IDENTITY_HOME/state/feishu/transport/health.json" || fail "reconnect identity failure restored or obscured health"
+
+BINDING_HOME="$TMP_ROOT/binding-change-home"
+BINDING_SESSION="$TMP_ROOT/binding-change-session"
+BINDING_FILE="$BINDING_SESSION/current.jsonl"
+BINDING_SID=bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+prepare_bound_transport_home "$BINDING_HOME"
+mkdir -p "$BINDING_SESSION"
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$BINDING_SID" "$BINDING_SESSION" > "$BINDING_FILE"
+env FM_HOME="$BINDING_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_ASYNC_ACTIONS=1 FM_FEISHU_BINDING_POLL_MS=20 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/binding-change.out" 2>"$TMP_ROOT/binding-change.err" &
+BINDING_PID=$!
+TEST_DAEMON_PIDS+=("$BINDING_PID")
+wait_for_transport_phase "$BINDING_HOME" healthy || fail "binding-change fixture did not first become healthy"
+FM_HOME="$BINDING_HOME" SESSION_FILE="$BINDING_FILE" SESSION_DIR="$BINDING_SESSION" SESSION_ID="$BINDING_SID" APP_FINGERPRINT="$APP_FINGERPRINT" node --input-type=module <<'JS'
+import { convergeConfiguredSession } from "./bin/fm-feishu-state.mjs";
+convergeConfiguredSession(process.env.FM_HOME, {
+  appIdFingerprint: process.env.APP_FINGERPRINT,
+  allowedUser: "ou_captain1234",
+  allowedChat: "oc_chat1234",
+}, {
+  sessionId: process.env.SESSION_ID,
+  sessionFile: process.env.SESSION_FILE,
+  sessionCwd: process.env.SESSION_DIR,
+  headerId: process.env.SESSION_ID,
+  headerCwd: process.env.SESSION_DIR,
+  outboundAfterEntryId: null,
+});
+JS
+wait_for_transport_phase "$BINDING_HOME" degraded || fail "binding generation change did not terminate the prior owner"
+if wait "$BINDING_PID"; then fail "binding generation change exited the prior owner successfully"; fi
+untrack_feishu_daemon "$BINDING_PID"
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="binding-generation-changed"||h.healthy!==false)process.exit(1)' \
+  "$BINDING_HOME/state/feishu/transport/health.json" || fail "binding generation terminal fence lost its distinct outcome"
 
 cat > "$SDK_EVENTS" <<JSON
 [

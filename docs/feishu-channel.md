@@ -103,6 +103,14 @@ A current owner and binding generation must still match before any outbound clai
 A second transport owner for the same Firstmate home is refused.
 The official SDK owns app-token acquisition, refresh, long-connection authentication, event decoding, and REST requests.
 
+A transient SDK connection error keeps the same transport owner and `WSClient` alive, changes health to non-dispatchable `reconnecting`, and leaves automatic reconnect to the SDK.
+Each `onReconnecting` callback increments the durable reconnect count.
+Only `onReady` or `onReconnected` followed by successful revalidation of the exact binding generation, owner process incarnation, and P2P chat identity restores healthy state and resumes pending media and outbound draining.
+One recovery episode has one five-minute deadline by default, configurable as a positive millisecond value through the transport owner's `FM_FEISHU_RECOVERY_TIMEOUT_MS` environment; a repeated connection error cannot extend that deadline.
+Expiry becomes the distinct terminal `sdk-recovery-timeout` outcome, closes the client, and releases the owner instead of leaving a falsely live process.
+Structured authentication or authorization failures, configuration or ownership fence loss, reconnect identity failure, and durable event-handoff failure remain terminal rather than entering recovery.
+Connection diagnostics retain only bounded error kinds: HTTP status, non-negative numeric SDK code, or fixed structural categories for common connection failures.
+
 The SDK event callback performs only bounded validation and private durable publication.
 It does not wait for Pi, execute a model, execute a tool, or send an outbound response.
 An accepted callback validates the authenticated app identity when present, sender type and open ID, exact chat and P2P mode, message shape, body size, active binding, and capacity before durable handoff.
@@ -115,7 +123,7 @@ A retryable download waits on a bounded durable schedule that honors a server `R
 Unauthorized, malformed, unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
 A durability failure throws from the callback so the SDK can report failure to Feishu rather than acknowledging memory-only receipt.
 
-The SDK owns reconnect and protocol replay behavior.
+The SDK owns reconnect and protocol replay behavior within the transport's bounded recovery and identity-verification fence.
 Firstmate does not poll message history or invent a second replay protocol.
 Replayed `event_id` or `message_id` values converge through the durable indexes.
 A replay that reaches the adapter after another accepted event receives a later local sequence because local durable commit order remains the audit order.
