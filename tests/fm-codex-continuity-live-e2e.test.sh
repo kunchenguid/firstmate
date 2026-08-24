@@ -48,6 +48,9 @@ PROMPT='Run exactly `bin/fm-watch-checkpoint.sh --seconds 1` as one foreground s
 
 grep -F 'checkpoint: no actionable wake within 1s' "$TRANSCRIPT" >/dev/null \
   || fail "Codex transcript omitted the real foreground checkpoint result"
+if grep -F 'invalid stop hook JSON output' "$TRANSCRIPT" >/dev/null; then
+  fail "Codex rejected the tracked Stop hook's output as invalid JSON"
+fi
 if grep -F 'watcher: started pid=' "$TRANSCRIPT" >/dev/null; then
   fail "Codex switched to the background arm path"
 fi
