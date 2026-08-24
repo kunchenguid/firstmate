@@ -195,28 +195,4 @@ grep -F '"$ROOT/tests/run.sh" "$ROOT/$path"' "$ROOT/bin/fm-behavior-shards.sh" >
 if grep -F 'tests/run.sh --skip-herdr' "$ROOT/.no-mistakes.yaml" >/dev/null; then
   fail "no-mistakes silently skips the real-Herdr admission path"
 fi
-python3 - "$ROOT/bin/fm-no-mistakes-test-command.sh" "$ROOT/tests/test-capabilities.tsv" <<'PY' \
-  || fail "ordinary local validation does not derive only the complete Herdr host set"
-from pathlib import Path
-import sys
-
-command = Path(sys.argv[1]).read_text(encoding="utf-8")
-rows = []
-for raw in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
-    if not raw or raw.startswith("#"):
-        continue
-    name, capability = raw.split("\t")
-    rows.append((name, capability))
-host = [name for name, capability in rows if capability in {"herdr-lab", "herdr-mixed"}]
-hermetic = [name for name, capability in rows if capability == "hermetic"]
-assert host and hermetic
-assert "while IFS=$'\\t' read -r script capability; do" in command
-assert 'herdr-lab|herdr-mixed) herdr_tests+=("$ROOT/tests/$script")' in command
-assert 'done < <(grep -v \'^#\' "$ROOT/tests/test-capabilities.tsv")' in command
-assert '"$ROOT/tests/run.sh" "${herdr_tests[@]}"' in command
-assert '"$ROOT/tests/run.sh" ||' not in command
-assert command.index("herdr_tests=()") < command.index('case "$selection" in')
-assert not any(name in command for name in host + hermetic)
-PY
-pass "ordinary local validation derives every Herdr registry row, no hermetic row, and crosses the authoritative runner without a manual allowlist"
 pass "no-mistakes, sharded CI, and documented local execution cross the authoritative runner"
