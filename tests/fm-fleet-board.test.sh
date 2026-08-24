@@ -64,7 +64,8 @@ cat <<'JSON' | filter_snapshot
     {"order":6,"structured":true,"id":"deferred-task","title":"Revisit the harbor plan","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"body_excerpt":"Deferred until the next planning cycle.","deferred_marker":true,"captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
     {"order":7,"structured":true,"id":"done-task","title":"Land the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Documentation only.","source":"task-body"},"captain_actionable":false,"unresolved_blocker_ids":[],"report_path":"data/done-task/report.md","links":[]},
     {"order":8,"structured":true,"id":"reactivated-task","title":"Reopen the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"The completed task was reactivated.","source":"task-body"},"body_excerpt":"The live worker is canonical.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
-    {"order":9,"structured":true,"id":"queued-live-task","title":"Start before charting","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Contained live work.","source":"task-body"},"body_excerpt":"The backlog row has not caught up.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]}
+    {"order":9,"structured":true,"id":"queued-live-task","title":"Start before charting","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Contained live work.","source":"task-body"},"body_excerpt":"The backlog row has not caught up.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
+    {"order":10,"structured":true,"id":"program-task","title":"Run the long-lived program","state":"in_flight","current_role":"program","repo":"firstmate","kind":"program","risk":{"level":"low","rationale":"Long-lived coordination only.","source":"task-body"},"body_excerpt":"The program coordinates current work without child metadata.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]}
   ]},
   "tasks":[
     {"id":"working-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Implementing the board"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
@@ -79,15 +80,16 @@ cat <<'JSON' | filter_snapshot
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
     "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
+    "programs":[{"id":"mate-program","title":"Coordinate the design program","repo":"firstmate","kind":"program","state":"working","source":"backlog","risk":{"level":"low","rationale":"Coordination only.","source":"task-body"},"context":"Program context."}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
     "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]}],
     "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
-    "counts":{"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
+    "counts":{"programs":1,"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
   },{
     "id":"primary","remote":false,"current":{"state":"ready","reason":null},
     "queued":[{"id":"ready-task","title":"Secondmate task with a reserved id","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Namespace fixture.","source":"task-body"},"context":"Secondmate namespace context.","captain_actionable":false,"unresolved_blocker_ids":[]}],
-    "active_children":[],"decisions_open":[],"holds":[],"landed":[],"endpoints":[],
-    "counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1,"landed":0,"endpoints":0},"omitted":[]
+    "programs":[],"active_children":[],"decisions_open":[],"holds":[],"landed":[],"endpoints":[],
+    "counts":{"programs":0,"active_children":0,"decisions_open":0,"holds":0,"queued":1,"landed":0,"endpoints":0},"omitted":[]
   }],"truncated":0},
   "secondmate_landed":{"records":[]}
 }
@@ -156,6 +158,8 @@ SERVER_PID=''
 SECOND_PID=''
 RECYCLED_PID=''
 HEALTH_PID=''
+PROXY_PID=''
+ZOMBIE_PARENT_PID=''
 LIFE_HOME=''
 cleanup_server() {
   if [ -n "$LIFE_HOME" ]; then
@@ -169,6 +173,14 @@ cleanup_server() {
   if [ -n "$HEALTH_PID" ] && kill -0 "$HEALTH_PID" 2>/dev/null; then
     kill "$HEALTH_PID" 2>/dev/null || true
     wait "$HEALTH_PID" 2>/dev/null || true
+  fi
+  if [ -n "$PROXY_PID" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
+    kill "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+  fi
+  if [ -n "$ZOMBIE_PARENT_PID" ] && kill -0 "$ZOMBIE_PARENT_PID" 2>/dev/null; then
+    kill "$ZOMBIE_PARENT_PID" 2>/dev/null || true
+    wait "$ZOMBIE_PARENT_PID" 2>/dev/null || true
   fi
   if [ -n "$SECOND_PID" ] && kill -0 "$SECOND_PID" 2>/dev/null; then
     kill "$SECOND_PID" 2>/dev/null || true
@@ -222,8 +234,11 @@ for _ in 1 2 3; do
   code=$(curl -sS -o /dev/null -w '%{http_code}' "${url}api/v1/board")
   [ "$code" = 503 ] || fail "unavailable board poll returned $code"
 done
+[ "$(wc -l < "$HOME_ROOT/snapshot.calls" | tr -d ' ')" -eq 1 ] \
+  || fail "initial snapshot failures were rerun inside the cache window"
 rm "$HOME_ROOT/snapshot.fail"
-curl -fsS "${url}api/v1/board" >/dev/null || fail "board poll failed during access-log check"
+curl -fsS "${url}api/v1/board?refresh=1" >/dev/null \
+  || fail "forced board recovery failed during access-log check"
 curl -fsS "$url" >/dev/null || fail "application poll failed during access-log check"
 [ ! -s "$HOME_ROOT/server.err" ] || fail "routine polling produced unbounded access-log output"
 pass "routine successful and unavailable polling stays out of the always-on access log"
@@ -257,8 +272,8 @@ printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
   and (.actions.operation_scope | test("^[a-f0-9]{64}$"))
   and .actions.max_text_bytes == 8192
-  and .counts == {backlog:3,in_progress:5,verification:1,needs_you:2,waiting:3,done:2}
-  and .summary == {open:14,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:3,in_progress:7,verification:1,needs_you:2,waiting:3,done:2}
+  and .summary == {open:16,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
          and .home.namespace == "primary"
@@ -280,6 +295,10 @@ printf '%s' "$board" | jq -e '
        | .lane == "in_progress" and .title == "Reopen the chart")
   and ([.cards[] | select(.id == "queued-live-task")][0]
        | .lane == "in_progress" and .status.detail == "Working before backlog reconciliation")
+  and ([.cards[] | select(.id == "program-task")][0]
+       | .lane == "in_progress" and .status.source == "backlog")
+  and ([.cards[] | select(.id == "mate-program")][0]
+       | .lane == "in_progress" and .home.id == "design-mate" and .status.source == "backlog")
   and ([.cards[] | select(.id == "deferred-task")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "mate-held")][0]
@@ -312,7 +331,7 @@ for malformed_snapshot in invalid-utf8 array bad-shape; do
   touch "$HOME_ROOT/snapshot.$malformed_snapshot"
   malformed=$(curl -fsS "${url}api/v1/board?refresh=1") \
     || fail "$malformed_snapshot snapshot escaped the last-good boundary"
-  printf '%s' "$malformed" | jq -e '.health.stale == true and .counts.in_progress == 5' >/dev/null \
+  printf '%s' "$malformed" | jq -e '.health.stale == true and .counts.in_progress == 7' >/dev/null \
     || fail "$malformed_snapshot snapshot did not retain a visibly stale board"
   rm "$HOME_ROOT/snapshot.$malformed_snapshot"
   board=$(curl -fsS "${url}api/v1/board?refresh=1") \
@@ -552,6 +571,51 @@ status_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status) \
   || fail "background lifecycle status failed"
 assert_contains "$status_out" "running: $start_url" "status did not verify the started instance"
+
+PROXY_FIXTURE="$TMP_ROOT/proxy-fixture.py"
+cat > "$PROXY_FIXTURE" <<'PY'
+import http.server
+import pathlib
+import sys
+
+port_file = pathlib.Path(sys.argv[1])
+request_log = pathlib.Path(sys.argv[2])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with request_log.open("a", encoding="utf-8") as stream:
+            stream.write(f"{self.path}\n")
+        self.send_error(502)
+
+    def log_message(self, _format, *_args):
+        pass
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_file.write_text(str(server.server_port), encoding="utf-8")
+server.serve_forever()
+PY
+proxy_port_file="$LIFE_HOME/proxy.port"
+proxy_log="$LIFE_HOME/proxy.requests"
+python3 "$PROXY_FIXTURE" "$proxy_port_file" "$proxy_log" &
+PROXY_PID=$!
+for _ in $(seq 1 100); do
+  [ -s "$proxy_port_file" ] && break
+  sleep 0.05
+done
+[ -s "$proxy_port_file" ] || fail "health proxy fixture did not start"
+proxy_port=$(cat "$proxy_port_file")
+status_out=$(http_proxy="http://127.0.0.1:$proxy_port" HTTP_PROXY="http://127.0.0.1:$proxy_port" \
+  no_proxy='' NO_PROXY='' FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+  FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status) \
+  || fail "loopback health check was diverted through the configured proxy"
+assert_contains "$status_out" "running: $start_url" \
+  "proxied environment did not verify the direct loopback instance"
+[ ! -s "$proxy_log" ] || fail "loopback health check contacted the configured proxy"
+kill "$PROXY_PID" 2>/dev/null || true
+wait "$PROXY_PID" 2>/dev/null || true
+PROXY_PID=''
+pass "lifecycle health checks stay direct to loopback and reject proxy routing"
+
 life_operation_scope=$(curl -fsS "${start_url}api/v1/board" | jq -r '.actions.operation_scope') \
   || fail "background lifecycle board did not expose its operation scope"
 [ "$life_operation_scope" != "$initial_operation_scope" ] \
@@ -565,6 +629,71 @@ if FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   fail "stopped application still reported healthy"
 fi
 pass "background lifecycle reuses verified identity and stops only that instance"
+
+ZOMBIE_HOME="$TMP_ROOT/zombie-home"
+mkdir -p "$ZOMBIE_HOME/state/fleet-board" "$ZOMBIE_HOME/data"
+ZOMBIE_FIXTURE="$TMP_ROOT/zombie-fixture.py"
+cat > "$ZOMBIE_FIXTURE" <<'PY'
+import http.server
+import json
+import os
+import pathlib
+import signal
+import sys
+import time
+
+runtime_path = pathlib.Path(sys.argv[1])
+instance = "zombie-server-instance"
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"ok": True, "instance": instance, "pid": os.getpid()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        pass
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+child = os.fork()
+if child == 0:
+    def stop(_signum, _frame):
+        runtime_path.unlink(missing_ok=True)
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    runtime_path.write_text(json.dumps({
+        "schema": "fm-fleet-board-runtime.v1",
+        "instance": instance,
+        "pid": os.getpid(),
+        "port": server.server_port,
+        "url": f"http://127.0.0.1:{server.server_port}/",
+    }), encoding="utf-8")
+    server.serve_forever()
+    os._exit(0)
+
+server.server_close()
+time.sleep(30)
+PY
+python3 "$ZOMBIE_FIXTURE" "$ZOMBIE_HOME/state/fleet-board/runtime.json" &
+ZOMBIE_PARENT_PID=$!
+for _ in $(seq 1 100); do
+  [ -s "$ZOMBIE_HOME/state/fleet-board/runtime.json" ] && break
+  sleep 0.05
+done
+[ -s "$ZOMBIE_HOME/state/fleet-board/runtime.json" ] \
+  || fail "zombie lifecycle fixture did not publish its runtime identity"
+stop_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$ZOMBIE_HOME" \
+  FM_STATE_OVERRIDE="$ZOMBIE_HOME/state" python3 "$SERVER" --stop) \
+  || fail "an exited zombie server was not treated as stopped"
+[ "$stop_out" = stopped ] || fail "zombie lifecycle stop returned $stop_out"
+kill "$ZOMBIE_PARENT_PID" 2>/dev/null || true
+wait "$ZOMBIE_PARENT_PID" 2>/dev/null || true
+ZOMBIE_PARENT_PID=''
+pass "an exited server cannot wedge stop while waiting to be reaped"
 
 HEALTH_FIXTURE="$TMP_ROOT/health-fixture.py"
 cat > "$HEALTH_FIXTURE" <<'PY'

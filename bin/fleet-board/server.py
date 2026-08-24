@@ -25,8 +25,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -155,6 +153,8 @@ def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
         return "needs_you"
     if record.get("deferred_marker"):
         return "waiting"
+    if record.get("state") == "in_flight" and record.get("current_role") == "program":
+        return "in_progress"
     # A task's live state is newer than its backlog row. Backlog movement can lag
     # worker startup, so a still-Queued row must not hide work already underway.
     state = current_state
@@ -445,6 +445,7 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
             )
         counted_omissions: set[str] = set()
         for surface in (
+            "programs",
             "active_children",
             "decisions_open",
             "holds",
@@ -522,6 +523,8 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
             merge_card(cards, mate_card(item, lane, source="backlog"))
         for item in mate.get("holds") or []:
             merge_card(cards, mate_card(item, "waiting"))
+        for item in mate.get("programs") or []:
+            merge_card(cards, mate_card(item, "in_progress", source="backlog"))
         for item in mate.get("active_children") or []:
             lane = "verification" if item.get("source") == "run-step" else "in_progress"
             merge_card(cards, mate_card(item, lane))
@@ -671,8 +674,11 @@ class SnapshotCache:
     def get(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
             attempt_age = time.monotonic() - self.attempted_at
-            if self.board is not None and not force and attempt_age < self.ttl:
-                return self._response()
+            if not force and attempt_age < self.ttl:
+                if self.board is not None:
+                    return self._response()
+                if self.last_error is not None:
+                    raise BoardError(self.last_error)
             try:
                 env = os.environ.copy()
                 env["FM_HOME"] = str(self.home)
@@ -1077,22 +1083,25 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     result: list[dict[str, Any]] = []
 
     def probe() -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
         try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/healthz", timeout=timeout
-            ) as response:
-                body = response.read(MAX_HEALTH_BYTES + 1)
+            connection.request("GET", "/healthz", headers={"Host": f"127.0.0.1:{port}"})
+            response = connection.getresponse()
+            if response.status != HTTPStatus.OK:
+                return
+            body = response.read(MAX_HEALTH_BYTES + 1)
             if len(body) > MAX_HEALTH_BYTES:
                 return
             value = json.loads(body)
         except (
             OSError,
             UnicodeDecodeError,
-            urllib.error.URLError,
             http.client.HTTPException,
             json.JSONDecodeError,
         ):
             return
+        finally:
+            connection.close()
         if isinstance(value, dict) and value.get("instance") == runtime.get("instance"):
             result.append(value)
 
@@ -1303,6 +1312,10 @@ def stop(home: pathlib.Path) -> bool:
         os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
+            observed = read_runtime(runtime_path)
+            if not observed or observed.get("instance") != current.get("instance"):
+                runtime_path.unlink(missing_ok=True)
+                return True
             if not process_exists(pid):
                 runtime_path.unlink(missing_ok=True)
                 return True

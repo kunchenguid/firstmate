@@ -57,8 +57,9 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. Actionable captain holds
+#     Each structured-home record carries programs, active_children,
+#     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
@@ -99,6 +100,7 @@ esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
+FM_SNAPSHOT_BACKLOG_BYTES=${FM_SNAPSHOT_BACKLOG_BYTES:-16777216}
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
 FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT:-0}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
@@ -138,6 +140,7 @@ case "$FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_BACKLOG_BYTES "$FM_SNAPSHOT_BACKLOG_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -204,6 +207,8 @@ usage: fm-fleet-snapshot.sh --json
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+Canonical backlog input is capped before parsing by FM_SNAPSHOT_BACKLOG_BYTES
+(default 16777216) in the primary home and every structured secondmate summary.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -325,10 +330,25 @@ first_pr_url_in_file() {  # <file>
 }
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
+  local backlog=${1:-$BACKLOG} backlog_bytes
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
+  fi
+  backlog_bytes=$(LC_ALL=C wc -c < "$backlog" 2>/dev/null | tr -d '[:space:]') || {
+    printf 'fm-fleet-snapshot: cannot measure backlog input: %s\n' "$backlog" >&2
+    return 1
+  }
+  case "$backlog_bytes" in
+    ''|*[!0-9]*)
+      printf 'fm-fleet-snapshot: cannot measure backlog input: %s\n' "$backlog" >&2
+      return 1
+      ;;
+  esac
+  if [ "$backlog_bytes" -gt "$FM_SNAPSHOT_BACKLOG_BYTES" ]; then
+    printf 'fm-fleet-snapshot: backlog input %s bytes exceeds FM_SNAPSHOT_BACKLOG_BYTES=%s: %s\n' \
+      "$backlog_bytes" "$FM_SNAPSHOT_BACKLOG_BYTES" "$backlog" >&2
+    return 1
   fi
 
   # shellcheck disable=SC2094
@@ -843,6 +863,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
                    ($terminal_in_flight | map(.id + "=" + .state) | join(", ")))}
         else empty end]) as $strict_invalidities
     | ([ $owned_in_flight[] as $work
+         | select($work.current_role == "program")
+         | card_fields($work; task_record($work.id)) +
+           {id:$work.id,state:"working",source:"backlog",doing:null} ]) as $programs_all
+    | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[] as $task
          | $task
@@ -899,6 +923,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         reason:$reason,
         invalidity:$invalidity,
         state:$state,
+        programs:$programs_all[:$child_n],
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
@@ -918,6 +943,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
+          programs:($programs_all | length),
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
           holds:($holds_all | length),
@@ -926,6 +952,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           endpoints:($tasks | length)
         },
         omitted:[
+          (if ($programs_all | length) > $child_n then {surface:"programs",count:(($programs_all | length) - $child_n)} else empty end),
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($holds_all | length) > $queued_n then {surface:"holds",count:(($holds_all | length) - $queued_n)} else empty end),
@@ -1379,6 +1406,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           FM_PROJECTS_OVERRIDE="$home/projects" \
           FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
           FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
+          FM_SNAPSHOT_BACKLOG_BYTES="$FM_SNAPSHOT_BACKLOG_BYTES" \
           FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
           FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
           FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
@@ -1406,7 +1434,8 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (($remote == true) or .generated == $generated)
           and (.valid | type) == "boolean" and (.state | type) == "string"
           and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
-          and (.active_children | type) == "array" and (.decisions_open | type) == "array"
+          and (.programs | type) == "array" and (.active_children | type) == "array"
+          and (.decisions_open | type) == "array"
           and (.holds | type) == "array" and (.queued | type) == "array"
           and (.landed | type) == "array" and (.endpoints | type) == "array"
           and (.counts | type) == "object" and (.omitted | type) == "array"
@@ -1453,6 +1482,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
+         programs:$summary.programs,
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
@@ -1482,7 +1512,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          current:{state:"unknown",reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         programs:[],active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{programs:0,active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi

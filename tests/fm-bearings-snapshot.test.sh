@@ -717,6 +717,12 @@ test_secondmate_and_child_bounds_are_disclosed() {
   printf '## In flight\n' >> "$mate/data/backlog.md"
   i=1
   while [ "$i" -le 3 ]; do
+    printf -- '- [ ] program-%s - Program %s (repo: sample) (kind: program)\n' \
+      "$i" "$i" >> "$mate/data/backlog.md"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 3 ]; do
     child="child-$i"
     mkdir -p "$mate/projects/$child"
     if [ "$i" -eq 1 ]; then
@@ -753,7 +759,9 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and .secondmate_current.shown == 2
       and .secondmate_current.truncated == 1
       and (.secondmate_current.records[] | select(.id == "a")
-        | .counts.active_children == 3 and (.active_children | length) == 2
+        | .counts.programs == 3 and (.programs | length) == 2
+          and (.omitted | any(.surface == "programs" and .count == 1))
+          and .counts.active_children == 3 and (.active_children | length) == 2
           and (.omitted | any(.surface == "active_children" and .count == 1))
           and .counts.holds == 3 and (.holds | length) == 2
           and (.omitted | any(.surface == "holds" and .count == 1))
@@ -1906,6 +1914,7 @@ EOF
   printf '%s' "$canonical" | jq -e '
     (.secondmate_current.records[] | select(.id == "hibit")
       | .current.state == "active_child_work"
+        and [.programs[].id] == ["dogfood-program"]
         and [.active_children[].id] == ["hibit-worker"]
         and ([.endpoints[].id] | index("dogfood-program") | not))
       and (.secondmate_current.records[] | select(.id == "wheel")
@@ -2084,6 +2093,30 @@ EOF
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
+test_backlog_input_is_bounded_before_projection() {
+  local home fakebin rc
+  home=$(make_home bounded-backlog-input)
+  : > "$home/data/secondmates.md"
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] bounded-task - Bounded task (repo: firstmate) (kind: program)\n'
+    for _ in $(seq 1 40); do
+      printf '  This intentionally oversized task body exercises the public snapshot input boundary.\n'
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_BACKLOG_BYTES=1024 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json \
+    > "$home/oversized.out" 2> "$home/oversized.err"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an oversized canonical backlog was parsed without a memory boundary"
+  [ ! -s "$home/oversized.out" ] || fail "an oversized canonical backlog emitted a partial snapshot"
+  assert_contains "$(cat "$home/oversized.err")" "exceeds FM_SNAPSHOT_BACKLOG_BYTES" \
+    "the snapshot did not disclose its canonical backlog boundary"
+  pass "canonical backlog input is rejected before unbounded projection work"
+}
+
 test_main_captain_readiness_matches_secondmate_projection() {
   local home fakebin json
   home=$(make_home main-captain-readiness)
@@ -2186,6 +2219,7 @@ test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
+test_backlog_input_is_bounded_before_projection
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
