@@ -591,8 +591,10 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        if (!scopeForUnreadWake(state, heartbeat).eligible) {
-          throw new Error("unread wake queue now contains a main-owned row");
+        const scope = scopeForUnreadWake(state, heartbeat);
+        if (scope.status === "empty") return;
+        if (scope.status === "unsafe") {
+          throw new Error("unread wake queue now contains a main-owned row or could not be read safely");
         }
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.

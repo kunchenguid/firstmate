@@ -649,6 +649,50 @@ EOF
   pass "pre-drain eligibility re-check defers a newly main-owned row"
 }
 
+test_branch_predrain_recheck_noops_already_drained_wake() {
+  local repo home out status
+  repo="$TMP_ROOT/predrain-empty-root"
+  home="$TMP_ROOT/predrain-empty-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
+const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+fire("session_start", {});
+let releaseFirst;
+globalThis.__fmPromptGate = new Promise((resolve) => {
+  releaseFirst = resolve;
+});
+if (!dispatch("signal: first queued wake").accepted) throw new Error("first wake was not accepted");
+for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!globalThis.__fmPromptStarted) throw new Error("first branch prompt did not start");
+if (!dispatch("heartbeat", [], true, true).accepted) throw new Error("queued heartbeat was not accepted");
+writeFileSync(`${home}/state/.wake-queue`, "");
+releaseFirst();
+for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 50));
+if ((globalThis.__fmPrompts ?? []).length !== 1) {
+  throw new Error(`already-drained wake prompted again: ${JSON.stringify(globalThis.__fmPrompts ?? [])}`);
+}
+if (mainUserMessages.length !== 0) {
+  throw new Error(`already-drained wake fell back to main: ${JSON.stringify(mainUserMessages)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an already-drained serialized wake must no-op without main fallback: $out"
+  pass "pre-drain eligibility re-check no-ops an already-drained wake"
+}
+
 test_branch_mirror_filters_order_and_cursor() {
   local repo home out status
   repo="$TMP_ROOT/mirror-root"
@@ -1083,6 +1127,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_defers_new_main_owned_row
+test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_replacement_activation_cleans_leases_and_retries_failure

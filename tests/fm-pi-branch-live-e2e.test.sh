@@ -49,7 +49,7 @@ ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 # heredoc nested inside command substitution, so capture through a file.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
   PI_CODING_AGENT_DIR="$agentdir" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -57,6 +57,9 @@ const home = resolve(process.env.FM_HOME);
 // Supervision is default-on: the live guard exercises the branch with no
 // captain grant file present at all.
 const approvedProject = `${home}/projects/live-probe`;
+mkdirSync(approvedProject, { recursive: true });
+writeFileSync(`${home}/state/live-probe.meta`, `project=${approvedProject}\nwindow=fm-live-probe\n`);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live-sdk probe\n");
 const busHandlers = new Map();
 const bus = {
   on(channel, handler) {
@@ -96,6 +99,8 @@ writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 const offer = {
   message: "signal: live-sdk probe",
   projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
   accepted: false,
   accept() {
     offer.accepted = true;

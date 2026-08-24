@@ -16,13 +16,22 @@ import { readdirSync, readFileSync } from "node:fs";
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean): { eligible: boolean; projects: string[] } {
+export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
+
+export function scopeForUnreadWake(state: string, heartbeat: boolean): {
+  status: UnreadWakeScopeStatus;
+  eligible: boolean;
+  projects: string[];
+} {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
   } catch {
-    return { eligible: false, projects: [] };
+    return { status: "unsafe", eligible: false, projects: [] };
   }
+
+  const rows = queue.split(/\r?\n/).filter((line) => line.length > 0);
+  if (rows.length === 0) return { status: "empty", eligible: false, projects: [] };
 
   const projects = new Set<string>();
   const metadata = new Map<string, string>();
@@ -39,17 +48,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): { eligibl
       }
     }
   } catch {
-    return { eligible: false, projects: [] };
+    return { status: "unsafe", eligible: false, projects: [] };
   }
 
-  let found = false;
-  for (const line of queue.split(/\r?\n/)) {
-    if (!line) continue;
+  for (const line of rows) {
     const fields = line.split("\t");
-    if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) return { eligible: false, projects: [] };
+    if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) return { status: "unsafe", eligible: false, projects: [] };
     const kind = fields[2];
     const key = fields[3];
-    found = true;
     if (kind === "heartbeat") continue;
     let project = "";
     if (kind === "signal") {
@@ -58,12 +64,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): { eligibl
     } else if (kind === "stale") {
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
     } else {
-      return { eligible: false, projects: [] };
+      return { status: "unsafe", eligible: false, projects: [] };
     }
-    if (!project) return { eligible: false, projects: [] };
+    if (!project) return { status: "unsafe", eligible: false, projects: [] };
     projects.add(project);
   }
-  return { eligible: found && (heartbeat || projects.size > 0), projects: [...projects] };
+  const eligible = heartbeat || projects.size > 0;
+  return { status: eligible ? "safe" : "unsafe", eligible, projects: [...projects] };
 }
 
 export interface BranchDispatchOffer {
