@@ -1191,6 +1191,17 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # omp (Oh My Pi, @oh-my-pi/pi-coding-agent): a divergent fork of pi-mono with
+    # its own binary and flags, verified live 2026-08-24 (omp v18.0.4) as a
+    # CREWMATE/SCOUT adapter only - it has no primary watcher-supervision
+    # protocol yet (fm_control_harness_supports_kind refuses --secondmate), and
+    # no per-task busy-state hook is wired here, so its busy state stays
+    # `unknown` in bin/fm-busy-lib.sh, the same honest gap codex and opencode
+    # already operate with. --approval-mode yolo auto-approves every tool call
+    # (verified: no trust dialog, no approval prompt on a fresh worktree).
+    # Interrupt (single Escape -> "Command aborted") and /exit were verified
+    # live in a throwaway scratch session; see the harness-adapters skill.
+    omp) printf '%s' 'omp --approval-mode yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1239,6 +1250,13 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+# omp is verified as a CREWMATE/SCOUT adapter only, for the identical reason:
+# no primary watcher-supervision protocol exists yet under docs/supervision-protocols/,
+# so a spawned secondmate's turn-end guard and watch cycle could never be armed.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = omp ]; then
+  echo "error: omp is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1376,7 +1394,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1408,9 +1426,9 @@ effort_flag_for_harness() {
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
+    pi|pi-signed|omp)
+      # Pi 0.80.6 and omp v18.0.4 both accept the full shared effort
+      # vocabulary, including max, through their identical --thinking flag.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
