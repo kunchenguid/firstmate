@@ -426,12 +426,13 @@ inbox_steer_check() {  # <window> <task>
 # bounding the wake rate, which would have suppressed genuinely stopped workers.
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
-# before: any batch that references a secondmate, an unresolvable task, a task with
-# no uniquely attributable recorded endpoint, no previous hash to compare against
-# (nothing has been polled yet), a capture that fails or comes back empty, an
-# exhausted deferral bound, and of course an unchanged pane. Any .status file also
-# returns 1: an authored append is content the supervisor may need to read, so only
-# the mechanical turn-end marker gets the fallback.
+# before: a secondmate without authoritative proof, an unresolvable task, a task
+# with no uniquely attributable recorded endpoint, no previous hash to compare
+# against (nothing has been polled yet), a capture that fails or comes back empty,
+# an exhausted deferral bound, and of course an unchanged pane. A .status file
+# without authoritative proof also returns 1: an authored append is content the
+# supervisor may need to read, so only the mechanical turn-end marker gets the
+# fallback.
 #
 # NOT a pure read: one bounded pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
@@ -440,7 +441,6 @@ inbox_steer_check() {  # <window> <task>
 # inherit the prior one. Reached only for a non-afk, no-captain-verb signal, so
 # it never runs on the ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
-  [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
   local rec_task task_index i j count hash_file hash_bytes created
   local max_absorb_secs=9223372036854775807
@@ -451,7 +451,7 @@ signal_turnend_panes_churned() {  # <file> ...
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
-      *.status)     return 1 ;;
+      *.status)     task=${base%.status}; kind=status ;;
       *.turn-ended) task=${base%.turn-ended}; kind=turn-ended ;;
       *)            return 1 ;;
     esac
@@ -467,6 +467,7 @@ signal_turnend_panes_churned() {  # <file> ...
       signal_statuses[task_index]=1
     fi
   done
+  [ -e "$CONFIG/turnend-churn-absorb" ] || { signal_crew_provably_working "$@"; return; }
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     rec_task=${meta##*/}
@@ -509,13 +510,12 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$count" -eq 1 ] || return 1
     signal_indexes+=("$task_index")
   done
-  for task_index in "${signal_indexes[@]}"; do
-    [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
-  done
   for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
     task=${signal_tasks[$i]}
     crew_is_provably_working "$task" && continue
+    [ "${signal_statuses[$i]}" -eq 0 ] || return 1
     task_index=${signal_indexes[$i]}
+    [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
     churn_indexes+=("$task_index")
   done
   [ "${#churn_indexes[@]}" -gt 0 ] || return 0
@@ -1660,7 +1660,7 @@ EOF
     signal_actionable=$?
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || ! signal_turnend_panes_churned $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
