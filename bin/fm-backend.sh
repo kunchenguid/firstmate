@@ -592,9 +592,17 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # Each adapter is an independently linted canonical root. The /dev/null source
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
+# The readability precheck below is what makes a missing or unreadable adapter
+# fail closed with a diagnostic: a dot-source of an absent file aborts the whole
+# non-interactive shell, so the per-adapter `|| return 1` never runs for it.
 fm_backend_source() {  # <name>
-  local name=$1
+  local name=$1 adapter
   fm_backend_validate "$name" || return 1
+  adapter="$FM_BACKEND_LIB_DIR/backends/$name.sh"
+  if [ ! -f "$adapter" ] || [ ! -r "$adapter" ]; then
+    printf 'error: backend adapter is unavailable: %s\n' "$adapter" >&2
+    return 1
+  fi
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
