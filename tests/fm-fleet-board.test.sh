@@ -160,6 +160,7 @@ RECYCLED_PID=''
 HEALTH_PID=''
 PROXY_PID=''
 ZOMBIE_PARENT_PID=''
+INBOX_RACE_PID=''
 LIFE_HOME=''
 cleanup_server() {
   if [ -n "$LIFE_HOME" ]; then
@@ -177,6 +178,10 @@ cleanup_server() {
   if [ -n "$PROXY_PID" ] && kill -0 "$PROXY_PID" 2>/dev/null; then
     kill "$PROXY_PID" 2>/dev/null || true
     wait "$PROXY_PID" 2>/dev/null || true
+  fi
+  if [ -n "$INBOX_RACE_PID" ] && kill -0 "$INBOX_RACE_PID" 2>/dev/null; then
+    kill "$INBOX_RACE_PID" 2>/dev/null || true
+    wait "$INBOX_RACE_PID" 2>/dev/null || true
   fi
   if [ -n "$ZOMBIE_PARENT_PID" ] && kill -0 "$ZOMBIE_PARENT_PID" 2>/dev/null; then
     kill "$ZOMBIE_PARENT_PID" 2>/dev/null || true
@@ -906,6 +911,64 @@ printf '%s' "$conflict_out" | jq -e \
   '.saved == false and .error == "request-id-conflict"' >/dev/null \
   || fail "inbox request-id conflict was not machine-readable"
 pass "the inbox durably owns action idempotency and wake recovery"
+
+INBOX_RACE_HOME="$TMP_ROOT/inbox-ack-race"
+INBOX_RACE_FAKEBIN="$INBOX_RACE_HOME/fakebin"
+INBOX_RACE_READY="$INBOX_RACE_HOME/publish-ready"
+INBOX_RACE_RELEASE="$INBOX_RACE_HOME/publish-release"
+INBOX_REAL_LN=$(command -v ln)
+mkdir -p "$INBOX_RACE_HOME/state" "$INBOX_RACE_FAKEBIN"
+cat > "$INBOX_RACE_FAKEBIN/ln" <<'SH'
+#!/usr/bin/env bash
+set -eu
+: > "${FM_INBOX_RACE_READY:?}"
+while [ ! -f "${FM_INBOX_RACE_RELEASE:?}" ]; do
+  sleep 0.01
+done
+exec "${FM_INBOX_REAL_LN:?}" "$@"
+SH
+chmod +x "$INBOX_RACE_FAKEBIN/ln"
+printf '%s' 'Persist this racing captain action.' | \
+  PATH="$INBOX_RACE_FAKEBIN:$PATH" FM_HOME="$INBOX_RACE_HOME" \
+  FM_STATE_OVERRIDE="$INBOX_RACE_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_RACE_HOME/state/.wake-queue" \
+  FM_INBOX_REAL_LN="$INBOX_REAL_LN" FM_INBOX_RACE_READY="$INBOX_RACE_READY" \
+  FM_INBOX_RACE_RELEASE="$INBOX_RACE_RELEASE" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id ack-race --json - \
+  >"$INBOX_RACE_HOME/paused.out" 2>"$INBOX_RACE_HOME/paused.err" &
+INBOX_RACE_PID=$!
+for _ in $(seq 1 200); do
+  [ -f "$INBOX_RACE_READY" ] && break
+  sleep 0.01
+done
+race_ready=0
+[ -f "$INBOX_RACE_READY" ] && race_ready=1
+printf '%s' 'Persist this racing captain action.' | \
+  FM_HOME="$INBOX_RACE_HOME" FM_STATE_OVERRIDE="$INBOX_RACE_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_RACE_HOME/state/.wake-queue" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id ack-race --json - \
+  >"$INBOX_RACE_HOME/winner.out" 2>"$INBOX_RACE_HOME/winner.err"
+winner_rc=$?
+FM_HOME="$INBOX_RACE_HOME" FM_STATE_OVERRIDE="$INBOX_RACE_HOME/state" \
+  "$ROOT/bin/fm-inbox.sh" drain --ack request-ack-race \
+  >"$INBOX_RACE_HOME/ack.out" 2>"$INBOX_RACE_HOME/ack.err"
+ack_rc=$?
+: > "$INBOX_RACE_RELEASE"
+wait "$INBOX_RACE_PID"
+paused_rc=$?
+INBOX_RACE_PID=''
+[ "$race_ready" -eq 1 ] || fail "the inbox acknowledgement race did not reach its publication barrier"
+[ "$winner_rc" -eq 0 ] || fail "the competing inbox request did not publish"
+[ "$ack_rc" -eq 0 ] || fail "the competing inbox request could not be acknowledged"
+[ "$paused_rc" -eq 0 ] || fail "the paused inbox retry failed after acknowledgement"
+printf '%s' "$(cat "$INBOX_RACE_HOME/paused.out")" | jq -e \
+  '.saved == true and .duplicate == true and .wake == "handled"' >/dev/null \
+  || fail "the publication race did not resolve to the handled request"
+[ ! -f "$INBOX_RACE_HOME/state/inbox/request-ack-race.note" ] \
+  || fail "an acknowledged request was republished into the live inbox"
+[ -f "$INBOX_RACE_HOME/state/inbox/handled/request-ack-race.note" ] \
+  || fail "the acknowledgement race lost the handled request"
+pass "acknowledgement racing publication cannot republish a handled request"
 
 if command -v node >/dev/null 2>&1; then
   if ! node - "$ROOT/bin/fleet-board/board-state.js" "$ROOT/bin/fleet-board/app.js" <<'JS'

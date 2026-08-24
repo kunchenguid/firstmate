@@ -255,7 +255,7 @@ queue_note() {
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
   mkdir -p "$INBOX"
 
-  local tmp id summary staging_name target
+  local tmp id summary staging_name target handled_target
   if [ -n "$request_id" ]; then
     validate_request_id "$request_id"
     id="request-$request_id"
@@ -283,16 +283,25 @@ queue_note() {
 
   target="$INBOX/$id.note"
   if [ -n "$request_id" ]; then
+    handled_target="$INBOX/handled/$id.note"
     if ! ln "$tmp" "$target" 2>/dev/null; then
       rm -f "$tmp"
-      if [ -f "$INBOX/handled/$id.note" ]; then
-        finish_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
+      if [ -f "$handled_target" ]; then
+        finish_requested_note "$handled_target" "$id" "$request_id" "$body" "$json_mode" 1
       elif [ -f "$target" ]; then
         finish_requested_note "$target" "$id" "$request_id" "$body" "$json_mode" 0
       else
         emit_note_result "$json_mode" "$id" "$request_id" false false not-attempted publish-failed
         return 1
       fi
+      return
+    fi
+    # An acknowledgement can move the prior request after the two namespace
+    # checks above but before this hard link. In that case the new link must not
+    # put already handled work back into the live inbox.
+    if [ -f "$handled_target" ]; then
+      rm -f "$target" "$tmp"
+      finish_requested_note "$handled_target" "$id" "$request_id" "$body" "$json_mode" 1
       return
     fi
     rm -f "$tmp"
