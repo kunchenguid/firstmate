@@ -1925,20 +1925,24 @@ fm_backend_herdr_pane_registration_state() {  # <session> <pane_id>
 # other process shape is unknown so lifecycle actions refuse.
 # An idle interactive shell transiently hosts short-lived prompt helpers as a
 # second foreground process (verified on the real 0.7.5 lab; see
-# fm_backend_herdr_pane_idle_shell_pid), which reads as an ambiguous group and
-# would otherwise turn a settled stale registration into an intermittent
-# refusal. So an inconclusive sample is retried over the same bounded settle
-# window and only a window of nothing but ambiguity stays unknown; the retry
-# never converts uncertainty into agent-free, because only a clean lone-shell
-# sample can print no-agent.
+# fm_backend_herdr_pane_idle_shell_pid), so a multi-process group can be a
+# passing artifact of a redrawing prompt rather than a real answer. ONLY that
+# genuinely transient shape (`ambiguous`) is resampled over a bounded settle
+# window. A failed CLI call, a malformed or shape-changed response, and a
+# clean group that simply is not the agent are permanent within any settle
+# window, so they refuse immediately rather than paying the whole window on
+# every liveness read in the fleet polling loops. The retry never converts
+# uncertainty into agent-free: only a corroborated lone-shell sample can print
+# no-agent.
 fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
   local attempt=0 max_attempts=${FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS:-10} state
   while :; do
     state=$(fm_backend_herdr_pane_foreground_sample "$1" "$2" "$3")
-    if [ "$state" = live ] || [ "$state" = no-agent ]; then
-      printf '%s' "$state"
-      return 0
-    fi
+    case "$state" in
+      live|no-agent) printf '%s' "$state"; return 0 ;;
+      ambiguous) ;;
+      *) printf 'unknown'; return 0 ;;
+    esac
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$max_attempts" ] || break
     sleep 0.1
@@ -1948,9 +1952,16 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 
 # fm_backend_herdr_pane_foreground_sample: one strict instantaneous
 # observation for fm_backend_herdr_pane_foreground_state, which owns the
-# contract and the settle retry.
+# contract and the settle retry. Prints live, no-agent, `ambiguous` (the one
+# retryable shape), or unknown.
+# no-agent is the only verdict that licenses action (relaunch and the
+# already-stopped exit report), so it is corroborated exactly like the sibling
+# fm_backend_herdr_pane_idle_shell_sample proof reading the same payload: the
+# lone foreground process must BE the pane's own shell (shell_pid ==
+# foreground_process_group_id == foreground_processes[0].pid), never merely
+# some shell holding the foreground while the agent sits stopped behind it.
 fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
-  local session=$1 pane_id=$2 agent=$3 info count name argv0 agent_name
+  local session=$1 pane_id=$2 agent=$3 info count name argv0 agent_name lone_name lone_argv0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -1968,6 +1979,7 @@ fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
   count=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes | length' 2>/dev/null)
   case "$count" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   agent_name=${agent#-}; agent_name=${agent_name##*/}; agent_name=${agent_name%.exe}
+  lone_name=""; lone_argv0=""
   while IFS=$'\t' read -r name argv0; do
     [ -n "$name" ] && [ -n "$argv0" ] || { printf 'unknown'; return 0; }
     name=${name#-}; name=${name##*/}; name=${name%.exe}
@@ -1976,19 +1988,28 @@ fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
       printf 'live'
       return 0
     fi
-    if [ "$count" = 1 ]; then
-      case "$name:$argv0" in
-        sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish)
-          printf 'no-agent'
-          return 0
-          ;;
-      esac
-    fi
+    lone_name=$name; lone_argv0=$argv0
   done < <(printf '%s' "$info" | jq -r '
     .result.process_info.foreground_processes[]
     | [(.name // empty), (.argv0 // .argv[0] // empty)] | @tsv
   ' 2>/dev/null)
-  printf 'unknown'
+  [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
+  case "$lone_name:$lone_argv0" in
+    sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  printf '%s' "$info" | jq -e '
+    .result.process_info as $p
+    | ($p.shell_pid | type == "number" and . > 1)
+    and ($p.foreground_process_group_id | type == "number" and . > 1)
+    and ($p.foreground_processes[0].pid | type == "number" and . > 1)
+  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  printf '%s' "$info" | jq -e '
+    .result.process_info as $p
+    | ($p.foreground_process_group_id == $p.shell_pid)
+    and ($p.foreground_processes[0].pid == $p.shell_pid)
+  ' >/dev/null 2>&1 || { printf 'ambiguous'; return 0; }
+  printf 'no-agent'
 }
 
 # fm_backend_herdr_pane_agent_state: lifecycle state for <pane-id> in
@@ -2023,6 +2044,14 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# fm_backend_herdr_endpoint_closeable: the registration-only husk decision
+# exposed to recovery callers OUTSIDE this file, so a lifecycle `dead` verdict
+# grounded in foreground-shell evidence can never authorize a `pane close`.
+fm_backend_herdr_endpoint_closeable() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_tab_is_husk "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
 # fm_backend_herdr_agent_state: recovery-grade lifecycle state for the same

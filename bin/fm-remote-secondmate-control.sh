@@ -160,6 +160,8 @@ cmd_launch() {
         return 0
         ;;
       dead)
+        fm_backend_endpoint_closeable "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+          || die "remote endpoint runs no agent process but still carries a registered agent record; refusing to close it - relaunch it in place with bin/fm-spawn.sh $id --relaunch"
         fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
           || die "could not remove the confirmed agent-less endpoint"
         ;;

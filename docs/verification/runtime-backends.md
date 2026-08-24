@@ -624,6 +624,9 @@ The smoke starts a real OpenCode process in a helper-isolated lab pane and kills
 Herdr retains `agent_status=idle` while `pane process-info` reports the login shell.
 The lifecycle classifier treats that positive shell evidence as agent-free for `exit` and relaunch, while `fm_backend_herdr_tab_is_husk` retains its registration-only refusal path for destructive close-and-replace.
 No registration status alone proves a pane agent-free: Herdr's `done` is a per-turn status of a still-attached agent, so terminal and non-terminal registrations alike are resolved against `pane process-info`, and an ambiguous group (a shell transiently hosting a prompt helper) is resampled over a bounded settle window before it refuses as unknown.
+The agent-free verdict is corroborated against the pane's own shell (`shell_pid == foreground_process_group_id == foreground_processes[0].pid`), so a shell holding the foreground in front of a stopped agent never reads as agent-free.
+A lifecycle `dead` verdict means only that no agent process is running; it is never permission to close a pane.
+Recovery callers that would destroy an endpoint ask `fm_backend_endpoint_closeable`, which Herdr answers from the registration-only husk view, so a still-registered pane is recovered in place through `fm-spawn` rather than closed.
 Run this guard after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport

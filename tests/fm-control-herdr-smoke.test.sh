@@ -16,7 +16,9 @@
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
-# when herdr or jq is missing.
+# when herdr or jq is missing; the OpenCode and Codex binaries are required
+# only from the stale-registration section down, so the agent-free
+# registration gate still runs on a host without them.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,8 +28,6 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v opencode >/dev/null 2>&1 || { echo "skip: opencode not found"; exit 0; }
-command -v codex >/dev/null 2>&1 || { echo "skip: codex not found"; exit 0; }
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -170,6 +170,13 @@ esac
 pass "real herdr: interrupt refuses when Herdr has no registered agent"
 
 # --- stale idle registration: a dead agent must not wedge relaunch ----------
+#
+# Only the remaining cases need real agent binaries, so the agent-free
+# registration gate above still runs on a host that has Herdr but neither CLI.
+
+command -v opencode >/dev/null 2>&1 || { echo "skip: opencode not found (agent-free registration cases already ran)"; exit 0; }
+command -v codex >/dev/null 2>&1 || { echo "skip: codex not found (agent-free registration cases already ran)"; exit 0; }
+
 
 lab pane run "$PANE_ID" 'opencode --mini' >/dev/null \
   || fail "could not start real OpenCode in the task pane"

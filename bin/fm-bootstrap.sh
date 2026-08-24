@@ -782,7 +782,11 @@ secondmate_liveness_one() {  # <meta> <id>
     dead|missing)
       if [ "$agent_state" = dead ]; then
         cause="confirmed agent absence on existing endpoint"
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        if fm_backend_endpoint_closeable "$backend" "$target" 2>/dev/null; then
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        else
+          echo "SECONDMATE_LIVENESS: secondmate $id: endpoint still carries a registered agent record; recovering through fm-spawn without closing it (backend=$backend)"
+        fi
       else
         cause="recorded endpoint confidently missing"
       fi

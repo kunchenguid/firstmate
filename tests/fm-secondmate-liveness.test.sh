@@ -370,6 +370,71 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+# make_liveness_herdr: a stateless `herdr` stub for the ONE endpoint shape the
+# destructive-path regression needs - a stale idle registration whose pane has
+# returned to its own login shell. Every call is logged. Only the three reads
+# the lifecycle classifier makes succeed; anything else fails, so the sweep's
+# respawn attempt stops at container setup instead of driving the real spawn
+# machinery through a fake server.
+make_liveness_herdr() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/herdrbin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_CALL_LOG:?}"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.8.0","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_sweep_never_closes_a_registered_herdr_endpoint() {
+  local w fb herdrfb log out
+
+  # The exact scenario this branch targets: OpenCode was SIGKILLed without its
+  # stop hook, so Herdr still reports agent_status=idle while the pane has
+  # returned to its login shell. Lifecycle now reads `dead` (no agent PROCESS),
+  # which must NOT become permission to close a pane Herdr still has an agent
+  # registered in.
+  w=$(new_world sweep-herdr-registered)
+  add_sm_home "$w" sm1 fmtest:w1:p2 opencode
+  printf 'backend=herdr\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  log="$w/herdr-calls.log"; : > "$log"
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_HOME="$w/home" \
+    FM_HERDR_CALL_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "a dead-classified but still-registered Herdr pane must never be closed"
+  assert_not_contains "$(cat "$log")" "tab close" \
+    "a dead-classified but still-registered Herdr tab must never be closed"
+  # fm_backend_herdr_kill's very first act is to resolve the session it would
+  # close in, so the endpoint teardown path must never even be entered.
+  assert_not_contains "$(cat "$log")" "session list" \
+    "the sweep must not enter the Herdr endpoint teardown path at all"
+  assert_contains "$out" "endpoint still carries a registered agent record" \
+    "the sweep should report that it refused to close the registered endpoint"
+  pass "sweep: a dead-classified Herdr secondmate pane with a live registration is never killed"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -545,6 +610,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_never_closes_a_registered_herdr_endpoint
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
