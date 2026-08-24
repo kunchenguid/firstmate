@@ -16,6 +16,22 @@ TREEHOUSE=$(command -v treehouse 2>/dev/null || true)
 # shellcheck source=bin/fm-treehouse-return-lib.sh
 . "$ROOT/bin/fm-treehouse-return-lib.sh"
 
+# Expected-failure captures below must not leak errexit into the rest of the
+# suite: this file runs without `set -e`, so a bare `set -e` after a capture
+# would silently arm errexit for every later case and abort the run at the first
+# unguarded nonzero command. These save and restore whatever mode was in effect.
+FM_ERREXIT_PREV=off
+errexit_off() {
+  case $- in
+    *e*) FM_ERREXIT_PREV=on ;;
+    *) FM_ERREXIT_PREV=off ;;
+  esac
+  set +e
+}
+errexit_restore() {
+  if [ "$FM_ERREXIT_PREV" = on ]; then set -e; else set +e; fi
+}
+
 fake_treehouse_bin() {  # <fakebin-dir>
   cat > "$1/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -135,10 +151,10 @@ test_unreadable_reachability_refuses_before_treehouse_return() {
   fake_treehouse_bin "$case_dir/fakebin"
   write_teardown_meta "$case_dir" unreadable-return "$unreadable"
 
-  set +e
+  errexit_off
   out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" unreadable-return 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "unreadable worktree unexpectedly returned"
   [ ! -e "$marker" ] || fail "unreadable reachability check allowed Treehouse return"
   assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
@@ -249,10 +265,10 @@ test_orca_guard_refusal_preserves_the_worktree() {
     > "$proj/.git/refs/firstmate/rescue/orca-refusal"
   write_orca_meta "$case_dir" orca-refusal "$wt" "$proj"
 
-  set +e
+  errexit_off
   out=$(run_orca_teardown "$case_dir" orca-refusal "$wt" 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "Orca teardown ignored an unrescuable commit: $out"
   [ ! -e "$case_dir/orca-worktree-removed" ] \
     || fail "guard refusal still let Orca delete the worktree: $out"
@@ -303,10 +319,10 @@ test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
   git -C "$outer" commit -q --allow-empty -m enclosing
   write_teardown_meta "$case_dir" nested-return "$broken"
 
-  set +e
+  errexit_off
   out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" nested-return 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "worktree with no git dir borrowed the enclosing repository: $out"
   [ ! -e "$marker" ] || fail "enclosing-repository HEAD was accepted as durable: $out"
   assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
@@ -351,11 +367,11 @@ test_guard_refusal_preserves_child_worktree_commits() {
     'mode=no-mistakes' \
     'yolo=off'
 
-  set +e
+  errexit_off
   out=$(FM_HOME="$home" FM_TREEHOUSE_RETURN_MARKER="$case_dir/treehouse-return-called" \
     PATH="$case_dir/fakebin:$PATH" "$TEARDOWN" domain --force 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "forced teardown ignored an unrescuable child commit: $out"
   [ -d "$childwt" ] || fail "guard refusal deleted the child worktree holding unreferenced commits: $out"
   [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
@@ -367,6 +383,99 @@ test_guard_refusal_preserves_child_worktree_commits() {
   pass "a committed-work guard refusal preserves the child worktree and its commits"
 }
 
+# Build a forced-secondmate teardown case whose only child is an Orca ship task
+# holding a detached-HEAD commit. Orca deletes that child worktree rather than
+# returning it to a pool, so the committed-work guard is the only thing standing
+# between the commit and a force-removal.
+make_child_orca_case() {  # <name>
+  local name=$1 case_dir home subhome childproj childwt
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  subhome="$case_dir/subhome"
+  # The child project repo lives outside the secondmate home: teardown removes
+  # the home itself, so a rescue ref only proves durability in a repository that
+  # outlives it.
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-orca-worktree"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$case_dir/fakebin"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+  fake_orca_bin "$case_dir/fakebin"
+
+  fm_git_worktree "$childproj" "$childwt" fm/child-orca-branch
+  git -C "$childwt" checkout -q --detach
+  git -C "$childwt" commit -q --allow-empty -m unnamed-child-orca-work
+
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' \
+    "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  write_orca_meta "$case_dir" child-orca "$childwt" "$childproj"
+  mv "$case_dir/home/state/child-orca.meta" "$subhome/state/child-orca.meta"
+  printf '%s\n' "$case_dir"
+}
+
+run_child_orca_teardown() {  # <case-dir> <child-worktree>
+  local case_dir=$1 childwt=$2
+  FM_HOME="$case_dir/home" \
+  FM_TREEHOUSE_RETURN_MARKER="$case_dir/treehouse-return-called" \
+  FM_ORCA_WT_PATH="$childwt" \
+  FM_ORCA_RM_MARKER="$case_dir/child-orca-worktree-removed" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" domain --force 2>&1
+}
+
+test_child_orca_detached_commit_is_rescued_before_removal() {
+  local case_dir childproj childwt head out rescue_refs
+  case_dir=$(make_child_orca_case child-orca-rescue)
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-orca-worktree"
+  head=$(git -C "$childwt" rev-parse HEAD)
+
+  out=$(run_child_orca_teardown "$case_dir" "$childwt") \
+    || fail "forced secondmate teardown over a detached child Orca commit failed: $out"
+  assert_present "$case_dir/child-orca-worktree-removed" \
+    "forced secondmate teardown never removed its child Orca worktree"
+  rescue_refs=$(git -C "$childproj" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue/child-orca)
+  [ -n "$rescue_refs" ] || fail "child Orca removal dropped an unreferenced commit: $out"
+  assert_contains "$out" 'RESCUED: committed work' \
+    "child Orca removal did not report its rescue"
+  pass "forced child Orca removal rescues an unreferenced detached-head commit first"
+}
+
+test_child_orca_guard_refusal_preserves_the_worktree() {
+  local case_dir childproj childwt head out rc
+  case_dir=$(make_child_orca_case child-orca-refusal)
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-orca-worktree"
+  head=$(git -C "$childwt" rev-parse HEAD)
+  # A file at refs/firstmate/rescue/<child-id> blocks the <id>/<timestamp> ref
+  # below it, so this detached commit can be neither certified nor rescued. It
+  # points at the baseline, so it never makes HEAD durable by itself.
+  mkdir -p "$childproj/.git/refs/firstmate/rescue"
+  git -C "$childproj" rev-parse refs/heads/fm/child-orca-branch \
+    > "$childproj/.git/refs/firstmate/rescue/child-orca"
+
+  errexit_off
+  out=$(run_child_orca_teardown "$case_dir" "$childwt")
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] || fail "forced teardown ignored an unrescuable child Orca commit: $out"
+  [ ! -e "$case_dir/child-orca-worktree-removed" ] \
+    || fail "guard refusal still let Orca delete the child worktree: $out"
+  [ -d "$childwt" ] || fail "guard refusal deleted the child Orca worktree holding unreferenced commits: $out"
+  [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
+    || fail "preserved child Orca worktree no longer holds its unreferenced commit"
+  assert_present "$case_dir/subhome/state/child-orca.meta" \
+    "guard refusal removed the child Orca task record"
+  assert_contains "$out" "$childwt" "child Orca guard refusal did not name the preserved worktree"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "child Orca guard refusal did not report why the committed work could not be rescued"
+  pass "a child Orca committed-work guard refusal preserves the worktree instead of deleting it"
+}
+
 test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
   local case_dir other target out rc
   case_dir="$TMP_ROOT/ambient-git-dir"
@@ -376,11 +485,11 @@ test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
   git init -q "$other"
   git -C "$other" commit -q --allow-empty -m durable-elsewhere
 
-  set +e
+  errexit_off
   out=$(GIT_DIR="$other/.git" GIT_WORK_TREE="$other" \
     fm_treehouse_return_guard ambient-return "$target" 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "an ambient GIT_DIR made an unreadable worktree look durable: $out"
   assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
     "ambient GIT_DIR return did not report its concrete refusal"
@@ -403,10 +512,10 @@ test_unrescuable_commit_reports_the_concrete_git_reason() {
   mkdir -p "$repo/.git/refs/firstmate/rescue"
   git -C "$repo" rev-parse HEAD > "$repo/.git/refs/firstmate/rescue/blocked-return"
 
-  set +e
+  errexit_off
   out=$(fm_treehouse_return_guard blocked-return "$wt" 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "guard accepted a worktree whose rescue ref could not be created"
   assert_contains "$out" 'REFUSED: cannot create rescue ref' \
     "blocked rescue ref did not refuse"
@@ -426,10 +535,10 @@ test_durable_branch_returns_even_with_an_unusable_task_id() {
   git -C "$repo" worktree add -q "$wt" -b fm/durable-branch HEAD
   git -C "$wt" commit -q --allow-empty -m branch-work
 
-  set +e
+  errexit_off
   out=$(fm_treehouse_return_guard '' "$wt" 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -eq 0 ] || fail "durable branch work was blocked by an unusable task id: $out"
   assert_not_contains "$out" 'REFUSED' "durable branch return refused over the task id"
   rescue_refs=$(git -C "$repo" for-each-ref --format='%(refname)' refs/firstmate/rescue)
@@ -448,10 +557,10 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
   git -C "$repo" worktree add -q --detach "$wt" HEAD
   git -C "$wt" commit -q --allow-empty -m detached-work
 
-  set +e
+  errexit_off
   out=$(fm_treehouse_return_guard '' "$wt" 2>&1)
   rc=$?
-  set -e
+  errexit_restore
   [ "$rc" -ne 0 ] || fail "unnamed committed work returned under an unusable task id"
   assert_contains "$out" 'REFUSED: cannot rescue committed work' \
     "unusable task id did not refuse unnamed committed work"
@@ -467,6 +576,8 @@ test_durable_branch_returns_even_with_an_unusable_task_id
 test_unusable_task_id_refuses_unrescuable_committed_work
 test_orca_detached_commit_is_rescued_before_worktree_removal
 test_orca_guard_refusal_preserves_the_worktree
+test_child_orca_detached_commit_is_rescued_before_removal
+test_child_orca_guard_refusal_preserves_the_worktree
 
 if [ -z "$TREEHOUSE" ]; then
   printf '%s\n' 'skip: treehouse not found'

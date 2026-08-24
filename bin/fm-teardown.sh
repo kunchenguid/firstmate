@@ -2448,7 +2448,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_guard_out
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2500,6 +2500,20 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        # Orca deletes this child worktree instead of returning it to a pool, so
+        # the same committed-work guard the top-level Orca path runs must run
+        # here too: an unreferenced detached HEAD is rescued into
+        # refs/firstmate/rescue first, and a reachability check that cannot be
+        # completed refuses while the worktree and this child's durable records
+        # are all still intact. A stranded child worktree is recoverable;
+        # commits force-deleted with it are not.
+        if child_guard_out=$(fm_treehouse_return_guard "$child_id" "$child_wt" 2>&1); then
+          [ -z "$child_guard_out" ] || printf '%s\n' "$child_guard_out"
+        else
+          [ -z "$child_guard_out" ] || printf '%s\n' "$child_guard_out" >&2
+          echo "REFUSED: committed work in child Orca worktree $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+          return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+        fi
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
