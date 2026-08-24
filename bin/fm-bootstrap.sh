@@ -872,6 +872,11 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
+# NO_MISTAKES_MIN is the minimum-compatibility floor: the oldest no-mistakes
+# release that supports firstmate's crewmate-validation workflow. Unlike the
+# axi-family floors below, it is NOT bumped to the latest release on each
+# captain update; it moves only when firstmate requires a newer no-mistakes
+# capability and the install base has had time to catch up.
 NO_MISTAKES_MIN=0.40.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
