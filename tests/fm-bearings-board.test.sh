@@ -233,6 +233,7 @@ const collect = (node) => node.children.forEach((child) => {
     classes: child.className ? child.className.split(/\s+/).filter(Boolean) : [],
     text: child.textContent,
     title: child.titleValue === undefined ? null : child.titleValue,
+    href: child.href === undefined ? null : child.href,
     placeholder: child.placeholder === undefined ? null : child.placeholder,
   });
   collect(child);
@@ -571,6 +572,36 @@ test_rendered_decision_body_text_exposes_full_values() {
   pass "decision card body text exposes its exact full value without hiding the label"
 }
 
+test_rendered_landed_pr_link_exposes_exact_url() {
+  local home data board url render
+  home=$(make_home landed-pr-tooltip)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  url='https://github.com/example/sample/pull/98765432109876543210?view=full&mode=review'
+  write_valid_payload "$data"
+  jq --arg url "$url" '.landed = [{
+    "id": "landed-pr-tooltip",
+    "repo": "sample",
+    "what": "Landed work with a pull request",
+    "owner": "firstmate",
+    "pr_url": $url
+  }]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "the landed-PR tooltip board did not build"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
+
+  printf '%s' "$render" | jq -e --arg url "$url" '
+    any(.nodes[]; (.classes | index("bb-row__pr")) != null
+      and .text == "#98765432109876543210?view=full&mode=review"
+      and .href == $url
+      and .title == $url)
+  ' >/dev/null || fail "the landed PR link did not preserve its label, href, and exact native title"
+
+  pass "the landed PR link exposes its exact URL without replacing its visible label"
+}
+
 test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
   local home data board hint render
   home=$(make_home freeform-hint)
@@ -804,6 +835,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board
 test_build_injects_binds_then_arms
 test_rendered_truncated_text_has_full_native_tooltips
 test_rendered_decision_body_text_exposes_full_values
+test_rendered_landed_pr_link_exposes_exact_url
 test_rendered_freeform_hint_is_reachable_beyond_the_placeholder
 test_rendered_static_badges_stay_tooltip_free
 test_registration_cannot_consume_before_any_origin_binding

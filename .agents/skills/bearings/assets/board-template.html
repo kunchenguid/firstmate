@@ -455,6 +455,11 @@ __FM_BEARINGS_BOARD_DATA__
     if (text != null) n.title = text;
     return n;
   }
+  function titledValueEl(tag, cls, text, fullText) {
+    var n = el(tag, cls, text);
+    if (fullText != null) n.title = fullText;
+    return n;
+  }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
   /* Fixed badge literals are short, nowrap, and always fully drawn, so they
      stay tooltip-free; payload-derived badge text has no bounded length and
@@ -660,8 +665,8 @@ __FM_BEARINGS_BOARD_DATA__
     main.appendChild(titledEl("div", "bb-row__sub", (t.repo || t.id) + " · " + t.owner));
     row.appendChild(main);
     if (t.pr_url) {
-      var a = el("a", "bb-row__pr", "#" + t.pr_url.split("/").pop());
-      a.href = t.pr_url; a.title = t.pr_url; a.target = "_blank"; a.rel = "noopener";
+      var a = titledValueEl("a", "bb-row__pr", "#" + t.pr_url.split("/").pop(), t.pr_url);
+      a.href = t.pr_url; a.target = "_blank"; a.rel = "noopener";
       row.appendChild(a);
     }
     ld.appendChild(row);
