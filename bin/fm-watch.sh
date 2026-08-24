@@ -63,6 +63,8 @@
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: fseventsd: <out> built-in host-footprint early warning, sampled on
+#                          the same bounded slow-check cadence
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -1254,6 +1256,15 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      run_check_capture "$SCRIPT_DIR/fm-telemetry.sh" fseventsd-check || exit 1
+    out=$FM_CHECK_RESULT
+    if [ -n "$out" ]; then
+      reason="check: fseventsd: $out"
+      fm_wake_append check fseventsd "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue

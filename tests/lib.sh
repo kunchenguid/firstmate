@@ -34,6 +34,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Every watcher spawn evaluates the slow-check block on its first cycle, because
+# a missing .last-check reads as "due immediately" regardless of FM_CHECK_INTERVAL.
+# Without this the fseventsd early-warning check would run pgrep/top against the
+# live host in every watcher test, coupling unrelated suites to this machine's real
+# fseventsd footprint and adding a subprocess of latency to each first cycle. Tests
+# that exercise the check itself set FM_TELEMETRY_FSEVENTSD_DISABLE=0 with fakes.
+export FM_TELEMETRY_FSEVENTSD_DISABLE=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
