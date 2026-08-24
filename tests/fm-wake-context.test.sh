@@ -431,6 +431,26 @@ test_collection_timeout_falls_back_after_crew_state_hang() {
   pass "une sonde crew-state bloquée respecte le délai agrégé et le fallback"
 }
 
+test_timeout_after_cursor_stage_keeps_receipt_before_ack() {
+  local home="$TMP_ROOT/timeout-after-cursor-stage" real_mv ack generation expected status=0
+  prepare_real_wake "$home"; real_mv=$(command -v mv); mkdir "$home/path"
+  cat > "$home/path/mv" <<'SH'
+#!/usr/bin/env bash
+target=; for target do :; done
+case "$target" in *.wake-context-cache.status-cursor) "$FM_TEST_REAL_MV" "$@" && : > "$FM_TEST_CURSOR_MOVED" ;; *.wake-context-cache) : > "$FM_TEST_CACHE_ENTERED"; sleep 10; "$FM_TEST_REAL_MV" "$@" ;; *) "$FM_TEST_REAL_MV" "$@" ;; esac
+SH
+  chmod +x "$home/path/mv"
+  PATH="$home/path:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_CURSOR_MOVED="$home/cursor.moved" FM_TEST_CACHE_ENTERED="$home/cache.entered" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=4 \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  [ "$status" -ne 0 ] && [ -e "$home/cursor.moved" ] && [ -e "$home/cache.entered" ] || fail "le timeout n’a pas suivi le vrai staging du curseur"
+  [ -f "$home/state/.wake-context-fallback-receipt" ] && [ -f "$home/state/.wake-context-cache.status-cursor" ] || fail "le fallback a publié l’ACK sans reçu et curseur durables"
+  ack=$(jq -r '.replay.ack_through' "$home/state/.wake-context-fallback-receipt"); generation=$(jq -r '.replay.recovery_generation' "$home/state/.wake-context-fallback-receipt")
+  expected="WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through $ack --recovery-generation $generation"; if [ "$(grep -Fc 'WAKE_ACK_REQUIRED:' "$home/err")" -ne 1 ] || ! grep -Fx "$expected" "$home/err" >/dev/null; then fail "le fallback n’a pas publié l’ACK exact"; fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null || fail "l’ACK exact du fallback a échoué"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" > "$home/replay" 2>/dev/null; grep -F 'beta during alpha wake' "$home/replay" >/dev/null && fail "le drain suivant a rejoué le status acquitté"
+  pass "un timeout après staging publie reçu et curseur avant l’ACK exact sans rejeu"
+}
+
 test_collection_timeout_spans_slow_crew_probes() {
   local home="$TMP_ROOT/slow-probes" started finished status=0
   install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1
@@ -547,6 +567,7 @@ test_backend_timeout_normalizes_to_a_positive_decimal
 test_collection_timeout_accepts_leading_zero_decimal
 test_collection_timeout_bounds_drain_before_ack
 test_collection_timeout_falls_back_after_crew_state_hang
+test_timeout_after_cursor_stage_keeps_receipt_before_ack
 test_collection_timeout_spans_slow_crew_probes
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack

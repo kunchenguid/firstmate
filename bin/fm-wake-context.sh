@@ -77,10 +77,14 @@ snapshot_status_cursor() {
 }
 
 stage_status_cursor() {
-  local cursor="$STATE/.status-presentation-cursor"
+  local cursor="$STATE/.status-presentation-cursor" staged="$TMP_DIR/status-cursor.after"
   [ ! -e "$cursor" ] || { [ -f "$cursor" ] && [ ! -L "$cursor" ]; } || return 1
-  [ -f "$TMP_DIR/status-cursor.after" ] && [ ! -L "$TMP_DIR/status-cursor.after" ] || return 1
-  mv -f "$TMP_DIR/status-cursor.after" "$CACHE_CURSOR"
+  if [ -e "$staged" ] || [ -L "$staged" ]; then
+    [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+    mv -f -- "$staged" "$CACHE_CURSOR"
+    return
+  fi
+  [ -f "$CACHE_CURSOR" ] && [ ! -L "$CACHE_CURSOR" ]
 }
 
 publish_cache() { # <packet>
@@ -284,7 +288,10 @@ emit_fallback() { # <stdout> <stderr>
     printf 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: wake drain did not complete; run bin/fm-wake-drain.sh once.\n'
     return 1
   }
-  publish_fallback_receipt "$2" || true
+  publish_fallback_receipt "$2" || {
+    printf 'WAKE_CONTEXT_FALLBACK: durable acknowledgement receipt unavailable; acknowledgement withheld.\n'
+    return 1
+  }
   printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
   printf 'Wake context packet could not be built after the durable presentation.\n'
   printf 'Handle the durable human presentation below and use its exact acknowledgement command.\n\n'
