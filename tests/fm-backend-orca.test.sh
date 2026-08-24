@@ -971,17 +971,33 @@ test_spawn_preserves_terminal_only_recovery_until_close_succeeds() {
 
   orca_case terminal-recovery-close-succeeds
   printf '{"ok":true}\n' > "$RESP/1.out"
+  printf 'malformed\n' > "$state/.status-presentation-cursor"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
-  expect_code 0 $? "terminal-only teardown should succeed after close succeeds"$'\n'"$out"
+  status=$?
+  [ "$status" -ne 0 ] || fail "terminal-only teardown should preserve retry state after later cleanup fails"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-terminal-recovery'$'\x1f''--json' \
     "terminal-only teardown did not close the recorded terminal"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
     "terminal-only teardown tried to remove an already released worktree"
-  assert_absent "$state/$id.meta" "successful terminal-only cleanup retained task metadata"
-  pass "Orca abort recovery retains terminal-only state until close succeeds"
+  assert_grep 'orca_allocation=cleanup-complete' "$state/$id.meta" \
+    "terminal-only teardown did not advance durable recovery after terminal closure"
+  assert_no_grep 'terminal=' "$state/$id.meta" \
+    "terminal-only teardown retained an already closed terminal handle"
+
+  rm -f "$state/.status-presentation-cursor"
+  orca_case terminal-recovery-finish-succeeds
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  expect_code 0 $? "cleanup-complete teardown retry should succeed"$'\n'"$out"
+  [ ! -s "$LOG" ] || fail "cleanup-complete teardown retry dispatched another Orca cleanup"
+  assert_absent "$state/$id.meta" "successful cleanup-complete retry retained task metadata"
+  pass "Orca terminal-only recovery advances before later fallible cleanup"
 }
 
 test_spawn_refuses_dormant_omp_before_orca_allocation() {

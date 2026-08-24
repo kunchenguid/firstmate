@@ -43,6 +43,7 @@ TOOLS=$(MANIFEST=$MANIFEST node -e '
 const manifest = JSON.parse(process.env.MANIFEST);
 const index = manifest.argv.indexOf("--tools");
 if (index < 0 || !manifest.unsetEnvironment.includes("PI_CONFIG_FILES") || !manifest.argv.includes("--no-lsp")) process.exit(1);
+if (manifest.argv[index + 1] !== "edit") process.exit(1);
 const retry = manifest.effectiveRetry;
 if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
 if (!retry.fallbackChains || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
@@ -90,4 +91,4 @@ UNKNOWN=$(omp_unknown_names "$TOOLS,$SENTINEL")
 [ "$UNKNOWN" = "$SENTINEL" ] \
   || fail "installed $VERSION rejects the adapter allowlist '$TOOLS': rejected '$UNKNOWN'"
 
-pass "installed $VERSION accepts the contained manifest and effective fallback isolation without session startup"
+pass "installed $VERSION accepts the local-only candidate manifest and effective fallback isolation without session startup"

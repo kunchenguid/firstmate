@@ -37,7 +37,8 @@
 # Normal Orca tasks use the same safety checks, then close the recorded terminal
 # and remove the recorded worktree through `orca worktree rm`; teardown never
 # guesses an Orca target from ambient CLI state. Cleanup-only recovery metadata
-# can instead describe terminal-only, worktree-only, or worktree-ID-only state.
+# can instead describe terminal-only, worktree-only, worktree-ID-only, or
+# cleanup-complete state.
 # A retained terminal in worktree recovery is a cleanup target, not a live
 # endpoint. Once it closes, teardown atomically retires that handle before the
 # fallible worktree removal so a retry skips the completed close.
@@ -861,9 +862,16 @@ meta_value() {
 }
 
 retire_orca_recovery_terminal() {
-  local meta=$1 temporary
+  local meta=$1 allocation=$2 temporary
   temporary=$(mktemp "${meta}.tmp.XXXXXX") || return 1
-  if ! awk -F= '$1 != "terminal"' "$meta" > "$temporary"; then
+  if ! awk -F= -v allocation="$allocation" '
+    $1 == "terminal" { next }
+    $1 == "orca_allocation" && allocation == "terminal-only" {
+      print "orca_allocation=cleanup-complete"
+      next
+    }
+    { print }
+  ' "$meta" > "$temporary"; then
     rm -f -- "$temporary"
     return 1
   fi
@@ -871,6 +879,13 @@ retire_orca_recovery_terminal() {
     rm -f -- "$temporary"
     return 1
   fi
+}
+
+orca_allocation_has_worktree() {
+  case "$1" in
+    terminal-only|cleanup-complete) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 require_orca_worktree_id() {
@@ -894,7 +909,7 @@ require_orca_terminal() {
 }
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_ALLOCATION" != terminal-only ]; then
+  if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
     ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   fi
   T_ORCA=$(meta_value "$META" terminal)
@@ -2284,7 +2299,7 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_allocation=$(meta_value "$child_meta" orca_allocation)
-      if [ "$child_orca_allocation" != terminal-only ]; then
+      if orca_allocation_has_worktree "$child_orca_allocation"; then
         child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
         if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
           child_proj=$(meta_value "$child_meta" project)
@@ -2455,7 +2470,7 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=
-      if [ "$child_orca_allocation" != terminal-only ]; then
+      if orca_allocation_has_worktree "$child_orca_allocation"; then
         child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
         if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
           validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -2484,13 +2499,13 @@ cleanup_firstmate_home_children() {
           echo "error: could not close recovery Orca terminal $child_t; retaining child task metadata" >&2
           return 1
         fi
-        if [ "$child_orca_allocation" != terminal-only ]; then
-          retire_orca_recovery_terminal "$child_meta" || {
-            echo "error: could not retire closed recovery Orca terminal $child_t; retaining child task metadata" >&2
-            return 1
-          }
-          child_t=
-        fi
+        retire_orca_recovery_terminal "$child_meta" "$child_orca_allocation" || {
+          echo "error: could not retire closed recovery Orca terminal $child_t; retaining child task metadata" >&2
+          return 1
+        }
+        [ "$child_orca_allocation" != terminal-only ] \
+          || child_orca_allocation=cleanup-complete
+        child_t=
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
@@ -2508,7 +2523,7 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
-      if [ "$child_orca_allocation" != terminal-only ]; then
+      if orca_allocation_has_worktree "$child_orca_allocation"; then
         fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -2658,7 +2673,7 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$ORCA_ALLOCATION" != terminal-only ] \
+if [ "$BACKEND" = orca ] && orca_allocation_has_worktree "$ORCA_ALLOCATION" \
   && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -2691,7 +2706,7 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] \
-  && { [ "$BACKEND" != orca ] || [ "$ORCA_ALLOCATION" != terminal-only ]; }; then
+  && { [ "$BACKEND" != orca ] || orca_allocation_has_worktree "$ORCA_ALLOCATION"; }; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
@@ -2718,7 +2733,7 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_ALLOCATION" != terminal-only ]; then
+  if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
     if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
       require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
       ORCA_PATH_MATCH_VERIFIED=1
@@ -2742,18 +2757,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         echo "error: could not close recovery Orca terminal $T; retaining task metadata" >&2
         exit 1
       fi
-      if [ "$ORCA_ALLOCATION" != terminal-only ]; then
-        retire_orca_recovery_terminal "$META" || {
-          echo "error: could not retire closed recovery Orca terminal $T; retaining task metadata" >&2
-          exit 1
-        }
-        T_ORCA=
-      fi
+      retire_orca_recovery_terminal "$META" "$ORCA_ALLOCATION" || {
+        echo "error: could not retire closed recovery Orca terminal $T; retaining task metadata" >&2
+        exit 1
+      }
+      [ "$ORCA_ALLOCATION" != terminal-only ] || ORCA_ALLOCATION=cleanup-complete
+      T_ORCA=
     else
       fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
     fi
   fi
-  if [ "$ORCA_ALLOCATION" != terminal-only ]; then
+  if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
     fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then

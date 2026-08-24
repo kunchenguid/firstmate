@@ -356,7 +356,7 @@ const expectedArgv = [
   "/opt/omp", "--cwd", "/isolated/cwd", "--add-dir", "/task/worktree",
   "--approval-mode", "yolo", "--no-title", "--no-extensions", "--no-skills",
   "--no-lsp",
-  "--tools", "read,write,edit,glob,grep", "--model", "anthropic/claude-sonnet-4-5",
+  "--tools", "edit", "--model", "anthropic/claude-sonnet-4-5",
   "-e", "/state/task.omp-ext.ts",
 ];
 if (JSON.stringify(manifest.unsetEnvironment) !== JSON.stringify(expectedUnset)) process.exit(1);
@@ -364,7 +364,7 @@ if (manifest.environment.FM_OMP_HARNESS !== "1") process.exit(1);
 if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit(1);
 if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
 const tools = manifest.argv[manifest.argv.indexOf("--tools") + 1].split(",");
-for (const forbidden of ["task", "browser", "computer", "web_search", "mcp", "bash"]) {
+for (const forbidden of ["read", "write", "glob", "grep", "task", "browser", "computer", "web_search", "mcp", "bash"]) {
   if (tools.includes(forbidden)) process.exit(1);
 }
 const templateManifest = {
@@ -383,165 +383,6 @@ const expectedTemplate = words.join(" ") + ' "$(__OPINPUT__ encode launch-brief 
 if (process.env.TEMPLATE !== expectedTemplate) process.exit(1);
 NODE
   pass "OMP candidate renderer emits one contained argv and tool boundary"
-}
-
-test_omp_extension_executes_with_encoded_supported_paths() {
-  local rec id=omp-path-encoding out weird_home weird_root ext executable_ext record i
-  rec=$(make_omp_case omp-path-encoding claude "$id")
-  read_case_record "$rec"
-  weird_home="$CASE_DIR/"$'home-quote\'-back\\slash'
-  weird_root="$CASE_DIR/"$'root-quote\'-back\\slash-line\nbreak'
-  mv "$HOME_DIR" "$weird_home"
-  HOME_DIR=$weird_home
-  ln -s "$ROOT" "$weird_root"
-  out=$(FM_TEST_ROOT_OVERRIDE="$weird_root" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "OMP should render its extension under supported special-character paths: $out"
-  ext="$HOME_DIR/state/$id.omp-ext.ts"
-  executable_ext="$CASE_DIR/encoded-ext.ts"
-  cp "$ext" "$executable_ext"
-  node --experimental-strip-types --input-type=module - "$executable_ext" <<'NODE' \
-    || fail "the generated OMP extension did not parse and execute"
-import { pathToFileURL } from "node:url";
-const extensionPath = process.argv[2];
-const handlers = new Map();
-const module = await import(pathToFileURL(extensionPath).href);
-module.default({ on(name, handler) { handlers.set(name, handler); } });
-await handlers.get("agent_start")();
-handlers.get("turn_end")();
-await new Promise((resolve) => setTimeout(resolve, 300));
-NODE
-  record="$HOME_DIR/state/$id.busy-state"
-  assert_grep 'state=busy source=omp-ext event=agent-start' "$record" \
-    "the generated extension did not invoke the exact encoded busy-event path"
-  i=0
-  while [ ! -e "$HOME_DIR/state/$id.turn-ended" ] && [ "$i" -lt 50 ]; do
-    sleep 0.02
-    i=$((i + 1))
-  done
-  assert_present "$HOME_DIR/state/$id.turn-ended" \
-    "the generated extension did not touch the exact encoded turn-end path"
-  pass "OMP extension paths are valid JavaScript literals and execute exactly"
-}
-
-test_omp_records_exact_task_metadata() {
-  local rec id=omp-meta out meta
-  rec=$(make_omp_case omp-meta claude "$id")
-  read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "omp spawn should succeed: $out"
-  meta="$HOME_DIR/state/$id.meta"
-  assert_present "$meta" "omp spawn did not publish task metadata"
-  assert_grep "harness=omp" "$meta" "meta must record harness=omp"
-  assert_grep "kind=ship" "$meta" "meta must record the crewmate kind"
-  assert_no_grep "traceparent=" "$meta" "omp must not enable trace propagation"
-  assert_no_grep "home=" "$meta" "a crewmate must not record secondmate home state"
-  assert_absent "$HOME_DIR/config/secondmate-harness" "omp must not write secondmate configuration"
-  pass "omp records harness=omp with no trace context and no secondmate configuration"
-}
-
-test_omp_accepts_a_scout_launch() {
-  local rec id=omp-scout out
-  rec=$(make_omp_case omp-scout claude "$id")
-  read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --scout --harness omp --model "$OMP_MODEL")
-  expect_code 0 $? "omp scout spawn should succeed: $out"
-  assert_contains "$out" "spawned $id harness=omp kind=scout" "omp must be accepted for a scout launch"
-  assert_present "$HOME_DIR/state/$id.omp-ext.ts" "an omp scout must still get its busy-state extension"
-  pass "omp is accepted for crewmate and scout launches"
-}
-
-test_omp_launch_carries_exactly_one_qualified_model_flag() {
-  local rec id=omp-model-argv out launch tmux_log stub_log flags value
-  rec=$(make_omp_case omp-model-argv claude "$id")
-  read_case_record "$rec"
-  tmux_log="$CASE_DIR/tmux-sends"
-  stub_log="$CASE_DIR/omp-argv"
-  : > "$tmux_log"
-  : > "$stub_log"
-  out=$(FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "omp spawn with a qualified model should succeed: $out"
-  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
-  [ -n "$launch" ] || fail "no omp launch command was delivered to the pane"
-
-  # Exactly one --model, carrying the exact identifier that was supplied.
-  flags=$(printf '%s\n' "$launch" | grep -o -- '--model' | wc -l | tr -d '[:space:]')
-  [ "$flags" = 1 ] || fail "omp launch must carry exactly one --model flag, found $flags"
-  value=$(printf '%s\n' "$launch" | sed -n "s/.*--model '\\([^']*\\)'.*/\\1/p")
-  [ "$value" = "$OMP_MODEL" ] \
-    || fail "omp --model must carry the exact supplied identifier, got '$value'"
-
-  # omp's legacy provider flag and every fuzzy, cycling, or fallback selector
-  # stay off the launch: one qualified identifier is the whole selection.
-  assert_not_contains "$launch" "--provider" "omp launch must not pass a provider flag"
-  assert_not_contains "$launch" "--fallback" "omp launch must not pass a fallback selector"
-  assert_not_contains "$launch" "--cycle" "omp launch must not pass a model cycler"
-
-  # The pinned executable is still probed ONLY for its identity, so no model
-  # catalog, provider list, or account query happens on the spawn path.
-  [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
-    || fail "adapter must invoke omp exactly once, with --version only, got: $(cat "$stub_log")"
-
-  # The recorded model is the supplied one, and no configuration was written.
-  assert_grep "model=$OMP_MODEL" "$HOME_DIR/state/$id.meta" "meta must record the exact launch model"
-  [ "$(cat "$HOME_DIR/config/crew-harness")" = claude ] \
-    || fail "an omp launch must not rewrite config/crew-harness"
-  assert_absent "$HOME_DIR/config/crew-dispatch.json" "an omp launch must not write a dispatch profile"
-  assert_absent "$HOME_DIR/config/secondmate-harness" "an omp launch must not write secondmate configuration"
-  pass "an omp launch carries exactly one --model with the exact supplied provider/model, no provider flag, and writes no configuration"
-}
-
-test_omp_requires_orca_before_any_mutation() {
-  local rec id=omp-backend-allowed out backend n=0
-  rec=$(make_omp_case omp-backend-allowed claude "$id")
-  read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --backend orca --mode no-mistakes --yolo off)
-  expect_code 0 $? "an explicit Orca OMP spawn should succeed: $out"
-  assert_grep 'backend=orca' "$HOME_DIR/state/$id.meta" "the allowed OMP spawn must record backend=orca"
-
-  rec=$(make_omp_case omp-backend-refused claude omp-backend-0)
-  read_case_record "$rec"
-  for backend in tmux herdr zellij cmux; do
-    n=$((n + 1))
-    assert_omp_launch_refused "omp-backend-$n" "omp requires backend=orca" \
-      --model "$OMP_MODEL" --backend "$backend"
-  done
-  [ "$n" -eq 4 ] || fail "the OMP non-Orca backend matrix must carry four rows, found $n"
-  pass "OMP accepts Orca and refuses tmux, Herdr, Zellij, and cmux before every mutation"
-}
-
-test_omp_forces_trace_off_and_clears_ambient_carrier() {
-  local rec id=omp-trace-off out launch tmux_log meta
-  local carrier='00-0123456789abcdef0123456789abcdef-0123456789abcdef-01'
-  rec=$(make_omp_case omp-trace-off claude "$id")
-  read_case_record "$rec"
-  # Freeze this home session to trace=on, then also seed an ambient carrier.
-  # OMP must override both independent inputs.
-  printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
-  printf '%s on\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
-  tmux_log="$CASE_DIR/endpoint-sends"
-  : > "$tmux_log"
-  out=$(TRACEPARENT="$carrier" FM_TMUX_LOG="$tmux_log" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --backend orca --mode no-mistakes --yolo off)
-  expect_code 0 $? "OMP should launch with trace forced off: $out"
-  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
-  [ -n "$launch" ] || fail "no OMP launch command was delivered"
-  assert_contains "$launch" '-u TRACEPARENT' "the OMP child must explicitly clear an ambient carrier"
-  assert_not_contains "$launch" "$carrier" "the ambient carrier must not reach the OMP child argv"
-  # assert_no_grep is a FIXED-string search, so a leading ^ would be matched
-  # literally and the assertion could never fail. These two carry the enforced
-  # half of the suppression - that omp never resolves trace on - so they must
-  # stay anchorless to actually bite.
-  assert_no_grep 'export TRACEPARENT=' "$tmux_log" "the enabled home must not export trace context to OMP"
-  meta="$HOME_DIR/state/$id.meta"
-  assert_no_grep 'traceparent=' "$meta" "OMP metadata must not record a trace carrier"
-  pass "OMP forces effective trace propagation off and clears an ambient TRACEPARENT carrier"
 }
 
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {

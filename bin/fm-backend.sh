@@ -553,6 +553,12 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
           echo "REFUSED: terminal-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
           return 1
         fi
+      elif [ "$allocation" = cleanup-complete ]; then
+        if [ "$validation_scope" != cleanup ] || [ -n "$terminal" ] \
+          || [ -n "$worktree" ] || [ -n "$worktree_id" ]; then
+          echo "REFUSED: cleanup-complete Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
+          return 1
+        fi
       elif [ "$allocation" = worktree-only ]; then
         if [ "$validation_scope" != cleanup ] || [ -z "$worktree" ]; then
           echo "REFUSED: worktree-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
@@ -570,7 +576,8 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
       fi
-      if [ "$allocation" != terminal-only ] && [ -z "$worktree_id" ]; then
+      if [ "$allocation" != terminal-only ] && [ "$allocation" != cleanup-complete ] \
+        && [ -z "$worktree_id" ]; then
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       fi
@@ -580,6 +587,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
           && ! fm_backend_orca_cleanup_id_valid "$worktree_id"; } \
         || { [ "$allocation" != worktree-id-only ] \
           && [ "$allocation" != terminal-only ] \
+          && [ "$allocation" != cleanup-complete ] \
           && ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; }; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1

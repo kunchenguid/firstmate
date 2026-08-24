@@ -985,7 +985,7 @@ FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 ```
 
 ```text
-ok - installed omp/17.2.9 accepts the candidate adapter allowlist 'read,write,edit,glob,grep'; validation stopped before session startup
+ok - installed omp/17.2.9 accepts the local-only candidate manifest and effective fallback isolation without session startup
 ```
 The guard appends a deliberately invalid tool name, so OMP exits during argument parsing without a prompt, TUI, session, provider call, or model turn.
 This is installed-binary compatibility evidence, not live First Mate lifecycle proof; OMP remains dormant until separately gated ATX-2170 verifies interrupt, exit, and relaunch control.

@@ -6,14 +6,15 @@
 #   fm-omp-candidate-artifacts.sh launch-template
 #   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
 # `prepare` creates a new agent directory containing config.yml and a new,
-# empty launch cwd. `manifest` emits the environment boundary and argv as JSON;
+# empty launch cwd. `manifest` emits the environment boundary and argv as JSON,
+# with local edit as the sole tool and LSP disabled;
 # `launch-template` emits the same boundary with spawn-time placeholders.
 # `extension` writes the First Mate busy-state adapter to <output>. Persistent
 # config and extension files are rendered beside their destinations and renamed
 # atomically. No mode starts OMP, opens a session, or calls a provider.
 set -eu
 
-OMP_TOOLS=read,write,edit,glob,grep
+OMP_TOOLS=edit
 OMP_RETRY_JSON='{"modelFallback":false,"usageAwareFallback":false,"fallbackChains":{}}'
 
 usage() {

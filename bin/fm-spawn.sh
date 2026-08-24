@@ -1663,23 +1663,11 @@ launch_template() {
     # every auto-discovered user/project extension, and --no-skills drops the
     # ambient skill surface, so the only loaded extension is the firstmate-owned
     # -e __OMPEXT__ busy-state file written below.
-    # --tools is an ALLOWLIST that limits the initially active toolset. Each name
-    # is here for one reason, and nothing is present that another name already
-    # covers:
-    #   read  - open a named file.
-    #   write - create a file.
-    #   edit  - modify an existing file.
-    #   glob  - find files by path pattern. This is the enumerated name covering
-    #           both directory listing and file search.
-    #   grep  - find files by content.
-    # Everything omp otherwise offers is deliberately absent. No `task`, so the
-    # worker cannot delegate to subagents firstmate does not supervise. No
-    # browser, computer, web_search, or mcp, so the pilot has no network or
-    # desktop surface. No `bash`, so the worker cannot execute commands at all:
-    # this pilot is scoped to reading and editing files, and command execution
-    # is a widening that has to be requested and approved on its own terms
-    # rather than inherited. Narrowing this list is always safe; widening it is
-    # a captain decision.
+    # --tools is an ALLOWLIST limited to local edit. OMP's read, write, glob,
+    # and grep path grammars admit network, internal-resource, or mounted-device
+    # targets, so they are absent together with every command, delegation,
+    # network, and desktop tool. Narrowing this list is always safe; widening it
+    # is a captain decision.
     # omp rejects an unknown --tools name with a usage error and refuses the
     # whole launch rather than narrowing silently. The portable suite pins this
     # exact string; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check
