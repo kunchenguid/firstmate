@@ -7,6 +7,10 @@
 # firstmate rescue ref. Remote-tracking refs deliberately do not count because
 # they can be pruned and do not retain the work on this machine.
 #
+# A target that is not a Git worktree has no HEAD commit to certify, so the
+# guard passes it through. A target bearing a .git entry that Git cannot read
+# is different: it may hold committed work, so the guard refuses it.
+#
 # When HEAD has no durable ref, the wrapper adds
 # refs/firstmate/rescue/<task-id>/<timestamp> at HEAD before it returns the
 # worktree. If Git cannot resolve HEAD, enumerate the allowed refs, or create
@@ -55,6 +59,25 @@ fm_treehouse_return_guard() {
 
   if ! worktree_path=$(cd -P -- "$worktree" 2>/dev/null && pwd -P) || [ -z "$worktree_path" ]; then
     printf 'REFUSED: cannot determine committed-work reachability for %s: worktree directory is unavailable.\n' \
+      "$worktree" >&2
+    return 1
+  fi
+
+  # Teardown also has safe no-op paths over ordinary directories. They have no
+  # Git HEAD (and therefore no committed work subject) for this guard to
+  # certify. Do not let an enclosing repository or inherited Git environment
+  # turn such a directory into one. Conversely, a .git entry proves this was
+  # meant to be a Git worktree, so a failed probe is a fail-closed refusal.
+  if ! fm_treehouse_return_git "$worktree_path" rev-parse --is-inside-work-tree; then
+    if [ ! -e "$worktree_path/.git" ] && [ ! -L "$worktree_path/.git" ]; then
+      return 0
+    fi
+    printf 'REFUSED: cannot determine committed-work reachability for %s: Git worktree inspection failed (%s).\n' \
+      "$worktree" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
+    return 1
+  fi
+  if [ "$FM_TREEHOUSE_RETURN_GIT_OUT" != true ]; then
+    printf 'REFUSED: cannot determine committed-work reachability for %s: Git did not identify it as a worktree.\n' \
       "$worktree" >&2
     return 1
   fi

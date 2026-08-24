@@ -141,14 +141,20 @@ test_attached_branch_returns_without_rescue_ref() {
 }
 
 test_unreadable_reachability_refuses_before_treehouse_return() {
-  local case_dir unreadable marker out rc
+  local case_dir unreadable marker out rc repo
   case_dir="$TMP_ROOT/unreadable"
   unreadable="$case_dir/unreadable-worktree"
+  repo="$case_dir/repo"
   marker="$case_dir/treehouse-return-called"
   mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
-    "$case_dir/fakebin" "$case_dir/repo" "$case_dir/pool" "$unreadable"
+    "$case_dir/fakebin" "$case_dir/pool"
   fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
   fake_treehouse_bin "$case_dir/fakebin"
+  fm_git_worktree "$repo" "$unreadable" fm/unreadable-return
+  # Keep the .git entry so this remains a Git worktree subject, but make its
+  # linked-worktree admin pointer unreadable. The guard must refuse rather than
+  # treating this as the harmless ordinary-directory pass-through case.
+  printf 'gitdir: %s\n' "$case_dir/missing-worktree-admin" > "$unreadable/.git"
   write_teardown_meta "$case_dir" unreadable-return "$unreadable"
 
   errexit_off
@@ -308,26 +314,23 @@ test_broken_ref_store_still_rescues_detached_commit() {
   pass "a damaged ref store does not fake durability for detached committed work"
 }
 
-test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
-  local case_dir outer broken marker out rc
+test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo() {
+  local case_dir outer ordinary marker out
   case_dir=$(make_guard_case nested-repo)
   outer="$case_dir/outer"
-  broken="$outer/pool/broken-worktree"
+  ordinary="$outer/pool/ordinary-directory"
   marker="$case_dir/treehouse-return-called"
-  mkdir -p "$broken" "$case_dir/repo"
+  mkdir -p "$ordinary" "$case_dir/repo"
   git init -q "$outer"
   git -C "$outer" commit -q --allow-empty -m enclosing
-  write_teardown_meta "$case_dir" nested-return "$broken"
+  write_teardown_meta "$case_dir" nested-return "$ordinary"
 
-  errexit_off
-  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" nested-return 2>&1)
-  rc=$?
-  errexit_restore
-  [ "$rc" -ne 0 ] || fail "worktree with no git dir borrowed the enclosing repository: $out"
-  [ ! -e "$marker" ] || fail "enclosing-repository HEAD was accepted as durable: $out"
-  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
-    "nested unreadable worktree did not report its concrete refusal"
-  pass "an unreadable worktree inside another repository refuses instead of borrowing its HEAD"
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" nested-return 2>&1) \
+    || fail "ordinary non-repository directory did not pass through teardown: $out"
+  assert_present "$marker" "non-repository directory did not reach the return path"
+  assert_not_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "ordinary directory was mistaken for the enclosing repository's worktree"
+  pass "a non-repository directory passes through without borrowing an enclosing repository"
 }
 
 test_guard_refusal_preserves_child_worktree_commits() {
@@ -476,7 +479,7 @@ test_child_orca_guard_refusal_preserves_the_worktree() {
   pass "a child Orca committed-work guard refusal preserves the worktree instead of deleting it"
 }
 
-test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
+test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree() {
   local case_dir other target out rc
   case_dir="$TMP_ROOT/ambient-git-dir"
   other="$case_dir/other-repo"
@@ -490,10 +493,10 @@ test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
     fm_treehouse_return_guard ambient-return "$target" 2>&1)
   rc=$?
   errexit_restore
-  [ "$rc" -ne 0 ] || fail "an ambient GIT_DIR made an unreadable worktree look durable: $out"
-  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
-    "ambient GIT_DIR return did not report its concrete refusal"
-  pass "an inherited GIT_DIR cannot stand in for the returned worktree's repository"
+  [ "$rc" -eq 0 ] || fail "an ambient GIT_DIR turned an ordinary directory into a worktree: $out"
+  assert_not_contains "$out" 'RESCUED: committed work' \
+    "ambient GIT_DIR made the guard inspect an unrelated repository"
+  pass "an inherited GIT_DIR cannot turn an ordinary directory into a worktree"
 }
 
 test_unrescuable_commit_reports_the_concrete_git_reason() {
@@ -568,8 +571,8 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
 }
 
 test_broken_ref_store_still_rescues_detached_commit
-test_worktree_inside_another_repo_refuses_instead_of_borrowing_it
-test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo
+test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo
+test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree
 test_guard_refusal_preserves_child_worktree_commits
 test_unrescuable_commit_reports_the_concrete_git_reason
 test_durable_branch_returns_even_with_an_unusable_task_id
