@@ -465,7 +465,7 @@ signal_turnend_panes_churned() {  # <file> ...
       signal_tasks+=("$task")
       [ "$kind" = status ] && signal_statuses+=(1) || signal_statuses+=(0)
     elif [ "$kind" = status ]; then
-      signal_statuses[$task_index]=1
+      signal_statuses[task_index]=1
     fi
   done
   for meta in "$STATE"/*.meta; do
@@ -523,7 +523,7 @@ signal_turnend_panes_churned() {  # <file> ...
   [[ $TURNEND_CHURN_ABSORB_SECS =~ ^[1-9][0-9]*$ ]] || return 1
   if [ "${#TURNEND_CHURN_ABSORB_SECS}" -gt "${#max_absorb_secs}" ] \
     || { [ "${#TURNEND_CHURN_ABSORB_SECS}" -eq "${#max_absorb_secs}" ] \
-      && [[ $TURNEND_CHURN_ABSORB_SECS > $max_absorb_secs ]]; }; then
+      && [[ $TURNEND_CHURN_ABSORB_SECS -gt $max_absorb_secs ]]; }; then
     return 1
   fi
   absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
