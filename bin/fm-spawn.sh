@@ -1088,7 +1088,11 @@ spawn_render_orca_recovery_meta() {
   echo "effort=${EFFORT:-default}" || return 1
   echo "backend=orca" || return 1
   echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
-  if [ -n "${ORCA_TERMINAL:-}" ]; then echo "terminal=$ORCA_TERMINAL" || return 1; fi
+  if [ -n "${ORCA_TERMINAL:-}" ]; then
+    echo "terminal=$ORCA_TERMINAL" || return 1
+  else
+    echo "orca_allocation=worktree-only" || return 1
+  fi
 }
 
 spawn_publish_orca_recovery_meta() {

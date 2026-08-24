@@ -666,7 +666,7 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was refreshed against `/opt/homebrew/bin/orca` with `/Applications/Orca.app` bundle version 1.4.188.
+On 2026-08-23, real readiness was refreshed against `/opt/homebrew/bin/orca` with `/Applications/Orca.app` bundle version 1.4.188.
 
 ```sh
 orca status --json
