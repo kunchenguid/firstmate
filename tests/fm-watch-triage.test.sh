@@ -1121,6 +1121,43 @@ test_turn_ended_mixed_positive_evidence_batch_default_off() {
   pass "per-task evidence composition stays off until the home opts in"
 }
 
+test_status_and_turn_end_batch_never_uses_churn_evidence() {
+  local dir state fakebin out drain_out capture_file first_window second_window second_key pid
+  dir=$(make_case status-and-turn-ended-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-firststatus"; second_window="test:fm-secondturn"
+  printf 'working: authoritative task still running\n' > "$state/firststatus.status"
+  : > "$state/secondturn.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$first_window" > "$state/firststatus.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/secondturn.meta"
+  printf 'second task rendered after the prior poll' > "$capture_file"
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$second_key"
+  export FM_FAKE_CREW_STATE_firststatus='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_secondturn='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firststatus\nfm-secondturn')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a status-and-turn-end batch on churn evidence"
+  grep -F "$state/firststatus.status" "$out" >/dev/null \
+    || fail "watcher did not print the status file from the surfaced mixed batch"
+  grep -F "$state/secondturn.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the turn-end from the surfaced mixed batch"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the surfaced status-and-turn-end batch failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/firststatus.status" >/dev/null \
+    || fail "the status file from the surfaced mixed batch was not queued"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/secondturn.turn-ended" >/dev/null \
+    || fail "the turn-end from the surfaced mixed batch was not queued"
+  [ ! -e "$state/.churn-since-$second_key" ] \
+    || fail "a status-bearing batch opened a pane-churn deadline"
+  unset FM_FAKE_CREW_STATE_firststatus FM_FAKE_CREW_STATE_secondturn
+  pass "a status-bearing batch never falls through to pane-churn evidence"
+}
+
 # The opt-in half. Pane churn infers execution from rendered bytes rather than
 # from a verdict the harness vouches for, so a home that has not asked for it must
 # see exactly the pre-change triage: the same churning fixture that absorbs above
@@ -1396,7 +1433,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   # Busy evidence that would absorb an ordinary crewmate's no-verb note must
   # not absorb a secondmate's: its status stream is the routed-reply channel.
   export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
-  watch_bg "$state" "$fakebin" "$out"
+  FM_CONFIG_OVERRIDE="$(churn_config "$dir")" watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's routed status note"
   grep -F "signal: $state/mate.status" "$out" >/dev/null \
@@ -3759,6 +3796,7 @@ test_turn_ended_colliding_window_key_surfaced
 test_turn_ended_duplicate_endpoint_records_surfaced
 test_turn_ended_mixed_positive_evidence_batch_absorbed
 test_turn_ended_mixed_positive_evidence_batch_default_off
+test_status_and_turn_end_batch_never_uses_churn_evidence
 test_turn_ended_churn_absorb_off_by_default
 test_turn_ended_churn_absorb_bounded
 test_turn_ended_churn_timer_write_failure_surfaced
