@@ -120,8 +120,10 @@ JS
 JSON
   cat > "$repo/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
 export class Text {
-  constructor(text) {
+  constructor(text, paddingX, paddingY) {
     this.text = text;
+    this.paddingX = paddingX;
+    this.paddingY = paddingY;
   }
 }
 JS
@@ -354,8 +356,39 @@ if (listedText.split("\n").length !== 2 || !listedText.includes("checks green"))
   throw new Error(`fm_branch_outcomes did not read the store: ${listedText}`);
 }
 if (!renderers.has("fm-branch-merge")) throw new Error("merge-note renderer missing");
-const rendered = renderers.get("fm-branch-merge")({ content: "note body" }, { expanded: false }, { fg: (_c, text) => text });
-if (rendered.text !== "note body") throw new Error("merge-note renderer dropped the note");
+const mergeNote = sentToMain[0].message.content;
+if (typeof mergeNote !== "string" || !mergeNote.startsWith("⛵")) {
+  throw new Error(`merge note missing sailboat prefix: ${mergeNote}`);
+}
+const fgCalls = [];
+const rendered = renderers.get("fm-branch-merge")(
+  { content: mergeNote },
+  { expanded: false },
+  {
+    fg(color, text) {
+      fgCalls.push({ color, text });
+      return text;
+    },
+  },
+);
+if (!String(rendered.text).includes("⛵")) throw new Error("renderer dropped the sailboat prefix");
+if (!String(rendered.text).includes("branch merged")) throw new Error("renderer dropped the note body");
+if (rendered.paddingX === 0 && rendered.paddingY === 0) {
+  throw new Error("renderer still pads with 0,0 instead of outputPad");
+}
+if (rendered.paddingX !== 1 || rendered.paddingY !== 0) {
+  throw new Error(
+    `renderer padding should match real Pi messages (outputPad, 0), got ${rendered.paddingX},${rendered.paddingY}`,
+  );
+}
+const boatCalls = fgCalls.filter((call) => call.text === "⛵");
+if (boatCalls.length !== 1 || boatCalls[0].color === "dim") {
+  throw new Error(`boat glyph must carry color, not dim: ${JSON.stringify(fgCalls)}`);
+}
+const restCalls = fgCalls.filter((call) => call.text !== "⛵");
+if (restCalls.length === 0 || restCalls.some((call) => call.color !== "dim")) {
+  throw new Error(`note remainder must be dim: ${JSON.stringify(fgCalls)}`);
+}
 process.exit(0);
 EOF
   status=$?
