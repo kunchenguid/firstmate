@@ -161,7 +161,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
-#     __CODEXFABRICENV__ absolute path to the process-only Codex Fabric credential bridge
+#     __CODEXFABRICENV__ optional absolute path to the process-only Codex Fabric credential bridge
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2727,7 +2727,10 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
-sq_codex_fabric_env=$(shell_quote "$FM_ROOT/bin/fm-codex-fabric-env.sh")
+sq_codex_fabric_env=
+if [ -f "$CONFIG/codex-fabric-mcp" ]; then
+  sq_codex_fabric_env=$(shell_quote "$FM_ROOT/bin/fm-codex-fabric-env.sh")
+fi
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")

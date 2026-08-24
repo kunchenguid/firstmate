@@ -239,11 +239,15 @@ New harnesses get verified through a supervised trial task before joining the se
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
-When Azure CLI is available, every Firstmate-spawned Codex worker asks its existing non-interactive session for a current `https://api.fabric.microsoft.com` access token before launch.
+### Codex Fabric MCP credentials (`config/codex-fabric-mcp`)
+
+The optional local, gitignored `config/codex-fabric-mcp` presence flag explicitly authorizes default-off Fabric credential delegation to Codex workers spawned from that home.
+The flag is not inherited by Secondmate homes, so each home requires its captain's own grant.
+When the flag is present and Azure CLI is available, a Firstmate-spawned Codex worker asks its existing non-interactive session for a current `https://api.fabric.microsoft.com` access token before launch.
 When acquisition succeeds, only the Codex worker process and its children receive the token through `FABRIC_CORE_BEARER_TOKEN` and `FABRIC_DW_GLOBAL_BEARER_TOKEN`, matching the global Fabric Core and Fabric Warehouse MCP configuration.
 The bridge leaves any caller-provided `FABRIC_ACCESS_TOKEN` value and export state unchanged.
 The bridge does not put the token in a backend daemon, pane shell, process argument, profile, configuration file, log, or cache.
-An absent Azure CLI or an unavailable existing session does not start an interactive login and preserves the prior Codex launch behavior.
+An absent Azure CLI, an unavailable existing session, or an acquisition that exceeds 10 seconds does not start an interactive login and preserves the prior Codex launch behavior.
 [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) verifies exact token acquisition, process-only environment construction, argument and tracing secrecy, failure fallback, Codex-only scope, and spawn wiring with fake credentials.
 A live verification initializes both Fabric MCPs through this spawn path, then performs bounded read-only catalog discovery and a data-independent one-row `SELECT` without reporting credential values or tenant data.
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.

@@ -14,6 +14,10 @@
 { set +x; } 2>/dev/null
 set -u
 
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
 if [ "$#" -eq 0 ]; then
   echo "usage: fm-codex-fabric-env.sh <codex-command> [args...]" >&2
   exit 2
@@ -29,7 +33,7 @@ esac
 launch_with_fabric_token() {
   local fabric_access_token_fresh=
   export -n fabric_access_token_fresh
-  fabric_access_token_fresh=$(az account get-access-token \
+  fabric_access_token_fresh=$(fm_run_timed 10 az account get-access-token \
     --resource https://api.fabric.microsoft.com \
     --query accessToken \
     --output tsv \

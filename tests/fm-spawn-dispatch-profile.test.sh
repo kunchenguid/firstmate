@@ -446,9 +446,27 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "'$ROOT/bin/fm-codex-fabric-env.sh' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
-  pass "codex receives the process-only Fabric bridge, --model, and model_reasoning_effort profile flags"
+  assert_not_contains "$launch" "fm-codex-fabric-env.sh" \
+    "Codex launch delegated Fabric credentials without the captain opt-in"
+  pass "codex receives model settings without default-on Fabric credential delegation"
+}
+
+test_codex_fabric_bridge_requires_home_opt_in() {
+  local rec id out status launch
+  id=profile-codex-fabric-opt-in-z3b
+  rec=$(make_spawn_case profile-codex-fabric-opt-in codex "$id")
+  read_case_record "$rec"
+  touch "$HOME_DIR/config/codex-fabric-mcp"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn with Fabric delegation enabled should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$ROOT/bin/fm-codex-fabric-env.sh' codex" \
+    "captain Fabric opt-in did not route Codex through the credential bridge"
+  pass "Codex Fabric credential delegation requires the home-local captain opt-in"
 }
 
 test_codex_fabric_bridge_acquires_fresh_process_environment() {
@@ -519,6 +537,40 @@ SH
   assert_not_contains "$(cat "$dir/az.args")" 'login' \
     "Codex Fabric bridge attempted an interactive Azure login"
   pass "Codex Fabric bridge falls back silently without interactive login or Fabric environment mutation"
+}
+
+test_codex_fabric_bridge_bounds_azure_cli_acquisition() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/codex-fabric-timeout"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_TEST_TIMEOUT_ARGS"
+exit 124
+SH
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+exit 99
+SH
+  cat > "$fakebin/codex" <<'SH'
+#!/bin/sh
+[ "${FABRIC_CORE_BEARER_TOKEN+x}" != x ] || exit 48
+[ "${FABRIC_DW_GLOBAL_BEARER_TOKEN+x}" != x ] || exit 49
+printf '%s\n' worker-timeout-fallback-ok
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/az" "$fakebin/codex"
+
+  out=$(env -u FABRIC_CORE_BEARER_TOKEN -u FABRIC_DW_GLOBAL_BEARER_TOKEN \
+    PATH="$fakebin:$PATH" FM_TEST_TIMEOUT_ARGS="$dir/timeout.args" \
+    "$ROOT/bin/fm-codex-fabric-env.sh" "$fakebin/codex" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Codex Fabric bridge should launch the worker after an Azure CLI timeout"
+  [ "$out" = worker-timeout-fallback-ok ] \
+    || fail "Codex Fabric timeout fallback changed the worker result: $out"
+  assert_contains "$(cat "$dir/timeout.args")" "10" \
+    "Codex Fabric bridge did not apply its ten-second acquisition bound"
+  pass "Codex Fabric bridge bounds optional Azure CLI acquisition and falls back to launch"
 }
 
 test_codex_fabric_bridge_refuses_non_codex_processes() {
@@ -919,8 +971,10 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_fabric_bridge_requires_home_opt_in
 test_codex_fabric_bridge_acquires_fresh_process_environment
 test_codex_fabric_bridge_falls_back_without_login_or_environment_changes
+test_codex_fabric_bridge_bounds_azure_cli_acquisition
 test_codex_fabric_bridge_refuses_non_codex_processes
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
