@@ -1349,7 +1349,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_tmux "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:gone-window-never-alive"
 
   printf 'window=fm-sess:gone-window\nkind=ship\npane_closed=1\n' > "$home/state/task-closed.meta"
 
