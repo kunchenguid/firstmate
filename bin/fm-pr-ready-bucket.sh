@@ -118,7 +118,7 @@ CLASSIFY_JQ='
   def in_bors:
     (.bors_author == true)
     or (
-      ((.bors_last // "") | test("has been approved|now in the \\[queue\\]|Trying:|:hourglass:"; "i"))
+      ((.bors_last // "") | test("has been approved|now in the \\[queue\\]|Trying:|:hourglass:|Rollup created"; "i"))
       and ((.bors_last // "") | test("unapproved|not previously approved|unmergeable"; "i") | not)
     );
   def red_required($checks):

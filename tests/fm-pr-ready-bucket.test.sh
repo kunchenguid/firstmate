@@ -6,7 +6,7 @@
 #   (a) MERGEABLE main PR with required Depot + title/body lint green is ready
 #   (b) conflicts, red required CI, review-blocker, and CHANGES_REQUESTED block
 #   (c) base other than main is stacked, even when it also has conflicts
-#   (d) bors-ci-merge-queue author or queue comment is in-Bors
+#   (d) bors-ci-merge-queue author, queue comment, or Rollup created is in-Bors
 #   (e) drafts and release-please PRs targeting main are omitted
 #   (f) pending required CI is omitted rather than blocked or ready
 #   (g) default repo is Chamber-Hero/memberos; --repo overrides
@@ -230,14 +230,17 @@ test_in_bors_author_and_comment() {
   case_dir=$(make_case in-bors)
   write_page "$case_dir/page.toon" false "" \
     "$(pr_json 401 "Auto merge of #101" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false "bors-ci-merge-queue" "tmp/bors" true "")" \
-    "$(pr_json 402 "feat: queued" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false "alice" "feat/queued" false "Commit abc has been approved by cap. It is now in the [queue] for this repository.")"
+    "$(pr_json 402 "feat: queued" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false "alice" "feat/queued" false "Commit abc has been approved by cap. It is now in the [queue] for this repository.")" \
+    "$(pr_json 405 "feat: rollup member" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false "alice" "feat/rollup" false ":tada: Rollup created")"
   out=$(run_bucket "$case_dir" --json)
-  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 2 ] \
-    || fail "in-bors: expected two in-Bors PRs, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 3 ] \
+    || fail "in-bors: expected three in-Bors PRs, got: $out"
   [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
     || fail "in-bors: queued PRs must not also be ready, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '.in_bors[] | select(.number==405)' >/dev/null \
+    || fail "in-bors: latest Rollup created comment must stay in-Bors, got: $out"
   out=$(run_bucket "$case_dir")
-  assert_contains "$out" "in-Bors (2)" "human output should title the in-Bors group"
+  assert_contains "$out" "in-Bors (3)" "human output should title the in-Bors group"
   assert_contains "$out" "https://github.com/Chamber-Hero/memberos/pull/401" \
     "in-Bors should print the rollup URL"
   pass "fm-pr-ready-bucket detects in-Bors from bors-ci-merge-queue author and queue comments"
