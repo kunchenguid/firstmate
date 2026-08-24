@@ -41,8 +41,11 @@
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
-# server-side events. It adds no periodic discovery, no timer fallback, and no
-# dependency on any unreleased capability.
+# server-side events. Under WSL, the canonical $HOME/.local/bin/lavish-axi uses
+# the executable $HOME/.local/bin/lavish-wsl bridge when it is available because
+# WSL loopback is not Windows loopback in every networking mode. A PATH-selected
+# operator override remains native. The adapter adds no periodic discovery, no
+# timer fallback, and no dependency on any unreleased capability.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -81,7 +84,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { awk 'NR < 2 { next } /^set -u$/ { exit } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -100,11 +103,22 @@ cmd_source_id() {
   fi
 }
 
+lavish_poll_executable() {
+  local lavish_bin bridge
+  lavish_bin=$(command -v lavish-axi 2>/dev/null) || die "lavish-axi is not installed"
+  bridge="$HOME/.local/bin/lavish-wsl"
+  if [ -n "${WSL_DISTRO_NAME:-}" ] && [ -x "$bridge" ] && [ "$lavish_bin" = "$HOME/.local/bin/lavish-axi" ]; then
+    printf '%s\n' "$bridge"
+  else
+    printf '%s\n' "$lavish_bin"
+  fi
+}
+
 cmd_arm() {
   local artifact=${1-} id real
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
-  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  lavish_poll_executable >/dev/null
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
@@ -203,11 +217,11 @@ poll_retry_delay() {
 }
 
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
+  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc poll_bin
   local pipeline_status
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
-  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  poll_bin=$(lavish_poll_executable) || exit 1
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
   printf -v cleanup_command 'rm -f -- %q' "$response"
@@ -223,7 +237,7 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    "$poll_bin" poll "$artifact" | poll_response_filter "$response"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}

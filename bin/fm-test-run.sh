@@ -442,6 +442,7 @@ tests/fm-pending-reply.test.sh 19488
 tests/fm-pi-primary-live-e2e.test.sh 41
 tests/fm-pi-watch-extension.test.sh 17979
 tests/fm-pr-check-security.test.sh 250417
+tests/fm-procevent-lavish-interface.test.sh 250
 tests/fm-procevent-when.test.sh 15249
 tests/fm-procevent.test.sh 53142
 tests/fm-project-origin.test.sh 105
