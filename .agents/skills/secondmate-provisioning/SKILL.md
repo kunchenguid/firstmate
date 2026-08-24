@@ -109,7 +109,7 @@ Because these paths are gitignored, that propagation is a separate, primary-auth
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
-A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
+Absent an honored deviation record, a present primary value converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
 
 That primary authority has exactly one sanctioned, opt-in escape: a home may hold its own value for a declared deviable item by writing an explicit deviation record beside it, `config/<item>.deviation`, and `config/backend` is the only deviable item today.
 The deviating value stays in the config item itself, where every consumer already reads it, so the record only states that this home holds its own value there.
