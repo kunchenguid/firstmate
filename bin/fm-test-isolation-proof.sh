@@ -206,8 +206,8 @@ EOF
 
 dir_mode() {
   local path=$1
-  if stat -f %Lp "$path" >/dev/null 2>&1; then
-    stat -f %Lp "$path"
+  if "${FM_BSD_STAT:-/usr/bin/stat}" -f %Lp "$path" >/dev/null 2>&1; then
+    "${FM_BSD_STAT:-/usr/bin/stat}" -f %Lp "$path"
   else
     stat -c %a "$path"
   fi
