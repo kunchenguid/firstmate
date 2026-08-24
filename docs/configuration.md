@@ -12,8 +12,23 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-`config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
+`config/` is a two-layer split owned by "Config layers" below, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
+
+## Config layers (shared vs local-secret)
+
+Story fmops-07 §4 split `config/` into two explicit layers so machines that share this setup inherit the operating choices without ever committing a secret, reversing the earlier "`config/` is captain-private, gitignored as a whole" rule.
+
+The **SHARED** layer is committed and holds machine-agnostic operating choices a shared setup should inherit: `worker-playbook.md`, `firstmate-playbook.md`, `crew-dispatch.json`, `backlog-backend`, and `startup-memory-budget`.
+
+The **LOCAL-SECRET** layer stays gitignored and holds secrets and per-machine choices: `.env`, any `*-password` (e.g. `cmux-socket-password`), `backend`, `crew-harness`, `secondmate-harness`, `calm`, `supervision-branch-model`, `supervision-branch-effort`, `herdr-presentation-spaces`, `stow-pass-horizon`, `trace-context`, `wedge-alarm`, `watched-tools.json`, and generated Relay state such as `x-mode.env`.
+
+The classification is by nature - a machine-agnostic operating choice versus a secret or per-machine choice - never by file location.
+`.gitignore` enforces it deny-by-default: everything under `config/` is ignored, then each SHARED file is un-ignored by an explicit `!config/<name>` line.
+Adding a new SHARED config file means adding one such line; a new secret or per-machine file needs no change because it is ignored by default.
+The rule is absolute: never commit a token or secret, and never un-ignore a file that can hold one.
+Being inherited into secondmate homes is a separate mechanism from being committed - a LOCAL-SECRET file such as `trace-context` can be propagated to a secondmate home by the provisioning path while still being gitignored in this repo.
+`AGENTS.md` section 2 lists each `config/...` file with its layer inline, and each producing feature's own section below owns that file's values and mechanics.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.

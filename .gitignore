@@ -11,4 +11,17 @@ plans/
 __pycache__/
 *.pyc
 .env
-config/
+# Config two-layer split (story fmops-07 §4; architecture.md §10).
+# DENY-BY-DEFAULT: everything under config/ stays gitignored (secrets and
+# per-machine choices never get committed by accident), then the machine-
+# agnostic SHARED operating choices are explicitly un-ignored so homes that
+# share this setup inherit them. Adding a new SHARED config file means adding
+# one `!config/<name>` line here; a new secret needs no change (it is ignored
+# by default). NEVER un-ignore a file that can hold a token, password, or a
+# per-machine choice.
+config/*
+!config/worker-playbook.md
+!config/firstmate-playbook.md
+!config/crew-dispatch.json
+!config/backlog-backend
+!config/startup-memory-budget
