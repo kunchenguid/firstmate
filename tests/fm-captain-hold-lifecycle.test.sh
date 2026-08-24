@@ -1110,7 +1110,7 @@ EOF
 # primitive, so a valid record, a legacy hold, an orphan, and malformed input
 # must be distinguishable without making the reader fail as a whole.
 test_structured_decision_body_read_and_errors() {
-  local home json large_bytes unsafe
+  local home json large_bytes unsafe original_digest
   home=$(make_home structured-decision)
   cat > "$home/structured.json" <<'EOF'
 {
@@ -1168,6 +1168,45 @@ EOF
   fi
   assert_contains "$(tasks_in "$home" show sample-write-failure-call --full)" "held: no" \
     "structured persistence failure left the task held without a body"
+  tasks_in "$home" add sample-hold-failure-call "Backlog hold failure" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the hold failure fixture"
+  run_captain "$home" hold sample-hold-failure-call \
+    --reason "captain initial body fixture" --repo sample \
+    --structured-file "$home/structured.json" >/dev/null \
+    || fail "could not create the existing structured record fixture"
+  tasks_in "$home" unhold sample-hold-failure-call >/dev/null \
+    || fail "could not release the hold failure fixture"
+  original_digest=$(shasum -a 256 "$home/data/sample-hold-failure-call/captain-decision.json" | awk '{print $1}')
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  add:sample-add-failure-call|hold:sample-hold-failure-call) exit 9 ;;
+  *) exec "$REAL_TASKS_AXI" "$@" ;;
+esac
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_captain "$home" hold sample-add-failure-call \
+    --title "Backlog add failure" --reason "captain add failure fixture" --repo sample \
+    --structured-file "$home/structured.json" > "$home/add-failure.out" 2> "$home/add-failure.err"; then
+    fail "structured hold accepted a failed task creation"
+  fi
+  assert_absent "$home/data/sample-add-failure-call/captain-decision.json" \
+    "failed task creation left an orphaned structured record"
+  if tasks_in "$home" show sample-add-failure-call --full >/dev/null 2>&1; then
+    fail "failed task creation unexpectedly added the task"
+  fi
+  if run_captain "$home" hold sample-hold-failure-call \
+    --reason "captain replacement body fixture" --repo sample \
+    --structured-file "$home/alternate-structured.json" \
+    > "$home/hold-failure.out" 2> "$home/hold-failure.err"; then
+    fail "structured hold accepted a failed backlog hold"
+  fi
+  [ "$original_digest" = "$(shasum -a 256 "$home/data/sample-hold-failure-call/captain-decision.json" | awk '{print $1}')" ] \
+    || fail "failed backlog hold did not restore the previous structured record"
+  assert_contains "$(tasks_in "$home" show sample-hold-failure-call --full)" "held: no" \
+    "failed backlog hold unexpectedly retained a captain hold"
+  rm -f "$home/fakebin/tasks-axi"
   tasks_in "$home" add sample-title-mismatch-call "Original title" \
     --kind ship --repo sample >/dev/null \
     || fail "could not create the title mismatch fixture"

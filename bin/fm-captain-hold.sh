@@ -158,7 +158,43 @@ CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 STRUCTURED_SCHEMA=fm-captain-decision.v1
 STRUCTURED_FILENAME=captain-decision.json
+STRUCTURED_TX_ACTIVE=0
+STRUCTURED_TX_PATH=
+STRUCTURED_TX_BACKUP=
+STRUCTURED_TX_HAD_RECORD=0
+STRUCTURED_TX_CREATED_DIR=0
+
+structured_record_rollback() {
+  local dir
+  [ "$STRUCTURED_TX_ACTIVE" = 1 ] || return 0
+  dir=$(dirname "$STRUCTURED_TX_PATH")
+  if [ "$STRUCTURED_TX_HAD_RECORD" = 1 ]; then
+    if ! mv -f -- "$STRUCTURED_TX_BACKUP" "$STRUCTURED_TX_PATH"; then
+      printf 'fm-captain-hold: could not restore structured decision record after backlog failure: %s\n' \
+        "$STRUCTURED_TX_PATH" >&2
+    fi
+  elif ! rm -f -- "$STRUCTURED_TX_PATH"; then
+    printf 'fm-captain-hold: could not remove structured decision record after backlog failure: %s\n' \
+      "$STRUCTURED_TX_PATH" >&2
+  fi
+  if [ "$STRUCTURED_TX_CREATED_DIR" = 1 ]; then
+    rmdir -- "$dir" 2>/dev/null || true
+  fi
+  STRUCTURED_TX_ACTIVE=0
+}
+
+structured_record_commit() {
+  [ "$STRUCTURED_TX_ACTIVE" = 1 ] || return 0
+  STRUCTURED_TX_ACTIVE=0
+  if [ "$STRUCTURED_TX_HAD_RECORD" = 1 ]; then
+    rm -f -- "$STRUCTURED_TX_BACKUP" \
+      || printf 'fm-captain-hold: could not retire structured decision rollback copy: %s\n' \
+        "$STRUCTURED_TX_BACKUP" >&2
+  fi
+}
+
 captain_hold_cleanup() {
+  structured_record_rollback
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
@@ -472,19 +508,36 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
 }
 
 write_structured_record() {  # <task-id> <input-path>
-  local id=$1 input=$2 dir path tmp record
+  local id=$1 input=$2 dir path tmp record backup=''
   [ -f "$input" ] || fail "structured decision file does not exist: $input"
   structured_input_valid "$id" "$input" \
     || fail "structured decision body is invalid: $input"
+  record=$(canonical_structured_record "$id" "$input") \
+    || fail "could not canonicalize structured decision body: $input"
   dir="$DATA/$id"
-  [ -e "$dir" ] || mkdir -p -- "$dir" || fail "cannot create structured decision directory: $dir"
+  STRUCTURED_TX_CREATED_DIR=0
+  if [ ! -e "$dir" ]; then
+    mkdir -p -- "$dir" || fail "cannot create structured decision directory: $dir"
+    STRUCTURED_TX_CREATED_DIR=1
+  fi
   [ -d "$dir" ] && [ ! -L "$dir" ] || fail "structured decision directory is unsafe: $dir"
   path=$(structured_record_path "$id")
   if [ -e "$path" ] && { [ ! -f "$path" ] || [ -L "$path" ]; }; then
     fail "structured decision record is unsafe: $path"
   fi
-  record=$(canonical_structured_record "$id" "$input") \
-    || fail "could not canonicalize structured decision body: $input"
+  STRUCTURED_TX_PATH=$path
+  STRUCTURED_TX_HAD_RECORD=0
+  if [ -f "$path" ]; then
+    backup=$(umask 077; mktemp "$dir/.captain-decision.rollback.XXXXXX") \
+      || fail "cannot stage structured decision rollback copy"
+    if ! cp -p -- "$path" "$backup"; then
+      rm -f -- "$backup"
+      fail "cannot preserve existing structured decision record: $path"
+    fi
+    STRUCTURED_TX_BACKUP=$backup
+    STRUCTURED_TX_HAD_RECORD=1
+  fi
+  STRUCTURED_TX_ACTIVE=1
   tmp=$(umask 077; mktemp "$dir/.captain-decision.XXXXXX") \
     || fail "cannot stage structured decision record"
   if ! { printf '%s\n' "$record" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; }; then
@@ -573,6 +626,7 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  structured_record_commit
   printf '%s\n' "$id"
 }
 
