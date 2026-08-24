@@ -325,7 +325,7 @@ config_validate() {
       elif ($t | has("announce_args")) and (($t | has("announce_pattern")) | not) then "tool \($t.name) announce_args needs announce_pattern"
       elif ($t | has("git")) and (($t.git | type) != "object") then "tool \($t.name) git must be an object"
       elif ($t | has("git")) and (($t.git.repo | type) != "string" or ($t.git.repo | startswith("/") | not) or ($t.git.repo | test("[[:cntrl:]]"))) then "tool \($t.name) git.repo must be an absolute path on one line"
-      elif ($t | has("git")) and ($t.git | has("remote")) and (($t.git.remote | type) != "string" or ($t.git.remote | test("^[A-Za-z0-9._-]+$") | not)) then "tool \($t.name) git.remote must be a simple remote name"
+      elif ($t | has("git")) and ($t.git | has("remote")) and (($t.git.remote | type) != "string" or ($t.git.remote | startswith("-")) or ($t.git.remote | test("^[A-Za-z0-9._-]+$") | not)) then "tool \($t.name) git.remote must be a simple remote name"
       elif ($t | has("git")) and ($t.git | has("branch")) and (($t.git.branch | type) != "string" or ($t.git.branch | test("^[A-Za-z0-9._/-]+$") | not)) then "tool \($t.name) git.branch must be a simple branch name"
       else empty
       end;
@@ -380,7 +380,7 @@ config_records() {
 path_hits() {
   local command_name=$1 dir candidate identity seen=''
   while IFS= read -r dir; do
-    [ -n "$dir" ] || continue
+    [ -n "$dir" ] || dir=.
     candidate="$dir/$command_name"
     [ -f "$candidate" ] && [ -x "$candidate" ] || continue
     identity=$(fm_pr_file_identity "$candidate" 2>/dev/null) || identity=

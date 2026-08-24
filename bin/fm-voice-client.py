@@ -87,6 +87,7 @@ import argparse
 import json
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import threading
@@ -175,7 +176,7 @@ def relay_command(options):
         return remote
     # -T because a pty would rewrite bytes in the audio stream, which is the
     # single most confusing way this could fail.
-    return ["ssh", "-T", options.host] + remote
+    return ["ssh", "-T", options.host, shlex.join(remote)]
 
 
 class Uplink:

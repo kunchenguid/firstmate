@@ -151,6 +151,26 @@ test_newest_copy_first_on_path_is_silent() {
   pass "no report when PATH already resolves the newest installed copy"
 }
 
+test_empty_path_entry_resolves_the_current_directory() {
+  local home current fresh out report
+  home=$(make_home empty-path)
+  current="$TMP_ROOT/empty-path/current"
+  fresh="$TMP_ROOT/empty-path/fresh/bin"
+  make_copy "$current" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  (cd "$current" && run_check "$home" ":$(fixture_path "$fresh")" "$out")
+  report=$(cat "$out")
+  assert_contains "$report" "herdr update not in effect" \
+    "an empty leading PATH entry did not resolve the stale current-directory copy"
+  assert_contains "$report" "PATH resolves 0.8.0 at ./$TOOL" \
+    "the report did not name the current-directory copy selected by PATH"
+  assert_contains "$report" "0.8.2 is installed at $fresh/$TOOL" \
+    "the report did not compare the later newer copy"
+  pass "an empty PATH entry resolves the current directory in PATH order"
+}
+
 test_identical_versions_are_silent() {
   local home first second out
   home=$(make_home same-version)
@@ -641,6 +661,12 @@ test_malformed_registry_is_reported_not_ignored() {
   rm -f "$home/state/.tool-updates"
   run_check "$home" "$PATH" "$out"
   assert_contains "$(cat "$out")" "tool herdr announce_args needs announce_pattern" "a command to search with no pattern to search for was accepted"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$TMP_ROOT/bad-config\",\"remote\":\"--get-url\",\"branch\":\"main\"}}]}"
+  rm -f "$home/state/.tool-updates"
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "tool firstmate git.remote must be a simple remote name" \
+    "a leading-dash remote name was accepted as a git option"
   pass "a malformed registry is reported instead of quietly skipped"
 }
 
@@ -1002,6 +1028,7 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 
 test_path_skew_is_reported_from_every_copy
 test_newest_copy_first_on_path_is_silent
+test_empty_path_entry_resolves_the_current_directory
 test_identical_versions_are_silent
 test_one_copy_reached_twice_is_probed_once
 test_unreadable_version_is_a_failure_not_a_pass

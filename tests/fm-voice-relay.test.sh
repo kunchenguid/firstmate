@@ -414,6 +414,20 @@ unconfigured_note=$(env "${inbox_env[@]}" \
   "$ROOT/bin/fm-inbox.sh" note "the handover must work with no configuration") \
   || fail "note should not need any configuration"
 assert_contains "$unconfigured_note" 'queued ' "note should still queue a record"
+
+printf 'must remain outside the inbox\n' > "$CONFIG_HOME/state/saved.note"
+set +e
+ack_out=$(env "${inbox_env[@]}" \
+  "$ROOT/bin/fm-inbox.sh" drain --ack ../saved 2>&1)
+ack_code=$?
+set -e
+[ "$ack_code" -ne 0 ] || fail "drain accepted a note id that escapes the inbox"
+assert_present "$CONFIG_HOME/state/saved.note" \
+  "an invalid acknowledgement moved a file from outside the inbox"
+assert_absent "$CONFIG_HOME/state/inbox/saved.note" \
+  "an invalid acknowledgement moved an outside file into the inbox"
+assert_contains "$ack_out" 'invalid note id' \
+  "an invalid acknowledgement did not name the refused identifier"
 assert_absent "$AWS_CALLED" \
   "no case above may reach a model: the aws stub recorded an attempt"
 pass "the model-backed subcommands refuse by name while note keeps working"
@@ -1291,7 +1305,7 @@ mkdir -p "$TMP_ROOT/client-files"
 printf '\0\0\0\0' > "$TMP_ROOT/client-files/clip.pcm"
 
 python3 - "$ROOT/bin" "$TMP_ROOT/client-files" <<'PY' || fail "laptop client"
-import io, os, sys, types
+import io, os, shlex, sys, types
 sys.path.insert(0, sys.argv[1])
 import importlib.util, pathlib
 spec = importlib.util.spec_from_file_location(
@@ -1363,7 +1377,8 @@ check(client.parse_args(["--host", "h"]).input_device is None,
 # Over SSH: no pty, or the audio stream is silently rewritten.
 argv = client.relay_command(client.parse_args(["--host", "desk"]))
 check(argv[:3] == ["ssh", "-T", "desk"], "ssh must be invoked with -T: %s" % argv)
-check("--serve" in argv, "the relay must be started in serve mode")
+check(len(argv) == 4, "ssh must receive one remote shell command: %s" % argv)
+check("--serve" in shlex.split(argv[3]), "the relay must be started in serve mode")
 
 # Locally: no ssh at all, so the same client can be measured on this host.
 argv = client.relay_command(client.parse_args(["--local"]))
@@ -1372,11 +1387,14 @@ check(argv[0] != "ssh", "--local must not invoke ssh: %s" % argv)
 # The interpreter is a setting because the relay needs a virtual environment the
 # system interpreter does not have.
 argv = client.relay_command(client.parse_args(
-    ["--host", "desk", "--relay-python", "/opt/venv/bin/python",
-     "--relay-arg=--scope", "--relay-arg=counts"]))
-check("/opt/venv/bin/python" in argv, "the relay interpreter must be passed: %s" % argv)
-check(argv[-2:] == ["--scope", "counts"],
-      "relay arguments must reach the relay: %s" % argv)
+    ["--host", "desk", "--relay-python", "/opt/Python Env/bin/python",
+     "--relay", "/srv/First Mate/bin/fm-voice-relay.py",
+     "--relay-arg=--scope", "--relay-arg=counts; printf unsafe"]))
+remote = shlex.split(argv[3]) if len(argv) == 4 else []
+check(remote == ["/opt/Python Env/bin/python",
+                 "/srv/First Mate/bin/fm-voice-relay.py", "--serve",
+                 "--scope", "counts; printf unsafe"],
+      "remote paths and arguments must survive login-shell parsing: %s" % argv)
 
 # A relay that dies after the handshake must be reported at once rather than at
 # the end of the timeout. Its own one-line error is already on the captain's
@@ -4158,7 +4176,8 @@ if [ "${1:-}" = "-T" ]; then shift; fi
 shift                                   # the host, which is this machine
 desktop_env=()
 while IFS= read -r line; do desktop_env+=("$line"); done < "$DIR/desktop.env"
-exec env -i "${desktop_env[@]}" "$@"
+[ "$#" -eq 1 ] || exit 64
+exec env -i "${desktop_env[@]}" /bin/sh -c "$1"
 SH
 chmod +x "$E2E/bin/ssh"
 

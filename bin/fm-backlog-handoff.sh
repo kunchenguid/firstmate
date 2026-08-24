@@ -813,6 +813,7 @@ REQUESTED_BATCH=$(receiver_wake_batch_id "$@") || {
 }
 
 if [ "${#TO_MOVE[@]}" -eq 0 ]; then
+  remove_interrupted_source_duplicates "$SUB_BACKLOG" "$@" || exit 1
   WAKE_PENDING_MARKER="$STATE/.backlog-handoff-$ID.wake-pending"
   case "$(cat "$WAKE_PENDING_MARKER" 2>/dev/null || true)" in
     prepared:*:"$REQUESTED_BATCH") receiver_wake_promote_prepared "$ID" "$REQUESTED_BATCH" || exit 1 ;;

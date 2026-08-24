@@ -334,6 +334,71 @@ EOF
   pass "a post-move crash preserves wake intent for an idempotent retry"
 }
 
+test_split_persist_crash_removes_source_duplicate_before_wake() {
+  local home="$TMP_ROOT/split-persist-main" sub="$TMP_ROOT/split-persist-sub"
+  local fakebin="$TMP_ROOT/split-persist-fakebin" real_tasks rc=0
+  setup_homes "$home" "$sub"
+  mkdir -p "$sub/data" "$fakebin"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] split-item - survive a target-first persist (repo: alpha)
+
+## Done
+EOF
+  printf '## Queued\n\n## Done\n' > "$sub/data/backlog.md"
+  real_tasks=$(command -v tasks-axi)
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+*" --file "*" --to "*)
+  [ "${1:-}" = mv ] || exec "$FM_REAL_TASKS_AXI" "$@"
+  cp "$FM_SPLIT_SOURCE" "$FM_SPLIT_SNAPSHOT"
+  "$FM_REAL_TASKS_AXI" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    cp "$FM_SPLIT_SNAPSHOT" "$FM_SPLIT_SOURCE"
+    handoff_pid=$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')
+    kill -KILL "$handoff_pid"
+    sleep 1
+  fi
+  exit "$rc"
+  ;;
+esac
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  set +e
+  FM_REAL_TASKS_AXI="$real_tasks" FM_SPLIT_SOURCE="$home/data/backlog.md" \
+    FM_SPLIT_SNAPSHOT="$TMP_ROOT/split-persist.snapshot" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design split-item \
+    > "$TMP_ROOT/split-persist.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "split-persist crash fixture unexpectedly reported success"
+  assert_grep 'split-item' "$home/data/backlog.md" \
+    "split-persist crash did not retain the interrupted source copy"
+  assert_grep 'split-item' "$sub/data/backlog.md" \
+    "split-persist crash did not make the destination durable"
+  assert_present "$home/state/.backlog-handoff-design.wake-pending" \
+    "split-persist crash lost receiver wake intent"
+
+  : > "$TMP_ROOT/default-tmux.log"
+  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design split-item \
+    > "$TMP_ROOT/split-persist-retry.out" 2>&1 \
+    || fail "split-persist recovery failed: $(cat "$TMP_ROOT/split-persist-retry.out")"
+  assert_no_grep 'split-item' "$home/data/backlog.md" \
+    "split-persist recovery left the item dispatchable in the source backlog"
+  assert_grep 'split-item' "$sub/data/backlog.md" \
+    "split-persist recovery lost the authoritative destination item"
+  [ "$(inbox_record_count "$home/state" design)" -eq 1 ] \
+    || fail "split-persist recovery did not emit exactly one receiver record"
+  [ "$(doorbell_count "$TMP_ROOT/default-tmux.log")" -eq 1 ] \
+    || fail "split-persist recovery did not ring exactly one receiver doorbell"
+  pass "a split-persist crash removes the source duplicate before waking"
+}
+
 test_pre_move_crash_does_not_wake_until_move_lands() {
   local home="$TMP_ROOT/pre-move-crash-main" sub="$TMP_ROOT/pre-move-crash-sub"
   local fakebin="$TMP_ROOT/pre-move-crash-fakebin" real_tasks rc=0 wake_count
@@ -1337,6 +1402,7 @@ test_failed_wake_retries_when_the_item_is_already_present
 test_known_receiver_failure_remains_retryable_after_grace
 test_known_failure_restores_retry_after_reconciliation_race
 test_move_crash_keeps_wake_pending_for_recovery
+test_split_persist_crash_removes_source_duplicate_before_wake
 test_pre_move_crash_does_not_wake_until_move_lands
 test_delivery_confirmation_crash_does_not_resend
 test_unresolved_delivery_attempt_refuses_immediate_resend
