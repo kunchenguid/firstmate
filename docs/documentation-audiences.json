@@ -181,6 +181,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/task-planning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -335,6 +339,10 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/task-planning.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/tmux-backend.md",

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--backend-port <port> --frontend-port <port> | --no-ports]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--backend-port <port> --frontend-port <port> | --no-ports]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -58,6 +58,37 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --backend-port <port> and --frontend-port <port> are firstmate's explicit,
+#   pre-decided dev port pair for this exact task's worktree, resolved at intake
+#   the same way as --model/--effort/--backend rather than picked by this script
+#   or bin/fm-worktree-runtime-lib.sh. Both are optional together; passing only
+#   one is refused. Ship and scout spawns only (never --secondmate, whose
+#   worktree is a firstmate home, not a project checkout): the given pair is
+#   recorded in state/<id>.meta, validated and written to code/web/.ports.worktree
+#   after the worktree settles, and a malformed value, a collision with
+#   code/web/.ports.main, or a port that is already bound fails the spawn outright
+#   rather than silently substituting a different pair.
+#   Neither given (a contract-less project, or --no-ports below) actively
+#   REMOVES any code/web/.ports.worktree already sitting in the worktree
+#   rather than leaving it: a task worktree is recycled and that file is
+#   gitignored, so a stale pair from a prior occupant would otherwise survive
+#   untouched and hand the new occupant a port nobody chose for it
+#   (bin/fm-worktree-runtime-lib.sh's fm_worktree_runtime_write_ports); a
+#   removal failure fails the spawn the same as a write failure.
+#   When the target project itself carries a port contract - its own
+#   code/web/.ports.main exists (bin/fm-worktree-runtime-lib.sh's
+#   FM_WORKTREE_RUNTIME_WEB_REL) - a ship or scout spawn REFUSES to launch with
+#   neither port flag given, naming the project and what to pass: silently
+#   skipping the pair would leave a live occupant with no line in the global
+#   port ledger. --no-ports is the explicit escape hatch for a task that
+#   deliberately never runs the dev servers (docs-only work, etc.); it is
+#   refused together with --backend-port/--frontend-port and refused on
+#   --secondmate spawns. A project with no port contract file is unaffected
+#   either way - passing neither flag there stays the same silent no-op it
+#   always was. --relaunch refuses all three flags: it adopts the task's
+#   recorded worktree as-is, and re-provisioning would overwrite the copy of
+#   the dev state the previous agent left there; the recorded pair keeps its
+#   meta lines across a relaunch.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -142,6 +173,7 @@
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   and the shared port decision (--backend-port/--frontend-port pair or --no-ports)
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -260,6 +292,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-worktree-runtime-lib.sh
+. "$SCRIPT_DIR/fm-worktree-runtime-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -275,6 +309,9 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+BACKEND_PORT_ARG=
+FRONTEND_PORT_ARG=
+NO_PORTS=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -282,6 +319,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+BACKEND_PORT_SET=0
+FRONTEND_PORT_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -298,6 +337,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      "backend-port") BACKEND_PORT_ARG=$a; BACKEND_PORT_SET=1 ;;
+      "frontend-port") FRONTEND_PORT_ARG=$a; FRONTEND_PORT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -321,6 +362,11 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --backend-port) want_value="backend-port" ;;
+    --backend-port=*) BACKEND_PORT_ARG=${a#--backend-port=}; BACKEND_PORT_SET=1 ;;
+    --frontend-port) want_value="frontend-port" ;;
+    --frontend-port=*) FRONTEND_PORT_ARG=${a#--frontend-port=}; FRONTEND_PORT_SET=1 ;;
+    --no-ports) NO_PORTS=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -332,6 +378,8 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$BACKEND_PORT_SET" -eq 0 ] || [ -n "$BACKEND_PORT_ARG" ] || { echo "error: --backend-port requires a non-empty value" >&2; exit 1; }
+[ "$FRONTEND_PORT_SET" -eq 0 ] || [ -n "$FRONTEND_PORT_ARG" ] || { echo "error: --frontend-port requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -342,6 +390,44 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
   }
   fm_trace_context_valid "$TRACEPARENT_ARG" || {
     echo "error: --traceparent is not a valid W3C traceparent" >&2
+    exit 1
+  }
+fi
+# Assigned dev-port pair (bin/fm-worktree-runtime-lib.sh): firstmate's explicit
+# intake decision for this exact ship/scout worktree. Both flags travel together,
+# each value is a positive integer, and a --secondmate home is never a project
+# checkout that could hold a port pair.
+if [ "$BACKEND_PORT_SET" -eq 1 ] || [ "$FRONTEND_PORT_SET" -eq 1 ]; then
+  [ "$BACKEND_PORT_SET" -eq 1 ] && [ "$FRONTEND_PORT_SET" -eq 1 ] || {
+    echo "error: --backend-port and --frontend-port must both be given together, or neither" >&2
+    exit 1
+  }
+  case "$KIND" in
+    ship | scout) ;;
+    *)
+      echo "error: --backend-port/--frontend-port apply only to ship/scout spawns; a --secondmate worktree is a firstmate home, never bound to a project's dev ports" >&2
+      exit 1
+      ;;
+  esac
+  case "$BACKEND_PORT_ARG" in
+    [1-9] | [1-9][0-9]*) ;;
+    *) echo "error: --backend-port must be a positive integer, got '$BACKEND_PORT_ARG'" >&2; exit 1 ;;
+  esac
+  case "$FRONTEND_PORT_ARG" in
+    [1-9] | [1-9][0-9]*) ;;
+    *) echo "error: --frontend-port must be a positive integer, got '$FRONTEND_PORT_ARG'" >&2; exit 1 ;;
+  esac
+fi
+# --no-ports is the explicit escape hatch for a task that deliberately never runs
+# the dev servers; it cannot coexist with an explicit pair and never applies to a
+# secondmate home.
+if [ "$NO_PORTS" -eq 1 ]; then
+  if [ "$BACKEND_PORT_SET" -eq 1 ] || [ "$FRONTEND_PORT_SET" -eq 1 ]; then
+    echo "error: --no-ports cannot be combined with --backend-port/--frontend-port; pass the pair or say --no-ports, not both" >&2
+    exit 1
+  fi
+  [ "$KIND" != secondmate ] || {
+    echo "error: --no-ports applies only to ship/scout spawns; a --secondmate worktree is a firstmate home, never checked against a project's port contract" >&2
     exit 1
   }
 fi
@@ -359,6 +445,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  { [ "$BACKEND_PORT_SET" -eq 0 ] && [ "$FRONTEND_PORT_SET" -eq 0 ] && [ "$NO_PORTS" -eq 0 ]; } || {
+    echo "error: --relaunch adopts the task's already-provisioned worktree as-is; --backend-port/--frontend-port/--no-ports cannot re-decide its runtime (the recorded pair keeps its meta lines)" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -868,6 +958,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  # One port decision applies to every pair in a batch, exactly like the shared
+  # harness. Each pair still re-validates it against its own project's contract,
+  # so a batch spanning contract and non-contract projects is refused per pair
+  # where the contract requires a deliberate pair or --no-ports.
+  [ "$BACKEND_PORT_SET" -eq 0 ] || shared_args+=(--backend-port "$BACKEND_PORT_ARG" --frontend-port "$FRONTEND_PORT_ARG")
+  [ "$NO_PORTS" -eq 0 ] || shared_args+=(--no-ports)
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1641,6 +1737,40 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+
+# Port-contract guard: a project that carries its own code/web/.ports.main
+# (bin/fm-worktree-runtime-lib.sh's FM_WORKTREE_RUNTIME_WEB_REL) expects
+# fm_worktree_runtime_write_ports below to bind this worktree's occupancy into
+# the global port ledger. Launching such a project with neither --backend-port
+# nor --frontend-port used to pass silently (both empty is a legitimate "no
+# ports contract" no-op for every OTHER project), which would leave a live
+# worktree running with no ledger row at all. Checked purely on the contract
+# FILE's presence - never on project name or path shape - so a project without
+# this exact layout (firstmate's own worktrees included) stays exactly the
+# silent no-op it always was. Runs here, right after PROJ_ABS resolves and
+# before any worktree or backend window/session is created, so a refusal never
+# leaves a half-made copy or pane behind. --secondmate spawns never reach this
+# branch (KIND=secondmate takes the other branch above), --no-ports was
+# already refused for them at argument-parsing time, and --relaunch never
+# reaches it either: its runtime - port pair included - was decided at the
+# original intake and is adopted as-is from the task's record.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$NO_PORTS" -ne 1 ] && [ "$BACKEND_PORT_SET" -ne 1 ]; then
+  PORTS_CONTRACT_FILE="$PROJ_ABS/$FM_WORKTREE_RUNTIME_WEB_REL/.ports.main"
+  if [ -f "$PORTS_CONTRACT_FILE" ]; then
+    echo "error: $(basename "$PROJ_ABS") has a port contract ($PORTS_CONTRACT_FILE) but this spawn passed neither --backend-port nor --frontend-port; resolve a pair at intake exactly like --model/--effort, or pass --no-ports if this exact task deliberately never runs the dev servers" >&2
+    exit 1
+  fi
+fi
+
+# Pre-flight an intake-decided pair through the exact refusals the library's
+# port write performs (.ports.main collisions, live binds) while nothing has
+# been created yet, so a port grabbed between intake and here fails the spawn
+# before any worktree move, wrangler-state copy, or backend window/session
+# exists. The library still re-validates independently at write time.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND_PORT_SET" -eq 1 ]; then
+  fm_worktree_runtime_validate_ports "$PROJ_ABS" "$BACKEND_PORT_ARG" "$FRONTEND_PORT_ARG" || exit 1
+fi
+
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2264,6 +2394,24 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+# Give the worktree what it needs to actually run the app - an assigned dev
+# port pair, a private database copy, and the gitignored dev env files -
+# before the worker's first turn. Fresh ship and scout spawns only: a
+# secondmate's WT is its own firstmate home, not a project checkout, a relaunch
+# must adopt the copy of the dev state the previous agent left in place, and
+# orca already validated WT above in the same case branch this block follows.
+# The port pair itself is firstmate's decision at intake
+# (--backend-port/--frontend-port, resolved exactly like --model/--effort/
+# --backend), never this script's or the library's own choice; a bad or
+# already-bound pair fails the spawn loudly rather than being silently swapped
+# for another one (bin/fm-worktree-runtime-lib.sh).
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  fm_worktree_runtime_provision "$WT" "$PROJ_ABS" "$BACKEND_PORT_ARG" "$FRONTEND_PORT_ARG" || {
+    echo "error: fm-spawn: worktree runtime provisioning failed for $ID" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2650,6 +2798,14 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Assigned dev-port pair (bin/fm-worktree-runtime-lib.sh): written only when
+  # firstmate passed one at intake, so every other spawn's meta stays
+  # byte-identical. A relaunch refuses port flags and preserves these lines
+  # through preserve_relaunch_meta, which does not own them.
+  [ "$BACKEND_PORT_SET" -ne 1 ] || {
+    echo "backend_port=$BACKEND_PORT_ARG"
+    echo "frontend_port=$FRONTEND_PORT_ARG"
+  }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
