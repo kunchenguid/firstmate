@@ -1124,6 +1124,43 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Story fmops-07 §1 / plan §2.4: belt-and-suspenders admission assert. The
+# fork engine enforces membership on `add`, so ordinary promote-seeded rows
+# always carry `parent:<epic>` and `[<epic>]`. This assert guards against a
+# hand-edited backlog by refusing to spawn a ship/scout id whose row lacks
+# BOTH membership signals. It never fires under enforced `add`; a normal
+# epic-linked id spawns unchanged. Secondmates are not backlog items
+# (AGENTS.md §10) and skip this check. Missing backlog is not this check's
+# job to fail - a real spawn failure surfaces elsewhere in the pipeline.
+fm_spawn_assert_admission() {  # <id>
+  local id=$1 backlog row title_rest tag
+  case "$KIND" in secondmate) return 0 ;; esac
+  backlog="$FM_HOME/data/backlog.md"
+  [ -f "$backlog" ] || return 0
+  row=$(grep -E "^-[[:space:]]+\[[ xX]\][[:space:]]+${id}[[:space:]]+-" "$backlog" 2>/dev/null | head -1) || row=''
+  [ -n "$row" ] || return 0
+  # `parent:<slug>` is the durable, one-owner membership edge fm-epic-status-lib
+  # already reads. Accept it anywhere in the row.
+  case "$row" in *"parent:"*) return 0 ;; esac
+  # Else require a `[<slug>]` tag in the title position (right after the
+  # `- [x] <id> - ` prefix), not a random URL bracket elsewhere.
+  # The prefix is stripped with sed to keep this deterministic across bash
+  # versions (parameter expansion glob does not compose ` - ` cleanly).
+  title_rest=$(printf '%s' "$row" | sed -E "s/^-[[:space:]]+\[[ xX]\][[:space:]]+${id}[[:space:]]+-[[:space:]]+//")
+  case "$title_rest" in
+    \[*\]*)
+      tag=${title_rest#\[}; tag=${tag%%\]*}
+      case "$tag" in
+        ''|*[!A-Za-z0-9._-]*) ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+  echo "error: spawn refused - task $id is a backlog orphan (no [<epic>] title tag or parent:<epic> edge). Under the fork engine (story fmops-07 §1), every task is stamped by 'add --epic' on write; a hand-edited row without membership cannot be seeded. Repair the row in $backlog or re-promote via bin/fm-umbrella-promote.sh." >&2
+  exit 1
+}
+fm_spawn_assert_admission "$ID"
+
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"

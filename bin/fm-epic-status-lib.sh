@@ -290,37 +290,10 @@ epic_dispatch_owner() {
   fi
 }
 
-# epic_report_symlink <data-dir> <id> <epic-dir>: idempotently bridge the task's
-# canonical report data/<id>/report.md into the epic's reports/ dir as
-# <id>-report.md, so the dashboard artifact tab - which scans data/plans/ and
-# follows symlinks - shows it with zero hand-patching (report dcen-10). The real
-# file stays where the scout wrote it; only a RELATIVE symlink is created here:
-#   data/plans/<epic-dir>/reports/<id>-report.md -> ../../../<id>/report.md
-# The three `..` reach the data root from reports/ regardless of where data lives
-# (reports -> <epic-dir> -> plans -> data). Best-effort and safe: it never moves
-# or deletes the real report, never clobbers a real file already at the target (a
-# legacy hand-moved report is left as-is and logged), and always returns 0 so a
-# resolution miss never blocks the caller (teardown).
-epic_report_symlink() {
-  local data=$1 id=$2 epic_dir=$3 reports target want
-  [ -n "$id" ] && [ -n "$epic_dir" ] || return 0
-  [ -f "$data/$id/report.md" ] || return 0
-  reports="$epic_dir/reports"
-  target="$reports/$id-report.md"
-  want="../../../$id/report.md"
-  if [ -L "$target" ]; then
-    [ "$(readlink "$target")" = "$want" ] && return 0
-    # A symlink pointing elsewhere is safe to refresh - it is a pointer, not the
-    # real report - so re-aim it at the canonical target.
-    ln -sfn "$want" "$target" 2>/dev/null || true
-    return 0
-  fi
-  if [ -e "$target" ]; then
-    # A real file (e.g. a legacy hand-moved report): never clobber it.
-    printf 'report-bridge: left existing real file at %s (not overwritten)\n' "$target" >&2
-    return 0
-  fi
-  mkdir -p "$reports" 2>/dev/null || return 0
-  ln -s "$want" "$target" 2>/dev/null || true
-  return 0
-}
+# Story fmops-07 §1: the dcen-11 report-symlink bridge (epic_report_symlink)
+# is DELETED. The fork engine's native report path
+# (data/plans/<epic>/reports/<id>-report.md, computed by `tasks-axi report
+# path`) is where the brief tells the worker to write from the start, so
+# teardown does not create or reconcile a symlink. bin/fm-teardown.sh no
+# longer calls this file, and the dashboard artifact scan reads the native
+# location directly.

@@ -28,6 +28,38 @@ make_home() {  # <name>
 
 ## Done
 EOF
+  # Story fmops-07 §1: the fork engine's `add` requires --epic <slug> and
+  # validates that data/plans/*-epic-<slug>/epic.md exists. Every fixture task
+  # in this suite belongs to a standing `sample` epic; seed the epic.md now so
+  # tasks_in add calls below satisfy the enforce-on-write rule (the tests use
+  # `--epic sample` where they add, and legacy pre-collapse simulation blocks
+  # do the same).
+  mkdir -p "$home/data/plans/000000-epic-sample/stories" \
+    "$home/data/plans/000000-epic-sample/reports" \
+    "$home/data/plans/000000-epic-ops/stories" \
+    "$home/data/plans/000000-epic-ops/reports"
+  cat > "$home/data/plans/000000-epic-sample/epic.md" <<'EOF'
+---
+epic: sample
+title: Sample fixture epic
+---
+
+# Sample fixture epic
+
+Fixture-only epic that lets test tasks be legitimately-membered under the
+fork engine's enforce-on-write model (story fmops-07 §1).
+EOF
+  cat > "$home/data/plans/000000-epic-ops/epic.md" <<'EOF'
+---
+epic: ops
+title: Ops catch-all fixture
+---
+
+# Ops catch-all fixture
+
+Standing catch-all for tasks without a derivable epic; matches production's
+`ops` epic (plan §2.6 F1 fallback).
+EOF
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
   printf '%s\n' "$home"
@@ -61,6 +93,23 @@ run_teardown() {  # <home> <id>
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
+  # Story fmops-07 §1: the fork engine's `add` requires --epic <slug>. Every
+  # fixture task in this suite belongs to the standing `sample` epic seeded
+  # in make_home above, so auto-inject --epic sample on `add` calls that do
+  # not already carry --epic or --child-of. This keeps the existing 20+ add
+  # sites terse and matches the invariant (backlog task carries membership)
+  # without editing each one to spell out the slug.
+  if [ "${1:-}" = add ]; then
+    local carry_epic=0
+    local a
+    for a in "$@"; do
+      case "$a" in --epic|--epic=*|--child-of|--child-of=*) carry_epic=1; break ;; esac
+    done
+    if [ "$carry_epic" = 0 ]; then
+      (cd "$home" && tasks-axi "$@" --epic sample)
+      return $?
+    fi
+  fi
   (cd "$home" && tasks-axi "$@")
 }
 
@@ -641,6 +690,26 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Queued
 
 ## Done
+EOF
+  # Story fmops-07 §1: seed the same sample+ops fixture epics as make_home so
+  # this secondmate home's tasks_in add calls satisfy enforce-on-write too.
+  mkdir -p "$mate/data/plans/000000-epic-sample/stories" \
+    "$mate/data/plans/000000-epic-ops/stories"
+  cat > "$mate/data/plans/000000-epic-sample/epic.md" <<'EOF'
+---
+epic: sample
+title: Sample fixture epic
+---
+
+# Sample fixture epic
+EOF
+  cat > "$mate/data/plans/000000-epic-ops/epic.md" <<'EOF'
+---
+epic: ops
+title: Ops catch-all fixture
+---
+
+# Ops catch-all fixture
 EOF
   fakebin=$(fm_fakebin "$mate")
   fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
@@ -1256,15 +1325,15 @@ EOF
 test_captain_hold_is_born_an_epic_member() {
   local home show line status
   home=$(make_home dcen09-membership)
-  mkdir -p "$home/data/plans/demo-epic/stories" "$home/data/origin-tag"
-  cat > "$home/data/plans/demo-epic/epic.md" <<'EOF'
+  mkdir -p "$home/data/plans/000000-epic-demo/stories" "$home/data/origin-tag"
+  cat > "$home/data/plans/000000-epic-demo/epic.md" <<'EOF'
 ---
 epic: demo
 title: Demo Epic
 ---
 # Demo Epic
 EOF
-  cat > "$home/data/plans/demo-epic/stories/origin.md" <<'EOF'
+  cat > "$home/data/plans/000000-epic-demo/stories/origin.md" <<'EOF'
 ---
 id: origin-tag
 repo: alpha
@@ -1272,7 +1341,7 @@ kind: ship
 ---
 # origin story
 EOF
-  cat > "$home/data/plans/demo-epic/stories/origin-plan.md" <<'EOF'
+  cat > "$home/data/plans/000000-epic-demo/stories/origin-plan.md" <<'EOF'
 ---
 id: origin-plan
 repo: alpha
@@ -1281,9 +1350,11 @@ kind: ship
 # plan-only origin
 EOF
   printf '# report\n' > "$home/data/origin-tag/report.md"
-  tasks_in "$home" add origin-tag "[demo] origin story" --repo alpha --kind ship >/dev/null
-  tasks_in "$home" add origin-plan "plain untagged origin" --repo alpha --kind ship >/dev/null
-  tasks_in "$home" add origin-none "unrelated origin" --repo alpha --kind ship >/dev/null
+  # Story fmops-07 §1: explicit --epic per origin so each fixture task lands
+  # in the intended epic (default sample auto-inject is overridden here).
+  tasks_in "$home" add origin-tag "[demo] origin story" --repo alpha --kind ship --epic demo >/dev/null
+  tasks_in "$home" add origin-plan "plain untagged origin" --repo alpha --kind ship --epic demo >/dev/null
+  tasks_in "$home" add origin-none "unrelated origin" --repo alpha --kind ship --epic ops >/dev/null
 
   # (1) origin carries the [demo] tag: the hold inherits tag + report, clean title.
   run_captain "$home" hold demo-hold-a --title "resolve credential choice" \
@@ -1307,12 +1378,16 @@ EOF
   assert_contains "$(tasks_in "$home" show demo-hold-b --full)" 'title: "[demo] resolve Y"' \
     "the plan-dir epic membership was not derived"
 
-  # (3) no epic determinable: degrade to the historical untagged shape.
+  # (3) no epic determinable: story fmops-07 §1 fix F1 falls back to the
+  # standing `ops` catch-all epic under the fork's enforce-on-write model
+  # (no task can be created without an epic), instead of the pre-fork
+  # untagged shape.
   run_captain "$home" hold demo-hold-c --title "resolve Z" \
     --reason "captain Z pending" --origin origin-none >/dev/null \
     || fail "could not create the no-epic captain hold"
   show=$(tasks_in "$home" show demo-hold-c --full)
-  assert_contains "$show" "title: resolve Z" "an undeterminable epic wrongly stamped a tag"
+  assert_contains "$show" 'title: "[ops] resolve Z"' \
+    "an undeterminable epic did not fall back to the ops catch-all tag"
   assert_not_contains "$show" "Report:" "a missing report was wrongly linked"
 
   # Membership is recognized the same way the merged epic view reads it.
@@ -1324,10 +1399,12 @@ EOF
   pass "a captain hold for an epic origin is born tagged, report-linked, clean-titled, and recognized"
 }
 
-# A completed scout is closed with its report linked - via a clean note, never the
-# title-polluting `done --report` (tasks-axi 0.2.5 has no separate link field).
-test_scout_completion_links_report_without_polluting_title() {
-  local home id out
+# Story fmops-07 §1 / plan §2.3: a completed scout is closed with its report
+# linked through `done --report <native>`. The fork engine's out-of-title
+# `report:` token (F2b) means the link stays clean; the pre-fork `--note`
+# workaround is retired.
+test_scout_completion_links_report_at_native_path() {
+  local home id out native_path
   home=$(make_home dcen09-scout-report)
   id=sample-scout
   mkdir -p "$home/data/$id"
@@ -1335,16 +1412,21 @@ test_scout_completion_links_report_without_polluting_title() {
     || fail "could not create the scout task"
   write_origin_meta "$home" "$id"
   printf 'done: report complete\n' > "$home/state/$id.status"
-  printf '# Sample scout\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  # Under the fork engine the report lives at the native path from creation
+  # (data/plans/<epic>/reports/<id>-report.md), so seed it there.
+  native_path=$(cd "$home" && tasks-axi report path "$id" 2>/dev/null) \
+    || fail "tasks-axi report path failed for $id"
+  mkdir -p "$(dirname "$home/$native_path")"
+  printf '# Sample scout\n\nNo captain choice remains.\n' > "$home/$native_path"
   run_captain "$home" complete "$id" --none >/dev/null \
     || fail "could not attest the empty captain-call inventory"
   out=$(run_teardown "$home" "$id" 2>&1) \
     || fail "scout teardown failed: $out"
-  assert_contains "$out" "tasks-axi done $id --note \"report: data/$id/report.md\"" \
-    "the completion reminder did not link the report through a clean note"
-  assert_not_contains "$out" "done $id --report" \
-    "the reminder still used the title-polluting --report flag"
-  pass "a completed scout is closed with its report linked cleanly, not by polluting the title"
+  assert_contains "$out" "tasks-axi done $id --report $native_path" \
+    "the completion reminder did not link the report at the native path"
+  assert_not_contains "$out" "--note \"report:" \
+    "the reminder still used the retired --note workaround"
+  pass "a completed scout is closed with its report linked at the native path via --report"
 }
 
 test_composed_decision_lives_in_register_not_backlog
@@ -1366,4 +1448,4 @@ test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
 test_captain_hold_is_born_an_epic_member
-test_scout_completion_links_report_without_polluting_title
+test_scout_completion_links_report_at_native_path

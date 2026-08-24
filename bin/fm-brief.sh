@@ -18,7 +18,10 @@
 #   the current behavior (branch from and PR to the default branch), so ordinary
 #   tasks are byte-identical. --base is ship-only.
 #   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   the native path `data/plans/<epic>/reports/<id>-report.md` (resolved via
+#   `tasks-axi report path <id>`; falls back to `data/<id>/report.md` when the
+#   engine cannot resolve it, e.g. task not yet added to backlog). No branch,
+#   no push, no PR, and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -349,6 +352,18 @@ HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
 if [ "$KIND" = scout ]; then
+# Story fmops-07 §1 / plan §2.2: the scout report lands at the native path
+# `data/plans/<epic>/reports/<id>-report.md` the fork engine writes on `add`.
+# Ask the engine for that path so it stays the one owner; degrade to the
+# legacy per-task path when the engine cannot resolve it (task not yet added,
+# probe not compatible, etc.), because the alternative is either fabricating a
+# native path here or blocking the scaffold entirely.
+REPORT_PATH_RESOLVED=$( (cd "$FM_HOME" && tasks-axi report path "$ID" 2>/dev/null) ) || REPORT_PATH_RESOLVED=''
+if [ -n "$REPORT_PATH_RESOLVED" ]; then
+  REPORT_TARGET="$REPORT_PATH_RESOLVED"
+else
+  REPORT_TARGET="$DATA/$ID/report.md"
+fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -389,7 +404,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 $INBOX_SECTION
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to \`$REPORT_TARGET\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.

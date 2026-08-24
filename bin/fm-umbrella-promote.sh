@@ -188,8 +188,14 @@ read_backlog() {
       raw=$0; sub(/^- \[[ x]\] +/, "", raw)
       id=raw; sub(/[ \t].*/, "", id)
       rest=""; p=index(raw, id " - "); if (p==1) rest=substr(raw, length(id)+4)
-      ct=rest; ri=index(rest, " (repo:"); bi=index(rest, " blocked-by:"); end=0
+      # Story fmops-07 §1: the fork engine renders a `parent:<slug>` membership
+      # edge into the line right after the title (before ` (repo:`). Treat it
+      # as trailing metadata so the derived title (ct) excludes it, exactly as
+      # ` (repo:` and ` blocked-by:` are excluded - otherwise a re-run would
+      # read `parent: things` as part of the title and see spurious drift.
+      ct=rest; ri=index(rest, " (repo:"); bi=index(rest, " blocked-by:"); pi=index(rest, " parent:"); end=0
       if (ri>0 && (bi==0 || ri<bi)) end=ri; else if (bi>0) end=bi
+      if (pi>0 && (end==0 || pi<end)) end=pi
       if (end>0) ct=substr(rest, 1, end-1)
       tag=""; if (match(ct, /\[[^]]+\]/)) tag=substr(ct, RSTART+1, RLENGTH-2)
       repo=""; if (match(raw, /\(repo: [^)]*\)/)) repo=substr(raw, RSTART+7, RLENGTH-8)
@@ -238,9 +244,14 @@ manual_reconcile_fields() {
           if (ri>0) {
             left=substr(rest, 1, ri-1); right=substr(rest, ri+1)
             bb=""; bi=index(left, " blocked-by:"); if (bi>0) bb=substr(left, bi)
+            # Story fmops-07 §1: preserve the `parent:<slug>` membership edge
+            # the fork engine renders between title and ` (repo:`, exactly as
+            # blocked-by: is preserved, so a manual-backend reconcile stays
+            # byte-identical to an engine update (which keeps parent).
+            pp=""; pidx=index(left, " parent:"); if (pidx>0) pp=substr(left, pidx)
             sub(/\(repo: [^)]*\)/, "(repo: " repo ")", right)
             sub(/\(kind: [^)]*\)/, "(kind: " kind ")", right)
-            print pfx id " - " title bb " " right
+            print pfx id " - " title pp bb " " right
             next
           }
         }
@@ -697,7 +708,13 @@ manual_add() {
   local id=$1 title=$2 repo=$3 kind=$4 today line tmp
   ensure_backlog_sections
   today="$(date -u +%Y-%m-%d)"
-  line="- [ ] $id - $title (repo: $repo) (kind: $kind) (since $today)"
+  # Story fmops-07 §1: the fork engine writes a `parent:<epic>` edge on every
+  # add so orphan is unrepresentable, rendered right after the title and before
+  # ` (repo:`. Match that exact position so the manual awk backend stays byte-
+  # identical to the engine output for the same story set (plan §2.1 acceptance
+  # diffs the two seed paths; read_backlog and Bearings / doctor read `parent:`
+  # as the durable membership pointer alongside `[epic]`).
+  line="- [ ] $id - $title parent: $EPIC_SLUG (repo: $repo) (kind: $kind) (since $today)"
   tmp="$(mktemp "${TMPDIR:-/tmp}/fm-umbrella-promote.XXXXXX")" || die "cannot create temp file"
   awk -v line="$line" '
     { print }
@@ -719,7 +736,10 @@ for i in ${to_add_idx[@]+"${to_add_idx[@]}"}; do
   if [ "$seed_manual" -eq 1 ]; then
     manual_add "$sid" "$title" "$repo" "$kind"
   else
-    "$TASKS" add "$sid" "$title" --kind "$kind" --repo "$repo" --queue --file "$BACKLOG" >/dev/null \
+    # Story fmops-07 §1 / plan §2.1: pass --epic so the fork engine stamps
+    # `[<epic>]` + `parent:<epic>` on write. Orphan is unrepresentable at the
+    # source; the reactive lint scan is retired downstream.
+    "$TASKS" add "$sid" "$title" --kind "$kind" --repo "$repo" --queue --epic "$EPIC_SLUG" --file "$BACKLOG" >/dev/null \
       || die "tasks-axi add failed for story $sid; backlog left partially seeded - re-run to converge (already-added stories are skipped)"
   fi
   say "seeded $sid  [$EPIC_SLUG]  (repo: $repo, kind: $kind)"

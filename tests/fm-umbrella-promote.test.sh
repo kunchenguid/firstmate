@@ -49,7 +49,7 @@ write_story() {
 make_home() {
   local name=$1
   local home="$TMP_ROOT/$name"
-  mkdir -p "$home/data" "$home/config" "$home/umbrellas/u/plans/ep/stories"
+  mkdir -p "$home/data" "$home/config" "$home/umbrellas/u/plans/ep-epic-things/stories"
   home=$(cd "$home" && pwd -P)
   cat > "$home/data/projects.md" <<'EOF'
 # Projects
@@ -57,7 +57,7 @@ make_home() {
 EOF
   printf '## In flight\n\n## Queued\n## Done\n' > "$home/data/backlog.md"
   printf '# DESIGN\n' > "$home/umbrellas/u/DESIGN.md"
-  cat > "$home/umbrellas/u/plans/ep/epic.md" <<'EOF'
+  cat > "$home/umbrellas/u/plans/ep-epic-things/epic.md" <<'EOF'
 ---
 epic: things
 title: Things epic
@@ -65,7 +65,7 @@ repos: [svc]
 ---
 # Epic things
 EOF
-  local sdir="$home/umbrellas/u/plans/ep/stories"
+  local sdir="$home/umbrellas/u/plans/ep-epic-things/stories"
   write_story "$sdir" svc-01 things svc main true
   write_story "$sdir" svc-02 things svc main false
   write_story "$sdir" svc-03 things svc main false
@@ -81,7 +81,7 @@ EOF
 # files' own mtime day, so the happy path is deterministic regardless of the wall
 # clock. make_home leaves the epic UNSIGNED so the guard tests can drive it.
 sign_home() {
-  local home=$1 status=${2:-active} signed=${3:-} epic="$1/umbrellas/u/plans/ep/epic.md"
+  local home=$1 status=${2:-active} signed=${3:-} epic="$1/umbrellas/u/plans/ep-epic-things/epic.md"
   [ -n "$signed" ] || signed=$(date -u +%Y-%m-%d)
   # Insert (or replace) status + signed_off just under the `epic:` line.
   awk -v st="$status" -v so="$signed" '
@@ -98,9 +98,9 @@ test_promote_moves_and_seeds() {
   run "$home" u
   expect_code 0 "$RC" "promote failed on a clean fixture"
 
-  assert_present "$home/data/plans/ep/epic.md" "epic dir not moved into data/plans/"
-  [ -L "$home/umbrellas/u/plans/ep" ] || fail "umbrella epic copy is not a back-symlink"
-  assert_grep "ep" "$home/umbrellas/u/.promoted" "promote marker not written"
+  assert_present "$home/data/plans/ep-epic-things/epic.md" "epic dir not moved into data/plans/"
+  [ -L "$home/umbrellas/u/plans/ep-epic-things" ] || fail "umbrella epic copy is not a back-symlink"
+  assert_grep "ep-epic-things" "$home/umbrellas/u/.promoted" "promote marker not written"
 
   # Every story seeded with its REAL id and the epic's tag, matching by construction.
   local n
@@ -123,15 +123,15 @@ test_backsymlink_canonical_and_single_count() {
   run "$home" u
   expect_code 0 "$RC" "promote failed"
 
-  local canon="$home/data/plans/ep" link="$home/umbrellas/u/plans/ep"
+  local canon="$home/data/plans/ep-epic-things" link="$home/umbrellas/u/plans/ep-epic-things"
 
   # (1) canonical epic is a REAL directory in the home.
-  { [ -d "$canon" ] && [ ! -L "$canon" ]; } || fail "data/plans/ep is not a real directory"
+  { [ -d "$canon" ] && [ ! -L "$canon" ]; } || fail "data/plans/ep-epic-things is not a real directory"
 
   # (2) the umbrella copy is a symlink resolving to the canonical dir.
   [ -L "$link" ] || fail "umbrella epic copy is not a symlink"
   [ "$(cd "$link" && pwd -P)" = "$(cd "$canon" && pwd -P)" ] \
-    || fail "umbrella symlink does not resolve to data/plans/ep"
+    || fail "umbrella symlink does not resolve to data/plans/ep-epic-things"
 
   # (3) editing THROUGH the symlink writes to the real file.
   printf 'edited via umbrella\n' >> "$link/epic.md"
@@ -158,14 +158,14 @@ test_rerun_heals_missing_backsymlink() {
   # Simulate a promote done by the OLD script: epic moved, marker written, but
   # NO back-symlink left in the umbrella.
   mkdir -p "$home/data/plans"
-  mv "$home/umbrellas/u/plans/ep" "$home/data/plans/ep"
-  printf 'ep\n' > "$home/umbrellas/u/.promoted"
-  [ -e "$home/umbrellas/u/plans/ep" ] && fail "fixture already has a back-symlink"
+  mv "$home/umbrellas/u/plans/ep-epic-things" "$home/data/plans/ep-epic-things"
+  printf 'ep-epic-things\n' > "$home/umbrellas/u/.promoted"
+  [ -e "$home/umbrellas/u/plans/ep-epic-things" ] && fail "fixture already has a back-symlink"
 
   run "$home" u
   expect_code 0 "$RC" "reconcile re-run failed"
-  [ -L "$home/umbrellas/u/plans/ep" ] || fail "re-run did not heal the missing back-symlink"
-  [ "$(cd "$home/umbrellas/u/plans/ep" && pwd -P)" = "$(cd "$home/data/plans/ep" && pwd -P)" ] \
+  [ -L "$home/umbrellas/u/plans/ep-epic-things" ] || fail "re-run did not heal the missing back-symlink"
+  [ "$(cd "$home/umbrellas/u/plans/ep-epic-things" && pwd -P)" = "$(cd "$home/data/plans/ep-epic-things" && pwd -P)" ] \
     || fail "healed symlink points at the wrong target"
   pass "a re-run heals an older plain-mv promote by creating the back-symlink"
 }
@@ -191,8 +191,8 @@ test_partial_resume() {
   # Simulate a crash after only svc-01 was seeded: pre-seed svc-01 correctly, and
   # pre-move the epic dir + marker so locate reconciles from data/plans.
   mkdir -p "$home/data/plans"
-  mv "$home/umbrellas/u/plans/ep" "$home/data/plans/ep"
-  printf 'ep\n' > "$home/umbrellas/u/.promoted"
+  mv "$home/umbrellas/u/plans/ep-epic-things" "$home/data/plans/ep-epic-things"
+  printf 'ep-epic-things\n' > "$home/umbrellas/u/.promoted"
   # svc-01 already correctly seeded before the simulated crash.
   printf '## In flight\n\n## Queued\n- [ ] svc-01 - [things] Story svc-01 heading (repo: svc) (kind: ship) (since 2026-08-15)\n## Done\n' > "$home/data/backlog.md"
 
@@ -237,16 +237,21 @@ test_reconciles_drifted_fields() {
   run "$home" u
   expect_code 0 "$RC" "first promote failed"
   # Simulate a redesign after the first promote: the story svc-02 title changed.
-  write_story "$home/data/plans/ep/stories" svc-02 things svc main  # regenerate (heading same)
+  write_story "$home/data/plans/ep-epic-things/stories" svc-02 things svc main  # regenerate (heading same)
   # Force a real drift by editing the seeded backlog line to a stale title/repo/kind.
-  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading \(repo: svc\) \(kind: ship\)/- [ ] svc-02 - [things] STALE title (repo: wrong) (kind: docs)/' \
+  # The fork engine renders `parent: things` between the title and ` (repo:`
+  # (story fmops-07 §1), so the pattern accounts for it; the rewritten stale
+  # line keeps the membership edge so only title/repo/kind drift.
+  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading parent: things \(repo: svc\) \(kind: ship\)/- [ ] svc-02 - [things] STALE title parent: things (repo: wrong) (kind: docs)/' \
     "$home/data/backlog.md"
   assert_grep "STALE title" "$home/data/backlog.md" "fixture drift not applied"
   run "$home" u
   expect_code 0 "$RC" "reconcile re-run failed"
   assert_contains "$OUT" "refreshed backlog entry svc-02" "did not report the field refresh"
   assert_contains "$OUT" "reconciled: 1" "did not count the reconcile"
-  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading (repo: svc) (kind: ship)" \
+  # The canonical converged line carries the fork engine's parent: membership
+  # edge between title and (repo:) (story fmops-07 §1).
+  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading parent: things (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "drifted line not converged to canonical"
   assert_no_grep "STALE title" "$home/data/backlog.md" "stale title survived"
   pass "an already-present story with drifted derived fields is rewritten to match the story"
@@ -262,8 +267,8 @@ test_refuses_orphan_epic_tag() {
   assert_contains "$OUT" "will not auto-resolve" "did not name the unresolvable drift"
   assert_contains "$OUT" "ghost-99" "did not point at the offending task"
   # Wrote nothing: epic still in the umbrella, no new tasks.
-  assert_present "$home/umbrellas/u/plans/ep" "refusal still moved the epic dir"
-  assert_absent "$home/data/plans/ep" "refusal wrote into data/plans"
+  assert_present "$home/umbrellas/u/plans/ep-epic-things" "refusal still moved the epic dir"
+  assert_absent "$home/data/plans/ep-epic-things" "refusal wrote into data/plans"
   assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "refusal seeded a second parallel task set"
   pass "a foreign task under this epic's tag is refused, not duplicated, and writes nothing"
 }
@@ -272,23 +277,23 @@ test_refuses_orphan_epic_tag() {
 test_refuses_missing_pr_base() {
   local home; home=$(make_home nopr)
   # Strip pr_base from one story.
-  write_story "$home/umbrellas/u/plans/ep/stories" svc-02 things svc ""
+  write_story "$home/umbrellas/u/plans/ep-epic-things/stories" svc-02 things svc ""
   run "$home" u
   expect_code 1 "$RC" "missing pr_base should fail"
   assert_contains "$OUT" "pr_base" "did not name the missing pr_base"
-  assert_absent "$home/data/plans/ep" "wrote to data/plans despite a validation failure"
+  assert_absent "$home/data/plans/ep-epic-things" "wrote to data/plans despite a validation failure"
   assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "seeded despite a validation failure"
   pass "a story missing pr_base fails with an actionable message and writes nothing"
 }
 
 test_refuses_unregistered_repo() {
   local home; home=$(make_home norepo)
-  write_story "$home/umbrellas/u/plans/ep/stories" svc-02 things ghost-repo main
+  write_story "$home/umbrellas/u/plans/ep-epic-things/stories" svc-02 things ghost-repo main
   run "$home" u
   expect_code 1 "$RC" "unregistered repo should fail"
   assert_contains "$OUT" "not registered" "did not name the registration gap"
   assert_contains "$OUT" "ghost-repo" "did not name the unregistered repo"
-  assert_absent "$home/data/plans/ep" "wrote to data/plans despite an unregistered repo"
+  assert_absent "$home/data/plans/ep-epic-things" "wrote to data/plans despite an unregistered repo"
   pass "an unregistered epic repo fails with an actionable message and writes nothing"
 }
 
@@ -314,17 +319,20 @@ test_manual_backend_reconciles() {
   run "$home" u
   expect_code 0 "$RC" "manual-backend promote failed"
   # Drift svc-01's fields (pure reconcile) AND case-rename svc-02 -> SVC-02 (rename
-  # path) - both go through the manual backend's line-edit helpers.
-  perl -i -pe 's/- \[ \] svc-01 - \[things\] Story svc-01 heading \(repo: svc\) \(kind: ship\)/- [ ] svc-01 - [things] OLD (repo: bad) (kind: docs)/' \
+  # path) - both go through the manual backend's line-edit helpers. The manual
+  # backend now renders the fork engine's parent: membership edge (story
+  # fmops-07 §1), so patterns and expectations carry it; the drifted line keeps
+  # parent: so only title/repo/kind drift.
+  perl -i -pe 's/- \[ \] svc-01 - \[things\] Story svc-01 heading parent: things \(repo: svc\) \(kind: ship\)/- [ ] svc-01 - [things] OLD parent: things (repo: bad) (kind: docs)/' \
     "$home/data/backlog.md"
   perl -i -pe 's/- \[ \] svc-02 /- [ ] SVC-02 /' "$home/data/backlog.md"
   run "$home" u
   expect_code 0 "$RC" "manual reconcile failed"
   assert_contains "$OUT" "reconciled: 1" "manual backend did not reconcile the drift"
   assert_contains "$OUT" "renamed backlog id SVC-02 -> svc-02" "manual backend did not rewrite the case-variant id"
-  assert_grep "- [ ] svc-01 - [things] Story svc-01 heading (repo: svc) (kind: ship)" \
+  assert_grep "- [ ] svc-01 - [things] Story svc-01 heading parent: things (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "manual reconcile did not converge the line"
-  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading (repo: svc) (kind: ship)" \
+  assert_grep "- [ ] svc-02 - [things] Story svc-02 heading parent: things (repo: svc) (kind: ship)" \
     "$home/data/backlog.md" "manual rename did not converge the renamed line"
   assert_no_grep "OLD (repo: bad)" "$home/data/backlog.md" "manual reconcile left stale fields"
   assert_no_grep "- [ ] SVC-02" "$home/data/backlog.md" "manual rename left the stale case-variant id"
@@ -358,7 +366,7 @@ test_verify_green_then_red() {
   assert_contains "$OUT" "no backlog entry" "did not classify the missing brief"
 
   # (b) break the back-symlink -> red.
-  rm -f "$home/umbrellas/u/plans/ep"
+  rm -f "$home/umbrellas/u/plans/ep-epic-things"
   run "$home" verify u
   expect_code 1 "$RC" "verify should fail on a missing back-symlink"
   assert_contains "$OUT" "back-symlink" "did not name the broken symlink"
@@ -372,8 +380,9 @@ test_verify_red_then_green_after_reconcile() {
   local home; home=$(make_home verifyrecon)
   run "$home" u
   expect_code 0 "$RC" "first promote failed"
-  # Doctor the backlog: svc-02 -> case variant SVC-02 with a stale title.
-  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading \(repo: svc\) \(kind: ship\)/- [ ] SVC-02 - [things] STALE (repo: svc) (kind: ship)/' \
+  # Doctor the backlog: svc-02 -> case variant SVC-02 with a stale title
+  # (the fork engine's parent: edge is carried through, story fmops-07 §1).
+  perl -i -pe 's/- \[ \] svc-02 - \[things\] Story svc-02 heading parent: things \(repo: svc\) \(kind: ship\)/- [ ] SVC-02 - [things] STALE parent: things (repo: svc) (kind: ship)/' \
     "$home/data/backlog.md"
   run "$home" verify u
   expect_code 1 "$RC" "verify should be red on the doctored backlog"
@@ -397,14 +406,14 @@ test_marker_written_before_move() {
   local home; home=$(make_home r3)
   run "$home" u
   expect_code 0 "$RC" "promote failed"
-  assert_grep "ep" "$home/umbrellas/u/.promoted" "marker not written on promote"
+  assert_grep "ep-epic-things" "$home/umbrellas/u/.promoted" "marker not written on promote"
   # Simulate a crash AFTER move+marker but BEFORE any seed: wipe the backlog and
   # drop the source (already moved). A re-run must locate via the marker and seed.
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
   [ -f "$home/umbrellas/u/.promoted" ] || fail "marker vanished"
   run "$home" u
   expect_code 0 "$RC" "reconcile-from-marker re-run failed"
-  assert_contains "$OUT" "already promoted to data/plans/ep" "did not reconcile from the marker"
+  assert_contains "$OUT" "already promoted to data/plans/ep-epic-things" "did not reconcile from the marker"
   assert_grep "- [ ] svc-01 - [things]" "$home/data/backlog.md" "did not re-seed from the moved copy"
   pass "the .promoted marker is written before the move and drives a clean reconcile re-run"
 }
@@ -422,7 +431,7 @@ test_locate_errors() {
 
   # A second epic dir under plans/ is ambiguous.
   mkdir -p "$home/umbrellas/u/plans/ep2/stories"
-  cp "$home/umbrellas/u/plans/ep/epic.md" "$home/umbrellas/u/plans/ep2/epic.md"
+  cp "$home/umbrellas/u/plans/ep-epic-things/epic.md" "$home/umbrellas/u/plans/ep2/epic.md"
   run "$home" u
   expect_code 1 "$RC" "ambiguous multi-epic should fail"
   assert_contains "$OUT" "ambiguous" "did not report the ambiguity"
@@ -439,7 +448,7 @@ test_refuses_draft_status() {
   expect_code 1 "$RC" "a draft-status epic should refuse to promote"
   assert_contains "$OUT" "not \"active\"" "did not report the unfrozen status"
   assert_contains "$OUT" "SIGN the epic" "did not tell the captain to sign first"
-  assert_absent "$home/data/plans/ep" "draft refusal wrote into data/plans"
+  assert_absent "$home/data/plans/ep-epic-things" "draft refusal wrote into data/plans"
   assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "draft refusal seeded the backlog"
   pass "a draft-status epic is refused with a sign-first message and writes nothing"
 }
@@ -450,7 +459,7 @@ test_refuses_draft_status() {
 # so the day-resolution comparison is deterministic regardless of the wall clock.
 test_stale_sign_guard() {
   local home; home=$(make_home stale)
-  local ep="$home/umbrellas/u/plans/ep"
+  local ep="$home/umbrellas/u/plans/ep-epic-things"
   # Freeze + sign at a fixed date, and pin every design file's mtime to that day.
   sign_home "$home" active 2026-08-18
   TZ=UTC touch -t 202608180000 "$ep/epic.md" "$ep/stories"/*.md "$home/umbrellas/u/DESIGN.md"
@@ -460,7 +469,7 @@ test_stale_sign_guard() {
   expect_code 1 "$RC" "a design edited after sign-off should refuse"
   assert_contains "$OUT" "stale" "did not report the stale sign-off"
   assert_contains "$OUT" "svc-02.md" "did not name the offending story file"
-  assert_absent "$home/data/plans/ep" "stale refusal wrote into data/plans"
+  assert_absent "$home/data/plans/ep-epic-things" "stale refusal wrote into data/plans"
   assert_no_grep "- [ ] svc-01" "$home/data/backlog.md" "stale refusal seeded the backlog"
 
   # Re-sign the current design: signed_off now covers the edited story.
@@ -475,7 +484,7 @@ test_stale_sign_guard() {
 # --- freshness guard: --allow-stale-sign downgrades to a loud warning ----------
 test_allow_stale_sign_override() {
   local home; home=$(make_home allowstale)
-  local ep="$home/umbrellas/u/plans/ep"
+  local ep="$home/umbrellas/u/plans/ep-epic-things"
   sign_home "$home" active 2026-08-18
   TZ=UTC touch -t 202608180000 "$ep/epic.md" "$ep/stories"/*.md "$home/umbrellas/u/DESIGN.md"
   TZ=UTC touch -t 202608200000 "$ep/stories/svc-02.md"

@@ -338,11 +338,20 @@ tasks_axi_mint_captain_hold() {  # <id> <title> <reason> <repo> <origin> <until>
       body=$(printf '%s\nReport: data/%s/report.md' "$body" "$origin")
     fi
   fi
+  # Story fmops-07 §1 fix F1: the fork engine's `add` requires --epic <slug>.
+  # Wire it here so the rare non-composed direct captain-hold mint (composed
+  # decisions route to the register per §5 and never take this branch) does
+  # not fail on enforced-add. Order of preference: the origin's own epic
+  # (matches title tag stamped above), otherwise the standing `ops` catch-all
+  # epic (plan §2.6 F1).
+  local epic_flag='--epic'
+  local epic_value=$epic_slug
+  [ -n "$epic_value" ] || epic_value=ops
   if [ -n "$body" ]; then
-    tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
+    tasks_axi add "$id" "$title" --repo "$repo" --body "$body" "$epic_flag" "$epic_value" >/dev/null \
       || fail "could not create task $id"
   else
-    tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
+    tasks_axi add "$id" "$title" --repo "$repo" "$epic_flag" "$epic_value" >/dev/null \
       || fail "could not create task $id"
   fi
   if [ -n "$until" ]; then
@@ -633,7 +642,19 @@ command_hold() {
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
-      [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
+      # Fork engine auto-stamps `[<epic>]` on add, so an existing title may
+      # carry a `[<slug>]` tag the caller's idempotent-retry title lacks. Try
+      # the caller's title as-is, then again with the existing tag stripped.
+      if [ "$existing_title" != "$title" ]; then
+        local stripped=$existing_title
+        case "$existing_title" in
+          '['*']'*)
+            stripped=${existing_title#\[*\] }
+            ;;
+        esac
+        [ "$stripped" = "$title" ] \
+          || fail "existing task $id has a different title"
+      fi
     fi
     if [ -n "$until" ]; then
       tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \

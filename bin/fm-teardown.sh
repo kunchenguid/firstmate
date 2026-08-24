@@ -174,10 +174,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-# epic_status_find_dir + epic_report_symlink: the report-into-epic bridge below
-# reuses this READ-ONLY lib rather than re-deriving epic dirs (report dcen-10).
-# shellcheck source=bin/fm-epic-status-lib.sh
-. "$SCRIPT_DIR/fm-epic-status-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1135,25 +1131,12 @@ work_is_landed() {
   content_in_default
 }
 
-# Bridge a completed task's report into its epic's reports/ dir so the dashboard
-# artifact tab shows it with zero hand-patching (report dcen-10). The canonical
-# report stays at data/<id>/report.md; this only adds an idempotent RELATIVE
-# symlink to it. Standalone (no-epic) tasks are skipped silently. Best-effort:
-# every step degrades to a silent skip, so a resolution miss never blocks
-# teardown. The epic slug comes from the ONE derivation owner (fm-captain-hold.sh
-# epic-slug), the dir from the ONE slug->dir owner (epic_status_find_dir).
-bridge_report_into_epic() {
-  local slug epic_dir
-  [ -f "$DATA/$ID/report.md" ] || return 0
-  slug=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" epic-slug "$ID" 2>/dev/null) \
-    || return 0
-  slug=$(printf '%s' "$slug" | tr -d '[:space:]')
-  [ -n "$slug" ] || return 0
-  epic_dir=$(epic_status_find_dir "$DATA/plans" "$slug") || return 0
-  [ -n "$epic_dir" ] || return 0
-  epic_report_symlink "$DATA" "$ID" "$epic_dir"
-}
+# Story fmops-07 §1 retires the dcen-11 report-symlink bridge. The fork
+# engine writes the report at data/plans/<epic>/reports/<id>-report.md from
+# creation and the brief tells the worker to write there directly, so the
+# dashboard artifact scan reads one native location without a symlink
+# reconciliation step. bridge_report_into_epic() and its epic_report_symlink
+# helper are DELETED - grep confirms zero remaining callers.
 
 backlog_refresh_reminder() {
   local pr done_cmd report_path
@@ -1161,16 +1144,16 @@ backlog_refresh_reminder() {
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
-        # Link the scout's report on completion so firstmate never hand-patches it
-        # (report dcen-09). tasks-axi 0.2.5's `done --report <path>` is buggy: it
-        # appends the path to the TITLE (there is no separate link field in the
-        # markdown backend), re-orphaning the record. `--note` records the same
-        # reference cleanly under the Done line and leaves the title intact, so we
-        # emit that instead. Switch back to --report once tasks-axi stores links
-        # out of the title.
-        report_path="data/$ID/report.md"
-        if [ -f "$DATA/$ID/report.md" ]; then
-          done_cmd="tasks-axi done $ID --note \"report: $report_path\""
+        # Story fmops-07 §1 / plan §2.3: the fork engine's F2b out-of-title
+        # `report:` token makes `done --report <native>` safe. The native
+        # report path is what the brief pointed the worker at from the start;
+        # ask the engine for it rather than string-building in bash. Best-
+        # effort: if the engine cannot resolve the path (task hand-created,
+        # engine older than the floor probe should have caught, etc.), fall
+        # through to a bare done - never write a stale legacy path here.
+        report_path=$(cd "$FM_HOME" && tasks-axi report path "$ID" 2>/dev/null) || report_path=''
+        if [ -n "$report_path" ] && [ -f "$FM_HOME/$report_path" ]; then
+          done_cmd="tasks-axi done $ID --report $report_path"
         else
           done_cmd="tasks-axi done $ID"
         fi
@@ -2598,10 +2581,23 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
-  REPORT="$DATA/$ID/report.md"
-  if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+  # Story fmops-07 §1 / plan §2.2: the fork engine writes the report at the
+  # native path from `add`, and the brief tells the worker to write there.
+  # Accept the report at EITHER the native path (via `tasks-axi report path`)
+  # OR the legacy `data/<id>/report.md` (a legacy task pre-migration; the
+  # migration ops in PR-3 move these into place). Refuse only when neither
+  # exists.
+  REPORT_NATIVE=$( (cd "$FM_HOME" && tasks-axi report path "$ID" 2>/dev/null) ) || REPORT_NATIVE=''
+  REPORT_LEGACY="$DATA/$ID/report.md"
+  REPORT=''
+  if [ -n "$REPORT_NATIVE" ] && [ -f "$FM_HOME/$REPORT_NATIVE" ]; then
+    REPORT="$FM_HOME/$REPORT_NATIVE"
+  elif [ -f "$REPORT_LEGACY" ]; then
+    REPORT="$REPORT_LEGACY"
+  fi
+  if [ -z "$REPORT" ]; then
+    echo "REFUSED: scout task $ID has no report at ${REPORT_NATIVE:-<native>} or $REPORT_LEGACY." >&2
+    echo "The report is the work product. Have the crewmate write it (at the native path from tasks-axi report path), or use --force after explicit discard approval." >&2
     exit 1
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -2869,5 +2865,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
-bridge_report_into_epic
 backlog_refresh_reminder

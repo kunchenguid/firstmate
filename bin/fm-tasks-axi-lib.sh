@@ -34,7 +34,7 @@
 # Both layers are bounded by process lifetime, so a tasks-axi install or upgrade
 # is picked up by the next process rather than being cached to disk.
 
-FM_TASKS_AXI_MIN=0.2.4
+FM_TASKS_AXI_MIN=0.3.0
 
 FM_TASKS_AXI_COMPATIBLE_MEMO=${FM_TASKS_AXI_COMPATIBLE:-}
 unset FM_TASKS_AXI_COMPATIBLE
@@ -79,7 +79,7 @@ fm_tasks_axi_compatible_probe() {
   if [ "$major" -gt "$min_major" ] ||
     { [ "$major" -eq "$min_major" ] && [ "$minor" -gt "$min_minor" ]; } ||
     { [ "$major" -eq "$min_major" ] && [ "$minor" -eq "$min_minor" ] && [ "$patch" -ge "$min_patch" ]; }; then
-    fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id
+    fm_tasks_axi_update_has_archive_body && fm_tasks_axi_mv_has_multi_id && fm_tasks_axi_add_has_epic
     return $?
   fi
   return 1
@@ -97,6 +97,17 @@ fm_tasks_axi_mv_has_multi_id() {
   command -v tasks-axi >/dev/null 2>&1 || return 1
   output=$(tasks-axi mv --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
+}
+
+# Story fmops-07 §1 / plan §2.5: the fork's enforce-on-write surface requires
+# `add --epic <slug>` (validated against data/plans/*/epic.md). Probe for it
+# so firstmate refuses to seed backlogs against a pre-fork tasks-axi that
+# would silently accept an orphan add.
+fm_tasks_axi_add_has_epic() {
+  local output
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  output=$(tasks-axi add --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -F -- '--epic' >/dev/null
 }
 
 fm_backlog_backend_value() {

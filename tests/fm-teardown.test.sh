@@ -177,10 +177,19 @@ SH
 
 add_compatible_tasks_axi() {
   local case_dir=$1
+  # Story fmops-07 §1: the fork engine is version 0.3.0 and its `add --help`
+  # advertises --epic (fm-tasks-axi-lib's new compatibility probe). Report
+  # both so fm_tasks_axi_backend_available treats this fake as compatible.
   cat > "$case_dir/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.2.4'
+  printf '%s\n' '0.3.0'
+  exit 0
+fi
+if [ "${1:-}" = add ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug> [flags]'
+  printf '%s\n' '  --epic <slug>      required epic membership'
+  printf '%s\n' '  --child-of <id>    decision-hold escape'
   exit 0
 fi
 if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
@@ -191,6 +200,11 @@ if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
 fi
 if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+if [ "${1:-}" = report ] && [ "${2:-}" = path ]; then
+  # Native report path for the scout done-reminder branch.
+  printf 'data/plans/000000-epic-ops/reports/%s-report.md\n' "${3:-unknown}"
   exit 0
 fi
 exit 0
