@@ -4,8 +4,9 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI: gh for GitHub, glab for
+# GitLab, and tea for Gitea, so an upstream checkout needs no extra tooling to
+# follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -103,6 +104,71 @@ case "$provider" in
     # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+    [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  gitea)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    case "$host" in
+      github.com|gitlab.com) exit 0 ;;
+    esac
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    case "$path" in
+      */*) ;;
+      *) exit 0 ;;
+    esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    case "$repo" in
+      */*) exit 0 ;;
+    esac
+    [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 40 ] || exit 0
+    case "$owner" in
+      *[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    # tea addresses a login by name, not by URL, so the login bound to this
+    # host is resolved from tea's own login table rather than an env var the
+    # way GITLAB_HOST selects a glab credential. No jq is required: tea's
+    # tsv output is one tab-separated record per line, which a plain read
+    # loop parses without a JSON processor, matching the GitLab case above.
+    # An absent or ambiguous login refuses exactly like an absent CLI: this
+    # poll never guesses which server a merge result would come from.
+    logins=$(tea logins list --output tsv 2>/dev/null) || exit 0
+    login=
+    matches=0
+    header=1
+    while IFS=$'\t' read -r lname lurl _rest; do
+      if [ "$header" = 1 ]; then
+        header=0
+        continue
+      fi
+      [ "$lurl" = "https://$host" ] || continue
+      matches=$((matches + 1))
+      login=$lname
+    done <<LOGINS
+$logins
+LOGINS
+    [ "$matches" -eq 1 ] && [ -n "$login" ] || exit 0
+    raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --output tsv \
+      --fields index,state --state all 2>/dev/null) || exit 0
+    state=
+    header=1
+    while IFS=$'\t' read -r idx st; do
+      if [ "$header" = 1 ]; then
+        header=0
+        continue
+      fi
+      [ "$idx" = "$number" ] || continue
+      state=$st
+    done <<ROWS
+$raw
+ROWS
     [ "$state" = merged ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
