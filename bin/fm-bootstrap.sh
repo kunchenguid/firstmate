@@ -89,13 +89,13 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs every sweep exactly as before - this flag
-#          is purely additive.
+#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
-#          alone and run the network half concurrently:
-#            all  (default, and any unrecognized value) - everything, exactly as
-#                 before. Unrecognized values fall back here on purpose: a typo
+#          alone and run the network half off the digest's blocking path:
+#            all  (default, and any unrecognized value) - every local and network
+#                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
 #                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
@@ -108,7 +108,13 @@
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
-#          runs, never WHETHER.
+#          runs, never WHETHER. During the network phase, project clone refresh
+#          overlaps the independent secondmate work. Per-secondmate remote
+#          liveness workers run concurrently and finish before per-secondmate
+#          remote convergence workers run concurrently, because convergence
+#          consumes respawned ids. Worker output is captured separately and
+#          replayed in spawn order; failure to create that private capture
+#          directory selects the sequential fallback.
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
