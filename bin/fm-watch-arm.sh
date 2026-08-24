@@ -499,6 +499,11 @@ signal_watch_child() {  # <signal>
 # Retire the owned watcher without ever waiting indefinitely on the same child
 # that caused the liveness failure. WATCH_CHILD_RC records the reaped status, or
 # 124 if even KILL could not make the direct child waitable inside the bound.
+# TERM is sent first and the child is given STALL_RETIRE_TIMEOUT to exit on its
+# own, so a healthy watcher keeps the chance to persist recovery through its own
+# EXIT trap. KILL escalates to the whole isolated process group only when the
+# child is STILL alive after that bound: a routine teardown of a watcher that
+# honored TERM never lands a group-wide SIGKILL on a fresh-beacon holder.
 WATCH_CHILD_RC=0
 retire_watch_child() {
   local deadline
@@ -511,13 +516,15 @@ retire_watch_child() {
       sleep 0.05
     done
   fi
-  # Sweep the whole isolated group even when the watcher shell honored TERM:
-  # a descendant that ignored it must not survive as an orphaned vendor wait.
-  signal_watch_child KILL
-  deadline=$(( $(date +%s) + 2 ))
-  while watch_child_running && [ "$(date +%s)" -lt "$deadline" ]; do
-    sleep 0.05
-  done
+  if watch_child_running; then
+    # The watcher did not exit in the TERM bound: sweep the whole isolated group
+    # so a hung backend helper is not orphaned next to the stalled lock holder.
+    signal_watch_child KILL
+    deadline=$(( $(date +%s) + 2 ))
+    while watch_child_running && [ "$(date +%s)" -lt "$deadline" ]; do
+      sleep 0.05
+    done
+  fi
   if watch_child_running; then
     WATCH_CHILD_RC=124
     return 1
@@ -712,6 +719,17 @@ wait_owned_child() {
   if [ -s "$watchdog_status" ]; then
     age=$(cat "$watchdog_status" 2>/dev/null || fm_path_age "$BEAT")
     signal_watch_child KILL
+    # If the deadline broke the loop with the child still running, it was never
+    # reaped by the `elif wait` above. Give the KILL a bounded moment to drop the
+    # process into a reapable state so the arm does not leave a zombie or a lock
+    # holder behind before returning.
+    bail_deadline=$(( $(date +%s) + 2 ))
+    while fm_pid_alive "$child" && [ "$(date +%s)" -lt "$bail_deadline" ]; do
+      sleep 0.05
+    done
+    wait "$child" 2>/dev/null || true
+    child=
+    child_group=
     if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime \
       || ! clear_stale_recorded_watcher_lock "$stalled_pid"; then
       cycle_log_append "$rc" "$(cycle_signal_name "$rc")" stale-beacon-release-failed none
