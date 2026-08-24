@@ -43,6 +43,10 @@ if [ -n "${FM_CREW_STATE_HANG:-}" ] && [ -e "$FM_CREW_STATE_HANG" ]; then
   printf '%s\n' "$$" > "$FM_CREW_STATE_HANG.entered"
   while [ -e "$FM_CREW_STATE_HANG" ]; do sleep 0.05; done
 fi
+case "$1" in
+  alpha) sleep "${FM_CREW_STATE_ALPHA_SECONDS:-0}" ;;
+  beta) sleep "${FM_CREW_STATE_BETA_SECONDS:-0}" ;;
+esac
 if [ -n "${FM_CREW_STATE_LARGE:-}" ]; then head -c 70000 /dev/zero | tr '\0' x; exit 0; fi
 printf 'state: working · source: pane · implementing\n'
 SH
@@ -309,6 +313,22 @@ test_collection_timeout_falls_back_after_crew_state_hang() {
   pass "une sonde crew-state bloquée respecte le délai agrégé et le fallback"
 }
 
+test_collection_timeout_spans_slow_crew_probes() {
+  local home="$TMP_ROOT/slow-probes" started finished status=0
+  install_fixture "$home"; append_wake "$home" 1
+  printf 'window=fleet:beta\nbackend=tmux\nworktree=%s\nkind=ship\n' "$home/worktree" > "$home/state/beta.meta"
+  printf 'working: beta\n' > "$home/state/beta.status"; printf '1\t2\tsignal\tbeta.status\tsignal: beta.status\n' >> "$home/state/.wake-queue"
+  started=$(date +%s)
+  FM_CREW_STATE_ALPHA_SECONDS=2 FM_CREW_STATE_BETA_SECONDS=2 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=3 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  finished=$(date +%s); [ "$status" -ne 0 ] || fail "deux sondes lentes ont produit un paquet"
+  [ $((finished - started)) -le 5 ] || fail "les sondes lentes ont dépassé la borne agrégée"
+  grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback des sondes lentes manque"
+  grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback des sondes lentes a perdu l’ACK"
+  [ ! -e "$home/state/.wake-context-cache" ] || fail "les sondes lentes ont publié un cache"
+  pass "plusieurs sondes crew-state partagent une borne agrégée"
+}
+
 test_cursor_merge_follows_live_rotation_without_regression() {
   local home="$TMP_ROOT/cursor-rotation" ident
   mkdir -p "$home/state"; printf 'note: rotated\n' > "$home/state/alpha.status"
@@ -400,6 +420,7 @@ test_status_only_recovery_uses_zero_ack
 test_post_drain_overflow_falls_back
 test_backend_timeout_normalizes_to_a_positive_decimal
 test_collection_timeout_falls_back_after_crew_state_hang
+test_collection_timeout_spans_slow_crew_probes
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor

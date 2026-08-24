@@ -344,7 +344,14 @@ finish_presentation() {
     || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
 }
 
+finish_with_collection_timeout() {
+  COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_run_timed "$COLLECTION_TIMEOUT" finish_presentation
+}
+
 main() {
+  local status
   [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
   case "$BACKEND_TIMEOUT" in
     ''|*[!0-9]*) BACKEND_TIMEOUT=3 ;;
@@ -367,8 +374,9 @@ main() {
     "$SCRIPT_DIR/fm-wake-drain.sh" > "$TMP_DIR/drain.out" 2> "$TMP_DIR/drain.err"; then
     emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; exit 1
   fi
-  COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
-  finish_presentation
+  finish_with_collection_timeout; status=$?
+  [ "$status" -ne 124 ] || emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"
+  return "$status"
 }
 
 main "$@"
