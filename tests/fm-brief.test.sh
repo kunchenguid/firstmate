@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "When it is implemented and committed, run /no-mistakes to validate and ship a PR." "$brief" \
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -345,10 +345,12 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
-  assert_grep "Before appending \`done:\`, verify the no-mistakes run is for your branch and all checks are green." "$brief" \
-    "no-mistakes DOD must require a green run for the worker's own branch before done:"
-  assert_no_grep "When you believe it is complete, append \`done:" "$brief" \
-    "no-mistakes DOD must not treat a committed implementation as done"
+  assert_grep "Before appending the final \`done: PR {url} checks green\`, verify the no-mistakes run is for your branch and all checks are green - a commit or manual tests are never enough." "$brief" \
+    "no-mistakes DOD must require a green run for the worker's own branch before the final done:"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "no-mistakes DOD must not treat a committed implementation as a complete task"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes to validate and ship a PR." "$brief" \
+    "no-mistakes DOD must keep firstmate as the trigger for the validation run"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -365,9 +367,9 @@ test_direct_pr_confirms_target_branch_before_opening() {
   id="brief-pr-target-b2"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "before opening the PR, verify its target branch is correct" "$brief" \
-    "direct-PR DOD must require confirming the PR target branch before opening it"
-  pass "fm-brief.sh: direct-PR DOD confirms the target branch before opening a PR"
+  assert_grep "confirm the PR base is the base branch this task names - the repo's default branch when it names none - and open a PR with \`gh-axi\` against that base" "$brief" \
+    "direct-PR DOD must require confirming the PR base against the task's named base before opening it"
+  pass "fm-brief.sh: direct-PR DOD confirms the PR base before opening a PR"
 }
 
 test_ship_project_memory_wording() {
