@@ -896,11 +896,16 @@ run_check_capture() {
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
 mark_all_captain_relevant_surfaced() {
-  local f task last
+  local rows=${1-} f task last
+  if [ "$#" -eq 0 ]; then
+    rows=$(scan_captain_relevant_statuses "$STATE")
+  fi
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-  done < <(scan_captain_relevant_statuses "$STATE")
+  done <<EOF
+$rows
+EOF
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -912,13 +917,17 @@ mark_all_captain_relevant_surfaced() {
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f task last surfaced rows
+  rows=$(scan_captain_relevant_statuses "$STATE")
+  FM_HEARTBEAT_ACTIONABLE_ROWS=$rows
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
-  done < <(scan_captain_relevant_statuses "$STATE")
+  done <<EOF
+$rows
+EOF
   return 1
 }
 
@@ -1507,7 +1516,7 @@ EOF
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
+      mark_all_captain_relevant_surfaced "$FM_HEARTBEAT_ACTIONABLE_ROWS"
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"
