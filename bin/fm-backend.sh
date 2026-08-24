@@ -383,6 +383,12 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+fm_backend_orca_repo_id_valid() {  # <value>
+  case "$1" in
+    ''|*::*|*[!A-Za-z0-9._@%+:/-]*) return 1 ;;
+  esac
+}
+
 fm_backend_orca_worktree_id_valid() {  # <value> <recorded-worktree-path>
   local value=$1 worktree=$2 prefix path
   # Older Orca releases and the hermetic adapter tests use opaque atom ids.
@@ -395,7 +401,7 @@ fm_backend_orca_worktree_id_valid() {  # <value> <recorded-worktree-path>
     *::/*)
       prefix=${value%%::*}
       path=${value#*::}
-      fm_backend_endpoint_atom_valid "$prefix" || return 1
+      fm_backend_orca_repo_id_valid "$prefix" || return 1
       [ "$path" = "$worktree" ] || return 1
       case "$path" in /*) return 0 ;; esac
       ;;

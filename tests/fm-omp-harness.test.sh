@@ -992,9 +992,6 @@ SH
   : > "$trigger"
   rm -f "$HOME_DIR/state/.last-watcher-beat"
   printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
-  mkdir -p "$HOME_DIR/state/.control-$id.lock" "$HOME_DIR/state/.spawn-$id.lock"
-  printf '%s\n' "$$" > "$HOME_DIR/state/.control-$id.lock/pid"
-  printf '%s\n' "$$" > "$HOME_DIR/state/.spawn-$id.lock/pid"
   before=$(case_tree_fingerprint)
   wt_before=$(/usr/bin/git -C "$WT_DIR" status --porcelain=v1)
   proj_before=$(/usr/bin/git -C "$PROJ_DIR" status --porcelain=v1)
@@ -1028,6 +1025,46 @@ SH
   [ ! -s "$tmux_log" ] || fail "metadata race contacted an endpoint"
   [ ! -s "$stub_log" ] || fail "metadata race invoked OMP"
   pass "a deterministic metadata symlink swap during snapshot acquisition refuses before every mutation"
+}
+
+test_relaunch_lifecycle_lock_precedes_watcher_guard() {
+  local rec id=omp-relaunch-locked out status meta guard_marker lock ready release holder i=0
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  lock="$HOME_DIR/state/.control-$id.lock"
+  ready="$CASE_DIR/control-ready"
+  release="$CASE_DIR/control-release"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  rm -f "$HOME_DIR/state/.last-watcher-beat" "$guard_marker"
+  printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$ready"
+    while [ ! -e "$release" ]; do /bin/sleep 0.01; done
+    fm_lock_release "$lock"
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "could not stage the relaunch lifecycle lock"; }
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  : > "$release"
+  wait "$holder" || fail "relaunch lifecycle lock holder failed"
+  [ "$status" -ne 0 ] || fail "a relaunch should refuse a concurrent lifecycle owner: $out"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "contended relaunch did not report the lifecycle owner: $out"
+  assert_absent "$guard_marker" "contended relaunch mutated watcher state before lifecycle serialization"
+  pass "fm-spawn relaunch: lifecycle serialization precedes watcher-state mutation"
 }
 
 test_valid_nonomp_relaunch_passes_the_preflight() {
@@ -1139,6 +1176,7 @@ test_omp_model_policy_matrix
 test_omp_selection_policy_matrix
 test_relaunch_rejects_unsafe_metadata_before_every_mutation
 test_relaunch_detects_a_path_swap_while_binding_the_snapshot
+test_relaunch_lifecycle_lock_precedes_watcher_guard
 test_valid_nonomp_relaunch_passes_the_preflight
 test_omp_relaunch_still_requires_the_model
 test_omp_trusts_only_its_own_semantic_source

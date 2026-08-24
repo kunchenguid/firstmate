@@ -704,7 +704,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  assert_contains "$out" "failed to publish Orca metadata" "spawn should fail at metadata publication"
   log_text=$(cat "$LOG")
   assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
@@ -718,6 +718,46 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
     "metadata-publication abort must happen before any harness launch is sent"
   [ ! -f "$state/$id.meta" ] || fail "metadata-write abort should not publish a regular metadata file"
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+}
+
+test_spawn_rejects_partial_orca_metadata_render() {
+  local proj wt data state config id out status log_text
+  id="orcapartialmetaz3"
+  proj="$TMP_ROOT/partial-meta-project"
+  wt="$TMP_ROOT/partial-meta-wt"
+  data="$TMP_ROOT/partial-meta-data"
+  state="$TMP_ROOT/partial-meta-state"
+  config="$TMP_ROOT/partial-meta-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  orca_case partial-meta
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-partial-meta"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-meta","path":"%s"},"terminal":{"handle":"term-partial-meta"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    bash -c '
+      echo() {
+        case "${1:-}" in orca_worktree_id=*) return 1 ;; esac
+        builtin echo "$@"
+      }
+      export -f echo
+      exec "$1/bin/fm-spawn.sh" "$2" "$3" claude --mode no-mistakes --yolo off --backend orca
+    ' _ "$ROOT" "$id" "$proj" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca spawn should reject a partial metadata render"
+  assert_contains "$out" "failed to render metadata" "partial metadata render failure was not surfaced"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-partial-meta'$'\x1f''--json' \
+    "partial metadata render should close the Orca terminal"
+  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-partial-meta'$'\x1f''--force'$'\x1f''--json' \
+    "partial metadata render should remove the Orca worktree"
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''send' \
+    "partial metadata render must abort before launch delivery"
+  assert_absent "$state/$id.meta" "partial metadata render must publish no task record"
+  pass "fm-spawn.sh --backend orca: partial metadata render aborts before publication"
 }
 
 test_spawn_launches_omp_through_the_orca_backend() {
@@ -926,7 +966,7 @@ test_endpoint_validation_accepts_live_composite_orca_worktree_id() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite" \
     "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
-    "backend=orca" "orca_worktree_id=repo-123::$wt"
+    "backend=orca" "orca_worktree_id=github:kunchenguid/firstmate::$wt"
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"; printf "%s" "$FM_BACKEND_VALIDATED_TARGET"' \
     "$ROOT" "$state/$id.meta" "$id")
   [ "$out" = "term-composite" ] || fail "live composite Orca worktree id should validate, got '$out'"
@@ -944,7 +984,7 @@ test_endpoint_validation_refuses_composite_orca_path_mismatch() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite-mismatch" \
     "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
-    "backend=orca" "orca_worktree_id=repo-123::$other"
+    "backend=orca" "orca_worktree_id=github:kunchenguid/firstmate::$other"
   set +e
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
     "$ROOT" "$state/$id.meta" "$id" 2>&1)
@@ -1499,6 +1539,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_launches_omp_through_the_orca_backend
 test_teardown_removes_the_orca_omp_endpoint
 test_spawn_releases_orca_resources_when_metadata_write_fails
+test_spawn_rejects_partial_orca_metadata_render
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json

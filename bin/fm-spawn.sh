@@ -457,7 +457,9 @@ refuse_omp_secondmate() {
 OMP_RESOLVED_BACKEND=
 require_omp_orca_backend() {
   local recorded_backend
-  if [ "$RELAUNCH" -eq 1 ]; then
+  if [ "$#" -gt 0 ]; then
+    OMP_RESOLVED_BACKEND=$1
+  elif [ "$RELAUNCH" -eq 1 ]; then
     recorded_backend=$(relaunch_preflight_meta_get backend)
     OMP_RESOLVED_BACKEND=${recorded_backend:-tmux}
   elif [ "$BACKEND_SET" -eq 1 ]; then
@@ -482,6 +484,24 @@ require_omp_orca_backend() {
 RELAUNCH_PREFLIGHT_ID=
 RELAUNCH_PREFLIGHT_META=
 RELAUNCH_PREFLIGHT_META_CONTENT=
+SPAWN_CONTROL_LOCK=
+SPAWN_CONTROL_LOCK_HELD=0
+SPAWN_CONTROL_PARENT=0
+SPAWN_META_LOCK=
+SPAWN_META_LOCK_HELD=0
+
+relaunch_preflight_release_locks() {
+  local status=$?
+  if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
+    SPAWN_META_LOCK_HELD=0
+    fm_lock_release "$SPAWN_META_LOCK" || true
+  fi
+  if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  fi
+  return "$status"
+}
 
 relaunch_preflight_path_signature() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
@@ -538,6 +558,27 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch needs an existing task record that is a regular, non-symlink metadata file for $RELAUNCH_PREFLIGHT_ID" >&2
     exit 1
   fi
+  # shellcheck source=bin/fm-lease-lib.sh
+  . "$SCRIPT_DIR/fm-lease-lib.sh"
+  SPAWN_CONTROL_LOCK="$STATE/.control-$RELAUNCH_PREFLIGHT_ID.lock"
+  RELAUNCH_CONTROL_OWNER=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
+  if [ "$RELAUNCH_CONTROL_OWNER" = "$PPID" ] && fm_pid_alive "$RELAUNCH_CONTROL_OWNER"; then
+    SPAWN_CONTROL_PARENT=1
+  elif [ "$(fm_lease_actor)" = branch ]; then
+    echo "error: relaunch (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+    SPAWN_CONTROL_LOCK_HELD=1
+  else
+    echo "error: another lifecycle action is already running for task $RELAUNCH_PREFLIGHT_ID" >&2
+    exit 1
+  fi
+  trap relaunch_preflight_release_locks EXIT
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_PREFLIGHT_META") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    || relaunch_preflight_snapshot_refuse
   RELAUNCH_PREFLIGHT_PATH_A=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
     || relaunch_preflight_snapshot_refuse
   exec 8< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
@@ -734,10 +775,14 @@ if spawn_selection_is_omp; then
   require_omp_orca_backend || exit 1
 fi
 
-# Now the watcher guard, which writes home state. Skipped when re-exec'd for one
+# Now the fresh-spawn watcher guard, which writes home state. Relaunch runs it
+# only after the task's lifecycle and metadata locks bind and validate the final
+# record below. Skipped when re-exec'd for one
 # pair of a batch (FM_SPAWN_NO_GUARD is set by the batch loop below), so the guard
 # runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+if [ "$RELAUNCH" -eq 0 ]; then
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -999,12 +1044,7 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
-SPAWN_CONTROL_LOCK=
-SPAWN_CONTROL_LOCK_HELD=0
-SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
-SPAWN_META_LOCK=
-SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
@@ -1233,27 +1273,9 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
 # bin/fm-lease-lib.sh; no-op in homes without a branch actor).
 # shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
+[ "$RELAUNCH" -eq 1 ] || . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)"
-fi
-if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
-  control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
-  if [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
-    SPAWN_CONTROL_PARENT=1
-  elif [ "$(fm_lease_actor)" = branch ]; then
-    # Role partition refinement: branch recovery relaunches only through the
-    # fm-control transaction that owns the control lock, never by invoking
-    # this entrypoint directly (contract: bin/fm-lease-lib.sh).
-    echo "error: relaunch (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
-    exit "$FM_LEASE_REFUSE_EXIT"
-  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
-    SPAWN_CONTROL_LOCK_HELD=1
-  else
-    echo "error: another lifecycle action is already running for task $ID" >&2
-    exit 1
-  fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
@@ -1350,6 +1372,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  KIND=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ -n "$KIND" ] || KIND=ship
+  MODE=$(fm_meta_get "$RELAUNCH_META" mode)
+  YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
+  [ -n "$ARG3" ] || {
+    echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
+    exit 1
+  }
+  if spawn_selection_is_omp; then
+    if [ "$KIND" = secondmate ]; then
+      refuse_omp_secondmate
+      exit 1
+    fi
+    require_omp_launch_model || exit 1
+    require_omp_orca_backend "$BACKEND" || exit 1
+  fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
@@ -1362,11 +1402,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
-  KIND=$(fm_meta_get "$RELAUNCH_META" kind)
-  [ -n "$KIND" ] || KIND=ship
-  MODE=$(fm_meta_get "$RELAUNCH_META" mode)
-  YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1394,11 +1429,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # crew or secondmate default currently says. Choosing a different harness is
   # the caller's explicit decision, made with --harness (bin/fm-control.sh
   # resolves that decision, including a secondmate's durable pin).
-  ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
-  [ -n "$ARG3" ] || {
-    echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
-    exit 1
-  }
+fi
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 fi
 
 shell_quote() {
@@ -3119,10 +3153,14 @@ META_WINDOW=$T
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
+elif [ "$BACKEND" = orca ]; then
+  if [ -e "$SPAWN_META_PATH" ] || [ -L "$SPAWN_META_PATH" ]; then
+    echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+    exit 1
+  fi
+  SPAWN_META_TMP="$STATE/.$ID.meta.publish.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
 preserve_relaunch_meta() {
@@ -3134,68 +3172,74 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
-{
-  echo "window=$META_WINDOW"
-  echo "endpoint_task_id=$ID"
-  echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
-  echo "harness=$HARNESS"
-  echo "kind=$KIND"
-  [ -z "$MODE" ] || echo "mode=$MODE"
-  [ -z "$YOLO" ] || echo "yolo=$YOLO"
-  echo "tasktmp=$TASK_TMP"
-  echo "model=${MODEL:-default}"
-  echo "effort=${EFFORT:-default}"
-  [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  echo "spawn_gen=$SPAWN_GEN"
+render_spawn_meta() {
+  echo "window=$META_WINDOW" || return 1
+  echo "endpoint_task_id=$ID" || return 1
+  echo "worktree=$WT" || return 1
+  echo "project=$PROJ_ABS" || return 1
+  echo "harness=$HARNESS" || return 1
+  echo "kind=$KIND" || return 1
+  if [ -n "$MODE" ]; then echo "mode=$MODE" || return 1; fi
+  if [ -n "$YOLO" ]; then echo "yolo=$YOLO" || return 1; fi
+  echo "tasktmp=$TASK_TMP" || return 1
+  echo "model=${MODEL:-default}" || return 1
+  echo "effort=${EFFORT:-default}" || return 1
+  if [ -n "${BUSY_GEN:-}" ]; then echo "busy_gen=$BUSY_GEN" || return 1; fi
+  echo "spawn_gen=$SPAWN_GEN" || return 1
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$BACKEND" != tmux ]; then echo "backend=$BACKEND" || return 1; fi
   if [ "$BACKEND" = herdr ]; then
-    echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
+    echo "herdr_session=$HERDR_SES" || return 1
+    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID" || return 1
+    echo "herdr_tab_id=$HERDR_TAB_ID" || return 1
+    echo "herdr_pane_id=$HERDR_PANE_ID" || return 1
   fi
   if [ "$BACKEND" = zellij ]; then
-    echo "zellij_session=$ZELLIJ_SES"
-    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
-    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    echo "zellij_session=$ZELLIJ_SES" || return 1
+    echo "zellij_tab_id=$ZELLIJ_TAB_ID" || return 1
+    echo "zellij_pane_id=$ZELLIJ_PANE_ID" || return 1
   fi
   if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
+    echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
+    echo "terminal=$ORCA_TERMINAL" || return 1
   fi
   if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID" || return 1
+    echo "cmux_surface_id=$CMUX_SURFACE_ID" || return 1
   fi
   if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
+    echo "home=$PROJ_ABS" || return 1
+    echo "projects=$SECONDMATE_PROJECTS" || return 1
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
+    preserve_relaunch_meta || return 1
   fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
-    echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+    echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX" || return 1
   fi
-} > "$SPAWN_META_PATH"
-META_WRITE_STATUS=$?
-if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
-  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
-  exit "$META_WRITE_STATUS"
+}
+if ! render_spawn_meta > "$SPAWN_META_PATH"; then
+  echo "error: failed to render metadata for $ID; aborting launch" >&2
+  exit 1
 fi
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] || [ "$BACKEND" = orca ]; then
   SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
-  RELAUNCH_REPLACEMENT_PENDING=0
+  if ! mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"; then
+    echo "error: failed to publish metadata for $ID; aborting launch" >&2
+    exit 1
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    RELAUNCH_REPLACEMENT_PENDING=0
+  fi
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
-  fm_lock_release "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=0
+  if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=0
+  fi
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
