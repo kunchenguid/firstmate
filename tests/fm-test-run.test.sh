@@ -386,6 +386,39 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_check_coverage_is_locale_independent() {
+  # The guard pins every sort to LC_ALL=C, so its comm comparisons must use the
+  # same collation. A UTF-8 locale that ignores punctuation orders
+  # fm-backend.test.sh before fm-backend-cmux.test.sh, the reverse of byte
+  # order, so a comm left on the ambient locale rejects the guard's C-sorted
+  # input with "file 2 is not in sorted order" on a healthy tree.
+  local loc chosen probe c_order utf8_order out status
+  chosen=
+  probe=$(printf 'fm-backend-cmux.test.sh\nfm-backend.test.sh\n')
+  c_order=$(printf '%s\n' "$probe" | LC_ALL=C sort)
+  # An uninstalled locale makes sort fall back to C, so this divergence check
+  # doubles as the availability check: no divergence means no usable locale,
+  # and the case would be vacuous rather than passing.
+  for loc in en_US.UTF-8 en_US.utf8 en_GB.UTF-8 en_GB.utf8 de_DE.UTF-8 fr_FR.UTF-8; do
+    utf8_order=$(printf '%s\n' "$probe" | LC_ALL="$loc" sort 2>/dev/null)
+    if [ "$utf8_order" != "$c_order" ]; then
+      chosen=$loc
+      break
+    fi
+  done
+  if [ -z "$chosen" ]; then
+    echo "skip: no installed UTF-8 locale collates punctuation differently from C"
+    return 0
+  fi
+  status=0
+  out=$(LC_ALL="$chosen" "$RUNNER" --check-coverage 2>&1) || status=$?
+  [ "$status" -eq 0 ] \
+    || fail "--check-coverage exited $status under LC_ALL=$chosen: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "coverage guard success marker under LC_ALL=$chosen"
+  pass "coverage guard survives a UTF-8 locale (verified under LC_ALL=$chosen)"
+}
+
 test_portable_serial_shards_partition_the_serial_lane() {
   local lanes count serial shard listed union dups shard_lane total cap
   lanes=$("$RUNNER" --list-lanes)
@@ -715,6 +748,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_check_coverage_is_locale_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated

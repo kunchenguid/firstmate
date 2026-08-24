@@ -578,6 +578,11 @@ select_lane() {
 run_coverage_guard() {
   local tmp missing extra a b shard
   local -a saved_scripts=()
+  # Every sort below is pinned to LC_ALL=C, so comm must collate the same way.
+  # Under a UTF-8 locale that ignores punctuation, comm rejects C-sorted input
+  # with "file 2 is not in sorted order" on a healthy tree. -x is required:
+  # a bare local would not reach sort and comm as child processes.
+  local -x LC_ALL=C
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
