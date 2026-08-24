@@ -1257,10 +1257,15 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        | if $e.verb == "working" then
            ([ $summary.active_children[]
               | select(if ($e.key | keyed) then .id == $e.key else true end)
-              | {surface:"active_children",id,key:null,verb:"working"}]) as $matches
+              | {surface:"active_children",id,key:null,verb:"working"}]
+            + [ $summary.programs[]
+                | select(.deferred_marker != true)
+                | select(if ($e.key | keyed) then .id == $e.key else true end)
+                | {surface:"programs",id,key:null,verb:"working"}]) as $matches
            | result($e; $matches;
-               $summary.counts.active_children == ($summary.active_children | length);
-               "active_children")
+               ($summary.counts.active_children == ($summary.active_children | length)
+                and $summary.counts.programs == ($summary.programs | length));
+               "active_children_or_programs")
          elif $e.verb == "paused" then
            ([ $summary.holds[]
               | select(if ($e.key | keyed) then .id == $e.key or .blocked_by == $e.key else true end)

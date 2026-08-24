@@ -2124,6 +2124,9 @@ test_program_only_secondmate_is_current_work() {
   make_valid_secondmate_home program-only "$mate"
   : > "$home/data/secondmates.md"
   append_secondmate_registry "$home" program-only "$mate"
+  fm_write_secondmate_meta "$home/state/program-only.meta" "$mate" \
+    "firstmate:fm-program-only" sample
+  printf 'working [key=rollout-program]: coordinating rollout\n' > "$home/state/program-only.status"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -2145,8 +2148,12 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "program-only")
     | .current.state == "active_child_work"
+      and .contradiction == false
       and [.programs[].id] == ["rollout-program"]
       and .active_children == []
+      and (.parent_event.reconciliation.activities
+        | any(.verb == "working" and .key == "rollout-program"
+          and .verdict == "corroborates" and .matched.surface == "programs"))
   ' >/dev/null || fail "a program-only secondmate was not canonical current work: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -2170,8 +2177,11 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "program-only")
     | .current.state == "no_active_work"
+      and .contradiction == true
       and ([.programs[] | select(.id == "rollout-program")][0]
         | .state == "deferred" and .deferred_marker == true)
+      and (.parent_event.reconciliation.activities
+        | any(.verb == "working" and .key == "rollout-program" and .verdict == "contradicts"))
   ' >/dev/null || fail "a deferred secondmate program remained canonical current work: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
