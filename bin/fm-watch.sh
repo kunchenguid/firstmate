@@ -436,10 +436,10 @@ inbox_steer_check() {  # <window> <task>
 #
 # NOT a pure read: one bounded pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
-# .stale- classification is cleared because churn begins a new quiet interval;
-# retaining an older matching hash would route a later stopped render through the
-# wedge timer instead of ordinary stale surfacing. Reached only for a non-afk,
-# no-captain-verb signal, so it never runs on the ordinary per-wake path.
+# .stale- classification and wedge-escalation count are cleared because churn
+# begins a new quiet interval; retaining either would make the new interval
+# inherit the prior one. Reached only for a non-afk, no-captain-verb signal, so
+# it never runs on the ordinary per-wake path.
 signal_turnend_panes_churned() {  # <file> ...
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
@@ -577,7 +577,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
       for created in "${created_keys[@]}"; do
         rm -f "$STATE/.churn-since-$created"
       done

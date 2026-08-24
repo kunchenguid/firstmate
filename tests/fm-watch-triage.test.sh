@@ -866,6 +866,35 @@ test_turn_ended_churn_resets_prior_stale_classification() {
   pass "pane churn starts a fresh stale-classification interval before a stopped render returns"
 }
 
+test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
+  local dir state fakebin out capture_file capture_count window key pid
+  dir=$(make_case turn-ended-churn-resets-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; capture_count="$dir/capture.count"
+  window="test:fm-codexfreshinterval"
+  : > "$state/codexfreshinterval.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexfreshinterval.meta"
+  printf 'rendering a new turn' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle output from the prior interval')" > "$state/.hash-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$capture_count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=1 \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a churning turn-end was not absorbed before the stale-path capture failed: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "churn retained the prior quiet interval's wedge-escalation count"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "the absorbed churn fixture queued an unexpected wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "pane churn resets prior wedge escalation state before the stale-path poll"
+}
+
 # The safety half: the same unverifiable harness, the same fixture, but the pane
 # has NOT changed since the previous poll. There is no positive evidence, so the
 # wake must still surface - a stopped worker is exactly what the turn-end marker
@@ -3788,6 +3817,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
+test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
 test_turn_ended_trailing_newline_prior_hash_surfaced
