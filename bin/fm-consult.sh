@@ -206,7 +206,10 @@ scaffold_consult() {
   [ ! -e "$brief" ] || die "consultation brief already exists: $brief"
   [ ! -d "$dir" ] || [ -w "$dir" ] \
     || die "consultation directory is not writable; fix its permissions: $(display_name "$dir")"
-  (umask 077; mkdir -p -- "$dir") || die "could not create consultation directory: $dir"
+  [ -d "$dir" ] || [ ! -d "$DATA" ] || [ -w "$DATA" ] \
+    || die "data directory is not writable; fix its permissions: $(display_name "$DATA")"
+  (umask 077; mkdir -p -- "$dir" 2>/dev/null) \
+    || die "could not create consultation directory: $dir"
 
   cat > "$brief" <<'EOF'
 # External advisor consultation
@@ -328,6 +331,9 @@ status_one() {
   validate_data_directory
   dir="$DATA/$id"
   [ -e "$dir" ] || [ -L "$dir" ] \
+    || die "no such consultation: $(display_name "$dir"); scaffold it first"
+  validate_consult_directory "$dir"
+  consult_entry_present "$dir" \
     || die "no such consultation: $(display_name "$dir"); scaffold it first"
   consult_state_line "$id" || die "$CONSULT_REFUSAL"
   printf '%s\n' "$CONSULT_LINE"

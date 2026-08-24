@@ -440,11 +440,13 @@ test_data_override_redirects_every_command() {
   out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" receive redirected)
   assert_contains "$out" "received: $report" "receive did not read the overridden data directory"
   out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status redirected)
-  has_exact_line "$out" "redirected: report received" "single status did not read the overridden data directory"
+  has_exact_line "$out" "redirected: report received" \
+    || fail "single status did not read the overridden data directory"
 
   rel=data-override-elsewhere
   out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE="$rel" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status)
-  has_exact_line "$out" "redirected: report received" "a relative FM_DATA_OVERRIDE was not resolved"
+  has_exact_line "$out" "redirected: report received" \
+    || fail "a relative FM_DATA_OVERRIDE was not resolved"
 
   out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE=data-override-missing FM_HOME="$home" \
     "$ROOT/bin/fm-consult.sh" status 2>&1); rc=$?
@@ -561,8 +563,8 @@ test_status_of_an_absent_consult_id_is_refused() {
   assert_not_contains "$out" "no brief written" "an absent consult id reused the empty-consultation label"
 
   out=$(run_consult "$home" status started 2>&1); rc=$?
-  expect_code 0 "$rc" "an existing consultation directory with no brief must still succeed"
-  has_exact_line "$out" "started: no brief written" "an existing empty consultation lost its own label"
+  [ "$rc" -ne 0 ] || fail "status labeled a bare directory holding no consult artifacts as a consultation"
+  assert_contains "$out" "no such consultation" "a bare directory was not refused like an absent consultation"
 
   out=$(run_consult "$home" status 2>&1); rc=$?
   expect_code 0 "$rc" "the listing must be unchanged by the single-id existence check"
@@ -727,6 +729,65 @@ test_scaffold_bootstraps_a_missing_data_directory() {
   pass "fm-consult: scaffold bootstraps a missing data directory under a valid home"
 }
 
+test_status_one_and_listing_agree_on_what_is_a_consultation() {
+  local home out rc listing
+  home=$(new_home identity-agreement)
+  run_consult "$home" scaffold briefed >/dev/null
+  mkdir -p "$home/data/reported" "$home/data/task-dir" "$home/data/bad id"
+  printf '# Answer\nEvidence.\n' > "$home/data/reported/consult-report.md"
+  printf 'unrelated\n' > "$home/data/task-dir/brief.md"
+  printf 'brief\n' > "$home/data/bad id/consult-brief.md"
+  listing=$(run_consult "$home" status 2>/dev/null)
+
+  out=$(run_consult "$home" status briefed 2>&1); rc=$?
+  expect_code 0 "$rc" "a brief-bearing consultation must report"
+  has_exact_line "$out" "briefed: brief written; still awaiting a report" \
+    || fail "wrong label for a brief-bearing consultation"
+  has_exact_line "$listing" "briefed: brief written; still awaiting a report" \
+    || fail "listing dropped a brief-bearing consultation"
+
+  out=$(run_consult "$home" status reported 2>&1); rc=$?
+  expect_code 0 "$rc" "a report-only consultation must report"
+  has_exact_line "$out" "reported: report received" || fail "wrong label for a report-only consultation"
+  has_exact_line "$listing" "reported: report received" || fail "listing dropped a report-only consultation"
+
+  out=$(run_consult "$home" status task-dir 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status labeled an ordinary task directory as a consultation"
+  assert_contains "$out" "no such consultation" "an ordinary task directory was not refused"
+  assert_not_contains "$listing" "task-dir" "listing reported an ordinary task directory"
+
+  out=$(run_consult "$home" status absent-name 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status accepted an absent consultation"
+  assert_contains "$out" "no such consultation" "an absent name was not refused"
+
+  out=$(run_consult "$home" status "bad id" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status accepted an unsafe consult id"
+  assert_contains "$out" "unsafe or absent consult id" "an unsafe id lost its own refusal"
+  assert_contains "$listing" "bad id: refused (" "listing dropped an artifact-bearing invalid-id directory"
+  pass "fm-consult: status <id> and the listing agree on what is a consultation"
+}
+
+test_scaffold_refuses_an_unwritable_data_root() {
+  local home out rc
+  home=$(new_home scaffold-unwritable-root)
+  run_consult "$home" scaffold alpha >/dev/null
+  chmod 0500 "$home/data"
+  if [ -w "$home/data" ]; then
+    chmod 0700 "$home/data"
+    pass "fm-consult: unwritable data root (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" scaffold newone 2>&1); rc=$?
+  chmod 0700 "$home/data"
+  expect_code 2 "$rc" "scaffold must refuse an unwritable data root through fm-consult"
+  assert_contains "$out" "fm-consult: " "scaffold leaked a bare shell error instead of an fm-consult refusal"
+  assert_contains "$out" "data directory is not writable" "the unwritable-root refusal was not explicit"
+  assert_not_contains "$out" "Permission denied" "scaffold leaked a bare mkdir permission error"
+  assert_absent "$home/data/newone" "the refused scaffold created a partial consultation directory"
+  pass "fm-consult: scaffold refuses an unwritable data root without leaking a shell error"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -755,5 +816,7 @@ test_symlinked_data_override_resolves_identically_for_both_spellings
 test_searchable_data_root_refuses_only_the_listing
 test_scaffold_refuses_an_unwritable_consultation_directory
 test_scaffold_bootstraps_a_missing_data_directory
+test_status_one_and_listing_agree_on_what_is_a_consultation
+test_scaffold_refuses_an_unwritable_data_root
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command
