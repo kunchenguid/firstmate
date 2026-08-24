@@ -19,7 +19,7 @@ test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
   expected=$(
-    for f in "$ROOT"/tests/*.test.sh; do
+    for f in "$ROOT"/tests/*.test.sh "$ROOT"/tests/fm-*.test.py; do
       [ -f "$f" ] || continue
       printf 'tests/%s\n' "$(basename "$f")"
     done | LC_ALL=C sort
@@ -33,7 +33,7 @@ test_list_all_exact_suite_coverage() {
   [ "$(printf '%s\n' "$listed" | uniq | wc -l | tr -d ' ')" = \
     "$(printf '%s\n' "$listed" | wc -l | tr -d ' ')" ] \
     || fail "--list --all must not duplicate scripts"
-  pass "exact suite coverage: --all lists every tests/*.test.sh once"
+  pass "exact suite coverage: --all lists every supported shell and Python test once"
 }
 
 test_family_selection() {
@@ -90,7 +90,7 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  mkdir -p "$repo/bin/backends" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -114,7 +114,9 @@ init_changed_fixture_repo() {
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
-  : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  printf '# herdr-eventwait.py\n' >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  printf '# herdr-eventwait.py\n' >>"$repo/tests/fm-backend.test.sh"
+  : >"$repo/bin/backends/herdr-eventwait.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -151,6 +153,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait test selects backend coverage"
   git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
+
+  printf '\n' >>"$repo/bin/backends/herdr-eventwait.py"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-herdr-eventwait.test.py" "eventwait production owner selects Python Herdr coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait production owner selects backend coverage"
+  git -C "$repo" add bin/backends/herdr-eventwait.py
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-owner-change
 
   printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
@@ -283,6 +292,95 @@ SH
   pass "aggregate exit reflects any script failure"
 }
 
+test_python_execution_and_failure_propagation() {
+  local tmp out rc fail_f
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-python.XXXXXX")
+  out="$tmp/out.txt"
+  fail_f="$tmp/failing.test.py"
+
+  "$RUNNER" tests/fm-backend-herdr-eventwait.test.py >"$out" 2>"$tmp/err.txt" \
+    || { cat "$out" "$tmp/err.txt"; rm -rf "$tmp"; fail "real Python test must pass through the runner"; }
+  grep -Fq 'Ran 5 tests' "$out" \
+    || { rm -rf "$tmp"; fail "canonical runner did not execute the real five Python tests"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$out" \
+    || { rm -rf "$tmp"; fail "passing Python summary is wrong: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -Fq 'family=real-herdr-gated' "$out" \
+    || { rm -rf "$tmp"; fail "Python test lost its real-herdr-gated family"; }
+
+  cat >"$fail_f" <<'PY'
+import unittest
+
+
+class DeliberateFailure(unittest.TestCase):
+    def test_failure(self):
+        self.fail("deliberate")
+
+
+if __name__ == "__main__":
+    unittest.main()
+PY
+  set +e
+  "$RUNNER" "$fail_f" >"$tmp/fail-out.txt" 2>"$tmp/fail-err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a failing Python test must fail the runner"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/fail-out.txt" \
+    || { rm -rf "$tmp"; fail "failing Python summary is wrong: $(grep FM_TEST_SUMMARY "$tmp/fail-out.txt")"; }
+  rm -rf "$tmp"
+  pass "canonical runner executes all five real Python tests and propagates failures"
+}
+
+test_python_discovery_is_narrow_and_empty_safe() {
+  local tmp repo listed out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-python-discovery.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests/pkg"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/only.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - shell fixture"
+SH
+  chmod +x "$repo/tests/only.test.sh"
+  : >"$repo/tests/fm-helper.py"
+  : >"$repo/tests/helper.test.py"
+  : >"$repo/tests/pkg/fm-nested.test.py"
+
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --all)
+  [ "$listed" = "tests/only.test.sh" ] \
+    || { rm -rf "$tmp"; fail "Python helper or empty glob leaked into discovery: $listed"; }
+  out=$(cd "$repo" && bin/fm-test-run.sh --all)
+  assert_contains "$out" "FM_TEST_SUMMARY total=1 failed=0" "empty Python glob keeps shell execution intact"
+  rm -rf "$tmp"
+  pass "Python discovery ignores helpers and handles an empty supported glob"
+}
+
+test_orphan_python_test_fails_coverage_inventory() {
+  local tmp repo path rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-python-orphan.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  while IFS= read -r path; do
+    mkdir -p "$repo/$(dirname "$path")"
+    : >"$repo/$path"
+  done < <("$RUNNER" --list --all)
+
+  (cd "$repo" && bin/fm-test-run.sh --check-coverage) >"$tmp/base-out" 2>"$tmp/base-err" \
+    || { cat "$tmp/base-out" "$tmp/base-err"; rm -rf "$tmp"; fail "coverage fixture baseline must pass"; }
+  : >"$repo/tests/fm-orphan.test.py"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --check-coverage) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "orphan supported Python test must fail coverage"; }
+  grep -Fq 'tests/fm-orphan.test.py' "$tmp/err" \
+    || { rm -rf "$tmp"; fail "coverage failure must name the orphan Python test: $(cat "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "coverage inventory rejects an orphan supported Python test"
+}
+
 test_gate_skip_accounting() {
   local tmp skip_f out json
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
@@ -370,6 +468,8 @@ test_portable_shard_union_and_coverage_guard() {
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
+  printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-eventwait.test.py' \
+    || fail "herdr family must include the eventwait Python test"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
@@ -711,6 +811,9 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
+test_python_execution_and_failure_propagation
+test_python_discovery_is_narrow_and_empty_safe
+test_orphan_python_test_fails_coverage_inventory
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family

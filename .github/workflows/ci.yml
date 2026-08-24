@@ -32,8 +32,9 @@ jobs:
       - run: bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
-  # equal the complete tests/*.test.sh inventory with no missing or duplicates,
-  # and that the portable serial CI shards partition that serial lane exactly.
+  # equal the complete supported shell and Python test inventory with no missing
+  # or duplicates, and that the portable serial CI shards partition that serial
+  # lane exactly.
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
@@ -282,8 +283,9 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # Serial only. Fail if any script reports herdr not found. Live
-          # harness credential tests stay outside this family (opt-in env only).
+          # Serial only. The canonical runner executes both shell and Python
+          # members. Fail if any test reports herdr not found. Live harness
+          # credential tests stay outside this family (opt-in env only).
           bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"

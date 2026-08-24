@@ -52,6 +52,8 @@ The two parallel lanes use longest-processing-time assignment from those measure
 `portable-serial` includes every `tests/*.test.sh` that is neither proven-isolated nor `real-herdr-gated`.
 It keeps watcher, lock, AFK, real tmux, daemon, secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other unproven work serial.
 Membership is derived rather than enumerated, so a newly added test lands here by default.
+Supported Python tests use the narrow direct-file convention `tests/fm-*.test.py` and require an intentional family mapping into an existing lane.
+This prevents helper Python modules from executing accidentally and makes the coverage guard reject an unmapped Python test.
 
 ## Portable serial CI shards
 
@@ -92,7 +94,7 @@ bin/fm-test-run.sh --check-coverage
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
-It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
+It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every supported shell and Python test.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 
 ## Timing artifacts

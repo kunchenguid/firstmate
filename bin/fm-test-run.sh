@@ -11,7 +11,7 @@
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --proven-isolated
-#   fm-test-run.sh tests/<name>.test.sh [more scripts...]
+#   fm-test-run.sh tests/<name>.test.sh|tests/fm-<name>.test.py [more tests...]
 #
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
@@ -128,10 +128,14 @@ now_ms() {
   fi
 }
 
-# Primary family for one tests/*.test.sh basename. Unmapped scripts are
-# unclassified so new tests are still runnable and visible in summaries.
+# Primary family for one supported test basename. Unmapped shell tests are
+# unclassified so they remain runnable in portable-serial. Supported Python
+# tests must be mapped into a lane so the coverage guard catches an orphan.
 family_for_basename() {
   case "$1" in
+    fm-backend-herdr-eventwait.test.py)
+      printf '%s\n' real-herdr-gated
+      ;;
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
@@ -359,12 +363,16 @@ is_proven_isolated_script() {
 # The portable serial remainder: every tests/*.test.sh that is neither
 # proven-isolated nor real-herdr-gated. Watcher, lock, AFK, real tmux, daemon,
 # secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other
-# unproven work stays here. Derived rather than enumerated so a newly added test
-# lands here by default instead of falling out of every lane.
+# unproven shell work stays here. Derived rather than enumerated so a newly added
+# shell test lands here by default. Python tests require an intentional family
+# mapping; the coverage guard fails if a supported Python test has no lane.
 list_portable_serial() {
   local s base fam
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    case "$s" in
+      *.test.py) continue ;;
+    esac
     base=$(basename "$s")
     fam=$(family_for_basename "$base")
     if [ "$fam" = "real-herdr-gated" ]; then
@@ -636,7 +644,9 @@ run_coverage_guard() {
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
-  all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
+  all_repo_shell_tests | LC_ALL=C sort -u >"$tmp/all_shell"
+  all_repo_python_tests | LC_ALL=C sort -u >"$tmp/all_python"
+  cat "$tmp/all_shell" "$tmp/all_python" | LC_ALL=C sort -u >"$tmp/all"
   list_proven_isolated | LC_ALL=C sort -u >"$tmp/proven"
   list_portable_parallel_1 | LC_ALL=C sort -u >"$tmp/s1"
   list_portable_parallel_2 | LC_ALL=C sort -u >"$tmp/s2"
@@ -728,7 +738,7 @@ run_coverage_guard() {
   missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
   extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
-    log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
+    log "coverage guard: union of portable shards + portable serial + Herdr must equal the supported test inventory"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
     [ -z "$extra" ] || { log "extra beyond inventory:"; printf '%s\n' "$extra" >&2; }
     rm -rf "$tmp"
@@ -745,8 +755,10 @@ run_coverage_guard() {
     fi
   fi
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial_shards=%s herdr=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s shell=%s python=%s parallel=%s serial=%s serial_shards=%s herdr=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
+    "$(wc -l <"$tmp/all_shell" | tr -d ' ')" \
+    "$(wc -l <"$tmp/all_python" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
     "$PORTABLE_SERIAL_SHARDS" \
@@ -814,14 +826,27 @@ print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipp
 PY
 }
 
-all_repo_tests() {
-  # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
+all_repo_shell_tests() {
   local f
-  # shellcheck disable=SC2035
   for f in tests/*.test.sh; do
     [ -f "$f" ] || continue
     printf '%s\n' "$f"
-  done | LC_ALL=C sort
+  done
+}
+
+all_repo_python_tests() {
+  # Narrow convention: direct tests/fm-*.test.py files only. Python helpers,
+  # packages, and conventional test_*.py modules are intentionally invisible.
+  local f
+  for f in tests/fm-*.test.py; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "$f"
+  done
+}
+
+all_repo_tests() {
+  # Deterministic lexical union of the two supported discovery conventions.
+  { all_repo_shell_tests; all_repo_python_tests; } | LC_ALL=C sort -u
 }
 
 normalize_script_path() {
@@ -832,7 +857,7 @@ normalize_script_path() {
       p=${p#./}
       printf '%s\n' "$p"
       ;;
-    *.test.sh)
+    *.test.sh|fm-*.test.py)
       if [ -f "tests/$p" ]; then
         printf 'tests/%s\n' "$p"
       else
@@ -902,6 +927,9 @@ families_for_changed_path() {
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
+      ;;
+    tests/fm-*.test.py)
+      printf '%s\n' "__script__:$(basename "$path")"
       ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
@@ -1504,6 +1532,14 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
+for s in "${SCRIPTS[@]}"; do
+  case "$s" in
+    *.test.py)
+      command -v python3 >/dev/null 2>&1 || die "python3 is required to run $s"
+      ;;
+  esac
+done
+
 # --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
 if [ "$JOBS" -gt 1 ]; then
   for s in "${SCRIPTS[@]}"; do
@@ -1607,8 +1643,11 @@ run_one_serial() {
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  # PIPESTATUS[0] is the test process; tee's exit is ignored for aggregate.
+  case "$script" in
+    *.test.py) python3 "$script" 2>&1 | tee "$out" ;;
+    *) bash "$script" 2>&1 | tee "$out" ;;
+  esac
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1715,7 +1754,10 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      case "$script" in
+        *.test.py) python3 "$script" >"$work/output" 2>&1 ;;
+        *) bash "$script" >"$work/output" 2>&1 ;;
+      esac
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
