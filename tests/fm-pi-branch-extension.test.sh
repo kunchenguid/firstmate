@@ -473,7 +473,7 @@ SH
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain }; })()`);
 const { dispatch, fire, settle, home, sentToMain } = globalThis.__t;
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 // Default-on: with no config/pi-supervision-branch grant file present at
 // all (this driver never writes one), a task-scoped wake is still accepted
@@ -509,6 +509,27 @@ await heartbeatReport.execute(
 );
 const noopMerge = sentToMain[sentToMain.length - 1];
 if (noopMerge.options.triggerTurn) throw new Error("a no-op heartbeat pass must not open a main turn");
+if (noopMerge.message.display !== false) throw new Error("a no-op heartbeat pass must not render a merge note");
+const storedNoop = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line))
+  .find((row) => row.task === "fleet" && row.summary === "fleet reviewed, nothing changed");
+if (!storedNoop || storedNoop.verdict !== "routine") {
+  throw new Error("the silent no-op heartbeat outcome was not stored durably");
+}
+await heartbeatReport.execute(
+  "task-routine",
+  { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed" },
+  undefined,
+  undefined,
+  {},
+);
+const taskRoutineMerge = sentToMain[sentToMain.length - 1];
+if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped routine outcome must render");
+if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
+  throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
+}
 await heartbeatReport.execute(
   "heartbeat-finding",
   { task: "fleet", verdict: "captain", summary: "task-2 has been stuck for an hour" },

@@ -344,7 +344,7 @@ export default function (pi: ExtensionAPI) {
       const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: true };
+      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: task !== "fleet" };
       if (mainStreaming) {
         pi.sendMessage(message, { deliverAs: "nextTurn" });
       } else {
@@ -713,8 +713,8 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which
-  // mergeIntoMain sets for a routine note alone; a captain-facing note is
-  // sent with display: false and is never printed or rendered here.
+  // mergeIntoMain sets for a task-scoped routine note alone; fleet routine
+  // and captain-facing notes are never printed or rendered here.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
