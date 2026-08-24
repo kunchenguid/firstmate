@@ -78,7 +78,9 @@ selection_binding=$(printf '%s\n' "$selection_output" | sed -n 's/^selection_bin
 # They run concurrently and report independently into this one command step.
 # shellcheck disable=SC2016 # The command expands its variables inside the Azure guest shell.
 "$DISPATCH" --require-selection-binding "$selection_binding" test -- \
-  "$ROOT/bin/fm-azure-runner-command.sh" bash -c '
+  "$ROOT/bin/fm-azure-runner-command.sh" env \
+  FM_TEST_HOST_CAPABILITIES_ABSENT=real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress \
+  bash -c '
   command -v tmux >/dev/null || { echo "tmux is required for e2e tests" >&2; exit 1; }
   tmux -V
   rc=0

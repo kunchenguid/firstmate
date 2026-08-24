@@ -38,6 +38,7 @@ No operation stops, starts, updates, or inspects a local legacy no-mistakes daem
 
 Remote Herdr is not part of this path.
 Later Herdr proxy tabs may display state, but validation submission, ask-user responses, recovery, evidence collection, and cleanup use Azure Resource Manager, Managed Run Command, and the private storage endpoint.
+The runner's separate per-run no-mistakes routing path may seal a detached gate HEAD as a direct private bundle with ordinary standalone capacity accounting; that path is not a validation cell or a child of one.
 
 No Azure resource was created while implementing this feature.
 Live Azure acceptance of these cells runs from released public main under separate explicit billable authorization; the first live Stage C pipeline acceptance has occurred and is recorded in the Live acceptance record section, while the full multi-leg checklist in the Live acceptance section remains unperformed.
@@ -272,6 +273,7 @@ It does not run the command locally.
 The dispatcher assigns each shard the exact SKU and pre-reserved constituent id from the admitted shape plan, avoiding the control cell's family, and sets the runner concurrency ceiling to eight.
 Each request uses the runner's exact private-parent snapshot mode, so a pipeline-owned fix commit can run before the no-mistakes push step without executing locally or prematurely mutating the remote task branch.
 The one-ref Git bundle, current source ref/head/tree, digest, size, and private input blob are all bound to the parent cell and command request, while the runner independently re-proves the public trusted default base.
+This parent-bound shard mode remains distinct from the direct per-run no-mistakes bundle in `docs/azure-runner.md`, which must not claim or require validation-cell capacity.
 A new child starts through `runner run` with an explicit invocation, confirmation, source ref, private bundle, and parent-cell reservation; only an already recorded child uses `runner resume`, so a missing VM cannot turn a prepared record into duplicate execution.
 The one-shot runner still re-proves live family quota, regional quota, rate, budget, private network, image, command bounds, and global admission under its own contract.
 Every shard therefore receives a separate VM, OS disk, process namespace, port space, lock space, temp root, terminal-server space, boot id, and VM instance id.
@@ -484,6 +486,7 @@ A missing ETag, changed instance, foreign tag, foreign principal, extra role ass
 
 Focused fake-cloud and static tests do not claim real Azure usability.
 The first live Stage C pipeline acceptance has occurred, as described in the Live acceptance record section, while the full multi-leg acceptance checklist below remains unperformed.
+The separate direct per-run runner repair is not accepted by those cell results and remains blocked until its exact code lands on public `main` and a fresh routed no-mistakes run passes on real Azure compute with zero cleanup.
 After this stack is released to public main and the operator has explicit billable authorization, the full checklist acceptance must run from that released main and record all of these results:
 
 1. Record Mac wall time, CPU, memory, swap, process count, and interactive latency before admission.
