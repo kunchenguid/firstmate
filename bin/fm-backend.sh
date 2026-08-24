@@ -881,8 +881,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter treats its terminal `done` agent status as
-# `dead` while its separate husk classifier still refuses to close it. Zellij
+# exact window; the Herdr adapter returns `dead` only when the pane's own
+# foreground process group proves no registered agent is running, while its
+# separate registration-only husk classifier still refuses to close it. Zellij
 # remains unverified because its secondmate ghost-tab and agent-process recovery
 # path has not been empirically validated. Orca and cmux do not support
 # secondmate spawns.

@@ -1919,11 +1919,37 @@ fm_backend_herdr_pane_registration_state() {  # <session> <pane_id>
   printf '%s' "${snapshot%%$'\t'*}"
 }
 
-# fm_backend_herdr_pane_foreground_state: verify a live registration against
+# fm_backend_herdr_pane_foreground_state: verify a registered agent against
 # the foreground process group. A lone login shell proves no agent is running;
 # the registered executable anywhere in the group proves it is live; every
 # other process shape is unknown so lifecycle actions refuse.
+# An idle interactive shell transiently hosts short-lived prompt helpers as a
+# second foreground process (verified on the real 0.7.5 lab; see
+# fm_backend_herdr_pane_idle_shell_pid), which reads as an ambiguous group and
+# would otherwise turn a settled stale registration into an intermittent
+# refusal. So an inconclusive sample is retried over the same bounded settle
+# window and only a window of nothing but ambiguity stays unknown; the retry
+# never converts uncertainty into agent-free, because only a clean lone-shell
+# sample can print no-agent.
 fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS:-10} state
+  while :; do
+    state=$(fm_backend_herdr_pane_foreground_sample "$1" "$2" "$3")
+    if [ "$state" = live ] || [ "$state" = no-agent ]; then
+      printf '%s' "$state"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep 0.1
+  done
+  printf 'unknown'
+}
+
+# fm_backend_herdr_pane_foreground_sample: one strict instantaneous
+# observation for fm_backend_herdr_pane_foreground_state, which owns the
+# contract and the settle retry.
+fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
   local session=$1 pane_id=$2 agent=$3 info count name argv0 agent_name
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
     printf 'unknown'
@@ -1966,9 +1992,11 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 }
 
 # fm_backend_herdr_pane_agent_state: lifecycle state for <pane-id> in
-# <session>. A terminal done registration is agent-free. A non-terminal
-# registration needs its foreground process to agree: a lone shell is
-# agent-free, the registered executable is live, and any unreadable or
+# <session>. No registration status alone proves a pane is agent-free: Herdr's
+# `done` is a per-turn status of a still-attached agent just as `idle` is, so
+# both terminal and non-terminal registrations need their foreground process
+# to agree. A lone shell is agent-free, the registered executable in the
+# foreground group is live, and any unreadable, malformed, child-only, or
 # mismatched process refuses as unknown.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local snapshot state agent
@@ -1976,12 +2004,12 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   state=${snapshot%%$'\t'*}
   agent=${snapshot#*$'\t'}
   case "$state" in
-    live)
+    live|done)
       [ -n "$agent" ] \
         && fm_backend_herdr_pane_foreground_state "$1" "$2" "$agent" \
         || printf 'unknown'
       ;;
-    dead|no-agent|done|unknown) printf '%s' "$state" ;;
+    dead|no-agent|unknown) printf '%s' "$state" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1999,11 +2027,11 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 
 # fm_backend_herdr_agent_state: recovery-grade lifecycle state for the same
 # session-start sweep as the tmux classifier. A structurally gone pane is
-# `missing`, a confirmed agent-less pane or terminal `done` agent is `dead`, a
-# foreground-verified non-terminal registration is `alive`, and an unexpected
-# or failed API read is `unreadable`. `done` remains distinct in the
-# registration classifier so the husk path never mistakes a terminal
-# registration for a closeable pane.
+# `missing`, a pane whose foreground process confirms no agent is running is
+# `dead`, a foreground-verified registration is `alive`, and an unexpected or
+# failed API read is `unreadable`. `done` remains distinct in the registration
+# classifier so the husk path never mistakes a terminal registration for a
+# closeable pane.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -2011,7 +2039,6 @@ fm_backend_herdr_agent_state() {  # <target>
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
-    done) printf 'dead' ;;
     *) printf 'unreadable' ;;
   esac
 }

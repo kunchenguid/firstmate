@@ -162,7 +162,7 @@ SH
 test_herdr_agent_state_preserves_husk_classifier() {
   local pane_state expected out
 
-  for row in 'dead missing' 'no-agent dead' 'done dead' 'live alive' 'unknown unreadable'; do
+  for row in 'dead missing' 'no-agent dead' 'live alive' 'done unreadable' 'unknown unreadable'; do
     pane_state=${row%% *}
     expected=${row#* }
     out=$(FM_TEST_PANE_STATE="$pane_state" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_PANE_STATE"; }; fm_backend_herdr_agent_state "sess:p1"' "$ROOT")
