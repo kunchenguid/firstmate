@@ -469,6 +469,41 @@ test_codex_fabric_bridge_requires_home_opt_in() {
   pass "Codex Fabric credential delegation requires the home-local captain opt-in"
 }
 
+test_codex_fabric_bridge_uses_secondmate_home_opt_in() {
+  local rec id sm out status launch
+  id=profile-codex-fabric-secondmate-denied-p4d
+  rec=$(make_spawn_case profile-codex-fabric-secondmate-denied codex "$id")
+  read_case_record "$rec"
+  touch "$HOME_DIR/config/codex-fabric-mcp"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_SKIP_SECONDMATE_INHERIT=1 run_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Codex secondmate spawn without its own Fabric grant should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "fm-codex-fabric-env.sh" \
+    "primary Fabric opt-in delegated credentials to a secondmate without its own opt-in"
+
+  id=profile-codex-fabric-secondmate-allowed-k7m
+  rec=$(make_spawn_case profile-codex-fabric-secondmate-allowed codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/config"
+  touch "$sm/config/codex-fabric-mcp"
+
+  out=$(FM_SKIP_SECONDMATE_INHERIT=1 run_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Codex secondmate spawn with its own Fabric grant should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$ROOT/bin/fm-codex-fabric-env.sh' codex" \
+    "secondmate's own Fabric opt-in did not route Codex through the credential bridge"
+  pass "Codex Fabric delegation uses the secondmate home's independent opt-in"
+}
+
 test_codex_fabric_bridge_acquires_fresh_process_environment() {
   local dir fakebin out status args
   dir="$TMP_ROOT/codex-fabric-success"
@@ -972,6 +1007,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_fabric_bridge_requires_home_opt_in
+test_codex_fabric_bridge_uses_secondmate_home_opt_in
 test_codex_fabric_bridge_acquires_fresh_process_environment
 test_codex_fabric_bridge_falls_back_without_login_or_environment_changes
 test_codex_fabric_bridge_bounds_azure_cli_acquisition

@@ -2728,7 +2728,11 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_codex_fabric_env=
-if [ -f "$CONFIG/codex-fabric-mcp" ]; then
+codex_fabric_config=$CONFIG
+if [ "$KIND" = secondmate ]; then
+  codex_fabric_config=$PROJ_ABS/config
+fi
+if [ -f "$codex_fabric_config/codex-fabric-mcp" ]; then
   sq_codex_fabric_env=$(shell_quote "$FM_ROOT/bin/fm-codex-fabric-env.sh")
 fi
 sq_worktree=$(shell_quote "$WT")
