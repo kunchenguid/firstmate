@@ -1,5 +1,10 @@
 # Pi supervision branch
 
+![Multi-brain agent architecture: one agent, two branches of attention, events are commits](pi-supervision-branch-poster.svg)
+
+The poster is the visual of the idea.
+This document stays the owner and the contract.
+
 Fleet supervision on the Pi primary harness runs on a second, persistent conversation - the supervision branch - inside the same `pi` process as the captain's chat.
 The branch absorbs ordinary actionable wakes that pass the watcher's unchanged first-stage classifier and resolve wholly to captain-granted projects, handles them with real tools, and merges each outcome back by appending a short note to the captain conversation's tail; fleet-wide, unresolvable, and out-of-scope wakes stay on main, and only captain-relevant branch outcomes open a turn.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
