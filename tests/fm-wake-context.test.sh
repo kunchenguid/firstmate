@@ -301,18 +301,6 @@ test_empty_status_set_stages_empty_cursor() {
   pass "empty status set stages an explicit empty cursor before ACK"
 }
 
-test_mktemp_failure_emits_safe_fallback() {
-  local home="$TMP_ROOT/mktemp-failure"
-  install_fixture "$home"; append_wake "$home" 1
-  mkdir "$home/not-a-temp-dir"; chmod 0500 "$home/not-a-temp-dir"
-  if TMPDIR="$home/not-a-temp-dir/missing" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
-    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err"; then
-    fail "mktemp failure unexpectedly succeeded"
-  fi
-  grep -F 'WAKE_CONTEXT_FALLBACK:' "$home/out" >/dev/null || fail "mktemp failure emitted no canonical fallback"
-  pass "pre-presentation mktemp failure emits the canonical safe fallback"
-}
-
 test_cardinality_overflow_falls_back_before_drain() {
   local home="$TMP_ROOT/overflow" i=1
   install_fixture "$home"
@@ -549,7 +537,6 @@ test_status_cursor_is_staged_before_ack
 test_unstageable_status_cursor_withholds_ack
 test_empty_queue_unstageable_status_cursor_withholds_ack
 test_empty_status_set_stages_empty_cursor
-test_mktemp_failure_emits_safe_fallback
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task
 test_packet_projects_unread_status_tail

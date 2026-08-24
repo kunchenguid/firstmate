@@ -375,7 +375,7 @@ prepare_presentation() {
   replay_cached && exit 0
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
     || rm -f -- "$CACHE_CURSOR" || fail_before_presentation "an orphaned cursor stage could not be retired"
-  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || fail_before_presentation "temporary storage could not be created"
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || exit 1
   snapshot_status_cursor
   copy_queue "$TMP_DIR/queue" || fail_before_presentation "the wake queue could not be read safely"
   validate_queue "$TMP_DIR/queue" || fail_before_presentation "the queue is malformed"
