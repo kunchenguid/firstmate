@@ -190,9 +190,12 @@
 # byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
 # --provider flag. This script does not inspect where a caller obtained that
 # value and claims nothing about it; it reads no omp default and writes no
-# configuration. An absent, unqualified, or malformed value refuses the spawn
-# before the watcher guard and before any lock, endpoint, worktree, state,
-# config, registry, metadata, or extension mutation.
+# configuration. On a fresh spawn, an absent, unqualified, or malformed value
+# refuses before the watcher guard and before any lock, endpoint, worktree,
+# state, config, registry, metadata, or extension mutation. On a relaunch, the
+# task lifecycle and metadata locks first bind one stable record; the same gate
+# refuses before watcher, endpoint, worktree, task-state, config, registry,
+# metadata, or extension mutation.
 # omp is Orca-only: the backend is resolved read-only before any mutation and
 # retained so the refusal and endpoint creation cannot drift. Any other backend
 # refuses at that same early gate.
@@ -202,6 +205,11 @@
 # regular-file metadata snapshot, and applies omp's model and backend gates plus
 # final endpoint validation before watcher, endpoint, worktree, task-state, or
 # config mutation.
+# If an Orca allocation cannot be released during aborted spawn cleanup, this
+# script atomically publishes a cleanup-only recovery record. A known worktree
+# path omits terminal= and sets orca_allocation=worktree-only; an ID-only Orca
+# response records worktree= empty, omits terminal=, and sets
+# orca_allocation=worktree-id-only. Only teardown cleanup accepts either shape.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -647,8 +655,8 @@ fi
 # it happens here rather than after the per-task lock: the harness this invocation
 # would actually launch has to be known before the watcher guard runs and before
 # anything is created. A --relaunch still adopts every identity axis from the
-# task's own durable record under the task's locks; the read-only preflight
-# above only lets omp's model and backend gates precede those locks.
+# task's own durable record under the task's locks; those locks bind the
+# preflight snapshot before omp's model and backend gates run.
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -738,9 +746,9 @@ spawn_selection_is_omp() {
     '') : ;;
     *) return 1 ;;
   esac
-  # A relaunch with no explicit harness adopts the recorded harness. A bounded
-  # read-only preflight lets omp's model/backend gates still precede every lock;
-  # the normal locked endpoint validation below remains authoritative.
+  # A relaunch with no explicit harness adopts the recorded harness. The task's
+  # lifecycle and metadata locks bind this preflight snapshot before omp's
+  # model/backend gates; normal locked endpoint validation remains authoritative.
   if [ "$RELAUNCH" -eq 1 ]; then
     configured=$(relaunch_preflight_meta_get harness)
     [ "$configured" = omp ]
@@ -756,11 +764,12 @@ spawn_selection_is_omp() {
   [ "$configured" = omp ]
 }
 
-# Every omp refusal for a fresh spawn lands here: before the watcher guard, before
-# the batch re-exec, before the per-task spawn lock, and before every endpoint,
-# worktree, state, configuration, registry, metadata, and extension mutation. It
-# recognizes explicit, positional, configured, batch, and raw selections so every
-# disallowed spelling is stopped at the same pre-mutation boundary.
+# Every omp refusal for a fresh spawn lands here before the watcher guard, batch
+# re-exec, per-task spawn lock, or mutation. A relaunch reaches the same gate only
+# after its lifecycle and metadata locks bind the stable snapshot, and still
+# before watcher, endpoint, worktree, task-state, configuration, registry,
+# metadata, or extension mutation. The gate recognizes explicit, positional,
+# configured, batch, and raw selections.
 if spawn_selection_is_omp; then
   # A secondmate selection is refused first and unconditionally - its model is
   # never even consulted, because the refusal is on adapter identity alone.
