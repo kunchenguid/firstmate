@@ -420,6 +420,8 @@ test_post_presentation_failure_preserves_human_ack() {
     "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err"; then
     fail "an oversized status set produced a packet"
   fi
+  grep -Fx 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.' "$home/out" >/dev/null \
+    || fail "post-presentation fallback did not expose the common result"
   grep -F 'Handle the durable human presentation below' "$home/out" >/dev/null || fail "post-presentation fallback was ambiguous"
   grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "post-presentation fallback lost its acknowledgement"
   [ -e "$home/drain.calls" ] || fail "post-presentation fallback did not preserve the first presentation"

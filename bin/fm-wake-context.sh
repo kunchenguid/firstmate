@@ -279,7 +279,12 @@ bounds_json() {
 }
 
 emit_fallback() { # <stdout> <stderr>
+  [ -n "$(extract_ack "$2")" ] || {
+    printf 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: wake drain did not complete; run bin/fm-wake-drain.sh once.\n'
+    return 1
+  }
   publish_fallback_receipt "$2" || true
+  printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
   printf 'Wake context packet could not be built after the durable presentation.\n'
   printf 'Handle the durable human presentation below and use its exact acknowledgement command.\n\n'
   cat "$1"

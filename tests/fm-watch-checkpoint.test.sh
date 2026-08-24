@@ -94,8 +94,14 @@ install_context_failure_checkpoint() { # <repo>
 #!/usr/bin/env bash
 printf 'signal: context fallback fixture\n'
 SH
-  cat > "$1/bin/fm-wake-context.sh" <<'SH'
+cat > "$1/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
+  printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
+  printf 'durable Codex presentation\n'
+  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
+  exit 1
+fi
 printf 'codex context failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
 exit 1
 SH
@@ -115,8 +121,23 @@ test_context_failure_surfaces_codex_fallback() {
   pass "checkpoint surfaces context stderr and canonical fallback"
 }
 
+test_context_failure_relays_post_presentation_result() {
+  local home repo out err status
+  home=$(make_home context-presented); repo="$home/repo"
+  install_context_failure_checkpoint "$repo"
+  out="$home/out.txt"; err="$home/err.txt"; status=0
+  FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION=1 FM_HOME="$home" \
+    "$repo/bin/fm-watch-checkpoint.sh" --seconds 2 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "Codex actionable checkpoint must preserve post-presentation context failure"
+  assert_contains "$(cat "$out")" "WAKE_CONTEXT_PRESENTED:" "Codex dropped the common post-presentation result"
+  assert_contains "$(cat "$out")" "--ack-through 7 --recovery-generation fixture-7" "Codex dropped the durable acknowledgement"
+  assert_not_contains "$(cat "$out")" "WAKE_CONTEXT_FALLBACK:" "Codex requested a second drain after durable presentation"
+  pass "checkpoint relays post-presentation result without re-drain"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
 test_context_failure_surfaces_codex_fallback
+test_context_failure_relays_post_presentation_result

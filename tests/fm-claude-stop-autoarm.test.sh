@@ -40,6 +40,12 @@ if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
   printf 'context fixture failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
   exit 1
 fi
+if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
+  printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
+  printf 'durable Claude presentation\n'
+  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
+  exit 1
+fi
 printf 'CLAUDE_CONTEXT_PACKET\n'
 SH
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
@@ -368,6 +374,19 @@ test_actionable_close_surfaces_context_fallback() {
   assert_contains "$out" "WAKE_CONTEXT_FALLBACK:" "Claude omitted the canonical context fallback"
   [ "$(printf '%s\n' "$out" | grep -c 'WAKE_CONTEXT_FALLBACK:')" -eq 1 ] || fail "Claude duplicated the canonical fallback: $out"
   pass "auto-arm: Claude delivers context stderr and canonical fallback"
+}
+
+test_actionable_close_relays_post_presentation_result() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-context-presented")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "post-presentation context failure must preserve Claude's actionable rewake"
+  assert_contains "$out" "WAKE_CONTEXT_PRESENTED:" "Claude dropped the common post-presentation result"
+  assert_contains "$out" "--ack-through 7 --recovery-generation fixture-7" "Claude dropped the durable acknowledgement"
+  assert_not_contains "$out" "WAKE_CONTEXT_FALLBACK:" "Claude requested a second drain after durable presentation"
+  pass "auto-arm: Claude relays post-presentation result without re-drain"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -819,6 +838,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_surfaces_context_fallback
+test_actionable_close_relays_post_presentation_result
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

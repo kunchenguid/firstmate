@@ -201,10 +201,7 @@ function wakeContextPresentation(): string {
   });
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return fallback;
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
-  if (result.status === 0 && output) return output;
-  if (output.includes("WAKE_CONTEXT_FALLBACK:")) return output;
-  if (/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain\.sh --ack-through [0-9]+ --recovery-generation [A-Za-z0-9._-]+$/m.test(output)) return output;
-  return output ? `${output}\n${fallback}` : fallback;
+  return output || fallback;
 }
 
 function createGeneration(): SessionGeneration {

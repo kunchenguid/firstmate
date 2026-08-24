@@ -91,12 +91,8 @@ if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; the
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   set +e
   CONTEXT_OUT=$("$SCRIPT_DIR/fm-wake-context.sh" --present 2>&1)
-  CONTEXT_RC=$?
   set -e
   [ -z "$CONTEXT_OUT" ] || printf '%s\n' "$CONTEXT_OUT"
-  if [ "$CONTEXT_RC" -ne 0 ] && ! printf '%s\n' "$CONTEXT_OUT" | grep -F 'WAKE_CONTEXT_FALLBACK:' >/dev/null; then
-    printf 'WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
-  fi
   exit 0
 fi
 

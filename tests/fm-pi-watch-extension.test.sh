@@ -344,6 +344,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   cat > "$repo/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
 sleep 6
+printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
 printf 'Wake context packet could not be built after the durable presentation.\n'
 printf 'Handle the durable human presentation below and use its exact acknowledgement command.\n\ndrained\n'
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
@@ -410,6 +411,9 @@ const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 const armRows = rows.filter((row) => row.startsWith("arm="));
 if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
 if (!deliveryStarted) throw new Error("wake delivery did not begin");
+if (!deliveredPrompt.includes("WAKE_CONTEXT_PRESENTED: durable presentation complete")) {
+  throw new Error(`Pi omitted the common post-presentation result: ${deliveredPrompt}`);
+}
 if (!deliveredPrompt.includes("Wake context packet could not be built after the durable presentation.")) {
   throw new Error(`Pi omitted wake-context fallback: ${deliveredPrompt}`);
 }
