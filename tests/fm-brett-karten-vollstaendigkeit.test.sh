@@ -121,12 +121,14 @@ case $out in
 esac
 case $out in *fehlt*) fail "the matched card was reported as missing: $out" ;; esac
 
-# A gap and an orphan land together on the one line.
-rm -f "$H3/data/brett-karten/lebendiger-posten.md"
-out=$(run_check "$H3")
+# A gap and an orphan land together on the one line of a first sweep.
+H3B=$(make_home h3b)
+write_hold "$H3B" kombiniert-gap captain ' ' "$PAST"
+write_card "$H3B" kombiniert-waise
+out=$(run_check "$H3B")
 case $out in
-  *"1 fehlt(lebendiger-posten@haupt)"*"1 waise(verwaiste-alte-karte)"*|\
-    *"1 waise(verwaiste-alte-karte)"*"1 fehlt(lebendiger-posten@haupt)"*)
+  *"1 fehlt(kombiniert-gap@haupt)"*"1 waise(kombiniert-waise)"*|\
+    *"1 waise(kombiniert-waise)"*"1 fehlt(kombiniert-gap@haupt)"*)
     pass "ok - gap and orphan reported together" ;;
   *) fail "expected combined fehlt and waise, got: $out" ;;
 esac
@@ -191,17 +193,14 @@ out=$(run_check "$HF")
 case $out in *zukunftsfrist-posten*) fail "a future-dated hold demanded a card: $out" ;; esac
 pass "ok - due dates demand cards, future dates stay out"
 
-# Undated open captain holds are register findings, never card demands.
+# Undated open captain holds are register findings, never card demands -
+# per home, on one line of the first sweep.
 HG=$(make_home hg)
-write_hold "$HG" fristlos-bekannter-posten
-
-out=$(run_check "$HG")
-[ "$out" = "brett-karten 1 geparkt-ohne-frist(fristlos-bekannter-posten@haupt);" ] \
-  || fail "expected a geparkt-ohne-frist register finding, got: $out"
-
 O6B=$(make_home o6b)
+write_hold "$HG" fristlos-bekannter-posten
 write_hold "$O6B" fristloser-offiziers-posten
 register_officer "$HG" sm-test "$O6B"
+
 out=$(run_check "$HG")
 [ "$out" = "brett-karten 2 geparkt-ohne-frist(fristlos-bekannter-posten@haupt,fristloser-offiziers-posten@sm-test);" ] \
   || fail "expected both homes' geparkt-ohne-frist findings, got: $out"
@@ -331,6 +330,48 @@ else
   chmod 755 "$H10/data/brett-karten"
 fi
 
+# --- L41 memory: once reported stays silent until its state changes --------------
+
+HM=$(make_home hm)
+write_hold "$HM" datierter-gap captain ' ' "$PAST"
+write_hold "$HM" fristloser-gap
+write_card "$HM" waisen-karte-alt
+
+out=$(run_check "$HM")
+[ "$out" = "brett-karten 1 fehlt(datierter-gap@haupt); 1 geparkt-ohne-frist(fristloser-gap@haupt); 1 waise(waisen-karte-alt);" ] \
+  || fail "first sweep did not report everything once, got: $out"
+pass "ok - first sweep reports the full supply once"
+
+out=$(run_check "$HM")
+[ -z "$out" ] || fail "an unchanged supply fired again (L41): $out"
+pass "ok - an unchanged supply stays silent on the next cycle"
+
+# Only NEWS is reported: one gap resolved, a new one appears.
+write_card "$HM" datierter-gap
+write_hold "$HM" fristlos-neu
+out=$(run_check "$HM")
+[ "$out" = "brett-karten 1 geparkt-ohne-frist(fristlos-neu@haupt);" ] \
+  || fail "expected only the new finding, got: $out"
+pass "ok - only new findings are reported"
+
+# A finding that vanished for a completed sweep fires again when it returns.
+sed -i '/- \[ \] fristloser-gap /d' "$HM/data/backlog.md"
+out=$(run_check "$HM")
+[ -z "$out" ] || fail "the removal sweep was not silent: $out"
+write_hold "$HM" fristloser-gap
+out=$(run_check "$HM")
+case $out in
+  *"1 geparkt-ohne-frist(fristloser-gap@haupt)"*) pass "ok - a returned finding fires again" ;;
+  *) fail "the returning finding stayed silent: $out" ;;
+esac
+
+# Deleting the memory makes the next sweep report everything current once.
+rm "$HM/state/brett-karten-vollstaendigkeit.gedaechtnis"
+out=$(run_check "$HM")
+[ "$out" = "brett-karten 2 geparkt-ohne-frist(fristlos-neu@haupt,fristloser-gap@haupt); 1 waise(waisen-karte-alt);" ] \
+  || fail "memory deletion did not restore the full report: $out"
+pass "ok - full report after memory deletion"
+
 # --- arm, disarm, shim bytes, selftest ------------------------------------------
 
 H11=$(make_home h11)
@@ -410,6 +451,17 @@ out=$(FM_HOME="$H11" "$CHECK" disarm)
 [ "$out" = "disarmed: state/brett-karten-vollstaendigkeit.check.sh" ] \
   || fail "unexpected disarm output: $out"
 [ ! -e "$SHIM" ] && [ ! -e "$TRUST" ] || fail "disarm left check artifacts behind"
+
+# Arm and disarm both reset the L41 memory so a freshly armed watch speaks
+# fully once.
+printf 'fehlt\talt-gedaechtnis\n' > "$H11/state/brett-karten-vollstaendigkeit.gedaechtnis"
+FM_HOME="$H11" "$CHECK" arm >/dev/null || fail "re-arm for the memory reset failed"
+[ ! -e "$H11/state/brett-karten-vollstaendigkeit.gedaechtnis" ] \
+  || fail "arm kept the stale memory instead of resetting it"
+FM_HOME="$H11" "$CHECK" disarm >/dev/null
+[ ! -e "$H11/state/brett-karten-vollstaendigkeit.gedaechtnis" ] \
+  || fail "disarm left a memory file behind"
+pass "ok - arm and disarm reset the watch's memory"
 
 # --- help surface ----------------------------------------------------------------
 

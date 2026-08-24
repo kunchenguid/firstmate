@@ -9,8 +9,9 @@
 #
 # The check REPORTS ONLY. It never creates, moves, or deletes cards - card
 # writing needs firstmate judgment with full context - and it never touches
-# any home's backlog. One printed line reports every gap loudly; silence
-# means the supply matched:
+# any home's backlog. One printed line carries what is NEW since the last
+# completed sweep (L41 memory below); a first sweep reports everything, and
+# silence means nothing new is wrong and no state has changed:
 #   fehlt(N:id@heim,...)  a captain-held task whose hold-until date has come
 #                         due (today or earlier) and whose card is missing
 #   geparkt-ohne-frist(N:id@heim,...)
@@ -32,6 +33,19 @@
 # hold-until value is its own FEHLER. The clock comes from `date`; tests pin
 # it through FM_BRETT_KARTEN_TODAY (YYYY-MM-DD), which fails loudly when it
 # is not a date.
+#
+# Memory (rule L41): the guard keeps its own private marker file
+# state/brett-karten-vollstaendigkeit.gedaechtnis holding the finding tokens
+# of the last COMPLETED sweep. Every sweep reports only the delta against
+# that memory - a once-reported id stays silent until its state changes, and
+# a vanished-and-returning finding fires again. Memory never suppresses
+# towards less truth: an unreadable memory degrades to a full report, and a
+# memory that cannot be written turns the sweep loud with a
+# gedaechtnis-unbeschreibbar FEHLER instead of pretending silence. The file
+# is safe to delete; the next sweep then reports everything once. arm and
+# disarm both reset it, so a freshly armed watch speaks fully once. This
+# marker is the only thing the guard ever writes - cards and backlogs stay
+# untouched.
 #
 # Commands:
 #   fm-brett-karten-vollstaendigkeit.sh check     compare and report (default)
@@ -83,6 +97,7 @@ BACKLOG="$FM_HOME/data/backlog.md"
 CHECK_ID=brett-karten-vollstaendigkeit
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
+GEDAECHTNIS="$STATE/$CHECK_ID.gedaechtnis"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 MAX_LIST=5
 
@@ -115,7 +130,12 @@ die_usage() {
 }
 
 # --- findings ----------------------------------------------------------------
-# Counters plus capped id lists keep the printed line bounded.
+# Raw tokens are collected first as newline-terminated strings, compared
+# against the guard's memory, and only the delta since the last completed
+# sweep is rendered into the printed line. Counters plus capped id lists keep
+# that line bounded.
+
+CUR_FEHLT= CUR_GEFR= CUR_WAISE= CUR_WEG= CUR_FEHLER=
 
 N_FEHLT=0 L_FEHLT=
 N_GEFR=0 L_GEFR=
@@ -173,6 +193,53 @@ summary_line() {
   return 0
 }
 
+# --- the L41 memory -------------------------------------------------------------
+# state/brett-karten-vollstaendigkeit.gedaechtnis holds the sorted
+# "<klasse><TAB><token>" lines of the last completed sweep. Every failure of
+# this memory degrades towards MORE reporting, never less.
+
+emit_tokens() {  # collected tokens as sorted "klasse<TAB>token" lines
+  {
+    [ -n "$CUR_FEHLT" ] && printf '%s' "$CUR_FEHLT" | sed 's/^/fehlt\t/'
+    [ -n "$CUR_GEFR" ] && printf '%s' "$CUR_GEFR" | sed 's/^/geparkt-ohne-frist\t/'
+    [ -n "$CUR_WAISE" ] && printf '%s' "$CUR_WAISE" | sed 's/^/waise\t/'
+    [ -n "$CUR_WEG" ] && printf '%s' "$CUR_WEG" | sed 's/^/karte-ohne-antwortweg\t/'
+    [ -n "$CUR_FEHLER" ] && printf '%s' "$CUR_FEHLER" | sed 's/^/fehler\t/'
+    true
+  } | LC_ALL=C sort -u
+}
+
+render_findings() {  # "<klasse><TAB>token" lines on stdin -> the printed line
+  local klasse tok
+  while IFS=$'\t' read -r klasse tok; do
+    [ -n "$tok" ] || continue
+    case $klasse in
+      fehlt) list_add L_FEHLT N_FEHLT "$tok" ;;
+      geparkt-ohne-frist) list_add L_GEFR N_GEFR "$tok" ;;
+      waise) list_add L_WAISE N_WAISE "$tok" ;;
+      karte-ohne-antwortweg) list_add L_WEG N_WEG "$tok" ;;
+      fehler) fehler_add "$tok" ;;
+    esac
+  done
+  summary_line
+}
+
+write_memory() {  # <sorted-current-file> -> nonzero leaves the old memory be
+  local tmp
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-brett-karten-ged.XXXXXX") || return 1
+  if ! cat "$1" > "$tmp" || ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if cmp -s "$tmp" "$GEDAECHTNIS"; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  mv -f -- "$tmp" "$GEDAECHTNIS" || { rm -f -- "$tmp"; return 1; }
+  return 0
+}
+
 # --- source readers -----------------------------------------------------------
 
 captain_rows() {  # <backlog> -> "id<TAB>until" per open captain row; until is
@@ -223,21 +290,21 @@ scan_home() {  # <label> <backlog> : classify one home's open captain holds
     until=${line#*$'\t'}
     OPEN_ALL[$id]=1
     if [ "$until" = "?" ]; then
-      fehler_add "hold-until-unlesbar-$id"
+      CUR_FEHLER+="hold-until-unlesbar-$id"$'\n'
       continue
     fi
     if [ -n "$until" ]; then
       tep=$(date -d "$until" +%s 2>/dev/null) || {
-        fehler_add "hold-until-unlesbar-$id"
+        CUR_FEHLER+="hold-until-unlesbar-$id"$'\n'
         continue
       }
       [ "$tep" -gt "$TODAY_EPOCH" ] && continue
     fi
     if [ "$KARTEN_OK" = 1 ] && [ ! -f "$KARTEN/$id.md" ]; then
       if [ -n "$until" ]; then
-        list_add L_FEHLT N_FEHLT "$id@$label"
+        CUR_FEHLT+="$id@$label"$'\n'
       else
-        list_add L_GEFR N_GEFR "$id@$label"
+        CUR_GEFR+="$id@$label"$'\n'
       fi
     fi
   done < <(captain_rows "$backlog")
@@ -247,7 +314,7 @@ officers_scan() {  # walk data/secondmates.md like fm-brett-antworten.sh
   local line name home backlog
   [ -f "$SECONDMATES" ] || return 0
   if [ ! -r "$SECONDMATES" ]; then
-    fehler_add secondmates-unlesbar
+    CUR_FEHLER+="secondmates-unlesbar"$'\n'
     return 0
   fi
   while IFS= read -r line; do
@@ -257,26 +324,26 @@ officers_scan() {  # walk data/secondmates.md like fm-brett-antworten.sh
     esac
     case $line in
       *" - "*) ;;
-      *) fehler_add secondmates-ungueltig; continue ;;
+      *) CUR_FEHLER+="secondmates-ungueltig"$'\n'; continue ;;
     esac
     name=${line%% - *}
     name=${name#- }
     case $name in
-      '' | *[!A-Za-z0-9_-]*) fehler_add secondmates-ungueltig; continue ;;
+      '' | *[!A-Za-z0-9_-]*) CUR_FEHLER+="secondmates-ungueltig"$'\n'; continue ;;
     esac
     home=${line#*"(home: "}
     home=${home%%;*}
     case $home in
       /*) ;;
-      *) fehler_add "secondmates-ungueltig-$name"; continue ;;
+      *) CUR_FEHLER+="secondmates-ungueltig-$name"$'\n'; continue ;;
     esac
     if [ ! -d "$home" ]; then
-      fehler_add "heim-fehlt-$name"
+      CUR_FEHLER+="heim-fehlt-$name"$'\n'
       continue
     fi
     backlog=$home/data/backlog.md
     if [ ! -r "$backlog" ]; then
-      fehler_add "backlog-unlesbar-$name"
+      CUR_FEHLER+="backlog-unlesbar-$name"$'\n'
       continue
     fi
     scan_home "$name" "$backlog"
@@ -290,18 +357,18 @@ declare -A OPEN_ALL=()
 KARTEN_OK=1
 
 action_check() {
-  local f stem
+  local f stem tmpnew tmpold delta
 
   if [ -e "$KARTEN" ] && [ ! -d "$KARTEN" ]; then
-    fehler_add karten-kein-ordner
+    CUR_FEHLER+="karten-kein-ordner"$'\n'
     KARTEN_OK=0
   elif [ -d "$KARTEN" ] && [ ! -r "$KARTEN" ]; then
-    fehler_add karten-unlesbar
+    CUR_FEHLER+="karten-unlesbar"$'\n'
     KARTEN_OK=0
   fi
 
   if [ ! -r "$BACKLOG" ]; then
-    fehler_add backlog-unlesbar-haupt
+    CUR_FEHLER+="backlog-unlesbar-haupt"$'\n'
   else
     scan_home haupt "$BACKLOG"
   fi
@@ -312,14 +379,38 @@ action_check() {
       [ -f "$f" ] || continue
       stem=$(basename "$f")
       stem=${stem%.md}
-      [ -n "${OPEN_ALL[$stem]:-}" ] || list_add L_WAISE N_WAISE "$stem"
+      [ -n "${OPEN_ALL[$stem]:-}" ] || CUR_WAISE+="$stem"$'\n'
       if ! card_has_antwortweg "$f"; then
-        list_add L_WEG N_WEG "$stem"
+        CUR_WEG+="$stem"$'\n'
       fi
     done
   fi
 
-  summary_line
+  # L41 memory: only the delta since the last completed sweep is printed; a
+  # broken memory degrades to the full loud report, never to silence.
+  tmpnew=$(mktemp "${TMPDIR:-/tmp}/fm-bkk-cur.XXXXXX") || tmpnew=
+  tmpold=$(mktemp "${TMPDIR:-/tmp}/fm-bkk-old.XXXXXX") || tmpold=
+  if [ -z "$tmpnew" ] || [ -z "$tmpold" ]; then
+    [ -z "$tmpnew" ] || rm -f -- "$tmpnew"
+    [ -z "$tmpold" ] || rm -f -- "$tmpold"
+    fehler_add gedaechtnis-unbeschreibbar
+    emit_tokens | render_findings
+    return 0
+  fi
+  emit_tokens > "$tmpnew"
+  : > "$tmpold"
+  if [ -f "$GEDAECHTNIS" ] && [ -r "$GEDAECHTNIS" ]; then
+    cat "$GEDAECHTNIS" > "$tmpold"
+  fi
+  delta=$(LC_ALL=C comm -13 "$tmpold" "$tmpnew")
+  if write_memory "$tmpnew"; then
+    [ -n "$delta" ] && printf '%s\n' "$delta" | render_findings
+    [ -n "$delta" ] || summary_line
+  else
+    fehler_add gedaechtnis-unbeschreibbar
+    render_findings < "$tmpnew"
+  fi
+  rm -f -- "$tmpnew" "$tmpold"
   return 0
 }
 
@@ -440,12 +531,13 @@ action_arm() {
   trap - HUP INT TERM
   [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
   ARM_BACKUP=
+  rm -f -- "$GEDAECHTNIS"
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
 
 action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST"
+  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$GEDAECHTNIS"
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
