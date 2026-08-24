@@ -52,15 +52,15 @@ Do not manually patch metadata to make an externally-created Orca terminal look 
 ## Supervision
 
 Use `bin/fm-peek.sh`, `bin/fm-send.sh`, `bin/fm-crew-state.sh`, and `bin/fm-teardown.sh` for routine operation.
-For steer messages, send short lines through `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works.
-Put long instructions in the task brief or a temporary file and point the crewmate at that file.
+For steer messages, use `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works, and ordinary local text steers may contain newlines because they ride the durable inbox.
+Keep initial scope in the task brief; a temporary file remains useful when the instruction includes supporting material the worker should inspect separately.
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
 The stable firstmate alias is `fm-<id>`.
 The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
 
-If `fm-send` fails to submit, do not immediately repeat the same long instruction.
-Peek first, then decide whether the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
+If an ordinary steer fails to enqueue, or a typed-plane `fm-send` fails to submit, do not immediately repeat the instruction.
+Read the reported failure and peek first, then decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
 For harness-specific interrupts or exits, load `harness-adapters`.
 
 ## Recovery
@@ -75,7 +75,7 @@ For a messy Orca-backed task:
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.
 
 Teardown remains governed by the normal firstmate landing rules.
-Scout work can be torn down after the report exists and the `decision-hold-lifecycle` completion gate passes.
+Scout work can be torn down after the report exists and the `captain-hold-lifecycle` completion gate passes.
 Ship work can be torn down only after the work is landed by its project mode.
 
 ## Smoke Test

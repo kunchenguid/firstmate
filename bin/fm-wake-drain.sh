@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
-# informational status lines and OPEN DECISIONS, then assert liveness.
+# informational status lines, OPEN DECISIONS, and captain-call record
+# divergence, then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -14,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -174,6 +177,66 @@ EOF
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
 }
 
+# Print the RECORD DIVERGENCE section: every captain call whose two records
+# contradict each other - the status log says a key was resolved outright while
+# the task held for the captain is still open. Nothing here closes anything; the
+# section exists because posting the resolution alone reads as complete on the
+# status side, so the durable record can keep saying the captain owes an answer
+# with no warning at all. bin/fm-captain-hold.sh's `diverged` owns which pairs
+# count and why; this prints what it reports.
+#
+# Bounded and silent like OPEN DECISIONS above: nothing prints when the two
+# records agree, which is the common case. If tasks-axi is unavailable, the
+# guard cannot read the structured record and stays silent. A guard failure
+# never changes the drain's exit status - a supervision turn must still present
+# its wakes when the backlog tool is having a bad day.
+print_record_divergence_section() {
+  local diverged task origin key title line shown=0 omitted=0 bound
+  local output='' used=0 bytes item_bytes=220 global_bytes=2000
+
+  # A non-positive bound is not a bound (bin/fm-timeout-lib.sh), so a bad
+  # override falls back to the default rather than disabling the deadline.
+  bound=${FM_DIVERGENCE_TIMEOUT:-20}
+  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
+
+  # Bounded, because this runs at the top of every supervision turn: a backlog
+  # tool having a bad day must cost the drain a few seconds at worst, never the
+  # presentation of the wakes it exists to deliver.
+  diverged=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-captain-hold.sh" diverged 2>/dev/null) || return 0
+  [ -n "$diverged" ] || return 0
+
+  while IFS=$(printf '\t') read -r task origin key title; do
+    [ -n "$task" ] || continue
+    line="$task [key=$key] reads resolved in $origin's status log but is still held for the captain"
+    [ -z "$title" ] || line="$line: $title"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    output="$output$line
+"
+    used=$((used + bytes))
+    shown=$((shown + 1))
+  done <<EOF
+$diverged
+EOF
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'RECORD DIVERGENCE (answered in the status log, still held in the backlog - nothing was closed automatically):\n' || return 1
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'RECORD DIVERGENCE: %d more omitted (byte cap)\n' "$omitted" || return 1
+  fi
+  # Both directions, deliberately. The status resolution is not proof the
+  # captain ruled: a call can dissolve, or turn out to have been a question of
+  # fact. Reconcile with what actually happened - never by closing on the
+  # strength of this line.
+  printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -181,6 +244,7 @@ print_status_sections() {
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
+  print_record_divergence_section || return 1
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
@@ -234,6 +298,10 @@ if [ -n "$ACK_THROUGH" ]; then
   awk -F '\t' -v cutoff="$ACK_THROUGH" '
     NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
   ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+  fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" || {
+    echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
+    exit 1
+  }
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
@@ -271,7 +339,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in
-    pending:downtime:*)
+    pending:downtime:*|announced:downtime:*)
       fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
         echo "wake drain: decision recovery could not begin handling safely" >&2
         exit 1
@@ -279,7 +347,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
       RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
       RECOVERY_ACK_REQUIRED=true
       ;;
-    pending:handling:*) RECOVERY_ACK_REQUIRED=true ;;
+    pending:handling:*|announced:handling:*) RECOVERY_ACK_REQUIRED=true ;;
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
@@ -327,7 +395,7 @@ fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 case "$RECOVERY_MARKER_TOKEN" in
-  pending:*|acked:*) ;;
+  pending:*|announced:*|acked:*) ;;
   *) echo "wake drain: durable wakes have no recovery generation" >&2; exit 1 ;;
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"

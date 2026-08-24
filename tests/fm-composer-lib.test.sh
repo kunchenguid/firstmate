@@ -291,11 +291,12 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
-  # idle/done/blocked pi identity proves the composer (herdr's rule, now
+  # idle/done pi identity proves the composer (herdr's rule, now
   # fleet-wide; tmux supplies identity from its foreground-process probe).
-  local screen typed pi_idle pi_working none
+  local screen typed pi_idle pi_working pi_blocked none
   screen=$'transcript\n────────────────────────\n\n────────────────────────\n footer'
   pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  pi_blocked=$(printf 'pi\tblocked')
   assert_screen "pi idle with identity" empty "$CAPS_STYLED" "$screen" '' "$pi_idle"
   assert_screen "pi idle on tmux with identity" empty "$CAPS_TMUX" "$screen" 2 "$pi_idle"
   assert_screen "pi idle on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
@@ -306,6 +307,10 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "pi pair without identity capability" unknown "$CAPS_PLAIN" "$screen"
   # A working pi cannot authorize injection into the blank region.
   assert_screen "working pi defers" unknown "$CAPS_STYLED" "$screen" '' "$pi_working"
+  # A pi parked on an interactive prompt reports `blocked`: it is waiting on a
+  # human keystroke, so the blank region is a menu's, not a free composer's.
+  # Typing there answers the prompt and the text is discarded (issue #2797).
+  assert_screen "blocked pi defers" unknown "$CAPS_STYLED" "$screen" '' "$pi_blocked"
   # The audit's live counterexample: a plain shell running sleep, cursor
   # parked on a blank line between two rules, NO pi process. The permissive
   # rule read this `empty`; identity+structure refuses it.
@@ -628,3 +633,34 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+
+test_queued_enter_verdict_busy_pending_is_empty() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending busy)
+  [ "$out" = empty ] || fail "busy + proven pending must be queued delivery (empty), got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)"
+}
+
+test_queued_enter_verdict_idle_pending_stays_pending() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending idle)
+  [ "$out" = pending ] || fail "idle + proven pending must stay a genuine swallow, got '$out'"
+  out=$(fm_composer_queued_enter_verdict pending unknown)
+  [ "$out" = pending ] || fail "unknown busy is not proof of a queue, got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + idle/unknown stays pending"
+}
+
+test_queued_enter_verdict_does_not_convert_other_states() {
+  local state out
+  for state in empty pending-unproven unknown send-failed future-state; do
+    out=$(fm_composer_queued_enter_verdict "$state" busy)
+    [ "$out" = "$state" ] || fail "busy must not convert '$state', got '$out'"
+    out=$(fm_composer_queued_enter_verdict "$state" idle)
+    [ "$out" = "$state" ] || fail "idle must not convert '$state', got '$out'"
+  done
+  pass "fm_composer_queued_enter_verdict: only proven pending is converted"
+}
+
+test_queued_enter_verdict_busy_pending_is_empty
+test_queued_enter_verdict_idle_pending_stays_pending
+test_queued_enter_verdict_does_not_convert_other_states

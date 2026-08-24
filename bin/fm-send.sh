@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Send one line of literal text to a crewmate endpoint, then Enter.
+# Steer a task by durable record: write the message into the task's steering
+# inbox and ring a constant doorbell line into its terminal, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
@@ -10,82 +11,154 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
-# Exit status contract: 0 = submit confirmed (or, for a remote secondmate
-# target, delivered with confirmation pending - see the remote paragraph);
-# 3 = the text was typed into the live endpoint and Enter was sent, but the
-# submit read-back stayed unconfirmed (verify the pane before any resend, and
-# never re-type blindly); any other nonzero = the send failed and nothing may
-# be assumed delivered.
-# Submission dispatches through the target's recorded backend; the tmux adapter
-# shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
-# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
-# Slash commands, and codex `$...` skill invocations resolved through harness
-# meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
+# Two data planes:
+#
+# INBOX - the default for text to a task recorded in this home, local and
+# remote alike. The message is appended as a durable sequenced record under
+# the task's steering inbox (newlines are legal) - state/<id>.inbox/ for a
+# local task, or the remote home's host-local inbox reached through fm-on.sh
+# for a remote secondmate - and the terminal receives only one short constant
+# self-describing doorbell line plus Enter, best-effort. The durable record IS
+# the delivery, so the record's fate alone governs the exit: 0 = the steer is
+# durably sent (recorded); nonzero = nothing was confirmed delivered and a
+# resend is appropriate (unresolvable target, an endpoint that cannot be
+# locked and revalidated or that retired or changed, an unwritable record, a
+# failed or lost remote transport) or a decision-close append failed after
+# delivery (the error then carries the exact manual close). The remote enqueue
+# is idempotent: the remote leg deduplicates an exact re-run of the same
+# request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
+# transport (ssh exit 255, completion unknown) fm-send retries the same leg
+# once itself. A later re-run is idempotent only through the printed
+# FM_PENDING_REPLY_EXISTING_CORR=<corr> command: it preserves the same
+# correlation, body, and record, while a plain re-run mints a new correlation
+# and delivers a separate record. A still-unconfirmed marked request keeps its
+# reply expectation preserved for the record that may have landed.
+# Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
+# nonzero: with the recovery marker stored the watcher reconciles it silently,
+# and with both the commit and the marker lost the send prints a distinct
+# "reply-tracking-degraded (steer delivered, do not resend)" warning instead,
+# because a resend-inviting status there would duplicate a delivered
+# instruction. There is no delivered-unconfirmed
+# outcome on this plane: "did the doorbell land" is no longer the question -
+# "was the message acted on" is, and that is answered asynchronously by the
+# worker's acknowledgement move into handled/, with the watcher re-ringing an
+# unacknowledged message and escalating a stuck one. bin/fm-task-inbox-lib.sh
+# owns the record format, the doorbell line, and the re-ring ladder. The
+# composer pre-check before the ring is ADVISORY only: when the composer
+# visibly holds pending text the ring is skipped with a notice and the watcher
+# re-rings later; no composer verdict is delivery proof on this plane, and a
+# failed ring never fails the send.
+#
+# TYPED - the LOCAL text that must reach the terminal itself: a harness-native
+# invocation (a leading "/", or a leading "$" to a codex target) must reach
+# the harness's own parser, and an explicit backend target names an endpoint,
+# not a task, so it stays typed even when local metadata happens to match it
+# (the same boundary that keeps it unmarked and outside --resolve-key). These
+# type the literal
+# text through the target backend's verified submit core: typed ONCE, then
+# Enter retried (never retyped) until the backend confirms a submit or reports
+# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
+# 3 = the text was typed into the live endpoint and
+# Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
+# before any resend, and never re-type blindly; a marked request's
+# pending-reply expectation stays armed because this outcome is not a proven
+# failure); any other nonzero = the send failed and nothing may be assumed
+# delivered. Submission dispatches through the target's recorded backend; the
+# tmux adapter shares its composer/submit core with the away-mode daemon via
+# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
+# (0.4). Slash commands, and codex `$...` skill invocations resolved through
+# harness meta, get a longer pre-Enter settle so completion popups do not
+# swallow Enter. A remote secondmate target has no typed text plane at all:
+# every remote text steer rides the inbox (a marked secondmate request already
+# reaches the harness as marker-prefixed chat rather than a parser command, so
+# routing a remote "/..." or "$..." through the record changes nothing the
+# parser would have seen); only --key still crosses to the remote pane as a
+# keystroke.
+#
+# Stage-1 compatibility boundary: classification uses the original pre-marker
+# text, but secondmate marking still precedes every typed submission. Therefore
+# a marked parser-native secondmate invocation intentionally reaches the harness
+# as marker-prefixed chat rather than executing as a parser command. This is a
+# pre-existing interaction retained for byte compatibility in this local-inbox
+# stage; do not move the marker behind the invocation or omit it here. Follow-up
+# fm-send-secondmate-harness-invocation-r1 owns that behavior.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
-# records kind=secondmate, the text uses the live-charter-compatible
+# records kind=secondmate, the message uses the live-charter-compatible
 # from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
 # routes its reply via its status file or a status-pointed doc instead of
-# stranding it in chat the main firstmate never reads. A crewmate/scout target,
+# stranding it in chat the main firstmate never reads. On the inbox plane the
+# marker travels verbatim inside the recorded body. A crewmate/scout target,
 # an explicit backend-target escape-hatch target, and the --key path are never
 # marked - their behavior is unchanged.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
-# success and reply success are separate facts: a successful submit never
-# resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
-# re-sending a recovery request for an already-open expectation so a second
-# record is not created. Direct unmarked captain input never creates one.
+# success and reply success are separate facts: delivery never resolves the
+# expectation. On the inbox plane the durable enqueue IS delivery to the task's
+# record, so the expectation is marked delivered at enqueue time; when that
+# bookkeeping commit fails after its durable recovery marker is stored, the
+# send remains successful and watcher reconciliation owns the repair, and when
+# the commit and marker are BOTH lost the send still remains successful with a
+# reply-tracking-degraded warning naming the expectation an operator must
+# inspect (it can no longer reconcile or escalate on its own). Only a
+# failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
+# it armed rather than dropping it, and only a proven send failure discards it.
+# Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
+# for an already-open expectation so a second record is not created. Direct
+# unmarked captain input never creates one.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
-# (bin/fm-remote-secondmate-control.sh cmd_send) that runs this same verified
-# submit against the recorded remote Herdr pane and relays its exit status
-# unchanged. A leg that delivered the text into the live verified pane but
-# could not synchronously confirm the submit (exit 3 - typically a busy mate
-# whose harness queues the steer and keeps rendering it) is reported here as
-# DELIVERED with confirmation pending: fm-send prints a non-error notice,
-# exits 0, marks the pending-reply expectation delivered, and closes any
-# --resolve-key decisions. Empirically that pattern is a delivered steer, a
-# resend duplicates the instruction, and the parent's pending-reply
-# recovery/escalation still surfaces the rare genuinely lost request. Transport
-# loss (ssh exit 255, completion unknown) and every real remote failure keep
-# failing loudly with the remote leg's own stderr attached.
+# (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
+# durable record into the remote home's steering inbox and rings the remote
+# doorbell, best-effort. The remote record is the delivery, exactly as it is
+# locally: leg exit 0 means durably recorded (fm-send then exits 0, marks the
+# pending-reply expectation delivered, and closes any --resolve-key
+# decisions), and any real remote failure fails loudly with the remote leg's
+# own stderr attached. Transport loss (ssh exit 255) means completion unknown,
+# so fm-send retries the identical leg once - safe because the remote write
+# deduplicates the same request onto the same record - and a still-lost
+# transport exits nonzero while preserving a marked request's reply
+# expectation, since the record may have landed. Its error prints the exact
+# FM_PENDING_REPLY_EXISTING_CORR=<id> resend command that preserves the body
+# and makes a later remote enqueue deduplicate onto that same record. The
+# remote host runs no re-ring ladder of
+# its own: a swallowed remote doorbell surfaces through the parent's
+# pending-reply recovery and escalation, whose recovery request re-rings the
+# remote doorbell when it is enqueued.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. After the submit is
-# confirmed, fm-send itself appends the closing
-# "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
-# so the captain-facing OPEN DECISIONS record closes at answer time and never
-# depends on the busy worker writing a matching resolved line. The close is a
-# LOCAL append for every target kind - crewmate, scout, local secondmate, and
-# remote secondmate alike - because the open-decision ledger fm-wake-drain
-# folds lives in this home's own state dir (a remote mate's escalations reach
-# it through the parent-replies ingest); only the answer message crosses the
-# backend or remote transport.
+# blocked: record in the target task's state/<id>.status. fm-send itself
+# appends the closing "resolved [key=<key>]: answered: <capped excerpt>" line
+# to that status file, so the captain-facing OPEN DECISIONS record closes at
+# answer time and never depends on the busy worker writing a matching resolved
+# line. On the inbox plane the close happens at ENQUEUE time, because enqueue
+# is durable delivery to the task's record; the worker reading the answer late
+# is covered by the acknowledgement re-ring ladder. On the typed plane it
+# still waits for the confirmed submit. The close is a LOCAL append for every
+# target kind - crewmate, scout, local secondmate, and remote secondmate alike
+# - because the open-decision ledger fm-wake-drain folds lives in this home's
+# own state dir (a remote mate's escalations reach it through the
+# parent-replies ingest); only the answer message crosses the backend or
+# remote transport.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
-# feeds bin/fm-decision-hold.sh's one keyed-answer intake for any key that names
-# a durable decision hold on the target task. fm-send maps nothing to a hold and
-# closes nothing itself; it hands the intake `<key>\t<answer>\t<label>` exactly
-# as every other channel does, and the intake owns what that means. This is what
-# lets an answer reach a decision that has already been transferred from the live
-# status log to its durable hold, which the status ledger alone can no longer
-# close.
+# feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
+# a captain-held task in this home - the key as a task id itself, or through
+# the legacy `<task>-decision-<key>` identity for pre-collapse rows. fm-send
+# closes nothing itself; it hands the intake `<task-id>\t<answer>\t<label>`
+# exactly as every other channel does, and the intake owns what that means.
+# This is what lets an answer reach a decision that has already been
+# transferred from the live status log to its durable captain-held task, which
+# the status ledger alone can no longer close.
 #
 # Each named key must therefore currently be open in ONE of the two ledgers: open
 # in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# an active captain hold for the target task. A key in neither is refused before
-# sending, so a mistyped key cannot deliver an answer while silently orphaning the
-# decision. A failed or unconfirmed send never closes a key (a remote
-# delivered-with-pending-confirmation outcome counts as delivered - see the
-# remote paragraph above); a
+# a still-open captain-held task resolved as above. A key in neither is refused
+# before sending, so a mistyped key cannot deliver an answer while silently
+# orphaning the decision. A failed or unconfirmed send never closes a key; a
 # delivered answer whose closing append fails exits nonzero with the exact
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
@@ -93,14 +166,16 @@
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
 #
-# After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
-# 0 disables) before returning: submit confirmation only proves the text was
-# accepted, but the harness needs a beat to spin up the turn before its busy
-# footer appears, so an immediate peek would otherwise see the stale idle pane.
-# The pause is fm-send-only; the shared submit core (used by the away-mode daemon,
-# which only needs "submitted") does not pay it, and the --key path is unaffected.
+# After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
+# (default 1, 0 disables) before returning: submit confirmation only proves the
+# text was accepted, but the harness needs a beat to spin up the turn before its
+# busy footer appears, so an immediate peek would otherwise see the stale idle
+# pane. The pause is typed-plane-only; the inbox plane, the shared submit core
+# (used by the away-mode daemon, which only needs "submitted"), and the --key
+# path do not pay it.
 set -eu
 
+FM_SEND_ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
@@ -139,6 +214,8 @@ fi
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -227,6 +304,7 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_META=""
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
+  TARGET_REMOTE_HOST=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -240,6 +318,7 @@ fm_send_resolve_target() {  # <raw-target>
       EXPECTED_LABEL="fm-$id"
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
+      TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -324,6 +403,20 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 
+# Supervision lease guard: a steer is overlap territory between the two Pi
+# supervision actors, so refuse while the OTHER actor holds this task's live
+# lease. A home with no supervision branch has no lease files and passes
+# untouched (contract: bin/fm-lease-lib.sh).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+if [ -n "$TARGET_META" ]; then
+  LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$LEASE_GUARD_TASK" ]; then
+    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    trap 'fm_lease_guard_release' EXIT
+  fi
+fi
+
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
@@ -372,6 +465,14 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+fm_send_known_undelivered_cleanup() {
+  [ -n "$PENDING_REPLY_CORR" ] || return 0
+  if [ "$PENDING_REPLY_CREATED" = 1 ]; then
+    fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR"
+  else
+    fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"
+  fi
+}
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -385,21 +486,32 @@ fi
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
 # Which ledger each answered key belongs to. A key still open in the status log
-# is owned by the status log: fm-decision-hold's `complete` closes that live copy
-# at the moment it transfers a decision to its durable hold, so "still open in
-# status" and "already a hold" are the two sides of one transfer, never both at
-# once. Checking the hold only for keys the status log no longer owns also keeps
-# the common path free of any backlog read.
+# is owned by the status log: fm-captain-hold's `complete` closes that live copy
+# at the moment it transfers a decision to its durable captain-held task, so
+# "still open in status" and "already held" are the two sides of one transfer,
+# never both at once. Checking the backlog only for keys the status log no
+# longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
 
-fm_send_hold_is_active() {  # <task-id> <decision-key>
-  local show
+# Resolve a --resolve-key key that the status log no longer owns to the
+# captain-held task that carries it: the key as a task id itself (the collapsed
+# identity - a captain call IS a task held for the captain), then the legacy
+# derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
+# means not closed and still carrying the captain-hold annotations tasks-axi
+# preserves even past a hold-until date.
+fm_send_hold_resolved_id() {  # <task-id> <decision-key>
+  local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
-  case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
-  case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
-  case "$show" in *"state: queued"*) return 0 ;; esac
+  for id in "$2" "$1-decision-$2"; do
+    show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
+    state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
+    hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
+    [ "$state" != "done" ] || continue
+    [ "$hold_kind" = captain ] || continue
+    printf '%s\n' "$id"
+    return 0
+  done
   return 1
 }
 
@@ -427,19 +539,20 @@ if [ -n "$RESOLVE_KEYS" ]; then
         ;;
     esac
     # Not open in the status log. A decision already transferred to its durable
-    # hold is exactly this case, and it is answerable - just through the other
-    # ledger - so check there before refusing.
-    if fm_send_hold_is_active "$RESOLVE_TASK_ID" "$k"; then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$k"
+    # captain-held task is exactly this case, and it is answerable - just
+    # through the other ledger - so check there before refusing.
+    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
+      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no active captain decision $RESOLVE_TASK_ID-decision-$k (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
 fi
 
-# Close each answered decision in this home's ledger, only after delivery is
-# fully confirmed. An append failure exits nonzero with the manual close
+# Close each answered decision in this home's ledger, only after the answer is
+# durably sent: enqueued on the inbox plane, submit-confirmed on the typed
+# plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 # The close is this home's own bookkeeping, written by the very turn that
 # answered the decision, so it goes through the guarded self-announced append
@@ -460,9 +573,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
   done
 }
 
-# Feed the answered hold keys to the ONE keyed-answer intake, as keyed lines,
-# exactly the way every other channel does. fm-send decides nothing here: it does
-# not map a key to a hold, build a decision record, or choose a close path.
+# Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
+# lines, exactly the way every other channel does. fm-send decides nothing here:
+# it does not build a decision record or choose a close path; the keys were
+# already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() {  # <answer-text>
   local note=$1 k lines=''
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
@@ -470,9 +584,9 @@ fm_send_feed_resolved_holds() {  # <answer-text>
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$RESOLVE_TASK_ID" \
+  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain decision could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-decision-hold.sh (answer, or resolve when it routes work) - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
 }
@@ -518,11 +632,21 @@ else
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
-    existing_corr=${FM_PENDING_REPLY_EXISTING_CORR:-$(fm_pending_reply_extract_corr "$MESSAGE")}
+    existing_corr_explicit=0
+    if [ "${FM_PENDING_REPLY_EXISTING_CORR+x}" = x ]; then
+      existing_corr_explicit=1
+      existing_corr=$FM_PENDING_REPLY_EXISTING_CORR
+    else
+      existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
+    fi
     if [ -n "$existing_corr" ] \
       && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
       PENDING_REPLY_CORR=$existing_corr
     else
+      if [ "$existing_corr_explicit" = 1 ]; then
+        echo "error: explicitly requested pending-reply correlation '${existing_corr:-empty}' is not reusable for $TARGET_TASK_ID; refusing to mint a replacement correlation" >&2
+        exit 1
+      fi
       if [ -z "$TARGET_TASK_ID" ]; then
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
@@ -532,12 +656,212 @@ else
       PENDING_REPLY_CREATED=1
     fi
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
-    if [ "$PENDING_REPLY_CREATED" = 1 ] \
-      && ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    if [ "$PENDING_REPLY_CREATED" != 1 ] \
+      && fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
+      if [ "$TARGET_BACKEND" = remote ]; then
+        if ! fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
+          echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
+          exit 1
+        fi
+      else
+        echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
+        exit 1
+      fi
+    fi
+    if ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+      [ "$PENDING_REPLY_CREATED" != 1 ] \
+        || fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+  # Data-plane selection (see the header): text addressed to a task selector
+  # resolved through this home's metadata rides the inbox plane, unless it is
+  # a LOCAL harness-native invocation that must reach the harness's own parser
+  # - a leading "/" (slash command), or a leading "$" to a codex target (skill
+  # invocation). A remote secondmate selector always rides the inbox: its
+  # requests are marked, and a marked request reaches the harness as
+  # marker-prefixed chat rather than a parser command anyway, so no remote
+  # text has a typed plane to lose. An explicit backend target stays typed
+  # even when it happens to match local metadata: it names an endpoint, not a
+  # task, the same boundary that keeps it unmarked and outside --resolve-key.
+  # Classification reads the pre-marker text so a marked secondmate request
+  # and a plain crewmate steer classify identically. It deliberately does NOT
+  # promise that a marked parser-native secondmate request executes as a parser
+  # command: the pre-existing marker-first wire bytes are retained in stage 1.
+  INBOX_PLANE=0
+  if [ -n "$TARGET_SELECTOR" ]; then
+    if [ "$TARGET_BACKEND" = remote ]; then
+      INBOX_PLANE=1
+    else
+      case "$RESOLVE_ANSWER_TEXT" in
+        /*) ;;
+        \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+        *) INBOX_PLANE=1 ;;
+      esac
+    fi
+  fi
+  if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
+    # Remote inbox leg: the message becomes a durable record in the remote
+    # home's steering inbox, written idempotently by the host-local leg, then
+    # the remote doorbell rings, best-effort. One identical retry after ssh
+    # 255 is safe by that idempotence; a still-lost transport preserves a
+    # marked request's reply expectation because the record may have landed.
+    REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    if ! fm_task_inbox_lock_acquire "$REMOTE_META_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task metadata could not be locked for final delivery validation" >&2
+      exit 1
+    fi
+    CURRENT_REMOTE_ID=
+    CURRENT_REMOTE_HOST=
+    if [ -f "$TARGET_META" ]; then
+      CURRENT_REMOTE_ID=$(fm_send_id_from_meta "$TARGET_META")
+      CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
+    fi
+    if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
+      || [ -z "$CURRENT_REMOTE_HOST" ] \
+      || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ]; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
+      exit 1
+    fi
+    remote_rc=0
+    remote_completion_unknown=0
+    "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
+      "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
+    if [ "$remote_rc" -eq 255 ]; then
+      remote_completion_unknown=1
+      remote_rc=0
+      "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
+        "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
+    fi
+    fm_lock_release "$REMOTE_META_LOCK"
+    if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
+      if [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+      else
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+      fi
+      resend_home=$(cd "$FM_HOME" 2>/dev/null && pwd) || resend_home=$FM_HOME
+      printf 'FM_HOME=%q ' "$resend_home" >&2
+      if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+        resend_state=$(cd "$STATE" 2>/dev/null && pwd) || resend_state=$STATE
+        printf 'FM_STATE_OVERRIDE=%q ' "$resend_state" >&2
+      fi
+      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
+      for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+        printf ' %q' "$resend_arg" >&2
+      done
+      printf '\n' >&2
+      exit 1
+    fi
+    if [ "$remote_rc" -ne 0 ]; then
+      fm_send_known_undelivered_cleanup || \
+        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
+      exit 1
+    fi
+    # The remote record is durable delivery, exactly as a local enqueue is.
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+        :
+      else
+        delivery_commit_status=$?
+        if [ "$delivery_commit_status" = 2 ]; then
+          echo "notice: the steer was durably recorded in the remote inbox, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+        else
+          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded in the remote inbox, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
+        fi
+      fi
+    fi
+    if [ -n "$RESOLVE_KEYS" ]; then
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fi
+    exit 0
+  fi
+  if [ "$INBOX_PLANE" = 1 ]; then
+    INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
+      exit 1
+    fi
+    CURRENT_INBOX_TARGET=
+    CURRENT_INBOX_BACKEND=
+    if [ -f "$TARGET_META" ]; then
+      CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+      CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+    fi
+    if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
+      || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
+      || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+      exit 1
+    fi
+    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE"); then
+      fm_lock_release "$INBOX_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
+      exit 1
+    fi
+    fm_lock_release "$INBOX_META_LOCK"
+    # Enqueue IS durable delivery to the task's record: mark the pending
+    # expectation delivered now, without resolving it - only a correlated
+    # parent report acknowledges the request.
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+        :
+      else
+        delivery_commit_status=$?
+        if [ "$delivery_commit_status" = 2 ]; then
+          echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+        else
+          # Both the commit and its recovery marker failed. The durable inbox
+          # record is what delivers the steer, so the send still SUCCEEDED:
+          # a nonzero here would read as undelivered to every automated caller
+          # and invite a duplicate enqueue - the exact defect this plane
+          # removes. Surface the degradation as its own distinct,
+          # non-resend-inviting condition instead: reply tracking for this
+          # request may not resolve or escalate on its own until an operator
+          # inspects it.
+          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
+        fi
+      fi
+    fi
+    # The answer is durably sent: close each answered decision at enqueue time
+    # (answerer-closes; see the header contract).
+    if [ -n "$RESOLVE_KEYS" ]; then
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fi
+    # Ring the doorbell, best-effort: no ring outcome changes the exit status,
+    # because the watcher's re-ring ladder owns loss detection from here.
+    ring_rc=0
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    case "$ring_rc" in
+      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    esac
+    exit 0
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -557,44 +881,18 @@ else
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
-  # verdict preserves the loud refusal boundary.
+  # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
+  # block: remote text rides the inbox leg above, and remote --key exits
+  # earlier.
   send_rc=0
-  REMOTE_DELIVERY_NOTICE=0
-  if [ "$TARGET_BACKEND" = remote ]; then
-    # The remote leg is this same script running host-locally against the
-    # recorded Herdr pane (cmd_send in fm-remote-secondmate-control.sh), so its
-    # submit verification IS the local one, and fm-on/the remote worker relay
-    # its exit status unchanged. Exit 3 is the delivered-unconfirmed contract
-    # (see this script's header) crossing the ssh boundary: the text reached
-    # the live verified pane and Enter was sent; only the synchronous read-back
-    # stayed unconfirmed. The remote stderr is held back and replayed only for
-    # a real failure, so a delivered outcome does not surface the inner leg's
-    # diagnostics as alarm.
-    remote_err=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1 >/dev/null) || send_rc=$?
-    if [ "$send_rc" -eq 0 ]; then
-      verdict=empty
-    elif [ "$send_rc" -eq 3 ]; then
-      verdict=empty
-      send_rc=0
-      REMOTE_DELIVERY_NOTICE=1
-    else
-      verdict=send-failed
-      [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
-    fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
-    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-      fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
-      echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
-      exit 1
-    fi
-    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-    fi
+    fm_send_known_undelivered_cleanup || \
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -602,9 +900,8 @@ else
     empty)
       ;;
     send-failed)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      fm_send_known_undelivered_cleanup || \
+        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
@@ -613,11 +910,13 @@ else
       # submit read-back stayed unconfirmed (e.g. a busy harness queues the
       # steer and keeps rendering it). That is not a proven failure, so never
       # re-type the message: verify the pane instead. Exit 3 is the documented
-      # delivered-unconfirmed status, and the remote send leg above depends on
-      # it crossing the ssh boundary intact.
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
+      # delivered-unconfirmed status.
+      # The pending-reply expectation is deliberately NOT discarded here:
+      # dropping it would silently stop tracking a marked request that very
+      # likely landed. It stays armed on its unconfirmed-delivery marker, so a
+      # correlated report still resolves it and an unanswered one still
+      # surfaces through the library's own reconciliation
+      # (bin/fm-pending-reply-lib.sh).
       echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
       exit 3
       ;;
@@ -649,12 +948,6 @@ else
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
-  fi
-  # Remote delivered-with-pending-confirmation: the outcome above is treated as
-  # delivered (expectation marked, keys closed), and this one non-error notice
-  # carries the remaining nuance so nobody re-sends the steer.
-  if [ "$REMOTE_DELIVERY_NOTICE" = 1 ]; then
-    echo "fm-send: delivered to remote secondmate $TARGET_REMOTE_ID; the remote pane accepted the text and Enter, and only the synchronous submit confirmation is still pending. This is not a failure - do not resend; the pending-reply expectation stays armed." >&2
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
