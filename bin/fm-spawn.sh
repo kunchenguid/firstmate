@@ -1286,7 +1286,7 @@ case "$HARNESS" in
       cursor_load_auth_for_spawn() {
         unset CURSOR_API_KEY
         # shellcheck source=/dev/null
-        . "$CURSOR_AUTH_ENV" || return 1
+        . "$CURSOR_AUTH_ENV" >/dev/null 2>&1 || return 1
         [ -n "${CURSOR_API_KEY:-}" ] || return 1
         export CURSOR_API_KEY
       }
@@ -2822,7 +2822,7 @@ case "$HARNESS" in
     if [ "$KIND" != secondmate ] && [ "$LAUNCH" = __CURSOR_BARE__ ]; then
       sq_cursor_auth=$(shell_quote "${CURSOR_AUTH_ENV:-${HOME:-}/.config/crew-router/env}")
       sq_cursor_bin=$(shell_quote "$CURSOR_BIN")
-      CURSOR_INNER="unset CURSOR_API_KEY; . $sq_cursor_auth || exit 1; [ -n \"\${CURSOR_API_KEY:-}\" ] || exit 1; export CURSOR_API_KEY; exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS $sq_cursor_bin -f $MODELFLAG--workspace $sq_worktree"
+      CURSOR_INNER="unset CURSOR_API_KEY; . $sq_cursor_auth >/dev/null 2>&1 || exit 1; [ -n \"\${CURSOR_API_KEY:-}\" ] || exit 1; export CURSOR_API_KEY; exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS $sq_cursor_bin -f $MODELFLAG--workspace $sq_worktree"
       LAUNCH="sh -c $(shell_quote "$CURSOR_INNER")"
     fi
     ;;

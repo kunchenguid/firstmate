@@ -686,14 +686,17 @@ test_cursor_refuses_auth_env_without_key_despite_ambient_key() {
   pass "cursor refuses auth files that rely on ambient credentials"
 }
 
-test_cursor_refuses_malformed_auth_env() {
+test_cursor_refuses_malformed_auth_env_without_exposing_contents() {
   local rec id out status auth_env
   id=profile-cursor-malformed-auth-z6h
   rec=$(make_spawn_case profile-cursor-malformed-auth cursor "$id")
   read_case_record "$rec"
   auth_env="$HOME_DIR/config/crew-router/env"
   mkdir -p "$(dirname -- "$auth_env")"
-  printf 'not valid shell syntax (\n' > "$auth_env"
+  printf '%s\n' \
+    "printf '%s\\n' cursor-auth-stdout-sentinel" \
+    "printf '%s\\n' cursor-auth-stderr-sentinel >&2" \
+    'CURSOR_API_KEY=cursor-auth-secret-sentinel (' > "$auth_env"
 
   out=$(FM_CURSOR_AUTH_ENV="$auth_env" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -701,6 +704,12 @@ test_cursor_refuses_malformed_auth_env() {
   expect_code 1 "$status" "cursor spawn should refuse a malformed auth env file"
   assert_contains "$out" "could not be sourced" \
     "cursor auth refusal did not identify the malformed env file"
+  assert_not_contains "$out" "cursor-auth-stdout-sentinel" \
+    "cursor auth preflight exposed sourced stdout"
+  assert_not_contains "$out" "cursor-auth-stderr-sentinel" \
+    "cursor auth preflight exposed sourced stderr"
+  assert_not_contains "$out" "cursor-auth-secret-sentinel" \
+    "cursor auth preflight exposed the malformed credential line"
   [ ! -s "$LAUNCH_LOG" ] || fail "cursor malformed-auth refusal must happen before launch"
   pass "cursor refuses malformed auth files before launch"
 }
@@ -1021,7 +1030,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_spawn_without_auth_env
 test_cursor_refuses_auth_env_without_key_despite_ambient_key
-test_cursor_refuses_malformed_auth_env
+test_cursor_refuses_malformed_auth_env_without_exposing_contents
 test_cursor_resolves_relative_auth_env_before_launch
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
