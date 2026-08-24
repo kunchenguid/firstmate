@@ -868,11 +868,12 @@ After an interrupt the aborted close was observed within seconds in some runs an
 Binding never reconstructs cursor's workspace-slug directory name, which collapses path separators.
 Cursor records the exact absolute workspace path in each project directory's `.workspace-trusted`, and the binding matches on that value.
 
-### Rendered busy token, delivery only
+### Rendered busy progress
 
 Mid-turn the pane showed a braille spinner plus a verb, and `ctrl+c to stop` on the composer row; both the verb line and that token were absent the instant the turn ended.
 The same version rendered `Working` in one turn and `Running` in the next, so the TOKEN is matched and the verb is not.
-This row is a delivery guard for submit acknowledgement only; recorded worker state comes from the transcript fold.
+For submit acknowledgement this row remains a delivery guard, and recorded worker state still comes from the transcript fold.
+The watcher separately treats a changed numeric token count or context percentage in consecutive recognized Cursor-owned status/footer samples as positive liveness after the busy-turn age bound; `tests/fm-watch-triage.test.sh` pins the known Working, Thinking, Reading, and Running forms, context-only progress, static-counter spinner redraw, field disappearance, unrecognized structure, ordinary-content rejection, and marker-write failure.
 
 ### Launch, lifecycle, and skills
 
