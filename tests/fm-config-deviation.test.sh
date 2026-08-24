@@ -256,7 +256,23 @@ test_bounded_display_does_not_mislabel_present_value() {
     "a present value beyond the preview must use the bounded unresolved label"
   assert_not_contains "$out" "held locally at absence" \
     "a present effective value must not be reported as absent"
-  pass "bounded divergence display distinguishes unresolved present values"
+
+  rec=$(new_home_pair unreadable-display)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  chmod 000 "$primary/config/backend"
+  printf 'tmux\n' > "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/unreadable-display.report"
+
+  out=$(converge "$primary" "$second" "$report")
+
+  assert_contains "$out" 'against primary "[value unreadable]"' \
+    "an unreadable present value must use the bounded unreadable label"
+  assert_not_contains "$out" "against primary absence" \
+    "an unreadable present value must not be reported as absent"
+  pass "bounded divergence display distinguishes unresolved and unreadable values"
 }
 
 test_equal_hardlinked_held_value_is_refused() {

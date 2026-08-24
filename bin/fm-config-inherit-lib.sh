@@ -200,7 +200,10 @@ fm_config_deviation_value_rejection() {  # <path>
 # "absence" when it holds none.
 fm_config_deviation_display() {  # <path>
   local value bytes
-  if [ -f "$1" ] && value=$(fm_config_deviation_line "$1"); then
+  if [ -f "$1" ] \
+    && ! head -c "$((FM_CONFIG_DEVIATION_MAX_BYTES + 1))" "$1" >/dev/null 2>&1; then
+    printf '"[value unreadable]"'
+  elif [ -f "$1" ] && value=$(fm_config_deviation_line "$1"); then
     printf '"%s"' "$value"
   elif [ -f "$1" ]; then
     bytes=$(head -c "$((FM_CONFIG_DEVIATION_MAX_BYTES + 1))" "$1" 2>/dev/null \
