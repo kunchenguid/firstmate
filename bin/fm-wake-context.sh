@@ -66,16 +66,6 @@ replay_cached() {
   return 1
 }
 
-snapshot_status_cursor() {
-  local cursor="$STATE/.status-presentation-cursor"
-  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
-    [ -f "$cursor" ] && [ ! -L "$cursor" ] || fail_before_presentation "the status cursor is unsafe"
-    cp "$cursor" "$TMP_DIR/status-cursor.before" || fail_before_presentation "the status cursor could not be captured"
-  else
-    : > "$TMP_DIR/status-cursor.absent"
-  fi
-}
-
 stage_status_cursor() {
   local cursor="$STATE/.status-presentation-cursor" staged="$TMP_DIR/status-cursor.after"
   [ ! -e "$cursor" ] || { [ -f "$cursor" ] && [ ! -L "$cursor" ]; } || return 1
@@ -383,7 +373,6 @@ prepare_presentation() {
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
     || rm -f -- "$CACHE_CURSOR" || fail_before_presentation "an orphaned cursor stage could not be retired"
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || exit 1
-  snapshot_status_cursor
   copy_queue "$TMP_DIR/queue" || fail_before_presentation "the wake queue could not be read safely"
   validate_queue "$TMP_DIR/queue" || fail_before_presentation "the queue is malformed"
   preflight "$TMP_DIR/queue"
