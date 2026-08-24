@@ -18,20 +18,17 @@ disable_project_settings: true
 # the locked Agent Fleet ruff check that .github/workflows/ci.yml also invokes.
 # The shell definition stays single-owned, so local and CI cannot diverge
 # (parity asserted by tests/fm-lint.test.sh).
-# The test command mirrors the source checks in .github/workflows/ci.yml:
-# route every behavior test through tests/run.sh's sealed admission boundary,
-# then run Agent Fleet's locked pytest and compileall checks, and fail if any
-# check exits non-zero. The e2e tests need tmux on PATH, which the firstmate
-# environment provides.
-# Local and CI cannot diverge on the admission a test receives: CI fans the same
-# inventory across eight shards, and bin/fm-behavior-shards.sh admits every path
-# it selects through tests/run.sh, so both routes cross this same boundary.
-# This command keeps the single serial runner rather than reproducing that
-# concurrent fan-out locally, because the two routes differ in exactly one way
-# that matters here: CI shards select the explicit non-Herdr path
-# (FM_TEST_SKIP_HERDR=1) because their disposable image carries no Herdr, while
-# this gate never skips, so every real-Herdr declaration provisions an owned
-# Herdr lab and the serial route holds those labs to one at a time.
+# The ordinary local test command derives every herdr-lab and herdr-mixed file
+# from tests/test-capabilities.tsv, admits those files through tests/run.sh's
+# sealed safety and lab-ownership boundary, and runs them serially on the
+# real-Herdr path before Agent Fleet's locked pytest and compileall checks.
+# It deliberately does not duplicate hermetic-only behavior files on the Mac.
+# The required Behavior tests CI job owns the complete behavior inventory:
+# eight isolated runners admit every selected path through tests/run.sh, run
+# every hermetic body plus the hermetic portion of the mixed file, and verify
+# the exact complete executed-manifest union after all shards finish.
+# Local real-Herdr execution plus required CI is therefore the complete
+# behavioral coverage contract; local pre-push does not claim all 123 files.
 # The dispatch wrapper is local by default.
 # An operator may opt an exact command class into the private Azure runner; once
 # selected remote, a cloud or result failure is returned without local fallback.
