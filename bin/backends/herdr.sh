@@ -2064,7 +2064,7 @@ EOF
   [ "$lone_kind" = shell ] || { printf 'unknown'; return 0; }
   [ "$pid_state" = own-shell ] || { printf 'unknown'; return 0; }
   case "$shell_pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  fm_backend_herdr_pid_is_lone_and_childless "$shell_pid" || { printf 'ambiguous'; return 0; }
+  fm_backend_herdr_pid_is_lone_and_childless "$shell_pid" || { printf 'unknown'; return 0; }
   printf 'no-agent'
 }
 
@@ -2122,23 +2122,45 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   esac
 }
 
-# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative
-# registration states (dead, no-agent). A live or done registration and every
+# fm_backend_herdr_registration_is_husk_state: the single owner of which
+# registration states are conservatively closeable - the two that positively
+# prove no agent record exists. A live or done registration and every
 # unreadable result refuse, so lifecycle's foreground-shell evidence never
 # licenses destructive pane replacement.
-fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
-  case "$(fm_backend_herdr_pane_registration_state "$1" "$2")" in
+fm_backend_herdr_registration_is_husk_state() {  # <registration-state>
+  case "$1" in
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
 }
 
+fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
+  fm_backend_herdr_registration_is_husk_state \
+    "$(fm_backend_herdr_pane_registration_state "$1" "$2")"
+}
+
 # fm_backend_herdr_endpoint_closeable: the registration-only husk decision
 # exposed to recovery callers OUTSIDE this file, so a lifecycle `dead` verdict
 # grounded in foreground-shell evidence can never authorize a `pane close`.
+# A refusal is not one thing: a pane that still holds an agent record is a
+# different operator situation from a registration nobody could read, and the
+# escalations these callers print are only actionable when they say which.
 fm_backend_herdr_endpoint_closeable() {  # <target>
-  fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_tab_is_husk "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  local state
+  fm_backend_herdr_parse_target "$1" || {
+    FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=malformed-target
+    return 1
+  }
+  state=$(fm_backend_herdr_pane_registration_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  if fm_backend_herdr_registration_is_husk_state "$state"; then
+    FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=husk
+    return 0
+  fi
+  case "$state" in
+    live|done) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=registered ;;
+    *) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=unreadable ;;
+  esac
+  return 1
 }
 
 # fm_backend_herdr_agent_state: recovery-grade lifecycle state for the same

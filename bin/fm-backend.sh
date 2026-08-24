@@ -763,13 +763,19 @@ fm_backend_kill() {  # <backend> <target>
 # pane must never be closed. Backends with a separate conservative
 # registration view answer from it; every other backend, whose lifecycle
 # verdict IS its only endpoint evidence, keeps its existing behavior.
+# On return, FM_BACKEND_ENDPOINT_CLOSEABLE_REASON names WHY, so a caller that
+# refuses can tell an operator whether the endpoint still holds an agent record
+# or whether nothing could be read at all - two situations with different
+# remedies that a bare boolean collapses into one misleading message.
+FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=
 fm_backend_endpoint_closeable() {  # <backend> <target>
   local backend=$1 target=$2
-  [ -n "$target" ] || return 1
+  FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=unreadable
+  [ -n "$target" ] || { FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=malformed-target; return 1; }
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_endpoint_closeable "$target" ;;
-    *) return 0 ;;
+    *) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=no-registration-view; return 0 ;;
   esac
 }
 

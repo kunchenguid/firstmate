@@ -162,7 +162,7 @@ SH
 test_herdr_agent_state_preserves_husk_classifier() {
   local pane_state expected out
 
-  for row in 'dead missing' 'no-agent dead' 'live alive' 'done unreadable' 'unknown unreadable'; do
+  for row in 'dead missing' 'no-agent dead' 'live alive' 'unknown unreadable'; do
     pane_state=${row%% *}
     expected=${row#* }
     out=$(FM_TEST_PANE_STATE="$pane_state" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_PANE_STATE"; }; fm_backend_herdr_agent_state "sess:p1"' "$ROOT")
@@ -404,6 +404,76 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_liveness_herdr_restarting <dir>: the same stub, except the SECOND
+# `pane get` fails - the Herdr server going away between the lifecycle probe
+# and the registration probe, which is what makes the closeable answer
+# unreadable rather than registered.
+make_liveness_herdr_restarting() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/herdrbin-restarting"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_HERDR_CALL_LOG:?}"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.8.0","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  seen=$(( $(cat "${FM_HERDR_PANE_GET_COUNT:?}" 2>/dev/null || echo 0) + 1 ))
+  echo "$seen" > "$FM_HERDR_PANE_GET_COUNT"
+  [ "$seen" -ge 2 ] && exit 1
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_sweep_reports_an_unreadable_registration_as_unreadable() {
+  local w fb herdrfb log out
+
+  # The closeable probe refuses for more than one reason. When the Herdr
+  # server is momentarily unreachable, nothing proves the pane still holds a
+  # registration, so the sweep must not tell the operator it does - and must
+  # not hand out a --relaunch command that will refuse for the same reason.
+  w=$(new_world sweep-herdr-unreadable)
+  add_sm_home "$w" sm1 fmtest:w1:p2 opencode
+  printf 'backend=herdr\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr_restarting "$w")
+  log="$w/herdr-calls.log"; : > "$log"
+  cat > "$w/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n4242 1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$w/ps"
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_HOME="$w/home" \
+    FM_HERDR_PS_BIN="$w/ps" FM_HERDR_CALL_LOG="$log" \
+    FM_HERDR_PANE_GET_COUNT="$w/pane-get.count" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "an unreadable registration must never license a close"
+  assert_contains "$out" "registration is unreadable" \
+    "the sweep should report an unreadable registration honestly"
+  assert_not_contains "$out" "stale registered agent record" \
+    "the sweep must not claim a stale registration it could not read"
+  pass "sweep: a refusal caused by an unreadable registration is reported as unreadable, not as a stale record"
+}
+
 test_sweep_never_closes_a_registered_herdr_endpoint() {
   local w fb herdrfb log out
 
@@ -632,6 +702,7 @@ test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_never_closes_a_registered_herdr_endpoint
+test_sweep_reports_an_unreadable_registration_as_unreadable
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

@@ -783,7 +783,11 @@ secondmate_liveness_one() {  # <meta> <id>
       if [ "$agent_state" = dead ]; then
         cause="confirmed agent absence on existing endpoint"
         if ! fm_backend_endpoint_closeable "$backend" "$target" 2>/dev/null; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint $target still carries a stale registered agent record, which blocks a fresh respawn into the same label; relaunch it in place with: $FM_ROOT/bin/fm-spawn.sh $id --relaunch"
+          if [ "${FM_BACKEND_ENDPOINT_CLOSEABLE_REASON:-}" = registered ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint $target still carries a stale registered agent record, which blocks a fresh respawn into the same label; relaunch it in place with: $FM_ROOT/bin/fm-spawn.sh $id --relaunch"
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint $target registration is ${FM_BACKEND_ENDPOINT_CLOSEABLE_REASON:-unreadable}, so nothing proves it safe to replace (backend=$backend)"
+          fi
           return 0
         fi
         fm_backend_kill "$backend" "$target" 2>/dev/null || true

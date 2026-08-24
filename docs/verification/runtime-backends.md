@@ -629,6 +629,7 @@ The childless half is what excludes a SUSPENDED agent - job control hands the te
 A lifecycle `dead` verdict means only that no agent process is running; it is never permission to close a pane.
 Recovery callers that would destroy an endpoint ask `fm_backend_endpoint_closeable`, which Herdr answers from the registration-only husk view.
 A still-registered stale endpoint is therefore neither closed nor auto-respawned: a fresh `--secondmate` spawn would be refused by that same registration view (the tab label is still taken), so the session-start sweep and the remote launch path escalate to the operator with the exact endpoint and one runnable `fm-spawn --relaunch` command, which is the path the smoke above proves end to end.
+That predicate also reports WHY it refused (`FM_BACKEND_ENDPOINT_CLOSEABLE_REASON`), so a registration nobody could read escalates as unreadable rather than as a stale record, and no `--relaunch` command is handed out that would refuse for the same unreachable-server reason.
 Known follow-up: an automatic in-place recovery flow for a stale registered secondmate is deliberately out of scope here; today it is operator-driven.
 
 Live evidence scope. The primary live signal is exact equality between Herdr's registered `agent` value and a foreground process name or `argv0`; that is what the OpenCode and Codex runs above measure on Herdr 0.8.0.

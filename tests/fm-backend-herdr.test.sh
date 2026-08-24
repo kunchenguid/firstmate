@@ -763,16 +763,20 @@ test_agent_free_verdict_requires_the_panes_own_shell() {
   dir="$TMP_ROOT/foreground-suspended-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
-  for n in 3 4 5 6 7 8 9 10 11 12; do
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh"}]}}}\n' > "$resp/$n.out"
-  done
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh"}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   psbin=$(make_foreground_ps "$dir" 4242 4243)
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
-    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=2 \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=10 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
   [ "$out" = unknown ] \
     || fail "a suspended agent behind the pane's own shell must refuse as unknown, got '$out'"
+  # A shell with a child is a settled answer - a suspended harness or a
+  # backgrounded job - so it must not pay the whole settle window on every
+  # liveness read in the fleet polling loops.
+  samples=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$samples" = 1 ] \
+    || fail "a shell with a child must not be resampled, saw $samples samples"
 
   # ...and the lifecycle verdict a relaunch gate reads must not be `dead`,
   # which is the only state bin/fm-spawn.sh --relaunch accepts.
@@ -923,9 +927,9 @@ test_endpoint_closeable_keeps_registration_only_safety() {
     . "$0/bin/fm-backend.sh"
     state=$(fm_backend_agent_state herdr fmtest:w1:p2)
     if fm_backend_endpoint_closeable herdr fmtest:w1:p2; then closeable=yes; else closeable=no; fi
-    printf "%s %s" "$state" "$closeable"
+    printf "%s %s %s" "$state" "$closeable" "$FM_BACKEND_ENDPOINT_CLOSEABLE_REASON"
   ' "$ROOT")
-  [ "$out" = "dead no" ] \
+  [ "$out" = "dead no registered" ] \
     || fail "a dead-classified but still-registered endpoint must not be closeable, got '$out'"
 
   # A genuine husk (no registration at all) stays closeable.
@@ -938,6 +942,29 @@ test_endpoint_closeable_keeps_registration_only_safety() {
     if fm_backend_endpoint_closeable herdr fmtest:w1:p2; then printf yes; else printf no; fi
   ' "$ROOT")
   [ "$out" = yes ] || fail "an unregistered husk pane must stay closeable, got '$out'"
+
+  # A refusal must say WHICH refusal it is: an unreadable registration (the
+  # Herdr server restarting mid-sweep) is a different operator situation from
+  # a pane that genuinely still holds an agent record, and the escalations
+  # built on this predicate are only actionable when they distinguish them.
+  dir="$TMP_ROOT/closeable-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w9:p9"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/fm-backend.sh"
+    if fm_backend_endpoint_closeable herdr fmtest:w1:p2; then closeable=yes; else closeable=no; fi
+    printf "%s %s" "$closeable" "$FM_BACKEND_ENDPOINT_CLOSEABLE_REASON"
+  ' "$ROOT")
+  [ "$out" = "no unreadable" ] \
+    || fail "an unreadable registration must refuse AS unreadable, not as a registered pane, got '$out'"
+
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/fm-backend.sh"
+    if fm_backend_endpoint_closeable herdr "not-a-target"; then closeable=yes; else closeable=no; fi
+    printf "%s %s" "$closeable" "$FM_BACKEND_ENDPOINT_CLOSEABLE_REASON"
+  ' "$ROOT")
+  [ "$out" = "no malformed-target" ] \
+    || fail "a malformed target must refuse as a malformed target, got '$out'"
 
   # A backend with no separate registration view keeps its existing behavior.
   out=$(bash -c '. "$0/bin/fm-backend.sh"; if fm_backend_endpoint_closeable tmux sess:win; then printf yes; else printf no; fi' "$ROOT")
