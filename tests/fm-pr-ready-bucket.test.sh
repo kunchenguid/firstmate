@@ -10,7 +10,9 @@
 #   (e) drafts and release-please PRs targeting main are omitted
 #   (f) pending required CI is omitted rather than blocked or ready
 #   (g) default repo is Chamber-Hero/memberos; --repo/--base overrides
-#       require --required-check and use that list, not MemberOS defaults
+#       require --required-check and use that list, not MemberOS defaults;
+#       a non-MemberOS --repo also ignores Bors, release-please,
+#       review-blocker, and CHANGES_REQUESTED conventions
 #   (h) the helper is read-only (no merge/comment/review) and does not
 #       scrape the Bors host
 #   (i) truncated labels, checks, or comments are paged to completion
@@ -363,6 +365,38 @@ test_required_check_override_replaces_memberos_list() {
   pass "fm-pr-ready-bucket uses --required-check instead of the MemberOS list"
 }
 
+test_repo_override_skips_memberos_merge_policy() {
+  local case_dir out other_green
+  case_dir=$(make_case override-policy)
+  other_green="other-ci=success"
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 611 "feat: review noise" MERGEABLE main "$other_green" "review-blocker" CHANGES_REQUESTED false alice feat/x false ":tada: Rollup created")" \
+    "$(pr_json 612 "chore(main): release 9.9.9" MERGEABLE main "$other_green" "" APPROVED false "release-please[bot]" "release-please--branches--main")" \
+    "$(pr_json 613 "Auto merge of #611" MERGEABLE main "$other_green" "" APPROVED false "bors-ci-merge-queue" "tmp/bors" true "")"
+  out=$(run_bucket "$case_dir" --repo Example-Org/other --required-check other-ci --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 3 ] \
+    || fail "override-policy: MemberOS conventions must not block a foreign repo, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.blocked | length')" = 0 ] \
+    || fail "override-policy: no PR should be blocked by MemberOS review policy, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 0 ] \
+    || fail "override-policy: Bors conventions must not apply off MemberOS, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '
+    ([.ready[].number] | sort) == [611,612,613]
+    and all(.ready[]; (.reasons | length) == 0)
+  ' >/dev/null || fail "override-policy: expected only generic ready items, got: $out"
+  if grep -E "ReadyBucketLabels|ReadyBucketComments" "$case_dir/gh-axi.log"; then
+    fail "override-policy: non-MemberOS listing should not page labels or Bors comments"
+  fi
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "override-policy: MemberOS defaults should still apply those conventions, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 2 ] \
+    || fail "override-policy: MemberOS should still treat Bors author/comment as in-Bors, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '[.ready,.blocked,.stacked,.in_bors | length] | add')" = 2 ] \
+    || fail "override-policy: MemberOS should omit the release-please PR, got: $out"
+  pass "fm-pr-ready-bucket keeps MemberOS merge policy off non-MemberOS --repo"
+}
+
 test_truncated_labels_are_paged() {
   local case_dir out
   case_dir=$(make_case truncated-labels)
@@ -517,6 +551,7 @@ test_stale_bors_comment_is_not_in_bors
 test_omits_draft_release_and_pending
 test_repo_override_and_read_only
 test_required_check_override_replaces_memberos_list
+test_repo_override_skips_memberos_merge_policy
 test_truncated_labels_are_paged
 test_truncated_checks_are_paged
 test_truncated_comments_are_paged

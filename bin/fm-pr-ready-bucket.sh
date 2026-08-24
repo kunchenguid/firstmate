@@ -31,6 +31,9 @@
 # Default --base is main.
 # --repo or --base other than those defaults requires --required-check,
 # so a different forge target cannot silently keep the MemberOS main list.
+# A --repo other than Chamber-Hero/memberos also drops MemberOS merge
+# conventions: Bors queue detection, release-please omission, review-blocker,
+# and CHANGES_REQUESTED. Those stay on the MemberOS default target only.
 # Nested label, check, and comment connections are paged to completion.
 # A still-truncated connection after the page bound is never classified
 # ready (blocked: incomplete GitHub state).
@@ -140,8 +143,9 @@ GQL_COMMENTS_JQ='.data.repository.pullRequest.comments | {
   ) // "")
 }'
 
-# shellcheck disable=SC2016 # jq $base/$required/$k are jq variables.
+# shellcheck disable=SC2016 # jq $base/$required/$memberos/$k are jq variables.
 CLASSIFY_JQ='
+  def memberos_policy: $memberos == 1;
   def fail_conclusions: ["failure","timed_out","cancelled","action_required","stale","startup_failure","error"];
   def pass_conclusions: ["success","neutral"];
   def parse_checks:
@@ -158,21 +162,28 @@ CLASSIFY_JQ='
       else "pending"
       end;
   def is_release:
-    ((.author // "") | test("release-please"; "i"))
-    or ((.head // "") | test("^release-please"; "i"))
-    or ((.title // "") | test("^chore\\(.*\\): release"; "i"));
+    memberos_policy
+    and (
+      ((.author // "") | test("release-please"; "i"))
+      or ((.head // "") | test("^release-please"; "i"))
+      or ((.title // "") | test("^chore\\(.*\\): release"; "i"))
+    );
   def has_blocker_label:
-    ((.labels // "") | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(ascii_downcase) | index("review-blocker")) != null;
+    memberos_policy
+    and ((.labels // "") | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(ascii_downcase) | index("review-blocker")) != null;
   def in_bors:
-    (.bors_author == true)
-    or (
-      ((.bors_last // "") | test("has been approved|now in the \\[queue\\]|Trying:|:hourglass:|Rollup created"; "i"))
-      and ((.bors_last // "") | test("unapproved|not previously approved|unmergeable"; "i") | not)
+    memberos_policy
+    and (
+      (.bors_author == true)
+      or (
+        ((.bors_last // "") | test("has been approved|now in the \\[queue\\]|Trying:|:hourglass:|Rollup created"; "i"))
+        and ((.bors_last // "") | test("unapproved|not previously approved|unmergeable"; "i") | not)
+      )
     );
   def incomplete_state:
-    ((.labels_truncated == true) and (has_blocker_label | not))
+    (memberos_policy and (.labels_truncated == true) and (has_blocker_label | not))
     or (.checks_truncated == true)
-    or ((.comments_truncated == true) and ((.bors_last // "") == "") and (.bors_author != true));
+    or (memberos_policy and (.comments_truncated == true) and ((.bors_last // "") == "") and (.bors_author != true));
   def red_required($checks):
     [$required[] | select(req_status(.; $checks) == "red")];
   def pending_required($checks):
@@ -182,7 +193,7 @@ CLASSIFY_JQ='
     | [
         (if .mergeable == "CONFLICTING" then "conflicts" else empty end),
         (if has_blocker_label then "review-blocker" else empty end),
-        (if .review == "CHANGES_REQUESTED" then "CHANGES_REQUESTED" else empty end),
+        (if memberos_policy and (.review == "CHANGES_REQUESTED") then "CHANGES_REQUESTED" else empty end),
         (red_required($checks) as $red | if ($red | length) > 0 then "red required CI: \($red | join(", "))" else empty end),
         (if incomplete_state then "incomplete GitHub state" else empty end)
       ];
@@ -226,6 +237,8 @@ usage: fm-pr-ready-bucket.sh [--repo OWNER/NAME] [--base BRANCH]
 Read-only listing of open GitHub PRs grouped for the next bors rollup.
 Default --repo is Chamber-Hero/memberos. Default --base is main.
 --repo or --base other than those defaults requires --required-check NAME.
+A --repo other than Chamber-Hero/memberos does not apply Bors, release-please,
+review-blocker, or CHANGES_REQUESTED conventions.
 GitHub is the ready-bucket; this command does not scrape a Bors host.
 Prints ready, blocked, stacked, and in-Bors groups with full PR URLs.
 EOF
@@ -545,12 +558,16 @@ page_comments() {
 
 complete_pr_connections() {
   local rec=$1
-  rec=$(jq -c '
-    if (.comments_truncated == true) and (((.bors_last // "") != "") or (.bors_author == true))
-    then .comments_truncated = false
-    else .
-    end
-  ' <<<"$rec") || return 1
+  if [ "$REPO" != "$DEFAULT_REPO" ]; then
+    rec=$(jq -c '.labels_truncated = false | .comments_truncated = false' <<<"$rec") || return 1
+  else
+    rec=$(jq -c '
+      if (.comments_truncated == true) and (((.bors_last // "") != "") or (.bors_author == true))
+      then .comments_truncated = false
+      else .
+      end
+    ' <<<"$rec") || return 1
+  fi
   if [ "$(jq -r '.labels_truncated' <<<"$rec")" = "true" ]; then
     rec=$(page_labels "$rec") || return 1
   fi
@@ -601,10 +618,17 @@ done
 
 ALL_PRS_JSON=$(complete_truncated_connections "$ALL_PRS_JSON") || exit 1
 
+if [ "$REPO" = "$DEFAULT_REPO" ]; then
+  MEMBEROS_POLICY=1
+else
+  MEMBEROS_POLICY=0
+fi
+
 GROUPED=$(
   printf '%s\n' "$ALL_PRS_JSON" | jq \
     --arg base "$BASE" \
     --argjson required "$REQUIRED_CHECKS_JSON" \
+    --argjson memberos "$MEMBEROS_POLICY" \
     "$CLASSIFY_JQ"
 ) || {
   echo "error: ready-bucket classification failed" >&2
