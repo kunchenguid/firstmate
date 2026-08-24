@@ -314,11 +314,13 @@ Repos: $repos_field
 
 Standard flow (harness-agnostic): the epic pipeline is the public \`/epic-*\`
 skill chain - \`/epic-new\` (stood up this lab) -> \`/epic-scaffold\` ->
-\`/epic-plan\` -> \`/epic-review\` -> \`/epic-handoff\` -> \`/epic-ship\`. From here,
-turn the settled \`DESIGN.md\` into a standard epic with \`/epic-scaffold\`, plan
-each story with \`/epic-plan\`, pass the \`/epic-review\` gate, then \`/epic-handoff\`
-seeds the home backlog. Invoke them the way your coding agent runs skills - the
-skills are the same on any harness, and each skill's SKILL.md is its contract.
+\`/epic-review\` -> \`/epic-handoff\` -> \`/epic-ship\`. From here,
+turn the settled \`DESIGN.md\` into a standard epic with \`/epic-scaffold\`, pass
+the \`/epic-review\` gate, then \`/epic-handoff\` seeds the home backlog. Each
+story's plan is produced at task-time by the dispatched worker under firstmate's
+plan-review gate, not upfront here. Invoke the skills the way your coding agent
+runs skills - the skills are the same on any harness, and each skill's SKILL.md
+is its contract.
 EOF
 
   # Metadata - deliberately under umbrellas/ (a sibling of data/, never state/), invisible to the task/watcher scan.

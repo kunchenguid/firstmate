@@ -1,15 +1,15 @@
 ---
 name: epic-scaffold
-description: Turn a settled design or an umbrella DESIGN.md into a STANDARD epic - an epic.md plus one file per story, each carrying the exact required frontmatter (id, epic, repo, pr_base, depends, kind, gate) and a self-contained body, so the epic promotes cleanly with no orphan tasks or doubled epics. The first story is the contract gate that lands the shared contract first. Use after /epic-new, once the design is settled and stories need writing. Second skill in the epic pipeline; hands off to /epic-plan.
+description: Turn a settled design or an umbrella DESIGN.md into a STANDARD epic - an epic.md plus one file per story, each carrying the exact required frontmatter (id, epic, repo, pr_base, depends, kind, gate) and a self-contained body, so the epic promotes cleanly with no orphan tasks or doubled epics. The first story is the contract gate that lands the shared contract first. Use after /epic-new, once the design is settled and stories need writing. Second skill in the epic pipeline; hands off to /epic-review.
 user-invocable: true
 ---
 
-<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice, one output format, and one story-frontmatter contract. The "Required story frontmatter" block below is stated identically in epic-review; keep the two copies byte-identical. -->
+<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of five epic-pipeline skills (epic-new -> epic-scaffold -> epic-review -> epic-handoff -> epic-ship) that share one voice, one output format, and one story-frontmatter contract. The "Required story frontmatter" block below is stated identically in epic-review; keep the two copies byte-identical. -->
 
 # epic-scaffold
 
 Turn a settled design - the captain's decided architecture, or a finished umbrella `DESIGN.md` - into a STANDARD epic that the rest of the pipeline can consume without surprises.
-The output is one epic directory: an `epic.md` plus one file per story under `stories/`, every story carrying the exact frontmatter the promotion engine validates and a body a planner and a worker can act on.
+The output is one epic directory: an `epic.md` plus one file per story under `stories/`, every story carrying the exact frontmatter the promotion engine validates and a body a dispatched worker can plan and act on at task-time.
 This skill's whole job is to make the format impossible to get wrong, because a story with a non-standard key (`story:`, `phase:`) or a missing `id:`/`pr_base:` is exactly what produced orphan tasks and a doubled epic before this pipeline existed.
 
 You are the SCAFFOLDER.
@@ -57,8 +57,8 @@ This skill only records a settled design in the standard shape.
 
    Never pre-fill `signed_off:` - an empty value is the gate that blocks dispatch before the captain signs.
 
-5. **Write one file per story** under `stories/<id>.md`, each starting with the required frontmatter below, then a self-contained body: **Goal**, **Context / dependency**, **Implementation plan** (a POINTER, filled by `/epic-plan` - leave a placeholder here, do not hand-write the plan), **Scope**, **Definition of done**, **Evidence**, **Delivery**.
-   The plan `/epic-plan` fills is an upfront skeleton - the DAG, sequencing, and security criteria, not line-accurate steps - that the dispatched worker refreshes against HEAD and, on plan-review approval, promotes back into canonical; `/epic-plan` owns that lifecycle, so keep the scaffold's plan section a placeholder and do not restate it here.
+5. **Write one file per story** under `stories/<id>.md`, each starting with the required frontmatter below, then a self-contained body: **Goal**, **Context / dependency**, **Implementation plan** (a POINTER placeholder - leave it a placeholder, do not hand-write the plan), **Scope**, **Definition of done**, **Evidence**, **Delivery**.
+   There is no upfront per-story plan step: the dispatched worker produces the plan at task-time (via its planning skill) against current HEAD and stops at the firstmate plan-review gate, so keep the scaffold's plan section a placeholder and do not write it here.
 
 6. **Make the first story the contract gate.**
    The shared contract (API shape, schema, proto, types package) lands first, as its own story, before anything that consumes it.
@@ -106,4 +106,4 @@ Report back exactly this shape:
 - **Stories:** one line each - `<id>` (repo `<repo>`, pr_base `epic/<slug>`, kind `<kind>`, gate `<true/false>`, depends `<...>`)
 - **Contract gate:** the one `gate: true` story that lands first
 - **Frontmatter check:** all stories standard (the seven keys), or name the ones that are not
-- **next:** /epic-plan (give each story a real plan directory)
+- **next:** /epic-review (independent gate before the captain signs)

@@ -104,13 +104,12 @@ Because children are ordinary tasks, the captain keeps full firstmate control of
 
 The captain drives exactly the phase that needs them and delegates exactly the phase that is safe to delegate.
 
-This flow is packaged as the harness-agnostic public epic pipeline - the `/epic-*` skills under `skills/` (see `skills/README.md`): `/epic-new` -> `/epic-scaffold` -> `/epic-plan` -> `/epic-review` -> `/epic-handoff` -> `/epic-ship`.
+This flow is packaged as the harness-agnostic public epic pipeline - the `/epic-*` skills under `skills/` (see `skills/README.md`): `/epic-new` -> `/epic-scaffold` -> `/epic-review` -> `/epic-handoff` -> `/epic-ship`.
 `/epic-new` stands up the umbrella lab; `/epic-handoff` wraps `bin/fm-umbrella-promote.sh` (section 9 step 2a); `/epic-ship` wraps `bin/fm-epic-ship.sh`.
 Each skill's `SKILL.md` is the single owner of its step, and the AGENTS.md that `bin/fm-umbrella.sh` writes into a lab points the design agent at that chain regardless of harness.
 
-The upfront per-story plan `/epic-plan` authors is a skeleton, not the last word: at dispatch each epic ship brief (generated with `bin/fm-brief.sh --base`) instructs the worker to refresh it against current HEAD, commit the task-time plan, and gate a material divergence at the captain plan-review step.
-When firstmate approves that plan-review, it promotes the worker's committed plan back into the canonical `stories/<id>-plan/` with `bin/fm-epic-plan-promote.sh <epic-slug> <story-id>` (defer to its `--help` for the exact contract), so the stories that depend on it read the fresh, HEAD-bound plan rather than the design-time draft.
-`/epic-plan`'s `SKILL.md` owns the harness-agnostic lifecycle; that helper is the firstmate-side mechanism.
+There is no upfront per-story planning step (the dropped `/epic-plan`): the story's implementation-plan section stays a pointer placeholder that `bin/fm-epic-lint.sh` treats as not-yet-planned, and each epic ship brief (generated with `bin/fm-brief.sh --base`) instructs the dispatched worker to produce the plan at task-time against current HEAD, commit it under its worktree, and stop at the firstmate plan-review gate before any code.
+The plan lives with the worker's HEAD; there is no promote-back step, so downstream stories read the story spec plus their own task-time plan rather than a synced design-time draft.
 
 ## 6. Concrete changes required
 

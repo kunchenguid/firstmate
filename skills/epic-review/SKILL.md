@@ -1,23 +1,24 @@
 ---
 name: epic-review
-description: The independent design-review GATE for a scaffolded and planned epic. Reviews epic.md, its stories, and each story's plan directory BEFORE handoff - is every story's frontmatter standard (else FAIL), is the contract concrete and landable-first, are dependencies and gates sound, does each story's plan cover its scope and edge cases. Produces a standard REVIEW.md with a clear PASS or FAIL verdict and a numbered fix list; FAIL blocks handoff. Run as a DIFFERENT agent than the one that scaffolded or planned. Fourth skill in the epic pipeline; on PASS hands off to /epic-handoff.
+description: The independent design-review GATE for a scaffolded epic. Reviews epic.md and its stories BEFORE handoff - is every story's frontmatter standard (else FAIL), is the contract concrete and landable-first, are dependencies and gates sound, is each story's scope and definition of done complete. Produces a standard REVIEW.md with a clear PASS or FAIL verdict and a numbered fix list; FAIL blocks handoff. Run as a DIFFERENT agent than the one that scaffolded. Third skill in the epic pipeline; on PASS hands off to /epic-handoff.
 user-invocable: true
 ---
 
-<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice, one output format, and one story-frontmatter contract. The "Required story frontmatter" block below is stated identically in epic-scaffold; keep the two copies byte-identical. -->
+<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of five epic-pipeline skills (epic-new -> epic-scaffold -> epic-review -> epic-handoff -> epic-ship) that share one voice, one output format, and one story-frontmatter contract. The "Required story frontmatter" block below is stated identically in epic-scaffold; keep the two copies byte-identical. -->
 
 # epic-review
 
-The independent review gate that a scaffolded and planned epic must pass before it is handed off.
-It reads `epic.md`, every story, and every story's plan directory, checks them against the standard, and writes a `REVIEW.md` beside the epic with a single **PASS** or **FAIL** verdict and a numbered fix list.
+The independent review gate that a scaffolded epic must pass before it is handed off.
+It reads `epic.md` and every story, checks them against the standard, and writes a `REVIEW.md` beside the epic with a single **PASS** or **FAIL** verdict and a numbered fix list.
 A **FAIL** blocks handoff - `/epic-handoff` should not run until the fixes land and this gate passes.
+There is no upfront per-story plan to review: each story carries a plan-section pointer placeholder, and the dispatched worker produces the plan at task-time against current HEAD, gated by firstmate's plan-review before any code.
 
-You are the REVIEWER, and you must be a DIFFERENT agent than the one that scaffolded or planned.
+You are the REVIEWER, and you must be a DIFFERENT agent than the one that scaffolded.
 Self-review defeats the gate: the whole reason this stage exists is a second, independent read.
 
 ## When to use
 
-- An epic has been scaffolded (`/epic-scaffold`) and planned (`/epic-plan`) and needs the gate before the captain signs and firstmate promotes.
+- An epic has been scaffolded (`/epic-scaffold`) and needs the gate before the captain signs and firstmate promotes; each story carries a plan-section pointer placeholder (the worker plans at task-time under the firstmate plan-review gate, so there is no upfront per-story plan to review here).
 - A previously-FAILed epic has had its fix list addressed and needs re-checking.
 
 ## What to check
@@ -39,13 +40,13 @@ Self-review defeats the gate: the whole reason this stage exists is a second, in
    Check 1's lint already proved, mechanically, that every `depends:` id resolves, there is no cycle, and exactly one story is `gate: true`; here you make the judgment it cannot - that the one gate story is the RIGHT contract story and that the stories consuming it actually `depends:` on it.
    The delivery contract (stories PR into `epic/<slug>` with evidence and review) and the ship gate (full-epic no-mistakes before shipping) are present in `epic.md`.
 
-4. **Each story has a real plan that covers its scope.**
-   Every story's implementation-plan section points at a plan directory (`plans/<epic>/stories/<id>-plan/`) produced by the planner, not a hand-written paragraph.
-   Read each plan and confirm its phases cover the story's stated scope and definition of done.
-   Where a plan's edge-case coverage looks thin, point the planner at an edge-case decomposition pass (for example `ck:ck-scenario`) rather than inventing scope here.
+4. **Each story's scope and definition of done are complete.**
+   There is no upfront plan directory to review - the plan is produced at task-time under the firstmate plan-review gate - so the review is of the STORY: its Goal, Scope, and Definition of done must be concrete and self-contained enough that a worker can plan against them.
+   `bin/fm-epic-lint.sh` already treats the story's implementation-plan section as a pointer placeholder (not-yet-planned) and stays green, so do not FAIL a story merely for lacking an upfront plan.
+   Where a story's scope or edge-case coverage looks thin, say so in the fix list so the scaffolder tightens the story, rather than inventing scope here.
 
 5. **Risks are surfaced.**
-   Note the architectural, ordering, and blast-radius risks of the plan.
+   Note the architectural, ordering, and blast-radius risks of the epic.
    For a risky or expensive epic, point at a pre-implementation red-team pass (for example `ck:ck-predict`).
 
 ### Required story frontmatter (identical in epic-scaffold and epic-review)
@@ -85,6 +86,6 @@ Write `REVIEW.md` beside `epic.md`, and report back exactly this shape:
 - **Epic:** `<slug>` - `<title>`
 - **Verdict:** PASS or FAIL
 - **Frontmatter:** `fm-epic-lint.sh` green (all N stories standard), or its numbered problem list copied verbatim
-- **Plans:** every story points at a real plan directory that covers its scope, or name the gaps
+- **Scope:** every story's Goal, Scope, and Definition of done are concrete and self-contained, or name the gaps
 - **Findings:** numbered fix list (empty on a clean PASS) - each item concrete and actionable
-- **next:** on PASS, the captain signs `epic.md`, then /epic-handoff; on FAIL, return to the scaffolder or planner to fix the numbered list, then re-run /epic-review
+- **next:** on PASS, the captain signs `epic.md`, then /epic-handoff; on FAIL, return to the scaffolder to fix the numbered list, then re-run /epic-review

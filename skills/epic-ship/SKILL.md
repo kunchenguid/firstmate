@@ -4,7 +4,7 @@ description: Ship a finished epic per repo through the gated flow. Requires the 
 user-invocable: true
 ---
 
-<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. This skill DRIVES bin/fm-epic-ship.sh; it must not reimplement that script's PR logic - defer to `fm-epic-ship.sh --help` for the exact contract. -->
+<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of five epic-pipeline skills (epic-new -> epic-scaffold -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. This skill DRIVES bin/fm-epic-ship.sh; it must not reimplement that script's PR logic - defer to `fm-epic-ship.sh --help` for the exact contract. -->
 
 # epic-ship
 

@@ -1,10 +1,10 @@
 ---
 name: epic-handoff
-description: Promote a reviewed, captain-signed epic into the home backlog, then guide the ordered next steps it deliberately does not do. Wraps bin/fm-umbrella-promote.sh, which validates the epic and every story's frontmatter, makes the epic canonical in the home's plans (leaving a back-symlink in the umbrella so design continues), and seeds each story into the backlog with ids and tags derived from the frontmatter so nothing orphans. Use after /epic-review passes and the captain signs epic.md. Fifth skill in the epic pipeline; guides toward dispatch and /epic-ship.
+description: Promote a reviewed, captain-signed epic into the home backlog, then guide the ordered next steps it deliberately does not do. Wraps bin/fm-umbrella-promote.sh, which validates the epic and every story's frontmatter, makes the epic canonical in the home's plans (leaving a back-symlink in the umbrella so design continues), and seeds each story into the backlog with ids and tags derived from the frontmatter so nothing orphans. Use after /epic-review passes and the captain signs epic.md. Fourth skill in the epic pipeline; guides toward dispatch and /epic-ship.
 user-invocable: true
 ---
 
-<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. This skill DRIVES bin/fm-umbrella-promote.sh; it must not reimplement that script's validation, move, or seed logic - defer to `fm-umbrella-promote.sh --help` for the exact contract. -->
+<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of five epic-pipeline skills (epic-new -> epic-scaffold -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. This skill DRIVES bin/fm-umbrella-promote.sh; it must not reimplement that script's validation, move, or seed logic - defer to `fm-umbrella-promote.sh --help` for the exact contract. -->
 
 # epic-handoff
 

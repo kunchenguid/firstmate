@@ -84,7 +84,7 @@ test_missing_both_fails_loud() {
   # The default playbook resolves from the SCRIPT's own code root (CODE_ROOT =
   # SCRIPT_DIR/..), so to make both sources absent build a throwaway code root:
   # a bin/ that symlinks fm-brief.sh and its sourced libs, and NO docs/ dir.
-  local coderoot="$home/coderoot" bin="$home/coderoot/bin" f
+  local bin="$home/coderoot/bin" f
   mkdir -p "$bin"
   for f in "$ROOT"/bin/*.sh; do
     ln -s "$f" "$bin/$(basename "$f")"

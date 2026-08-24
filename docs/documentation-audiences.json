@@ -425,14 +425,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "evidence/epwf-02/README.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "evidence/epwf-02/transcript.txt",
-      "audience": "maintainer-verification"
-    },
-    {
       "path": "skills/README.md",
       "audience": "public-product"
     },
@@ -442,10 +434,6 @@
     },
     {
       "path": "skills/epic-new/SKILL.md",
-      "audience": "public-product"
-    },
-    {
-      "path": "skills/epic-plan/SKILL.md",
       "audience": "public-product"
     },
     {

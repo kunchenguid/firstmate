@@ -106,11 +106,29 @@ EOF
   cat >> "$d/stories/svc-03.md" <<'EOF'
 
 ## Implementation plan
-_Pointer (filled by /epic-plan): `plans/things/stories/svc-03-.../`._
+_Pointer placeholder (filled at task-time by the worker under plan-review): `plans/things/stories/svc-03-.../`._
 EOF
   lint "$d"
   expect_code 0 "$RC" "resolvable + templated pointers should pass: $OUT"
   pass "a resolvable plan pointer passes and a templated (...) pointer is skipped"
+}
+
+# --- GREEN: story fmops-07 §3 - a scaffolded, NOT-yet-planned epic stays green.
+# With /epic-plan dropped, the scaffold leaves each story's Implementation plan
+# section a pointer placeholder (or absent); the lint must pass so a scaffolded
+# epic reaches /epic-review and sign-off with no upfront plan.
+test_green_scaffolded_not_yet_planned() {
+  local d; d=$(fresh notplanned)
+  # svc-02: a templated pointer placeholder exactly as the scaffold leaves it.
+  cat >> "$d/stories/svc-02.md" <<'EOF'
+
+## Implementation plan
+_Filled at task-time by the dispatched worker under firstmate's plan-review gate: `.../`._
+EOF
+  # svc-03: no Implementation plan section at all (also not-yet-planned).
+  lint "$d"
+  expect_code 0 "$RC" "a scaffolded not-yet-planned epic must be lint-green: $OUT"
+  pass "a scaffolded not-yet-planned epic is lint-green (no upfront /epic-plan step)"
 }
 
 # --- RED: the real incident case (uppercase id + story:/phase: + mismatch) ----
@@ -439,6 +457,7 @@ test_structural_errors() {
 
 test_green_standard_epic
 test_green_plan_pointers
+test_green_scaffolded_not_yet_planned
 test_red_incident_case
 test_red_uppercase_id
 test_red_id_filename_mismatch
