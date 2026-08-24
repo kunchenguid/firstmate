@@ -343,8 +343,10 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
-head -c 180000 /dev/zero | tr '\0' x
-printf '\nTRUNCATED_TAIL_WITH_ACK\n'
+sleep 6
+printf 'Wake context packet could not be built after the durable presentation.\n'
+printf 'Handle the durable human presentation below and use its exact acknowledgement command.\n\ndrained\n'
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
 exit 1
 SH
   chmod +x "$repo/bin/fm-wake-context.sh"
@@ -397,7 +399,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-continuity", {}, undefined, undefined, {});
-for (let i = 0; i < 250; i += 1) {
+for (let i = 0; i < 800; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
     : [];
@@ -408,9 +410,15 @@ const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 const armRows = rows.filter((row) => row.startsWith("arm="));
 if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
 if (!deliveryStarted) throw new Error("wake delivery did not begin");
-if (!deliveredPrompt.includes("WAKE_CONTEXT_FALLBACK:")) throw new Error(`Pi omitted wake-context fallback: ${deliveredPrompt}`);
-if ((deliveredPrompt.match(/WAKE_CONTEXT_FALLBACK:/g) || []).length !== 1) throw new Error(`Pi duplicated wake-context fallback: ${deliveredPrompt}`);
-if (deliveredPrompt.includes("TRUNCATED_TAIL_WITH_ACK")) throw new Error(`Pi leaked truncated wake context: ${deliveredPrompt}`);
+if (!deliveredPrompt.includes("Wake context packet could not be built after the durable presentation.")) {
+  throw new Error(`Pi omitted wake-context fallback: ${deliveredPrompt}`);
+}
+if (!deliveredPrompt.includes("--ack-through 7 --recovery-generation fixture-7")) {
+  throw new Error(`Pi lost the delayed wake-context ACK: ${deliveredPrompt}`);
+}
+if (deliveredPrompt.includes("WAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.")) {
+  throw new Error(`Pi added a conflicting generic fallback: ${deliveredPrompt}`);
+}
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
 if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {

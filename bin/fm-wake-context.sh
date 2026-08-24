@@ -269,7 +269,7 @@ monitoring_json() {
 }
 
 extract_ack() { # <stderr>
-  sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run //p' "$1" | tail -1
+  sed -n 's|^WAKE_ACK_REQUIRED: after handling completes run \(bin/fm-wake-drain\.sh --ack-through [0-9][0-9]* --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*\)$|\1|p' "$1" | tail -1
 }
 
 bounds_json() {
@@ -344,12 +344,6 @@ finish_presentation() {
     || { emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; return 1; }
 }
 
-finish_with_collection_timeout() {
-  COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
-  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
-    fm_run_timed "$COLLECTION_TIMEOUT" finish_presentation
-}
-
 normalize_timeouts() {
   case "$BACKEND_TIMEOUT" in
     ''|*[!0-9]*) BACKEND_TIMEOUT=3 ;;
@@ -358,7 +352,13 @@ normalize_timeouts() {
       [ -n "$BACKEND_TIMEOUT" ] || BACKEND_TIMEOUT=3
       ;;
   esac
-  case "$COLLECTION_TIMEOUT" in ''|*[!0-9]*|0) COLLECTION_TIMEOUT=10 ;; esac
+  case "$COLLECTION_TIMEOUT" in
+    ''|*[!0-9]*) COLLECTION_TIMEOUT=10 ;;
+    *)
+      COLLECTION_TIMEOUT=$(printf '%s' "$COLLECTION_TIMEOUT" | sed 's/^0*//')
+      [ -n "$COLLECTION_TIMEOUT" ] || COLLECTION_TIMEOUT=10
+      ;;
+  esac
 }
 
 prepare_presentation() {
@@ -380,10 +380,27 @@ drain_presentation() {
   fi
 }
 
+collect_presentation() {
+  drain_presentation
+  finish_presentation
+}
+
+run_collection() {
+  COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_run_timed "$COLLECTION_TIMEOUT" collect_presentation
+}
+
 finish_collection() {
   local status
-  finish_with_collection_timeout; status=$?
-  [ "$status" -ne 124 ] || emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"
+  run_collection; status=$?
+  if [ "$status" -eq 124 ]; then
+    if [ -f "$TMP_DIR/drain.err" ] && [ -n "$(extract_ack "$TMP_DIR/drain.err")" ]; then
+      emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"
+    else
+      fail_before_presentation "wake context collection timed out"
+    fi
+  fi
   return "$status"
 }
 
@@ -391,7 +408,6 @@ main() {
   [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
   normalize_timeouts
   prepare_presentation
-  drain_presentation
   finish_collection
 }
 
