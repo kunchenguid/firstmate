@@ -229,6 +229,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/browser-guard.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
     },
@@ -351,6 +355,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/browser-guard.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

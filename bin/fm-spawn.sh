@@ -2803,6 +2803,25 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Block analytics beacons in every crewmate browser session by default, so a task
+# cannot forget it. bin/fm-browser-guard.sh owns the blocklist and emits the exact
+# CHROME_DEVTOOLS_AXI_CHROME_ARGS flag; the pane shell composes it with any value
+# it already inherited (e.g. GPU flags). FM_BROWSER_ALLOW_ANALYTICS=1 is the
+# explicit, loud opt-out for a genuine analytics-testing or production-apex task.
+if [ "${FM_BROWSER_ALLOW_ANALYTICS:-0}" = 1 ]; then
+  echo "notice: FM_BROWSER_ALLOW_ANALYTICS=1 - browser analytics beacon blocking DISABLED for $W" >&2
+  spawn_send_text_line "$T" "# firstmate: browser analytics beacon blocking DISABLED for this session (FM_BROWSER_ALLOW_ANALYTICS=1)"
+else
+  if SPAWN_BROWSER_GUARD_FLAG=$("$SCRIPT_DIR/fm-browser-guard.sh" chrome-args 2>/dev/null) \
+     && [ -n "$SPAWN_BROWSER_GUARD_FLAG" ]; then
+    # $SPAWN_BROWSER_GUARD_FLAG expands here (firstmate side); the literal
+    # ${CHROME_DEVTOOLS_AXI_CHROME_ARGS:-} is expanded by the pane shell so an
+    # inherited value is preserved rather than clobbered.
+    spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_CHROME_ARGS=\"$SPAWN_BROWSER_GUARD_FLAG \${CHROME_DEVTOOLS_AXI_CHROME_ARGS:-}\""
+  else
+    echo "warning: browser analytics guard flag could not be computed for $W; this browser session is NOT protected" >&2
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
