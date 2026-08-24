@@ -5,6 +5,7 @@
 #   fm-telemetry.sh arm
 #   fm-telemetry.sh disarm
 #   fm-telemetry.sh status
+#   fm-telemetry.sh fseventsd-check         internal fleet early-warning check
 #   fm-telemetry.sh record [owner-token]   internal detached recorder mode
 #   fm-telemetry.sh fsync <file>           internal durable-flush helper
 #
@@ -36,6 +37,17 @@
 # with its age; losing the start-up race is reported on stdout instead, so it
 # never lands in that stream.
 # Nothing auto-arms this tool and it never installs a launch agent.
+# The fleet watcher's existing slow-check path calls `fseventsd-check` at most
+# once every five minutes. On macOS it samples fseventsd with top, keeps a
+# bounded three-hour history under state/telemetry/, and emits only a newly
+# reached warning, action, or emergency level. The accepted thresholds are:
+# warning above 512 MiB twice or above 256 MiB/hour for two hours; action above
+# 2 GiB, a doubling within one hour once already above 512 MiB, or a warning
+# combined with warning-or-worse memory pressure or more than 8 GiB swap;
+# emergency for sustained growth from the action range toward 4 GiB while memory
+# pressure is at warning-or-worse.
+# Memory-pressure levels use the kernel's dispatch encoding, where 1 is normal,
+# 2 is warning and 4 is critical, so only 2 or above counts as pressure here.
 #
 # FM_TELEMETRY_INTERVAL controls the cadence in whole seconds from 15 through
 # 30 (default 20).
@@ -45,6 +57,14 @@
 # (default /usr/bin/python3).
 # FM_TELEMETRY_RECORD_ONCE=1 is a test seam that makes internal record mode take
 # one snapshot and exit.
+# FM_TELEMETRY_NOW is a test seam that overrides the whole-second clock used by
+# `fseventsd-check` for its cadence, history and growth windows.
+# FM_TELEMETRY_FSEVENTSD_DISABLE=1 makes `fseventsd-check` a no-op before it
+# samples anything; the shared test library sets it so watcher tests never read
+# the live host, and production never sets it.
+# A sample whose history could not be persisted is still alerted on, with the
+# persistence failure reported as a diagnostic, so a full disk cannot silence a
+# level that was already measured.
 # Internal record mode without an owner token re-execs itself with a synthesized
 # one, so every recorder carries its token in argv and status and disarm have a
 # single liveness rule.
@@ -64,6 +84,8 @@ TELEMETRY_DIR="$STATE/telemetry"
 LOCK_LINK="$TELEMETRY_DIR/.record.lock"
 GUARD_LINK="$TELEMETRY_DIR/.record.guard"
 DIAGNOSTICS_LOG="$TELEMETRY_DIR/recorder.err"
+FSEVENTSD_HISTORY="$TELEMETRY_DIR/fseventsd-samples"
+FSEVENTSD_ALERT="$TELEMETRY_DIR/fseventsd-alert"
 INTERVAL=${FM_TELEMETRY_INTERVAL:-20}
 MAX_BYTES=${FM_TELEMETRY_MAX_BYTES:-209715200}
 FSYNC_PYTHON="${FM_TELEMETRY_PYTHON:-/usr/bin/python3}"
@@ -82,6 +104,8 @@ Usage:
   fm-telemetry.sh arm       start one detached recorder for this FM_HOME
   fm-telemetry.sh disarm    stop this home's recorder cleanly
   fm-telemetry.sh status    report running state and newest snapshot age
+  fm-telemetry.sh fseventsd-check
+                           run the internal fleet early-warning check
 
 Configuration:
   FM_TELEMETRY_INTERVAL     seconds between snapshots (15..30, default 20)
@@ -312,6 +336,226 @@ capture_processes() {
     awk 'NF { count[$3]++ } END { for (id in count) print count[id], id }' "$PROCESS_TMP" \
       | sort -k1,1nr -k2,2n | take_top
   } >> "$SNAPSHOT_TMP"
+}
+
+size_to_bytes() {
+  local raw=${1:-} unit number multiplier
+  [ -n "$raw" ] || return 1
+  unit=${raw#"${raw%?}"}
+  case "$unit" in
+    K|k) number=${raw%?}; multiplier=1024 ;;
+    M|m) number=${raw%?}; multiplier=1048576 ;;
+    G|g) number=${raw%?}; multiplier=1073741824 ;;
+    T|t) number=${raw%?}; multiplier=1099511627776 ;;
+    [0-9]) number=$raw; multiplier=1 ;;
+    *) return 1 ;;
+  esac
+  awk -v value="$number" -v multiplier="$multiplier" 'BEGIN {
+    if (value !~ /^[0-9]+([.][0-9]+)?$/) exit 1
+    printf "%.0f\n", value * multiplier
+  }'
+}
+
+bytes_to_mib() {
+  awk -v bytes="$1" 'BEGIN { printf "%.2f", bytes / 1048576 }'
+}
+
+bytes_to_gib() {
+  awk -v bytes="$1" 'BEGIN { printf "%.2f", bytes / 1073741824 }'
+}
+
+fseventsd_sample() {
+  local pid top_output mem_raw swap_output swap_raw
+  FSEVENTSD_MEM_BYTES=
+  FSEVENTSD_PRESSURE_LEVEL=-1
+  FSEVENTSD_SWAP_BYTES=0
+  command -v pgrep >/dev/null 2>&1 || return 1
+  command -v top >/dev/null 2>&1 || return 1
+  pid=$(pgrep -x fseventsd 2>/dev/null | head -1)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  top_output=$(top -l 1 -pid "$pid" \
+    -stats pid,command,mem,rsize,compressed,cpu,time,threads 2>/dev/null) || return 1
+  mem_raw=$(printf '%s\n' "$top_output" |
+    awk -v pid="$pid" '$1 == pid && $2 == "fseventsd" { print $3; exit }')
+  FSEVENTSD_MEM_BYTES=$(size_to_bytes "$mem_raw") || return 1
+
+  if command -v sysctl >/dev/null 2>&1; then
+    FSEVENTSD_PRESSURE_LEVEL=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || printf '%s' -1)
+    case "$FSEVENTSD_PRESSURE_LEVEL" in ''|*[!0-9]*) FSEVENTSD_PRESSURE_LEVEL=-1 ;; esac
+    swap_output=$(sysctl -n vm.swapusage 2>/dev/null || true)
+    swap_raw=$(printf '%s\n' "$swap_output" |
+      awk '{ for (i = 1; i <= NF; i++) if ($i == "used" && $(i + 1) == "=") { print $(i + 2); exit } }')
+    if [ -n "$swap_raw" ]; then
+      FSEVENTSD_SWAP_BYTES=$(size_to_bytes "$swap_raw") || FSEVENTSD_SWAP_BYTES=0
+    fi
+  fi
+}
+
+fseventsd_alert_rank() {
+  case "$1" in
+    warning) printf '1\n' ;;
+    action) printf '2\n' ;;
+    emergency) printf '3\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
+fseventsd_record_sample() {
+  local now=$1 mem=$2 pressure=$3 swap=$4 cutoff tmp
+  cutoff=$((now - 10800))
+  tmp=$(umask 077; mktemp "$TELEMETRY_DIR/.fseventsd-history.XXXXXX") || return 1
+  if [ -f "$FSEVENTSD_HISTORY" ]; then
+    awk -v cutoff="$cutoff" '$1 >= cutoff' "$FSEVENTSD_HISTORY" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  printf '%s %s %s %s\n' "$now" "$mem" "$pressure" "$swap" >> "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv -f "$tmp" "$FSEVENTSD_HISTORY"
+}
+
+fseventsd_publish_alert() {
+  local severity=$1 message=$2 previous=none previous_rank current_rank tmp
+  [ ! -f "$FSEVENTSD_ALERT" ] || previous=$(sed -n '1p' "$FSEVENTSD_ALERT")
+  previous_rank=$(fseventsd_alert_rank "$previous")
+  current_rank=$(fseventsd_alert_rank "$severity")
+  [ "$current_rank" -gt "$previous_rank" ] || return 0
+  tmp=$(umask 077; mktemp "$TELEMETRY_DIR/.fseventsd-alert.XXXXXX") || return 1
+  printf '%s\n' "$severity" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$FSEVENTSD_ALERT" || { rm -f "$tmp"; return 1; }
+  printf '%s\n' "$message"
+}
+
+fseventsd_check() {
+  local now last last_epoch previous='' preprevious='' previous_count=0
+  local prev_epoch=0 prev_mem=0
+  local preprev_epoch=0 preprev_mem=0
+  local growth_rate_mib='' doubling=0 warning=0
+  local severity=none reasons='' message mem_mib swap_gib pressure_label
+  local warning_bytes=536870912 action_bytes=2147483648 swap_action_bytes=8589934592
+  local pressure_warn_level=2 pressure_critical_level=4
+
+  case "${FM_TELEMETRY_FSEVENTSD_DISABLE:-0}" in ''|0) ;; *) return 0 ;; esac
+  now=${FM_TELEMETRY_NOW:-$(date '+%s' 2>/dev/null || true)}
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  mkdir -p "$TELEMETRY_DIR" || return 0
+  if [ -s "$FSEVENTSD_HISTORY" ]; then
+    last=$(tail -n 1 "$FSEVENTSD_HISTORY" 2>/dev/null || true)
+    last_epoch=${last%% *}
+    case "$last_epoch" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$now" -ge "$last_epoch" ] && [ "$((now - last_epoch))" -lt 300 ]; then
+          return 0
+        fi
+        ;;
+    esac
+    previous=$last
+    previous_count=$(wc -l < "$FSEVENTSD_HISTORY" | tr -d '[:space:]')
+    if [ "$previous_count" -ge 2 ]; then
+      preprevious=$(tail -n 2 "$FSEVENTSD_HISTORY" | sed -n '1p')
+    fi
+  fi
+
+  fseventsd_sample || return 0
+  if [ -n "$previous" ]; then
+    read -r prev_epoch prev_mem _ <<EOF
+$previous
+EOF
+  fi
+  if [ -n "$preprevious" ]; then
+    read -r preprev_epoch preprev_mem _ <<EOF
+$preprevious
+EOF
+  fi
+
+  if [ "$prev_epoch" -le "$now" ] && [ "$((now - prev_epoch))" -le 600 ] \
+    && [ "$prev_mem" -gt "$warning_bytes" ] && [ "$FSEVENTSD_MEM_BYTES" -gt "$warning_bytes" ]; then
+    warning=1
+    reasons='two consecutive samples above 512 MiB'
+  fi
+  if [ -f "$FSEVENTSD_HISTORY" ]; then
+    growth_rate_mib=$(awk -v now="$now" -v mem="$FSEVENTSD_MEM_BYTES" '
+      $1 >= now - 10800 && $1 <= now - 7200 { epoch = $1; bytes = $2 }
+      END {
+        if (epoch > 0 && mem > bytes) {
+          rate = (mem - bytes) * 3600 / (now - epoch) / 1048576
+          if (rate > 256) printf "%.2f", rate
+        }
+      }' "$FSEVENTSD_HISTORY")
+    if [ -n "$growth_rate_mib" ]; then
+      warning=1
+      [ -z "$reasons" ] || reasons="$reasons; "
+      reasons="${reasons}growth ${growth_rate_mib} MiB/hour for 2h"
+    fi
+    if [ "$FSEVENTSD_MEM_BYTES" -gt "$warning_bytes" ] && awk -v now="$now" -v mem="$FSEVENTSD_MEM_BYTES" '
+      $1 >= now - 3600 && $1 < now && $2 > 0 && mem >= 2 * $2 { found = 1 }
+      END { exit(found ? 0 : 1) }' "$FSEVENTSD_HISTORY"; then
+      doubling=1
+    fi
+  fi
+
+  if [ "$FSEVENTSD_MEM_BYTES" -gt "$action_bytes" ]; then
+    severity=action
+    [ -z "$reasons" ] || reasons="$reasons; "
+    reasons="${reasons}MEM above 2 GiB"
+  fi
+  if [ "$doubling" -eq 1 ]; then
+    severity=action
+    [ -z "$reasons" ] || reasons="$reasons; "
+    reasons="${reasons}doubling within one hour"
+  fi
+  if [ "$warning" -eq 1 ] && [ "$FSEVENTSD_PRESSURE_LEVEL" -ge "$pressure_warn_level" ]; then
+    severity=action
+    if [ "$FSEVENTSD_PRESSURE_LEVEL" -ge "$pressure_critical_level" ]; then
+      pressure_label='red critical'
+    else
+      pressure_label=yellow
+    fi
+    [ -z "$reasons" ] || reasons="$reasons; "
+    reasons="${reasons}warning plus ${pressure_label} memory pressure"
+  fi
+  if [ "$warning" -eq 1 ] && [ "$FSEVENTSD_SWAP_BYTES" -gt "$swap_action_bytes" ]; then
+    severity=action
+    [ -z "$reasons" ] || reasons="$reasons; "
+    reasons="${reasons}warning plus more than 8 GiB swap"
+  fi
+  if [ "$severity" = none ] && [ "$warning" -eq 1 ]; then
+    severity=warning
+  fi
+
+  if [ "$preprev_epoch" -gt 0 ] && [ "$prev_epoch" -gt "$preprev_epoch" ] \
+    && [ "$now" -gt "$prev_epoch" ] && [ "$((prev_epoch - preprev_epoch))" -le 600 ] \
+    && [ "$((now - prev_epoch))" -le 600 ] && [ "$preprev_mem" -lt "$prev_mem" ] \
+    && [ "$prev_mem" -lt "$FSEVENTSD_MEM_BYTES" ] \
+    && [ "$FSEVENTSD_MEM_BYTES" -gt "$action_bytes" ] \
+    && [ "$FSEVENTSD_PRESSURE_LEVEL" -ge "$pressure_warn_level" ]; then
+    severity=emergency
+    [ -z "$reasons" ] || reasons="$reasons; "
+    reasons="${reasons}sustained growth toward 4 GiB plus worsening memory pressure"
+  fi
+
+  fseventsd_record_sample "$now" "$FSEVENTSD_MEM_BYTES" \
+    "$FSEVENTSD_PRESSURE_LEVEL" "$FSEVENTSD_SWAP_BYTES" \
+    || diagnostic "could not persist the fseventsd sample history"
+  if [ "$severity" = none ]; then
+    rm -f "$FSEVENTSD_ALERT"
+    return 0
+  fi
+
+  mem_mib=$(bytes_to_mib "$FSEVENTSD_MEM_BYTES")
+  swap_gib=$(bytes_to_gib "$FSEVENTSD_SWAP_BYTES")
+  case "$severity" in
+    warning) message="WARNING: fseventsd MEM=${mem_mib} MiB; $reasons" ;;
+    action) message="ACTION: fseventsd MEM=${mem_mib} MiB; $reasons; pressure_level=$FSEVENTSD_PRESSURE_LEVEL swap_used=${swap_gib} GiB" ;;
+    emergency)
+      message="EMERGENCY: fseventsd MEM=${mem_mib} MiB; $reasons; pressure_level=$FSEVENTSD_PRESSURE_LEVEL swap_used=${swap_gib} GiB; stop launching new work, save state, and reduce workload before the machine wedges"
+      ;;
+  esac
+  fseventsd_publish_alert "$severity" "$message"
 }
 
 fsync_file() {
@@ -672,6 +916,7 @@ case "${1:-}" in
   arm) arm ;;
   disarm) disarm ;;
   status) status ;;
+  fseventsd-check) fseventsd_check ;;
   record) shift; record "${1:-}" ;;
   fsync) shift; fsync_file "${1:-}" ;;
   -h|--help|help) usage ;;
