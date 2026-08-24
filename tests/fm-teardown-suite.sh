@@ -6597,6 +6597,9 @@ SH
   git -C "$firstmate_source" fetch --quiet "$ROOT" "$firstmate_tip"
   git -C "$firstmate_source" checkout --quiet -b "$default" FETCH_HEAD
   git -C "$case_dir/project" remote set-url origin "$firstmate_source"
+  git -C "$case_dir/project" fetch --quiet "$ROOT" "$firstmate_tip"
+  git -C "$case_dir/wt" reset --quiet --hard "$firstmate_tip"
+  git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$firstmate_tip"
   PATH=$original_path
   tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
   git -C "$clone" remote set-url origin https://example.com/repository.git
