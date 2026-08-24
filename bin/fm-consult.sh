@@ -16,6 +16,9 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
+# status with no id lists every consultation, printing a refused line with a
+# reason for any entry it cannot report safely, and exits nonzero once the whole
+# listing is printed. status with an id refuses such an entry immediately.
 #
 # Transport is deliberately absent: this script makes no network calls and
 # assumes no browser, tunnel, API client, or advisor channel.
@@ -72,9 +75,52 @@ FM_HOME=$(CDPATH='' cd -- "$FM_HOME_INPUT" 2>/dev/null && pwd -P) \
   || die "FM_HOME directory cannot be resolved: $FM_HOME_INPUT"
 DATA="$FM_HOME/data"
 
+# The consult_*_ok checks decide one consultation; they never exit. They set
+# CONSULT_REFUSAL to a specific, actionable reason and return 1 so a caller can
+# choose the policy: a direct query dies on the spot, while a full listing prints
+# the reason for that entry and keeps going.
+CONSULT_REFUSAL=
+CONSULT_LINE=
+
+consult_id_ok() {
+  CONSULT_REFUSAL=
+  if fm_task_id_creation_valid "${1:-}"; then
+    return 0
+  fi
+  CONSULT_REFUSAL="unsafe or absent consult id; use 1-64 characters from A-Z, a-z, 0-9, dot, underscore, or dash, and do not begin with dot"
+  return 1
+}
+
+consult_directory_ok() {
+  local dir=$1
+  CONSULT_REFUSAL=
+  if [ -L "$dir" ]; then
+    CONSULT_REFUSAL="consultation directory must not be a symlink: $dir"
+    return 1
+  fi
+  if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+    CONSULT_REFUSAL="consultation path is not a directory: $dir"
+    return 1
+  fi
+  return 0
+}
+
+consult_file_ok() {
+  local path=$1 label=$2
+  CONSULT_REFUSAL=
+  if [ -L "$path" ]; then
+    CONSULT_REFUSAL="$label must not be a symlink: $path"
+    return 1
+  fi
+  if [ -e "$path" ] && [ ! -f "$path" ]; then
+    CONSULT_REFUSAL="$label is not a regular file: $path"
+    return 1
+  fi
+  return 0
+}
+
 validate_consult_id() {
-  fm_task_id_creation_valid "${1:-}" \
-    || die "unsafe or absent consult id; use 1-64 characters from A-Z, a-z, 0-9, dot, underscore, or dash, and do not begin with dot"
+  consult_id_ok "${1:-}" || die "$CONSULT_REFUSAL"
 }
 
 validate_data_directory() {
@@ -87,21 +133,11 @@ validate_data_directory() {
 }
 
 validate_consult_directory() {
-  local dir=$1
-  if [ -L "$dir" ]; then
-    die "consultation directory must not be a symlink: $dir"
-  fi
-  if [ -e "$dir" ] && [ ! -d "$dir" ]; then
-    die "consultation path is not a directory: $dir"
-  fi
+  consult_directory_ok "$1" || die "$CONSULT_REFUSAL"
 }
 
 validate_consult_file() {
-  local path=$1 label=$2
-  [ ! -L "$path" ] || die "$label must not be a symlink: $path"
-  if [ -e "$path" ] && [ ! -f "$path" ]; then
-    die "$label is not a regular file: $path"
-  fi
+  consult_file_ok "$1" "$2" || die "$CONSULT_REFUSAL"
 }
 
 scaffold_consult() {
@@ -180,26 +216,38 @@ receive_consult() {
   printf 'summary: lines=%s headings=%s bytes=%s\n' "$lines" "$headings" "$bytes"
 }
 
-status_one() {
+# Classify one consultation into its status line without exiting. Sets
+# CONSULT_LINE on success; sets CONSULT_REFUSAL and returns 1 when the entry
+# cannot be reported safely.
+consult_state_line() {
   local id=$1 dir brief report
-  validate_consult_id "$id"
+  CONSULT_LINE=
   dir="$DATA/$id"
   brief="$dir/consult-brief.md"
   report="$dir/consult-report.md"
-  validate_consult_directory "$dir"
-  validate_consult_file "$brief" "consultation brief"
-  validate_consult_file "$report" "consultation report"
+  consult_directory_ok "$dir" || return 1
+  consult_file_ok "$brief" "consultation brief" || return 1
+  consult_file_ok "$report" "consultation report" || return 1
   if [ -s "$report" ]; then
-    printf '%s: report received\n' "$id"
+    CONSULT_LINE="$id: report received"
   elif [ -f "$brief" ]; then
-    printf '%s: brief written; still awaiting a report\n' "$id"
+    CONSULT_LINE="$id: brief written; still awaiting a report"
   else
-    printf '%s: no brief written\n' "$id"
+    CONSULT_LINE="$id: no brief written"
   fi
+  return 0
+}
+
+status_one() {
+  local id=$1
+  validate_consult_id "$id"
+  validate_data_directory
+  consult_state_line "$id" || die "$CONSULT_REFUSAL"
+  printf '%s\n' "$CONSULT_LINE"
 }
 
 status_all() {
-  local dir id found=0
+  local dir id found=0 refused=0
   validate_data_directory
   [ -d "$DATA" ] || {
     printf '%s\n' 'no consultations'
@@ -211,18 +259,24 @@ status_all() {
     if [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
       || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]; then
       id=${dir##*/}
-      status_one "$id"
       found=1
+      if consult_id_ok "$id" && consult_state_line "$id"; then
+        printf '%s\n' "$CONSULT_LINE"
+      else
+        refused=1
+        printf '%s: refused (%s)\n' "$id" "$CONSULT_REFUSAL"
+      fi
     fi
   done
   [ "$found" -eq 1 ] || printf '%s\n' 'no consultations'
+  [ "$refused" -eq 0 ] \
+    || die "one or more consultations were refused; every entry above was still listed"
 }
 
 case "$COMMAND" in
   scaffold) scaffold_consult "$2" ;;
   receive) receive_consult "$2" ;;
   status)
-    validate_data_directory
     if [ "$#" -eq 2 ]; then
       status_one "$2"
     else
