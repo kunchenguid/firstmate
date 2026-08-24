@@ -195,9 +195,12 @@ Pairing and binding records live under `data/feishu/`.
 Durable accepted events, ledgers, pending indexes, media envelopes and cache bytes, Assistant-registration intents, outbox records, attempts, receipts, quarantine records, alerts, owner identity, and health live under `state/feishu/`.
 Directories are mode `0700` and files are mode `0600`.
 Raw identity is never used as a filename.
-Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, byte substitution, traversal attempts, and cross-home paths are rejected.
+Symlinks and hardlinks in durable record files, partial files, malformed schemas, cross-record mismatches, byte substitution, traversal attempts, and cross-home paths are rejected.
 Delivered or terminally refused media is removed after a bounded 24-hour retention window; pending and offered work is retained for recovery.
-A live lock owner is distinguishable from stale dead-owner reclamation, a fresh dead owner still inside the stale-owner grace period, and malformed or unsafe lock state; only live-owner contention is retried by the active ingress pump.
+Existing state locks are opened without following symlinks, read as bounded PID records from that descriptor, and kept bound to the same inode evidence.
+A hardlinked regular lock owned by a live PID remains ordinary contention, while a dead owner older than 30 seconds permits removal of only the revalidated canonical lock entry before exclusive reacquisition; no unknown alias is searched for or removed.
+Malformed hardlinked locks, fresh dead owners, or changed path/inode/link evidence stop with a body-free hardlink-specific outcome, while symlink and non-regular lock objects remain terminally unsafe.
+Only live-owner contention is retried by the active ingress pump.
 
 Healthy normal startup prints no Feishu status or success line.
 Public status shows only enabled state, binding status, generation, body-free transport phase, and aggregate counts.

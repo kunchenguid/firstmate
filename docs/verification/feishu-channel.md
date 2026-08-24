@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.2` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.3` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
@@ -53,8 +53,10 @@ It proves that the extension registers no TUI input, message-end, turn-start, or
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
 It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
 It also proves image-only and ordered text-plus-multiple-image delivery as native Pi content, exact byte preservation, private `0600` envelopes/cache files, resource/message replay convergence, stale-claim substitution refusal, MIME and object-size mismatch refusal, retry after partial download, bounded durable retry backoff that honors `Retry-After` for retriable media downloads with the retry ceiling preserved, strict ingress FIFO that holds later text behind a not-ready media head until ready or terminal refusal, any-single-locale post acceptance preferring `zh_cn`, and malformed post structure quarantine without transport failure, attachment-count and malformed-key refusal, unsupported-type metadata, symlink containment, bounded terminal cleanup, and media-originated parity with Pi's existing tool path.
-A separate live process holds the pairing lock beyond the normal acquisition wait while the public Pi lifecycle pump runs; the test proves one retry notice, pending-message preservation, automatic recovery after release, and one native-queue offer across repeated timer ticks.
-It separately proves stale dead-owner reclamation, refusal of a fresh dead owner during its grace period, malformed and unsafe lock refusal, non-retryable state-corruption shutdown, changed-generation refusal, marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` exclusion with surrounding-whitespace normalization, close non-exact delivery, and local neutralization of a historical whitespace-carrying pending routine record, non-Assistant exclusion, restart deduplication, deterministic and idempotent post Markdown rendering, supported Markdown preservation, unsupported-source literal preservation, URL-, link-, code-span-, code-block-, table-, quote-, and list-preserving chunking, oversize-construct refusal, rendered-output resource refusal, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
+A separate live process holds a real two-link pairing lock beyond the normal acquisition wait while the public Pi lifecycle pump runs; the test proves that neither entry is removed while the owner is live, one retry notice, pending-message preservation, automatic recovery after the owner releases only the canonical entry, and one native-queue offer across repeated timer ticks.
+Exact inbound-state fixtures prove stale dead-owner recovery removes only the revalidated canonical entry and reacquires serialization while the unknown alias remains, fresh dead-owner and malformed-record refusal preserve both links, canonical inode replacement refuses without deleting either object, and symlink and directory locks remain terminally unsafe.
+The bridge fixture separately proves the hardlink-specific body-free stop outcome, zero native sends, durable pending preservation, lifecycle-boundary recovery, and exactly one native offer after recovery.
+The suite also preserves ordinary single-link stale dead-owner reclamation, fresh dead-owner and malformed refusal, non-retryable state-corruption shutdown, changed-generation refusal, marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` exclusion with surrounding-whitespace normalization, close non-exact delivery, and local neutralization of a historical whitespace-carrying pending routine record, non-Assistant exclusion, restart deduplication, deterministic and idempotent post Markdown rendering, supported Markdown preservation, unsupported-source literal preservation, URL-, link-, code-span-, code-block-, table-, quote-, and list-preserving chunking, oversize-construct refusal, rendered-output resource refusal, pre-persistence credential refusal, and private durable-record symlink and hardlink rejection.
 
 The bridge lifecycle section reproduces the startup-order failure through the real Pi extension factories and their public lifecycle handlers.
 The initiating trigger is Pi's initial `session_start`; the masking condition is that Firstmate lock ownership becomes valid only after the bridge's first callback has returned; the visible symptom is an absent loaded marker with no pairing, binding, or transport.
@@ -75,7 +77,7 @@ A sentinel executable on `PATH` proves the transport does not invoke the former 
 
 ```console
 $ bash tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.2
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
 ```
 
 The check compiles the bridge, native-queue channel, watcher integration, turn-end integration, and shared state declarations with strict TypeScript settings against the installed Pi declarations.

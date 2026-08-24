@@ -66,7 +66,7 @@ node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertManualRebindSafe,
@@ -213,18 +213,20 @@ async function emit(pi, name, event, ctx) {
   return results;
 }
 
-async function holdLiveStateLock(path, milliseconds) {
+async function holdLiveStateLock(path, milliseconds, { hardlinked = false } = {}) {
   const ready = `${path}.ready`;
+  const alias = hardlinked ? `${path}.unknown-alias` : "";
   const child = spawn(process.execPath, ["--input-type=module", "-e", `
-    import { closeSync, fsyncSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+    import { closeSync, fsyncSync, linkSync, openSync, unlinkSync, writeFileSync } from "node:fs";
     const fd = openSync(process.env.LOCK_PATH, "wx", 0o600);
     writeFileSync(fd, String(process.pid) + "\\n", "utf8");
     fsyncSync(fd);
     closeSync(fd);
+    if (process.env.ALIAS_PATH) linkSync(process.env.LOCK_PATH, process.env.ALIAS_PATH);
     writeFileSync(process.env.READY_PATH, "ready\\n");
     setTimeout(() => { unlinkSync(process.env.LOCK_PATH); }, Number(process.env.HOLD_MS));
   `], {
-    env: { ...process.env, LOCK_PATH: path, READY_PATH: ready, HOLD_MS: String(milliseconds) },
+    env: { ...process.env, LOCK_PATH: path, READY_PATH: ready, HOLD_MS: String(milliseconds), ALIAS_PATH: alias },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -238,7 +240,45 @@ async function holdLiveStateLock(path, milliseconds) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert(existsSync(ready), "concurrent lock holder did not acquire the fixture lock");
-  return { exited };
+  return { alias, exited };
+}
+
+async function replaceHardlinkedStateLock(path) {
+  const ready = `${path}.ready`;
+  const replaced = `${path}.replaced`;
+  const alias = `${path}.unknown-alias`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { closeSync, fsyncSync, linkSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+    let fd = openSync(process.env.LOCK_PATH, "wx", 0o600);
+    writeFileSync(fd, String(process.pid) + "\\n", "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    linkSync(process.env.LOCK_PATH, process.env.ALIAS_PATH);
+    writeFileSync(process.env.READY_PATH, "ready\\n");
+    setTimeout(() => {
+      unlinkSync(process.env.LOCK_PATH);
+      fd = openSync(process.env.LOCK_PATH, "wx", 0o600);
+      writeFileSync(fd, String(process.pid) + "\\n", "utf8");
+      fsyncSync(fd);
+      closeSync(fd);
+      writeFileSync(process.env.REPLACED_PATH, "replaced\\n");
+    }, 200);
+  `], {
+    env: { ...process.env, LOCK_PATH: path, READY_PATH: ready, REPLACED_PATH: replaced, ALIAS_PATH: alias },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`replacement lock holder exited ${code}: ${stderr}`)));
+  });
+  for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert(existsSync(ready), "replacement fixture did not acquire the hardlinked lock");
+  return { alias, exited, replaced };
 }
 
 function remote(overrides = {}) {
@@ -272,12 +312,20 @@ assert.equal(ingressCounts(home).pending, 1);
 const session = context(sessionId, sessionFile, sessionCwd, [preBindingAssistant]);
 const pi = fakePi();
 registerFeishuNativeChannel(pi);
-const pairingLockHolder = await holdLiveStateLock(join(pathsForHome(home).stateRoot, ".pairing.lock"), 6000);
+const livePairingLock = join(pathsForHome(home).stateRoot, ".pairing.lock");
+const pairingLockHolder = await holdLiveStateLock(livePairingLock, 6000, { hardlinked: true });
 assert(!pi.handlers.has("input"), "Feishu extension intercepted native TUI input");
 assert(!pi.handlers.has("message_end") && !pi.handlers.has("turn_start"), "removed TUI transformation or acknowledgement hooks remained registered");
 assert(!pi.handlers.has("tool_call"), "Feishu extension retained a special tool-effect policy");
 await emit(pi, "session_start", { reason: "startup" }, session.ctx);
 await new Promise((resolve) => setImmediate(resolve));
+for (let attempt = 0; attempt < 40 && !session.notifications.some(({ message }) => message.includes("transient state-lock contention")); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.equal(pi.sends.length, 0, "active hardlinked lock owner was bypassed before releasing the canonical entry");
+assert(existsSync(livePairingLock) && existsSync(pairingLockHolder.alias), "active hardlinked lock owner lost a directory entry during contention");
+assert.equal(lstatSync(livePairingLock).ino, lstatSync(pairingLockHolder.alias).ino, "active hardlinked lock owner changed inode during contention");
+assert.equal(lstatSync(livePairingLock).nlink, 2, "active hardlinked lock owner lost its aliased shape during contention");
 await pairingLockHolder.exited;
 for (let attempt = 0; attempt < 30 && pi.sends.length === 0; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -285,6 +333,8 @@ for (let attempt = 0; attempt < 30 && pi.sends.length === 0; attempt += 1) {
 assert.equal(pi.sends.length, 1, `accepted Feishu input did not recover after live state-lock contention: ${JSON.stringify([...session.statuses])} ${JSON.stringify(session.notifications)}`);
 assert.equal(session.notifications.filter(({ message }) => message.includes("transient state-lock contention")).length, 1, "live lock contention did not produce one bounded-retry notice");
 assert(!session.notifications.some(({ message }) => message.includes("ingress stopped safely")), "live lock contention stopped the converged ingress runtime");
+assert.equal(lstatSync(pairingLockHolder.alias).nlink, 1, "hardlinked live-owner fixture alias did not remain after its owner released the canonical entry");
+unlinkSync(pairingLockHolder.alias);
 await new Promise((resolve) => setTimeout(resolve, 800));
 assert.equal(pi.sends.length, 1, "repeated pump ticks duplicated the recovered native-queue offer");
 assert.equal(pi.sends[0].options?.deliverAs, "steer", "Feishu input did not use Pi's native steering queue");
@@ -582,25 +632,45 @@ assert.equal(existsSync(repairPathRecord.pendingPath), false, "repair-path neutr
 assert.equal(statusSummary(home).outbound_pending, 0, "historical routine records left outbound work after neutralization");
 assert.equal(claimNextOutbound(home), undefined, "a neutralized historical routine record was later re-sent");
 
-const pairingPath = pathsForHome(home).pairing;
-const validPairingBytes = readFileSync(pairingPath, "utf8");
-writeFileSync(pairingPath, "{malformed\n");
-for (let attempt = 0; attempt < 20 && !session.notifications.some(({ message }) => message.includes("malformed Feishu JSON")); attempt += 1) {
+const bridgePendingBefore = ingressCounts(home).pending;
+const bridgeHardlinkEvent = publishFeishuInbound(home, remote({
+  event_id: "evt_bridge_hardlink",
+  message_id: "om_bridgeHardlink1",
+  content: "pending behind hardlinked state lock",
+}));
+const bridgeSendCount = pi.sends.length;
+const bridgeInboundLock = join(pathsForHome(home).stateRoot, ".inbound-state.lock");
+const bridgeInboundAlias = `${bridgeInboundLock}.unknown-alias`;
+writeFileSync(bridgeInboundLock, "2147483647\n", { mode: 0o600 });
+linkSync(bridgeInboundLock, bridgeInboundAlias);
+const expectedHardlinkStop = "Feishu ingress stopped safely: Error: Feishu inbound-state hardlinked state lock owner is not live within the stale-owner grace period";
+for (let attempt = 0; attempt < 80 && !session.notifications.some(({ message }) => message === expectedHardlinkStop); attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
-assert(session.notifications.some(({ message }) => message.includes("Feishu ingress stopped safely") && message.includes("malformed Feishu JSON")), "non-retryable state corruption did not stop ingress distinctly");
-writeFileSync(pairingPath, validPairingBytes);
+assert(session.notifications.some(({ message }) => message === expectedHardlinkStop), "hardlinked inbound-state lock did not produce its stable body-free bridge outcome");
+assert(!expectedHardlinkStop.includes(home) && !expectedHardlinkStop.includes("2147483647") && !expectedHardlinkStop.includes("pending behind hardlinked state lock"), "hardlinked lock outcome leaked private path, PID, or message data");
+assert.equal(pi.sends.length, bridgeSendCount, "hardlinked inbound-state refusal sent native Pi input");
+assert.equal(ingressCounts(home).pending, bridgePendingBefore + 1, "hardlinked inbound-state refusal did not preserve durable pending input");
+assert.equal(lstatSync(bridgeInboundLock).ino, lstatSync(bridgeInboundAlias).ino, "bridge refusal replaced the hardlinked lock inode");
+assert.equal(lstatSync(bridgeInboundLock).nlink, 2, "bridge refusal unlinked a hardlink entry");
 const stoppedSendCount = pi.sends.length;
 await new Promise((resolve) => setTimeout(resolve, 500));
 assert.equal(pi.sends.length, stoppedSendCount, "a stopped non-retryable runtime restarted without a lifecycle boundary");
+unlinkSync(bridgeInboundLock);
+unlinkSync(bridgeInboundAlias);
 
 await emit(pi, "session_shutdown", {}, session.ctx);
 const resumedPi = fakePi();
 registerFeishuNativeChannel(resumedPi);
 const resumed = context(sessionId, sessionFile, sessionCwd, session.entries);
 await emit(resumedPi, "session_start", { reason: "resume" }, resumed.ctx);
-await new Promise((resolve) => setTimeout(resolve, 320));
+for (let attempt = 0; attempt < 30 && !resumedPi.sends.some((send) => parseFeishuMarker(send.content)?.deliveryRef === bridgeHardlinkEvent.deliveryRef); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
 assert(!resumedPi.sends.some((send) => parseFeishuMarker(send.content)?.deliveryRef === first.deliveryRef), "persisted Feishu input was resubmitted after exact session resume");
+assert.equal(resumedPi.sends.filter((send) => parseFeishuMarker(send.content)?.deliveryRef === bridgeHardlinkEvent.deliveryRef).length, 1, "preserved hardlink-blocked input was not offered exactly once after a lifecycle recovery boundary");
+await new Promise((resolve) => setTimeout(resolve, 500));
+assert.equal(resumedPi.sends.filter((send) => parseFeishuMarker(send.content)?.deliveryRef === bridgeHardlinkEvent.deliveryRef).length, 1, "repeated pump ticks duplicated the recovered hardlink-blocked native offer");
 assert.equal(ingressCounts(home).delivered, 3, "session markers did not reconcile prior native-queue submissions");
 assert.equal(claimNextOutbound(home), undefined, "persisted Assistant entries were mirrored again after exact session resume");
 await emit(resumedPi, "session_shutdown", {}, resumed.ctx);
@@ -858,8 +928,58 @@ utimesSync(pairingLock, old, old);
 assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /malformed Feishu pairing state lock/);
 unlinkSync(pairingLock);
 symlinkSync(lockPaths.pairing, pairingLock);
-assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu pairing state lock/);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu pairing symlink state lock/);
 unlinkSync(pairingLock);
+
+const inboundLock = join(lockPaths.stateRoot, ".inbound-state.lock");
+const staleHardlinkAlias = `${inboundLock}.stale-unknown-alias`;
+writeFileSync(inboundLock, "2147483647\n", { mode: 0o600 });
+linkSync(inboundLock, staleHardlinkAlias);
+utimesSync(inboundLock, old, old);
+const staleHardlinkInode = lstatSync(inboundLock).ino;
+assert.deepEqual(pendingFeishuIngress(lockHome, lockFence), [], "stale dead hardlinked owner was not safely reclaimed");
+assert(!existsSync(inboundLock), "stale hardlinked canonical lock entry remained after successful reacquisition");
+assert(existsSync(staleHardlinkAlias), "stale hardlink recovery deleted the unknown alias");
+assert.equal(lstatSync(staleHardlinkAlias).ino, staleHardlinkInode, "stale hardlink recovery replaced the unknown alias inode");
+assert.equal(lstatSync(staleHardlinkAlias).nlink, 1, "stale hardlink recovery mutated more than the canonical entry");
+unlinkSync(staleHardlinkAlias);
+
+const freshHardlinkAlias = `${inboundLock}.fresh-unknown-alias`;
+writeFileSync(inboundLock, "2147483647\n", { mode: 0o600 });
+linkSync(inboundLock, freshHardlinkAlias);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /Feishu inbound-state hardlinked state lock owner is not live within the stale-owner grace period/);
+assert(existsSync(inboundLock) && existsSync(freshHardlinkAlias), "fresh dead hardlinked owner lost a directory entry during refusal");
+assert.equal(lstatSync(inboundLock).nlink, 2, "fresh dead hardlinked owner was unlinked during its grace period");
+unlinkSync(inboundLock);
+unlinkSync(freshHardlinkAlias);
+
+const malformedHardlinkAlias = `${inboundLock}.malformed-unknown-alias`;
+writeFileSync(inboundLock, "not-a-pid\n", { mode: 0o600 });
+linkSync(inboundLock, malformedHardlinkAlias);
+utimesSync(inboundLock, old, old);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /malformed Feishu inbound-state hardlinked state lock/);
+assert(existsSync(inboundLock) && existsSync(malformedHardlinkAlias), "malformed hardlinked lock was unlinked during refusal");
+assert.equal(lstatSync(inboundLock).nlink, 2, "malformed hardlinked lock shape changed during refusal");
+unlinkSync(inboundLock);
+unlinkSync(malformedHardlinkAlias);
+
+const replacement = await replaceHardlinkedStateLock(inboundLock);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu inbound-state hardlinked state lock changed during recovery/);
+await replacement.exited;
+assert(existsSync(replacement.replaced), "replacement fixture did not complete the path race");
+assert(existsSync(inboundLock) && existsSync(replacement.alias), "path-replacement refusal deleted canonical or aliased evidence");
+assert.notEqual(lstatSync(inboundLock).ino, lstatSync(replacement.alias).ino, "path-replacement fixture did not change the canonical inode");
+unlinkSync(inboundLock);
+unlinkSync(replacement.alias);
+
+symlinkSync(lockPaths.pairing, inboundLock);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu inbound-state symlink state lock/);
+assert(lstatSync(inboundLock).isSymbolicLink(), "symlink lock was mutated during refusal");
+unlinkSync(inboundLock);
+mkdirSync(inboundLock);
+assert.throws(() => pendingFeishuIngress(lockHome, lockFence), /unsafe Feishu inbound-state non-regular state lock/);
+assert(lstatSync(inboundLock).isDirectory(), "directory lock was mutated during refusal");
+rmdirSync(inboundLock);
 
 console.log("ok - native Pi steering, lock-contention recovery, state safety, and all-origin Assistant mirroring");
 JS

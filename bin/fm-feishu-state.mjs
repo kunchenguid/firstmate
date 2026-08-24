@@ -11,12 +11,15 @@
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -51,6 +54,7 @@ export const DEFAULT_MIN_FREE_BYTES = 64 * 1024 * 1024;
 export const IDEMPOTENCY_WINDOW_MS = 60 * 60 * 1000;
 const LOCK_WAIT_MS = 3000;
 const LOCK_STALE_MS = 30000;
+const LOCK_PID_RECORD_MAX_BYTES = 32;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60000;
 const MODULE_FILE = fileURLToPath(import.meta.url);
@@ -191,29 +195,177 @@ function pidAlive(pid) {
   }
 }
 
-function inspectStateLock(lock, name, { requireOwner = false } = {}) {
+function stateLockKind(stat) {
+  if (stat.isSymbolicLink()) return "symlink";
+  if (!stat.isFile()) return "non-regular";
+  return stat.nlink >= 2n ? "hardlinked" : "regular";
+}
+
+function stateLockEvidence(stat) {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    nlink: stat.nlink,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+  };
+}
+
+function sameStateLockInode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameStateLockEvidence(left, right) {
+  return sameStateLockInode(left, right)
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs;
+}
+
+function hardlinkedStateLockChanged(name) {
+  return new Error(`unsafe Feishu ${name} hardlinked state lock changed during recovery`);
+}
+
+function stateLockShapeError(name, kind) {
+  return new Error(`unsafe Feishu ${name} ${kind} state lock`);
+}
+
+function readBoundedStateLockOwner(fd) {
+  const bytes = Buffer.alloc(LOCK_PID_RECORD_MAX_BYTES + 1);
+  let length = 0;
+  for (;;) {
+    const count = readSync(fd, bytes, length, bytes.length - length, length);
+    if (count === 0) break;
+    length += count;
+    if (length === bytes.length) break;
+  }
+  const raw = length <= LOCK_PID_RECORD_MAX_BYTES ? bytes.toString("utf8", 0, length) : undefined;
+  const owner = raw !== undefined && /^[1-9][0-9]*\n$/.test(raw) ? Number(raw.trim()) : undefined;
+  return Number.isSafeInteger(owner) && owner > 1 ? owner : undefined;
+}
+
+function openStateLock(lock, name, { expectedHardlink } = {}) {
+  let pathStat;
   try {
-    const stat = lstatSync(lock);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-      throw new Error(`unsafe Feishu ${name} state lock`);
-    }
-    const age = Date.now() - stat.mtimeMs;
-    const raw = readFileSync(lock, "utf8");
-    const owner = /^[1-9][0-9]*\n$/.test(raw) ? Number(raw.trim()) : undefined;
-    if (owner === undefined || !Number.isSafeInteger(owner) || owner <= 1) {
-      if (requireOwner || age >= LOCK_WAIT_MS) throw new Error(`malformed Feishu ${name} state lock`);
-      return { changed: false, age, owner: undefined };
-    }
-    return { changed: false, age, owner };
+    pathStat = lstatSync(lock, { bigint: true });
   } catch (error) {
+    if (error?.code === "ENOENT" && expectedHardlink) throw hardlinkedStateLockChanged(name);
     if (error?.code === "ENOENT") return { changed: true };
     throw error;
+  }
+  const pathKind = stateLockKind(pathStat);
+  const pathEvidence = stateLockEvidence(pathStat);
+  if (expectedHardlink && (pathKind !== "hardlinked" || !sameStateLockEvidence(pathEvidence, expectedHardlink))) {
+    throw hardlinkedStateLockChanged(name);
+  }
+  if (pathKind === "symlink" || pathKind === "non-regular") {
+    throw stateLockShapeError(name, pathKind);
+  }
+
+  let fd;
+  try {
+    try {
+      fd = openSync(lock, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if (pathKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
+      if (error?.code === "ELOOP") throw stateLockShapeError(name, "symlink");
+      if (error?.code === "ENOENT") return { changed: true };
+      throw error;
+    }
+    const openedStat = fstatSync(fd, { bigint: true });
+    const openedKind = stateLockKind(openedStat);
+    const openedEvidence = stateLockEvidence(openedStat);
+    if (openedKind === "symlink" || openedKind === "non-regular") {
+      if (pathKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
+      throw stateLockShapeError(name, openedKind);
+    }
+    if (!sameStateLockEvidence(pathEvidence, openedEvidence)) {
+      if (pathKind === "hardlinked" || openedKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
+      throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+    }
+    const owner = readBoundedStateLockOwner(fd);
+    const afterReadStat = fstatSync(fd, { bigint: true });
+    let afterReadPathStat;
+    try {
+      afterReadPathStat = lstatSync(lock, { bigint: true });
+    } catch (error) {
+      if (pathKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
+      if (error?.code === "ENOENT") throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+      throw error;
+    }
+    const afterReadPathKind = stateLockKind(afterReadPathStat);
+    const afterReadEvidence = stateLockEvidence(afterReadPathStat);
+    if (!sameStateLockEvidence(openedEvidence, stateLockEvidence(afterReadStat))
+      || afterReadPathKind !== openedKind
+      || !sameStateLockEvidence(openedEvidence, afterReadEvidence)) {
+      if (pathKind === "hardlinked" || openedKind === "hardlinked" || afterReadPathKind === "hardlinked" || expectedHardlink) {
+        throw hardlinkedStateLockChanged(name);
+      }
+      throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+    }
+    return {
+      changed: false,
+      fd,
+      age: Date.now() - Number(openedStat.mtimeMs),
+      owner,
+      hardlinked: openedKind === "hardlinked",
+      evidence: openedEvidence,
+    };
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    throw error;
+  }
+}
+
+function inspectStateLock(lock, name, { requireOwner = false, expectedHardlink } = {}) {
+  const opened = openStateLock(lock, name, { expectedHardlink });
+  if (opened.changed) return opened;
+  try {
+    const label = opened.hardlinked ? `${name} hardlinked` : name;
+    const { owner } = opened;
+    if (owner === undefined || !Number.isSafeInteger(owner) || owner <= 1) {
+      if (requireOwner || opened.age >= LOCK_WAIT_MS) throw new Error(`malformed Feishu ${label} state lock`);
+      return { ...opened, fd: undefined, owner: undefined };
+    }
+    return { ...opened, fd: undefined, owner };
+  } finally {
+    closeSync(opened.fd);
+  }
+}
+
+function reclaimHardlinkedStateLock(lock, name, observed) {
+  const opened = openStateLock(lock, name, { expectedHardlink: observed.evidence });
+  try {
+    if (opened.owner === undefined) throw new Error(`malformed Feishu ${name} hardlinked state lock`);
+    if (opened.owner !== observed.owner || opened.age <= LOCK_STALE_MS) throw hardlinkedStateLockChanged(name);
+    if (pidAlive(opened.owner)) return false;
+    let pathStat;
+    try {
+      pathStat = lstatSync(lock, { bigint: true });
+    } catch {
+      throw hardlinkedStateLockChanged(name);
+    }
+    const descriptorStat = fstatSync(opened.fd, { bigint: true });
+    if (stateLockKind(pathStat) !== "hardlinked"
+      || !sameStateLockEvidence(stateLockEvidence(pathStat), observed.evidence)
+      || !sameStateLockEvidence(stateLockEvidence(descriptorStat), observed.evidence)) {
+      throw hardlinkedStateLockChanged(name);
+    }
+    try {
+      unlinkSync(lock);
+    } catch {
+      throw new Error(`unsafe Feishu ${name} hardlinked state lock could not be reclaimed safely`);
+    }
+    return true;
+  } finally {
+    closeSync(opened.fd);
   }
 }
 
 function withLock(paths, name, callback) {
   const lock = join(paths.stateRoot, `.${name}.lock`);
   const started = Date.now();
+  let expectedHardlink;
   for (;;) {
     let fd;
     try {
@@ -226,17 +378,24 @@ function withLock(paths, name, callback) {
     } catch (error) {
       if (fd !== undefined) closeSync(fd);
       if (error?.code !== "EEXIST") throw error;
-      const observed = inspectStateLock(lock, name);
+      const observed = inspectStateLock(lock, name, { expectedHardlink });
       if (observed.changed) continue;
+      if (observed.hardlinked && expectedHardlink === undefined) expectedHardlink = observed.evidence;
       if (observed.owner !== undefined && observed.age > LOCK_STALE_MS && !pidAlive(observed.owner)) {
-        try { unlinkSync(lock); } catch {}
+        if (observed.hardlinked) {
+          if (!reclaimHardlinkedStateLock(lock, name, observed)) continue;
+          expectedHardlink = undefined;
+        } else {
+          try { unlinkSync(lock); } catch {}
+        }
         continue;
       }
       if (Date.now() - started >= LOCK_WAIT_MS) {
-        const lockOwner = inspectStateLock(lock, name, { requireOwner: true });
+        const lockOwner = inspectStateLock(lock, name, { requireOwner: true, expectedHardlink });
         if (lockOwner.changed) continue;
         if (pidAlive(lockOwner.owner)) throw new FeishuStateLockContentionError(name);
-        throw new Error(`Feishu ${name} state lock owner is not live within the stale-owner grace period`);
+        const label = lockOwner.hardlinked ? `${name} hardlinked` : name;
+        throw new Error(`Feishu ${label} state lock owner is not live within the stale-owner grace period`);
       }
       sleepSync(10);
     }
