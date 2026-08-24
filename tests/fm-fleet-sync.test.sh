@@ -23,7 +23,8 @@
 # project or a clone with no origin remote at all (prune_gone_branches never
 # reaches either, since both skip the whole remote-backed sync); an unmerged
 # branch, one still checked out in a worktree, and the project's own default
-# branch are all left untouched.
+# branch are all left untouched. This destructive backstop is off by default
+# and needs explicit FM_FLEET_PRUNE_MERGED=1 authority.
 #
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
@@ -101,6 +102,15 @@ run_sync() {
   local home=$1
   shift
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+# run_sync_with_merged_prune <home> [args...]: run the captain-authorized
+# merged-task-branch backstop against an isolated home.
+run_sync_with_merged_prune() {
+  local home=$1
+  shift
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FLEET_PRUNE_MERGED=1 \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
 # build_enclosing_home <name>: an FM_HOME that is itself nested inside another git
@@ -446,7 +456,7 @@ test_local_only_prunes_merged_task_branch() {
   mkdir -p "$home/data"
   printf -- '- sigma [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_contains "$out" "sigma: pruned fm/task-a" \
     "local-only project still gets its merged fm/* branch swept"
@@ -464,7 +474,7 @@ test_no_origin_prunes_merged_task_branch() {
   commit_file "$clone" file.txt v0 C0
   ff_merge_task_branch "$clone" fm/task-b feature.txt hello
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_contains "$out" "xi: pruned fm/task-b" \
     "a remote-less project still gets its merged fm/* branch swept"
@@ -482,7 +492,7 @@ test_detached_project_prunes_merged_task_branch() {
   mkdir -p "$home/data"
   printf -- '- chi [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_contains "$out" "chi: pruned fm/task-detached" \
     "a detached project still deletes a branch proved merged into main"
@@ -505,13 +515,30 @@ test_unrelated_checkout_prunes_branch_merged_into_default() {
   mkdir -p "$home/data"
   printf -- '- unrelated_head [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_contains "$out" "unrelated_head: pruned fm/task-unrelated" \
     "the sweep must delete a branch proved merged into main even from unrelated HEAD"
   branch_exists "$clone" fm/task-unrelated \
     && fail "unrelated-head-prune: fm/task-unrelated should have been deleted"
   pass "the final safe deletion uses the explicit default-branch merge target, not the caller's unrelated checkout"
+}
+
+test_merged_task_branch_requires_explicit_prune_authority() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" tau)
+  ff_merge_task_branch "$clone" fm/task-opt-in feature.txt hello
+  mkdir -p "$home/data"
+  printf -- '- tau [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "pruned fm/task-opt-in" \
+    "the merged-branch backstop must not run without explicit captain authority"
+  branch_exists "$clone" fm/task-opt-in \
+    || fail "merged-prune-opt-in: fm/task-opt-in was deleted without explicit authority"
+  pass "the merged-task-branch backstop is disabled until explicitly authorized"
 }
 
 test_unmerged_task_branch_is_left_alone() {
@@ -525,7 +552,7 @@ test_unmerged_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- omicron [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-c" "an unmerged fm/* branch must never be reported as pruned"
   branch_exists "$clone" fm/task-c \
@@ -617,7 +644,7 @@ test_gone_unmerged_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- upsilon [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-gone" "a [gone] upstream without a merge must never be reported as pruned"
   branch_exists "$clone" fm/task-gone \
@@ -639,7 +666,7 @@ test_checked_out_task_branch_is_left_alone() {
   mkdir -p "$home/data"
   printf -- '- pi_project [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  out=$(run_sync "$home" "$clone")
+  out=$(run_sync_with_merged_prune "$home" "$clone")
 
   assert_not_contains "$out" "pruned fm/task-d" "a branch still checked out in a worktree must never be reported as pruned"
   branch_exists "$clone" fm/task-d \
@@ -654,7 +681,7 @@ test_prune_never_targets_the_default_branch() {
   mkdir -p "$home/data"
   printf -- '- rho [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
-  run_sync "$home" "$clone" >/dev/null
+  run_sync_with_merged_prune "$home" "$clone" >/dev/null
 
   branch_exists "$clone" main || fail "default-branch-guard: main was removed by the sweep"
   [ "$(git -C "$clone" symbolic-ref --quiet --short HEAD 2>/dev/null)" = main ] \
@@ -970,6 +997,7 @@ test_local_only_prunes_merged_task_branch
 test_no_origin_prunes_merged_task_branch
 test_detached_project_prunes_merged_task_branch
 test_unrelated_checkout_prunes_branch_merged_into_default
+test_merged_task_branch_requires_explicit_prune_authority
 test_unmerged_task_branch_is_left_alone
 test_branch_update_between_proof_and_delete_is_left_alone
 test_worktree_added_between_proof_and_delete_is_left_alone
