@@ -31,7 +31,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NEEDS_GLAB_AUTH: <host>` - ask the captain to run `! glab auth login --hostname <host>` (interactive; you cannot run it for them).
 - `FORGE_UNSUPPORTED: <project> (host: <host|unresolved>)` - the registered project has an origin outside the configured GitHub/GitLab provider boundary, so do not dispatch forge-dependent work for it.
   Confirm the remote is correct, or add a self-managed GitLab hostname to `FM_GITLAB_HOSTS`, then rerun session start.
-  This probe now arrives from the deferred network stage, so it is also how an unreachable network shows up: the registered forge CLI cannot validate its token offline and reports the same failure. Confirm reachability before asking the captain to re-authenticate a credential that may be fine.
+  This diagnostic comes from local origin classification, not network reachability. If a configured forge cannot be reached or its credentials are invalid, follow the corresponding `NEEDS_GH_AUTH` or `NEEDS_GLAB_AUTH` remediation instead.
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.
   Rerun the printed command; it is idempotent and re-derives every finding.
   A `hit the ...s bound` line means one of those checks is slow or unreachable - most often a remote secondmate host - and the stage stopped rather than letting it wedge; a `lock was no longer held` line means the session that asked for the sweeps no longer owns them, so leave them to the session that does.

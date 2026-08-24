@@ -219,7 +219,6 @@ local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 
 FORGE_UNSUPPORTED_REPORTED=0
-FORGE_NETWORK_ALLOWED=1
 forge_report_unsupported() {
   local unsupported=0
   while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
@@ -1566,8 +1565,8 @@ detect_home_summary_publication() {
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
 local_phase && detect_local_tools
 if network_phase; then
-  if forge_report_unsupported; then
-    __fm_timing_stamp=$(fm_timing_now_ms)
+  forge_report_unsupported || true
+  __fm_timing_stamp=$(fm_timing_now_ms)
   # Authentication is checked for each registered supported forge. An unknown
   # origin is reported by the local pass, but must not suppress authentication
   # remediation for an unrelated supported project in the same home.
@@ -1600,18 +1599,18 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # Never hand an unclassified registered origin to the clone-refresh worker:
   # its remote transport is not a supported forge boundary, so fail closed for
   # that project while leaving unrelated secondmate supervision sweeps intact.
-  if network_phase && forge_report_unsupported && network_sweep_authorized 'project clone refresh'; then
+  if network_phase && network_sweep_authorized 'project clone refresh'; then
     fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
     if [ -n "$fleet_sync_out" ]; then
       (
         __fm_timing_stamp=$(fm_timing_now_ms)
-        fleet_sync
+        FM_FLEET_SYNC_SKIP_UNKNOWN=1 fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
       __fm_timing_stamp=$(fm_timing_now_ms)
-      fleet_sync
+      FM_FLEET_SYNC_SKIP_UNKNOWN=1 fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
     fi
   fi
