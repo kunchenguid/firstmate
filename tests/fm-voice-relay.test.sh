@@ -847,18 +847,20 @@ class Down:
         if kind == frame.NOTICE:
             self.notices.append(obj)
 
+class UnsetEvent:
+    """The failed-turn path only observes whether the session has ended."""
+
+    def is_set(self):
+        return False
+
 class Stub:
     """A session that records what it was asked, or raises where the model would."""
-
-    class Ended:
-        def is_set(self):
-            return False
 
     def __init__(self, raises=None):
         self.raises = raises
         self.replies = 0
         self.failed = False
-        self.ended = self.Ended()
+        self.ended = UnsetEvent()
         self.turn = {}
         self.calls = []
 
@@ -1366,11 +1368,12 @@ check(client.parse_args(["--host", "desk", "--relay", "/other/relay.py"]).relay
 # Push to talk is the default for this build, and the only mode that runs.
 check(client.parse_args(["--host", "h"]).listen == client.PUSH_TO_TALK,
       "push to talk must be the default")
-check(client.parse_args(["--host", "h"]).wait_for_reply is True,
-      "waiting for a reply must default on")
-check(client.parse_args(["--host", "h", "--wait-for-reply"]).wait_for_reply is True,
+check(client.parse_args(["--host", "h"]).wait_for_reply,
+      "waiting for each reply must be the default")
+check(client.parse_args(["--host", "h", "--wait-for-reply"]).wait_for_reply,
       "--wait-for-reply must enable waiting")
-check(client.parse_args(["--host", "h", "--no-wait-for-reply"]).wait_for_reply is False,
+check(not client.parse_args(
+          ["--host", "h", "--no-wait-for-reply"]).wait_for_reply,
       "--no-wait-for-reply must disable waiting")
 
 # An open microphone needs to know when the captain stopped speaking, and this

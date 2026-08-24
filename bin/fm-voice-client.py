@@ -1312,7 +1312,9 @@ def parse_args(argv):
                         help="wait for each answer to finish being spoken before "
                              "opening the next turn (default on)")
     parser.add_argument("--no-wait-for-reply", dest="wait_for_reply",
-                        action="store_false")
+                        action="store_false",
+                        help="open the next turn without waiting for the answer "
+                             "to finish being spoken")
     parser.add_argument("--gap-seconds", type=float, default=0.5,
                         help="quiet beat after an answer finishes. default 0.5")
     parser.add_argument("--audio-idle", type=float, default=0.4,
