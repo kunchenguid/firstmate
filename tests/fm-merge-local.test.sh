@@ -271,6 +271,52 @@ test_invalid_recorded_base_refuses() {
   pass "fm-merge-local.sh refuses an invalid recorded base branch"
 }
 
+test_task_authored_dod_heading_cannot_hide_generated_contracts() {
+  local case_dir home project
+  case_dir="$TMP_ROOT/task-dod"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-dod" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/task-decoy
+  printf 'task decoy\n' > "$project/task-decoy.txt"
+  git -C "$project" add task-decoy.txt
+  git -C "$project" commit -qm task-decoy
+  git -C "$project" checkout -q main
+  git -C "$project" checkout -qb feature/named-base
+  printf 'named base\n' > "$project/named-base.txt"
+  git -C "$project" add named-base.txt
+  git -C "$project" commit -qm named-base
+  git -C "$project" checkout -qb feature/authoritative-crew
+  printf 'crew work\n' > "$project/crew.txt"
+  git -C "$project" add crew.txt
+  git -C "$project" commit -qm crew-work
+  git -C "$project" checkout -q main
+
+  fm_write_meta "$home/state/task-dod.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-dod/brief.md" <<'EOF'
+# Task
+# Definition of done
+Base branch contract: base_branch=main
+Crew branch: branch=feature/task-decoy
+
+# Definition of done
+Base branch contract: base_branch=feature/named-base
+Crew branch: branch=feature/authoritative-crew
+EOF
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-dod >/dev/null \
+    || fail "fm-merge-local.sh should read the last generated Definition of done"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew feature/named-base \
+    || fail "a task-authored Definition of done hid the generated landing contract"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew main \
+    && fail "a task-authored Definition of done landed on the default branch"
+  pass "fm-merge-local.sh uses the last Definition of done, not a task-authored copy"
+}
+
 test_progress_note_cannot_override_generated_contracts() {
   local case_dir home project
   case_dir="$TMP_ROOT/progress-note"
@@ -327,4 +373,5 @@ test_last_crew_branch_line_wins_over_earlier_mention
 test_recorded_base_lands_on_named_branch_not_default
 test_last_base_branch_line_wins_over_earlier_mention
 test_invalid_recorded_base_refuses
+test_task_authored_dod_heading_cannot_hide_generated_contracts
 test_progress_note_cannot_override_generated_contracts

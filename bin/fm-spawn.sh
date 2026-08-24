@@ -1829,16 +1829,19 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
-# Last matching line in `# Definition of done` wins: generated contracts are
-# appended after {TASK} text that may mention the same phrase, and a later
-# relaunch `## Progress note` must not override them. If that section is
-# missing, the last matching line in the brief still wins. bin/fm-merge-local.sh
-# uses the same rule for landing.
+# Last matching line in the last `# Definition of done` before a relaunch
+# `## Progress note` wins: generated contracts are appended after {TASK} text
+# that may mention the same phrase or even copy the heading, and a later
+# progress note must not override them. If that section is missing, the last
+# matching line in the brief still wins. bin/fm-merge-local.sh uses the same
+# rule for landing.
 brief_dod_section() {
   awk '
-    /^# Definition of done[[:space:]]*$/ { grab=1; next }
-    /^#{1,6}[[:space:]]/ { if (grab) exit }
-    grab { print }
+    /^## Progress note/ { exit }
+    /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
+    /^#{1,6}[[:space:]]/ { grab=0; next }
+    grab { buf = buf $0 ORS }
+    END { printf "%s", buf }
   ' "$1"
 }
 

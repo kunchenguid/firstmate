@@ -660,6 +660,39 @@ test_base_branch_contract_uses_last_line() {
   pass "ship base-contract agreement uses the last Base branch line"
 }
 
+test_base_branch_contract_uses_last_dod_heading() {
+  local rec id brief out status
+  id='pool-base-branch-last-dod-r8'
+  rec=$(make_case base-branch-last-dod "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_ship_brief "$id" no-mistakes develop
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^# Task$/ {
+      print
+      print "# Definition of done"
+      print "Base branch contract: base_branch=release"
+      print "Delivery contract: mode=local-only"
+      next
+    }
+    { print }
+  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "spawn should honor the last generated Definition of done"
+  assert_contains "$out" "spawned $id" "spawn did not report success after a task-authored Definition of done"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "spawn treated a task-authored Definition of done as the contract"
+  pass "ship base-contract agreement uses the last Definition of done heading"
+}
+
 test_base_branch_contract_ignores_progress_note() {
   local rec id brief out status
   id='pool-base-branch-progress-note-r8'
@@ -710,6 +743,7 @@ test_missing_base_branch_refuses_without_default_fallback
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_base_branch_contract_refuses_mismatch
 test_base_branch_contract_uses_last_line
+test_base_branch_contract_uses_last_dod_heading
 test_base_branch_contract_ignores_progress_note
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

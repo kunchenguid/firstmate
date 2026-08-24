@@ -60,14 +60,17 @@ default_branch() {
   return 1
 }
 
-# Generated contracts live in `# Definition of done`. Stop at the next heading
-# so a relaunch `## Progress note` cannot override them. A brief with no DOD
-# section (older one-line records) falls back to the whole file.
+# Generated contracts live in the last `# Definition of done` before a relaunch
+# `## Progress note`. The last heading wins so replaceable task text cannot
+# hide the generated section with its own copy. A brief with no DOD section
+# (older one-line records) falls back to the whole file.
 brief_dod_section() {
   awk '
-    /^# Definition of done[[:space:]]*$/ { grab=1; next }
-    /^#{1,6}[[:space:]]/ { if (grab) exit }
-    grab { print }
+    /^## Progress note/ { exit }
+    /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
+    /^#{1,6}[[:space:]]/ { grab=0; next }
+    grab { buf = buf $0 ORS }
+    END { printf "%s", buf }
   ' "$1"
 }
 
