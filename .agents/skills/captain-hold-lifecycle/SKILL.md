@@ -18,7 +18,12 @@ The agent performs the semantic inventory because scripts must not infer captain
 
 Every unresolved question that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must be carried by a captain-held task in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
-Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
+Put the question and its closed options in the hold reason, and cut one held task per genuine question: every question the captain answers separately becomes its own captain-held task with its own Captain's Call board card carrying closed, clickable options.
+Bundle several questions into one task only when they are truly decidable only together.
+Captain order O-0040 (2026-08-24) mandated this after a four-question consolidated card reached the board with no clickable answer path, so the captain could not send an answer at all.
+The order's word: "Bitte dir fragen nächstes mal vernünftig aufs brett! Einzelne frage mit Klickbarer antwort." ("Please put questions on the board properly next time! Single question with a clickable answer.")
+Only option sections in the board's recognized format become clickable answers; a card without recognized options is unanswerable for the captain.
+The 1:1 contract between a Captain's Call card and its captain-held task id stays load-bearing: never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
@@ -44,7 +49,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
-3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
+3. Hold one captain-held task per genuine question - bundle only questions truly decidable only together - each with a concise reason carrying the question and closed options.
 4. Run `complete` with the full captain-held inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), through `--until` when the captain defers it, or confirm a channel already closed it.
