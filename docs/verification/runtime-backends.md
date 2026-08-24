@@ -978,14 +978,14 @@ The extension executes inside the signed CLI's own runtime, so a CLI upgrade can
 
 ## OMP candidate tool containment
 
-On 2026-08-23 in the local control environment, the opt-in argument-validation guard ran against installed `omp/17.2.9`:
+On 2026-08-24 in the local control environment, the opt-in consumer guard ran against installed `omp/17.2.9`:
 
 ```sh
 FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 ```
 
 ```text
-ok - installed omp/17.2.9 consumes the empty tool and isolated fallback boundary without session startup
+ok - installed omp/17.2.9 isolates hostile profiles and constructs an empty tool registry without provider startup
 ```
-The guard consumes the candidate's no-tools, no-LSP, AST-edit-off, and fallback-isolation boundary through OMP's help and config subcommands without a prompt, TUI, session, provider call, or model turn.
+The guard proves hostile named profiles can bypass an agent-directory override, then consumes the candidate's profile-unset, no-tools, no-LSP, AST-edit-off, and fallback-isolation boundary through OMP's config consumer and RPC `get_state.dumpTools` under `--no-session`, without a prompt, TUI, persisted session, provider call, or model turn.
 This is installed-binary compatibility evidence, not live First Mate lifecycle proof; OMP remains dormant until separately gated ATX-2170 verifies interrupt, exit, and relaunch control.

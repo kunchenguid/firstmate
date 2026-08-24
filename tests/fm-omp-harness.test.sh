@@ -349,7 +349,7 @@ test_omp_launch_argv_is_contained() {
     || fail "candidate OMP manifest or launch template widened its containment boundary"
 const manifest = JSON.parse(process.env.MANIFEST);
 const expectedUnset = [
-  "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "GROK_AGENT",
+  "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "OMP_PROFILE", "PI_PROFILE", "GROK_AGENT",
   "FM_PI_HARNESS", "CURSOR_AGENT", "CURSOR_INVOKED_AS", "TRACEPARENT",
 ];
 const expectedArgv = [
@@ -418,6 +418,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const manifest = JSON.parse(process.env.MANIFEST);
 if (!manifest.unsetEnvironment.includes("PI_CONFIG_FILES")) process.exit(1);
+if (!manifest.unsetEnvironment.includes("OMP_PROFILE") || !manifest.unsetEnvironment.includes("PI_PROFILE")) process.exit(1);
 if (manifest.environment.PI_CODING_AGENT_DIR === process.env.AMBIENT_AGENT) process.exit(1);
 if (manifest.environment.PI_CODING_AGENT_DIR !== process.env.AGENT_DIR) process.exit(1);
 const cwdIndex = manifest.argv.indexOf("--cwd");
