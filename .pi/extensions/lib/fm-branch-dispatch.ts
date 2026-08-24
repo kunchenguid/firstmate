@@ -22,15 +22,27 @@ export interface BranchDispatchOffer {
    * Empty means the wake is fleet-wide or could not be scoped safely.
    */
   projects: readonly string[];
+  /**
+   * True when the watcher classified this wake as a fleet-wide heartbeat
+   * scan. Heartbeats are eligible for branch handling on their own
+   * (docs/pi-supervision-branch.md "Heartbeat routing"), independent of
+   * `projects`.
+   */
+  heartbeat: boolean;
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   accept(): void;
 }
 
-export function createBranchDispatchOffer(message: string, projects: readonly string[] = []): BranchDispatchOffer {
+export function createBranchDispatchOffer(
+  message: string,
+  projects: readonly string[] = [],
+  heartbeat = false,
+): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
     projects: [...projects],
+    heartbeat,
     accepted: false,
     accept() {
       offer.accepted = true;

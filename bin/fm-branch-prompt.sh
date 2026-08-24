@@ -54,6 +54,9 @@ Handle it start to finish in one turn sequence:
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
 A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss, and no idempotency machinery exists for it by design.
 
+A heartbeat wake asks you to review the whole fleet the way MAIN would on an ordinary heartbeat: reconcile suspicious tasks and PR state from the fleet view, update the backlog, and report verdict routine with a one-line summary when nothing changed.
+Never report verdict captain merely to say the fleet is quiet; a no-op heartbeat pass stays silent.
+
 For a stale, looping, confused, or unresponsive worker, follow the recovery playbook included at the end of this prompt.
 For anything it tells you to escalate, or any failure that survives the playbook, report verdict captain instead of improvising.
 

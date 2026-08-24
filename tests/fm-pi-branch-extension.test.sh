@@ -168,11 +168,8 @@ const approvedProject = `${home}/projects/approved`;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
 mkdirSync(approvedProject, { recursive: true });
-// Most drivers exercise an explicitly granted project. Consent-gating cases
-// opt out so they can prove that absence itself preserves old behavior.
-if (!process.env.FM_TEST_SKIP_BRANCH_GRANT) {
-  writeFileSync(`${home}/config/pi-supervision-branch`, `project=${approvedProject}\n`);
-}
+// Supervision is default-on for every task: no captain grant file gates it
+// any more.
 // The branch acts only for the session that owns the fleet lock; drivers own
 // it by default, while cold-start and secondary-session scenarios opt out.
 if (!process.env.FM_TEST_SKIP_LOCK) {
@@ -216,10 +213,11 @@ const pi = {
 function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
-function makeOffer(message, projects = [approvedProject]) {
+function makeOffer(message, projects = [approvedProject], heartbeat = false) {
   const offer = {
     message,
     projects,
+    heartbeat,
     accepted: false,
     accept() {
       offer.accepted = true;
@@ -227,8 +225,8 @@ function makeOffer(message, projects = [approvedProject]) {
   };
   return offer;
 }
-function dispatch(message, projects) {
-  const offer = makeOffer(message, projects);
+function dispatch(message, projects, heartbeat) {
+  const offer = makeOffer(message, projects, heartbeat);
   bus.emit("fm-branch-supervision:dispatch", offer);
   return offer;
 }
@@ -340,8 +338,19 @@ if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[0].message.content)) {
   throw new Error(`routine note still has boilerplate: ${sentToMain[0].message.content}`);
 }
-if (typeof sentToMain[2].message.content !== "string" || !sentToMain[2].message.content.startsWith("⚓ ")) {
-  throw new Error(`captain note missing anchor prefix: ${sentToMain[2].message.content}`);
+// A routine note is rendered (display: true); a captain-facing note must
+// never be printed or rendered at all - the follow-up turn triggered above
+// is itself the captain-visible outcome. display: false is the exact flag
+// Pi's own chat renderer and HTML export both gate on before ever calling a
+// customType renderer, so this is the authoritative "never printed" proof.
+if (sentToMain[0].message.display !== true) {
+  throw new Error(`routine note must render: display=${sentToMain[0].message.display}`);
+}
+if (sentToMain[2].message.display !== false) {
+  throw new Error(`captain note must never be printed or rendered: display=${sentToMain[2].message.display}`);
+}
+if (typeof sentToMain[2].message.content !== "string" || sentToMain[2].message.content.includes("⚓")) {
+  throw new Error(`captain note must carry no anchor glyph now that it is never rendered: ${sentToMain[2].message.content}`);
 }
 if (!sentToMain[2].message.content.includes("task-9: PR https://example.com/pr/9")) {
   throw new Error(`captain note lost its outcome: ${sentToMain[2].message.content}`);
@@ -400,7 +409,6 @@ const assertRenderedNote = (note, glyph) => {
   }
 };
 assertRenderedNote(sentToMain[0].message.content, "⛵");
-assertRenderedNote(sentToMain[2].message.content, "⚓");
 process.exit(0);
 EOF
   status=$?
@@ -446,7 +454,7 @@ EOF
   pass "branch prompt_cache_key is stable per home across sessions and distinct between homes"
 }
 
-test_branch_gating_config_afk_and_fallback() {
+test_branch_default_on_heartbeat_afk_and_fallback() {
   local repo broken home out status
   repo="$TMP_ROOT/gating-root"
   broken="$TMP_ROOT/gating-broken-root"
@@ -461,51 +469,74 @@ exit 1
 SH
   chmod +x "$broken/bin/fm-branch-prompt.sh"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_SKIP_BRANCH_GRANT=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home }; })()`);
-const { dispatch, fire, settle, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain }; })()`);
+const { dispatch, fire, settle, home, sentToMain } = globalThis.__t;
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 
-// No autonomy grant: session activation and wake routing both preserve the
-// old path, with no branch-owned runtime state merely because Pi loaded it.
+// Default-on: with no config/pi-supervision-branch grant file present at
+// all (this driver never writes one), a task-scoped wake is still accepted
+// and activation still runs.
+if (existsSync(`${home}/config/pi-supervision-branch`)) {
+  throw new Error("test fixture unexpectedly wrote a grant file");
+}
 fire("session_start", {});
-if (dispatch("signal: while unconfigured").accepted) throw new Error("unconfigured branch accepted a wake");
-if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) throw new Error("unconfigured branch activated runtime state");
+if (!dispatch("signal: default-on task wake").accepted) {
+  throw new Error("a task-scoped wake was refused with no grant file present");
+}
+if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
+  throw new Error("default-on activation did not write the diagnostic marker");
+}
 
-// Empty, explicit off, and malformed values also fail closed.
-writeFileSync(`${home}/config/pi-supervision-branch`, "\n");
-if (dispatch("signal: while empty").accepted) throw new Error("empty grant accepted a wake");
-writeFileSync(`${home}/config/pi-supervision-branch`, "off\n");
-if (dispatch("signal: while disabled").accepted) throw new Error("disabled branch accepted a wake");
-writeFileSync(`${home}/config/pi-supervision-branch`, "yes\n");
-if (dispatch("signal: while malformed").accepted) throw new Error("malformed grant accepted a wake");
+// A fleet-wide heartbeat is separately eligible even with no resolved
+// project, per the heartbeat-routing exception (docs/pi-supervision-branch.md).
+if (!dispatch("heartbeat: fleet reviewed, nothing to report", [], true).accepted) {
+  throw new Error("heartbeat offer was refused");
+}
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat wake prompt");
 
-// An exact project opt-in grants the role, but away mode still owns supervision.
-writeFileSync(`${home}/config/pi-supervision-branch`, `project=${home}/projects/approved\n`);
+// A no-op heartbeat pass reports verdict routine and stays silent (no main
+// turn); only a captain-worthy finding opens one.
+const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
+const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+await heartbeatReport.execute(
+  "heartbeat-noop",
+  { task: "fleet", verdict: "routine", summary: "fleet reviewed, nothing changed" },
+  undefined,
+  undefined,
+  {},
+);
+const noopMerge = sentToMain[sentToMain.length - 1];
+if (noopMerge.options.triggerTurn) throw new Error("a no-op heartbeat pass must not open a main turn");
+await heartbeatReport.execute(
+  "heartbeat-finding",
+  { task: "fleet", verdict: "captain", summary: "task-2 has been stuck for an hour" },
+  undefined,
+  undefined,
+  {},
+);
+const captainMerge = sentToMain[sentToMain.length - 1];
+if (captainMerge.options.triggerTurn !== true) throw new Error("a captain-worthy heartbeat finding must open a main turn");
+if (captainMerge.message.display !== false) throw new Error("the heartbeat captain-facing note must not be printed");
+
+// Every other fleet-wide or unresolvable wake (empty projects, not a
+// heartbeat) still keeps the wake-to-main path.
+if (dispatch("check: unresolved fleet event", []).accepted) {
+  throw new Error("branch accepted an unscoped, non-heartbeat fleet wake");
+}
+
+// Away mode still owns supervision regardless of default-on eligibility.
 writeFileSync(`${home}/state/.afk`, "");
 if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
-
-// Same build, gates cleared: only wakes wholly inside the granted project are
-// accepted. A mixed-project drain stays on main rather than extending standing
-// authority to the other project.
 rmSync(`${home}/state/.afk`);
-if (dispatch("heartbeat", []).accepted) {
-  throw new Error("branch accepted an unscoped fleet-wide wake");
-}
-if (dispatch("signal: other project", [`${home}/projects/other`]).accepted) {
-  throw new Error("branch accepted an out-of-scope project wake");
-}
-if (dispatch("signal: mixed projects", [`${home}/projects/approved`, `${home}/projects/other`]).accepted) {
-  throw new Error("branch accepted a mixed-project wake");
-}
 if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "config and afk gating must bind: $out"
+  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and afk gating must bind: $out"
 
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -528,7 +559,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch fallback must return wakes to main: $out"
-  pass "branch gating (config, afk) binds and a broken branch falls back to main"
+  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch falls back to main"
 }
 
 test_branch_mirror_filters_order_and_cursor() {
@@ -959,7 +990,7 @@ EOF
 
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_cache_key_is_per_home_stable
-test_branch_gating_config_afk_and_fallback
+test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_replacement_activation_cleans_leases_and_retries_failure

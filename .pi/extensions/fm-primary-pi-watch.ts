@@ -298,9 +298,10 @@ export default function (pi: ExtensionAPI) {
 
   // Resolve every unread row that the branch's mandatory fm-wake-drain call
   // would present. Only task-local signal/stale rows can be delegated: a
-  // fleet-wide check/heartbeat or an unresolvable task stays with main. This
-  // prevents one project's autonomy grant from authorizing work on another
-  // project merely because both projects share a firstmate home.
+  // fleet-wide check or an unresolvable task stays with main (heartbeat is
+  // separately eligible below, independent of this scoping). This keeps a
+  // delegated wake scoped to what THIS wake actually resolves to, so a
+  // mixed-project drain is never delegated on partial resolution.
   function projectsForUnreadWake(): string[] {
     let queue = "";
     try {
@@ -350,11 +351,13 @@ export default function (pi: ExtensionAPI) {
     return found ? [...projects] : [];
   }
 
-  // Offer an ordinary, project-scoped actionable wake to the supervision
-  // branch. A synchronous accept means the branch now owns delivery and
-  // handling; every unsafe or unaccepted offer keeps today's main path.
+  // Offer an ordinary, project-scoped actionable wake - or a fleet-wide
+  // heartbeat scan - to the supervision branch. A synchronous accept means
+  // the branch now owns delivery and handling; every unsafe or unaccepted
+  // offer keeps today's main path.
   function offerWakeToBranch(message: string): boolean {
-    const offer = createBranchDispatchOffer(message, projectsForUnreadWake());
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    const offer = createBranchDispatchOffer(message, projectsForUnreadWake(), heartbeat);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted;
   }

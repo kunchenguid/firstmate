@@ -8,9 +8,10 @@
 // merges an append-only note to main's tail. Main's captain/assistant dialog
 // is mirrored into the branch as read-only fm-main-mirror context at main's
 // turn_end. Pi-only by construction: this file lives in .pi/extensions, so no
-// other harness ever loads it, and a home that has not explicitly granted the
-// wake's project in config/pi-supervision-branch (or runs away mode) keeps
-// today's wake-to-main behavior untouched.
+// other harness ever loads it. Supervision is default-on for every task once
+// this Pi session owns the fleet lock: no captain grant file is required.
+// Away mode (or a broken branch) keeps today's wake-to-main behavior
+// untouched regardless.
 //
 // Prefix stability (the cache contract, owner: bin/fm-branch-prompt.sh
 // header): the branch's system prompt is the generator's byte-stable output,
@@ -69,7 +70,6 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const configFile = join(config, "pi-supervision-branch");
 const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
@@ -90,7 +90,6 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
-const MERGE_NOTE_ANCHOR = "⚓";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -104,32 +103,14 @@ const scriptEnv = {
   FM_CONFIG_OVERRIDE: config,
 };
 
-function grantedProjects(): Set<string> {
-  try {
-    // Standing autonomy is project-specific. Each line must be an exact
-    // `project=<value>` matching task metadata; comments and blank lines are
-    // allowed, while malformed content fails the whole grant closed.
-    const grants = new Set<string>();
-    for (const raw of readFileSync(configFile, "utf8").split(/\r?\n/)) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#")) continue;
-      if (!line.startsWith("project=") || line.length === 8) return new Set();
-      grants.add(line.slice(8));
-    }
-    return grants;
-  } catch {
-    return new Set();
-  }
-}
-
-function branchConfigured(): boolean {
-  return grantedProjects().size > 0;
-}
-
-function offerIsGranted(offer: BranchDispatchOffer): boolean {
-  if (!Array.isArray(offer.projects) || offer.projects.length === 0) return false;
-  const grants = grantedProjects();
-  return grants.size > 0 && offer.projects.every((project) => grants.has(project));
+// Supervision is default-on for every task: no captain grant file gates
+// eligibility any more. A fleet-wide heartbeat is eligible on its own
+// (docs/pi-supervision-branch.md "Heartbeat routing"); every other
+// fleet-wide or unresolvable wake (empty projects, not a heartbeat) still
+// keeps the wake-to-main path, exactly as watcher-failure alarms already do.
+function offerEligible(offer: BranchDispatchOffer): boolean {
+  if (offer.heartbeat) return true;
+  return Array.isArray(offer.projects) && offer.projects.length > 0;
 }
 
 function afkActive(): boolean {
@@ -343,11 +324,14 @@ export default function (pi: ExtensionAPI) {
   // Append-only merge into main. The store row is already durable when this
   // runs; the note is a cache of it at main's tail. Delivery modes per the
   // design: routine+idle appends now with no turn, routine+busy appends after
-  // the captain's next prompt, captain-relevant appends and triggers exactly
-  // one turn (queued as a follow-up while main is busy). The read cursor
-  // advances once the note is handed to Pi; a crash inside Pi's own delivery
-  // window leaves the outcome durable in the store, where main's
-  // fm_branch_outcomes tool still reads it on demand.
+  // the captain's next prompt, captain-relevant triggers exactly one turn
+  // (queued as a follow-up while main is busy) - that follow-up turn is
+  // itself the captain-visible outcome, so the captain-facing note is
+  // delivered silently (display: false) rather than printed or rendered a
+  // second time; a routine note stays rendered with its sailboat prefix. The
+  // read cursor advances once the note is handed to Pi; a crash inside Pi's
+  // own delivery window leaves the outcome durable in the store, where
+  // main's fm_branch_outcomes tool still reads it on demand.
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -356,15 +340,16 @@ export default function (pi: ExtensionAPI) {
     summary: string,
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
-    const glyph = verdict === "captain" ? MERGE_NOTE_ANCHOR : MERGE_NOTE_BOAT;
-    const note = `${glyph} ${task}: ${summary}`;
-    const message = { customType: "fm-branch-merge", content: note, display: true };
     if (verdict === "captain") {
+      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else if (mainStreaming) {
-      pi.sendMessage(message, { deliverAs: "nextTurn" });
     } else {
-      pi.sendMessage(message, {});
+      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: true };
+      if (mainStreaming) {
+        pi.sendMessage(message, { deliverAs: "nextTurn" });
+      } else {
+        pi.sendMessage(message, {});
+      }
     }
     if (/^[0-9]+$/.test(seq)) {
       if (!actingAsOwner(expectedGeneration)) return false;
@@ -635,10 +620,10 @@ ${context.command}
   pi.events?.on?.(FM_BRANCH_DISPATCH_EVENT, (data) => {
     const offer = data as BranchDispatchOffer;
     if (!offer || typeof offer.accept !== "function") return;
-    // Check project-specific consent before ownership activation so an
-    // unconfigured or out-of-scope wake gets neither branch routing nor
-    // branch-owned state/lease cleanup side effects.
-    if (!offerIsGranted(offer)) return;
+    // Check eligibility before ownership activation so an out-of-scope wake
+    // gets neither branch routing nor branch-owned state/lease cleanup side
+    // effects.
+    if (!offerEligible(offer)) return;
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
@@ -661,7 +646,7 @@ ${context.command}
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
-    if (!branchConfigured() || !actingAsOwner()) return;
+    if (!actingAsOwner()) return;
     try {
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
     } catch {
@@ -681,7 +666,7 @@ ${context.command}
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
-    if (branchConfigured()) actingAsOwner(generation);
+    actingAsOwner(generation);
   });
 
   pi.on?.("session_shutdown", () => {
@@ -727,17 +712,16 @@ ${context.command}
     },
   });
 
+  // Pi only calls this renderer for a message with display: true, which
+  // mergeIntoMain sets for a routine note alone; a captain-facing note is
+  // sent with display: false and is never printed or rendered here.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    const glyph = note.startsWith(MERGE_NOTE_ANCHOR)
-      ? MERGE_NOTE_ANCHOR
-      : note.startsWith(MERGE_NOTE_BOAT)
-        ? MERGE_NOTE_BOAT
-        : "";
-    const rest = glyph ? note.slice(glyph.length) : note;
+    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
+    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
     const outputPad = 1;
     return new Text(
-      `${glyph ? theme.fg("customMessageText", glyph) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,
     );

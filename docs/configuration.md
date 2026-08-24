@@ -34,15 +34,16 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
-## Pi supervision branch (config/pi-supervision-branch)
+## Pi supervision branch
 
-On a Pi primary, ordinary actionable fleet wakes that pass the unchanged watcher classifier are handled by a persistent in-process supervision branch that keeps the captain's conversation clean; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns the architecture.
-The gitignored `config/pi-supervision-branch` file under the effective home is the captain's explicit, project-local autonomy grant. It contains one or more exact `project=<value>` lines, where each value exactly matches the `project=` field in task metadata; blank lines and `#` comments are allowed. A wake is delegated only when every unread queue row is task-local and every task's project is listed. Fleet-wide, unresolvable, mixed-scope, absent, unreadable, empty, legacy `on`, `off`, or otherwise malformed grants stay on the captain-facing main path and activate no branch-owned runtime state or lease cleanup.
-The grant enables only the Pi-primary routing and bounded supervision role in the captain-approved architecture: sharing a home does not extend authority to unlisted projects, the branch cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
-The file is read fresh at every wake offer, so an edit takes effect without restarting Pi.
-Homes on any other primary harness never read this file and are entirely unaffected.
+On a Pi primary, ordinary actionable fleet wakes that pass the unchanged watcher classifier, plus every fleet-wide heartbeat scan, are handled by a persistent in-process supervision branch that keeps the captain's conversation clean; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns the architecture.
+Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
+A wake is delegated when every unread queue row is task-local, or when the watcher classifies the wake as a fleet-wide heartbeat scan; every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on the captain-facing main path.
+Away mode still declines every wake offer, and a broken branch still falls back to today's wake-to-main path.
+The branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
+Homes on any other primary harness never load this feature and are entirely unaffected.
 Runtime state lives in `state/branch-outcomes.jsonl` with its `.branch-outcomes-cursor`, the persistent conversation under `state/branch-session/` with its `.branch-session` pointer and `.branch-mirror-cursor`, and per-task `state/.lease-<task>` files; `bin/fm-branch-outcome.sh` and `bin/fm-lease-lib.sh` own those formats.
-This grant is local to each Firstmate home and is not part of secondmate inherited configuration; each home remains disabled until its captain explicitly writes `on`.
+A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself; a routine outcome still appends a rendered, sailboat-prefixed note.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

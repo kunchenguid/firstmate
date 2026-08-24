@@ -54,10 +54,9 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const home = resolve(process.env.FM_HOME);
-// The live guard exercises the branch only after the captain's explicit
-// project-local autonomy grant.
+// Supervision is default-on: the live guard exercises the branch with no
+// captain grant file present at all.
 const approvedProject = `${home}/projects/live-probe`;
-writeFileSync(`${home}/config/pi-supervision-branch`, `project=${approvedProject}\n`);
 const busHandlers = new Map();
 const bus = {
   on(channel, handler) {
