@@ -205,15 +205,23 @@ fm_harness_omp_claude_marker_path() {  # <state>
 # path. Always called on every lock write, omp or not, so a later non-omp
 # acquisition clears a stale marker rather than leaving it pointing at a pid
 # some unrelated future process could reuse.
+#
+# Returns failure when a genuine omp holder's marker write fails. That case
+# is fatal for the caller, not merely logged: without the persisted marker no
+# foreign session can ever prove this pid alive (fm_harness_pid_alive has no
+# other evidence for a foreign omp pid), so it would treat this live holder
+# as stale and overwrite the lock out from under it. fm-lock.sh must fail the
+# whole acquisition rather than report success with unverifiable identity.
 fm_harness_record_omp_claude() {  # <state> <pid>
   local state=$1 pid=$2 comm marker
   marker=$(fm_harness_omp_claude_marker_path "$state")
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=""
   if [ "$(basename -- "$comm")" = omp ] && [ "${CLAUDECODE:-}" = "1" ]; then
-    printf '%s\n' "$pid" > "$marker" 2>/dev/null || true
-  else
-    rm -f "$marker" 2>/dev/null || true
+    printf '%s\n' "$pid" > "$marker" 2>/dev/null
+    return $?
   fi
+  rm -f "$marker" 2>/dev/null || true
+  return 0
 }
 
 # True if $1 is a live process that looks like a verified harness. $2 is the

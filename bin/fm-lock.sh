@@ -107,7 +107,16 @@ fi
 # identity (see fm_harness_pid_alive), so persist that verification now, in
 # the one context - the writer's own environment, immediately after winning
 # the lock - where it is sound evidence. Runs on every acquisition, omp or
-# not, so a non-omp session correctly clears any stale prior record.
-fm_harness_record_omp_claude "$STATE" "$me"
+# not, so a non-omp session correctly clears any stale prior record. A write
+# failure here means no foreign session can ever prove $me alive, so it must
+# fail the whole acquisition rather than leave $LOCK claiming an identity
+# nothing else can verify - and $LOCK is removed rather than left in place,
+# so a later invocation from this same session cannot short-circuit past the
+# broken marker write via the "$old" = "$me" fast path above.
+if ! fm_harness_record_omp_claude "$STATE" "$me"; then
+  rm -f "$LOCK" 2>/dev/null || true
+  echo "error: cannot persist omp session-lock identity marker; operate read-only until resolved" >&2
+  exit 1
+fi
 release_claim_lock
 echo "lock acquired: harness pid $me"

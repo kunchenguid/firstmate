@@ -574,6 +574,48 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# A directory in place of the marker file makes fm_harness_record_omp_claude's
+# write fail deterministically and cross-platform, without relying on chmod
+# (which root - a common CI container user - ignores).
+test_e2e_omp_marker_write_failure_fails_the_whole_acquisition() {
+  local dir fakebin out rc lock_after
+  dir="$TMP_ROOT/e2e-omp-marker-write-failure"
+  mkdir -p "$dir/state"
+  install_autoarm_scripts "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf '%s\n' omp ;;
+  args=) printf '%s\n' omp ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  mkdir -p "$dir/state/.lock.omp-claude"
+
+  out=$(CLAUDECODE=1 PATH="$fakebin:$PATH" FM_HOME="$dir" "$dir/bin/fm-lock.sh" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "fm-lock.sh reported success despite a failed omp-identity marker write: $out"
+  case "$out" in
+    *"lock acquired"*) fail "fm-lock.sh printed lock-acquired despite a failed marker write: $out" ;;
+  esac
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  [ -z "$lock_after" ] \
+    || fail "the session lock was left claiming pid $lock_after with no persisted omp-identity marker for a foreign session to verify"
+  pass "session-lock e2e: a failed omp-identity marker write fails the whole acquisition instead of leaving an unverifiable lock"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_omp_is_claude_identified_only_with_claudecode_marker
@@ -585,3 +627,4 @@ test_persisted_omp_claude_marker_lets_a_foreign_checker_see_a_live_omp_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_e2e_omp_marker_write_failure_fails_the_whole_acquisition
