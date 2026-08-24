@@ -2164,6 +2164,7 @@ fm_backend_herdr_endpoint_closeable() {  # <target>
     FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=husk
     return 0
   fi
+  # shellcheck disable=SC2034 # Output global is consumed by sourcing callers.
   case "$state" in
     live|done) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=registered ;;
     *) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=unreadable ;;

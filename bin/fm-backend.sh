@@ -773,6 +773,7 @@ fm_backend_endpoint_closeable() {  # <backend> <target>
   FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=unreadable
   [ -n "$target" ] || { FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=malformed-target; return 1; }
   fm_backend_source "$backend" || return 1
+  # shellcheck disable=SC2034 # Output global is consumed by sourcing callers.
   case "$backend" in
     herdr) fm_backend_herdr_endpoint_closeable "$target" ;;
     *) FM_BACKEND_ENDPOINT_CLOSEABLE_REASON=no-registration-view; return 0 ;;
