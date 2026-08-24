@@ -50,19 +50,54 @@ lab_pid_is_safe() {
   esac
 }
 
+wait_lab_pid_exit() {
+  local pid=$1 i=0
+  [ -n "$pid" ] || return 0
+  while lab_pid_is_safe "$pid" && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if lab_pid_is_safe "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    kill -CONT "$pid" 2>/dev/null || true
+  fi
+  i=0
+  while lab_pid_is_safe "$pid" && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! lab_pid_is_safe "$pid"
+}
+
 cleanup() {
-  local watcher_pid arm_pid
+  local coordinator_pid watcher_pid arm_pid pid cleanup_failed=0
+  coordinator_pid=$(sed -n 's/^pid=//p' "$HOME_DIR/state/.grok-watch-coordinator" 2>/dev/null || true)
+  if [ "${COORDINATOR_RECORDED:-0}" = 1 ] && [ -z "$coordinator_pid" ]; then
+    cleanup_failed=1
+  fi
   watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
   arm_pid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
   "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
-  sleep 0.1
-  if [ -n "$watcher_pid" ] && lab_pid_is_safe "$watcher_pid"; then
-    kill -TERM "$watcher_pid" 2>/dev/null || true
-  fi
-  if [ -n "$arm_pid" ] && lab_pid_is_safe "$arm_pid"; then
-    kill -TERM "$arm_pid" 2>/dev/null || true
+  for pid in "$coordinator_pid" "$watcher_pid" "$arm_pid"; do
+    if [ -n "$pid" ] && lab_pid_is_safe "$pid"; then
+      kill -TERM "$pid" 2>/dev/null || true
+      kill -CONT "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "$coordinator_pid" "$watcher_pid" "$arm_pid"; do
+    wait_lab_pid_exit "$pid" || cleanup_failed=1
+  done
+  if [ "$cleanup_failed" -ne 0 ]; then
+    trap - EXIT
+    printf 'not ok - Grok live E2E cleanup could not retire every lab-owned coordinator, watcher, and arm\n' >&2
+    exit 1
   fi
   rm -rf "$LAB"
+  if [ -e "$LAB" ]; then
+    trap - EXIT
+    printf 'not ok - Grok live E2E cleanup could not remove the retired lab\n' >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT
 
@@ -73,9 +108,24 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/grok-e2e.meta"
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; grok --trust --always-approve --reasoning-effort low; rc=\$?; printf \"GROK_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"pid=%s\\n\" \"\$\$\" > \"$HOME_DIR/state/.grok-watch-coordinator\"; printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; grok --trust --always-approve --reasoning-effort low; rc=\$?; printf \"GROK_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 wait_for_text "Grok Build" 180 || fail "Grok did not reach its ready composer"
+
+i=0
+coordinator_pid=
+while [ "$i" -lt 60 ]; do
+  coordinator_pid=$(sed -n 's/^pid=//p' "$HOME_DIR/state/.grok-watch-coordinator" 2>/dev/null || true)
+  [ -n "$coordinator_pid" ] && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -n "$coordinator_pid" ] \
+  || fail "the lab coordinator did not record its pid, so cleanup cannot retire it before removing the lab"
+lab_pid_is_safe "$coordinator_pid" \
+  || fail "the recorded coordinator pid is not a lab-owned process"
+COORDINATOR_RECORDED=1
+
 sleep 1
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 PROMPT='Use run_terminal_command with background=true to run exactly `bin/fm-watch-arm.sh`. Never use a shell ampersand. Once it reports started, respond briefly.'

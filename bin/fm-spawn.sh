@@ -2837,7 +2837,7 @@ fi
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" tmp status=0
   SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_lock_acquire_wait "$SPAWN_META_LOCK" || return 1
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
