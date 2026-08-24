@@ -48,6 +48,7 @@ The follow-up turn a `captain` verdict opens is itself the captain-visible outco
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
+That read is a Calm-collapsed row: with Calm on, an outcome the branch already handled collapses with the row, while a failed read, a captain-relevant outcome, and any unrecognized output stay on screen ([docs/calm.md](calm.md) owns the behavior, `.pi/extensions/lib/fm-calm-branch-outcomes.ts` owns what survives).
 
 ## Heartbeat routing
 
@@ -73,4 +74,5 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 
 Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, fallback, filter, mirror, cache key, persistence), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, leases, guards, non-branch-home invariance), the branch-offer and heartbeat-offer tests in `tests/fm-pi-watch-extension.test.sh`, and the recovery test in `tests/fm-session-start.test.sh`.
 Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK with no credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
+How the outcome read actually renders is Pi's own verdict, so it has its own pair: `tests/fm-calm-branch-outcomes.test.sh` pins the collapse decision with real store records and no harness, and `FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 tests/fm-calm-branch-outcomes-live-e2e.test.sh` proves the rendered row against the real `pi` binary in a real terminal.
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.

@@ -50,18 +50,26 @@ import {
   createBashToolDefinition,
   DefaultResourceLoader,
   getAgentDir,
+  keyHint,
   SessionManager,
   type AgentSession,
   type ExtensionAPI,
+  type Theme,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
+import { calmBranchOutcomeAttention } from "./lib/fm-calm-branch-outcomes.ts";
+import {
+  calmTranscriptClassIsVisible,
+  FIRSTMATE_CALM_PRESENTATION_EVENT,
+  type CalmPresentationState,
+} from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -90,7 +98,61 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-const MERGE_NOTE_BOAT = "⛵";
+// The supervision branch's own glyph: on every merged note it prints, and on
+// each line Calm keeps when it collapses a branch-outcome read.
+const BRANCH_BOAT = "⛵";
+
+// Pi renders a tool row whose definition supplies no render slot through its
+// own call and result fallbacks: the bold tool name, then the result text
+// clipped to this many lines with an expand hint, inside a Box(1, 1) shell that
+// one blank line precedes. Calm's collapse needs renderShell "self", because a
+// self-rendered row that draws nothing is the only shape Pi removes from the
+// transcript entirely - so the slots below have to reproduce that stock shape
+// themselves for every path where Calm is not hiding. The live guard is what
+// proves the reproduction still matches the Pi actually installed.
+const OUTCOMES_FALLBACK_PREVIEW_LINES = 10;
+
+type OutcomesShellState = {
+  shell?: Box;
+  call?: Component;
+  result?: Component;
+};
+
+type OutcomesRenderContext = {
+  isError: boolean;
+  isPartial: boolean;
+};
+
+function refreshOutcomesShell(
+  state: OutcomesShellState,
+  theme: Theme,
+  context: OutcomesRenderContext,
+): Box {
+  const background = context.isPartial
+    ? (text: string) => theme.bg("toolPendingBg", text)
+    : context.isError
+      ? (text: string) => theme.bg("toolErrorBg", text)
+      : (text: string) => theme.bg("toolSuccessBg", text);
+  const shell = state.shell ?? new Box(1, 1, background);
+  state.shell = shell;
+  shell.setBgFn(background);
+  shell.clear();
+  if (state.call) shell.addChild(state.call);
+  if (state.result) shell.addChild(state.result);
+  return shell;
+}
+
+function stockOutcomesResultText(theme: Theme, output: string, expanded: boolean): string {
+  const lines = output.split("\n");
+  const displayLines = expanded ? lines : lines.slice(0, OUTCOMES_FALLBACK_PREVIEW_LINES);
+  const remaining = lines.length - displayLines.length;
+  let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+  if (remaining > 0) {
+    text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+  }
+  return text;
+}
+
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -253,6 +315,27 @@ export default function (pi: ExtensionAPI) {
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
 
+  // Calm's presentation state reaches this extension over its published event
+  // rather than through shared module state, the same way the watcher extension
+  // reads it: Pi loads each extension independently, so the event is the only
+  // supported coupling. No Calm extension in this home means no event, which
+  // leaves the tool on its stock presentation.
+  let calmPresentation: CalmPresentationState = {
+    active: false,
+    stockExportRendering: false,
+  };
+  pi.events?.on?.(FIRSTMATE_CALM_PRESENTATION_EVENT, (data) => {
+    const next = data as Partial<CalmPresentationState>;
+    calmPresentation = {
+      active: next.active === true,
+      stockExportRendering: next.stockExportRendering === true,
+    };
+  });
+  const calmHides = (itemClass: Parameters<typeof calmTranscriptClassIsVisible>[0]): boolean =>
+    calmPresentation.active &&
+    !calmPresentation.stockExportRendering &&
+    !calmTranscriptClassIsVisible(itemClass);
+
   function generationOwnsLock(expectedGeneration: number): boolean {
     return !shuttingDown && expectedGeneration === generation && lockOwnership() === "owned";
   }
@@ -341,7 +424,7 @@ export default function (pi: ExtensionAPI) {
       const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
+      const message = { customType: "fm-branch-merge", content: `${BRANCH_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
       if (mainStreaming) {
         pi.sendMessage(message, { deliverAs: "nextTurn" });
       } else {
@@ -703,6 +786,56 @@ ${context.command}
     parameters: Type.Object({
       recent: Type.Optional(Type.Number({ description: "How many most-recent outcomes to read (default 20)" })),
     }),
+    // Calm reaches this row through the same visibility owner as every other
+    // collapsed tool row; lib/fm-calm-branch-outcomes.ts owns the one exception
+    // Calm makes inside that collapse. Calm off and Pi's own stock export
+    // rendering both keep the raw store records exactly as Pi would render them.
+    renderShell: "self",
+    renderCall: (_args, theme, context) => {
+      if (calmHides("assistant-tool-call")) return new Container();
+      const title = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
+      // Pi's HTML exporter renders the call and result slots independently and
+      // keeps only what each one hands back, so an export must return its own
+      // component instead of folding it into the shared on-screen shell.
+      if (calmPresentation.stockExportRendering) return title;
+      const shellState = context.state as OutcomesShellState;
+      shellState.call = title;
+      return refreshOutcomesShell(shellState, theme, context);
+    },
+    renderResult: (result, options, theme, context) => {
+      const output = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n");
+      if (calmHides("tool-result")) {
+        // The call slot already returned an empty component, so an empty result
+        // here is what removes the whole row; anything the collapse must not
+        // swallow comes back as its own dim line instead, carrying the branch's
+        // glyph exactly as its merged notes do.
+        const attention = calmBranchOutcomeAttention(output, context.isError === true);
+        if (attention.length === 0) return new Container();
+        const outputPad = 1;
+        return new Text(
+          attention
+            .map((line) =>
+              line.glyph
+                ? `${theme.fg("customMessageText", BRANCH_BOAT)}${theme.fg("dim", ` ${line.text}`)}`
+                : theme.fg("dim", line.text),
+            )
+            .join("\n"),
+          outputPad,
+          0,
+        );
+      }
+      const resultText = output
+        ? new Text(stockOutcomesResultText(theme, output, options.expanded === true), 0, 0)
+        : new Container();
+      if (calmPresentation.stockExportRendering) return resultText;
+      const shellState = context.state as OutcomesShellState;
+      shellState.result = resultText;
+      refreshOutcomesShell(shellState, theme, context);
+      return new Container();
+    },
     execute: async (_toolCallId, params) => {
       const recentRaw = (params as { recent?: unknown }).recent;
       const recent = typeof recentRaw === "number" && recentRaw >= 1 ? String(Math.floor(recentRaw)) : "20";
@@ -726,11 +859,11 @@ ${context.command}
   // fleet heartbeat; captain-facing notes are never printed or rendered here.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
-    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    const hasGlyph = note.startsWith(BRANCH_BOAT);
+    const rest = hasGlyph ? note.slice(BRANCH_BOAT.length) : note;
     const outputPad = 1;
     return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", BRANCH_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,
     );

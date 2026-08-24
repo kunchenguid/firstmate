@@ -26,6 +26,8 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-branch-outcomes.ts" "$repo/.pi/extensions/lib/fm-calm-branch-outcomes.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -38,6 +40,17 @@ import { writeFileSync } from "node:fs";
 
 export function getAgentDir() {
   return "/stub-agent-dir";
+}
+
+export function keyHint(_keybinding, description) {
+  return description;
+}
+
+export function getMarkdownTheme() { return {}; }
+
+export class UserMessageComponent {
+  render() { return []; }
+  invalidate() {}
 }
 
 export class DefaultResourceLoader {
@@ -124,6 +137,28 @@ export class Text {
     this.text = text;
     this.paddingX = paddingX;
     this.paddingY = paddingY;
+  }
+}
+export class Container {
+  constructor() {
+    this.children = [];
+  }
+  addChild(child) {
+    this.children.push(child);
+  }
+  clear() {
+    this.children = [];
+  }
+}
+export class Box extends Container {
+  constructor(paddingX, paddingY, bgFn) {
+    super();
+    this.paddingX = paddingX;
+    this.paddingY = paddingY;
+    this.bgFn = bgFn;
+  }
+  setBgFn(bgFn) {
+    this.bgFn = bgFn;
   }
 }
 JS
