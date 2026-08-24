@@ -36,8 +36,9 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Both agent-state waits spend a budget of real elapsed time rather than a count of poll intervals, because a single state read can cost more than one interval, and the refusal reports the duration actually waited beside the budget it was given.
-That budget is accumulated from per-poll steps rather than measured as the difference between the wait's first and last clock reading: the only clock available is the settable epoch clock, so an ntp correction or a manual clock set landing mid-wait would otherwise make the elapsed time negative and hold the exit or relaunch open past its own refusal deadline until the clock caught back up.
-A backward step is discarded, which costs the wait at most the one poll interval the correction landed in and never the budget already spent.
+That budget is accumulated from per-poll steps rather than measured as the difference between the wait's first and last clock reading: the only clock available is the settable epoch clock, so an ntp correction, a manual clock set, or a resume from suspend landing mid-wait would otherwise be counted as time the wait spent.
+Backward, that would make the elapsed time negative and hold the exit or relaunch open past its own refusal deadline until the clock caught back up; forward, it would add a jump nothing waited through and spend the whole budget in a single poll, refusing before the deadline arrived.
+A backward step is discarded and a forward step is capped at the longest a single poll of that wait could plausibly take, so a correction in either direction costs the wait at most the one poll interval it landed in and never the budget already spent.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.

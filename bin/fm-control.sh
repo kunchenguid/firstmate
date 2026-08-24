@@ -139,9 +139,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Sourced for fm_timing_now_ms and fm_timing_step_ms, the one owner of a
-# millisecond clock reading and of the backward-step guard a budget accumulated
-# from that settable clock needs, so the lifecycle waits below measure a budget
-# instead of counting their own polls.
+# millisecond clock reading and of the clock-correction guard a budget
+# accumulated from that settable clock needs, so the lifecycle waits below
+# measure a budget instead of counting their own polls.
 # Recording stays off: it is inert unless FM_TIMING_LOG names a file.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -151,6 +151,16 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+# The longest a single poll of a lifecycle wait below could plausibly take, and
+# so the most one step of the settable clock may add to a budget before it is
+# read as a correction rather than as elapsed time. A poll is its sleep plus one
+# agent_state read, and that read is NOT bounded by POLL - a backend classifier
+# may sample an endpoint several times before it answers - so the allowance over
+# POLL is generous on purpose. It sits well above any real poll and well under
+# the smallest budget it guards (SETTLE_WAIT), so an ordinary slow poll is never
+# charged as a clock jump and a real jump never costs a whole wait.
+# fm_timing_step_ms owns what the bound means.
+STEP_MAX_MS=$(awk -v p="$POLL" 'BEGIN{printf "%d", p * 1000 + 2000}')
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -337,13 +347,17 @@ control_seconds() {  # <milliseconds>
 #
 # The budget is ACCUMULATED from per-poll steps, not taken as the difference
 # between the first and last clock reading. fm_timing_now_ms reads the settable
-# epoch clock, so an ntp correction or a manual clock set during a wait can move
-# it backward; an endpoint difference then goes negative and the loop stops
-# counting down, holding an exit or relaunch open past its own refusal deadline
-# until the clock catches back up. Adding fm_timing_step_ms of the previous
-# reading discards a backward step, so a correction costs at most the one poll
-# interval it landed in and the budget still expires. See fm_timing_step_ms in
-# bin/fm-timing-lib.sh for why no monotonic clock is read instead.
+# epoch clock, so an ntp correction, a manual clock set, or a resume from
+# suspend during a wait can move it EITHER way: backward, an endpoint difference
+# goes negative and the loop stops counting down, holding an exit or relaunch
+# open past its own refusal deadline until the clock catches back up; forward, a
+# jump is added as time nothing waited through and spends the whole budget in a
+# single poll, refusing before the deadline instead. Adding fm_timing_step_ms of
+# the previous reading, bounded by STEP_MAX_MS, costs a correction at most the
+# one poll interval it landed in in either direction, so the budget still
+# expires and still measures the real wait. See fm_timing_step_ms in
+# bin/fm-timing-lib.sh for the bound's contract and for why no monotonic clock
+# is read instead.
 #
 # Prints the final observed state and the real seconds waited, separated by a
 # space; returns 0 on a match.
@@ -354,7 +368,7 @@ wait_agent_state() {  # <timeout> <wanted>...
   while :; do
     state=$(agent_state)
     now=$(fm_timing_now_ms)
-    elapsed=$(( elapsed + $(fm_timing_step_ms "$mark" "$now") ))
+    elapsed=$(( elapsed + $(fm_timing_step_ms "$mark" "$now" "$STEP_MAX_MS") ))
     mark=$now
     for want in "$@"; do
       if [ "$state" = "$want" ]; then

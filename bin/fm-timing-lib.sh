@@ -88,28 +88,50 @@ fm_timing_now_ms() {
 }
 
 # Milliseconds between an earlier and a later fm_timing_now_ms reading, with a
-# backward step discarded.
+# clock correction in EITHER direction bounded to the interval it landed in.
 #
 # fm_timing_now_ms reads the SETTABLE epoch clock - EPOCHREALTIME and date(1)
 # both follow it - and bash has no portable monotonic source to read instead. So
-# ntp, a manual clock set, or a suspend/resume correction can move it BACKWARD
-# between two readings, and the difference between two endpoints is then not a
-# duration at all: it is negative. A caller spending a budget of real seconds
-# that way stops counting down and outlives the budget it was given by however
-# far the clock moved, which for a lifecycle wait means an exit or relaunch that
-# hangs on past its own refusal deadline.
+# ntp, a manual clock set, or a resume from suspend can move it between two
+# readings by an amount that is not elapsed time at all, in either direction.
+# BACKWARD, the difference between two endpoints is not a duration: it is
+# negative. A caller spending a budget of real seconds that way stops counting
+# down and outlives the budget it was given by however far the clock moved,
+# which for a lifecycle wait means an exit or relaunch that hangs on past its
+# own refusal deadline. FORWARD, the difference is a jump nothing waited
+# through. Added whole to a budget it spends all of it in a single poll, so that
+# same wait refuses having really waited a fraction of what it was given - the
+# same deadline missed from the other side.
 #
 # The fix a caller applies is to accumulate STEPS rather than subtract
 # endpoints: read the clock every poll and add this step of the previous
-# reading. A correction then costs at most the single interval it landed in -
-# that interval's real time is dropped, never the budget already spent - so the
-# accumulated elapsed time never decreases and the budget always expires.
-fm_timing_step_ms() {  # <earlier-reading-ms> <later-reading-ms>
-  local earlier=${1:-0} later=${2:-0} step
+# reading, bounded by <max-step-ms>, the longest a single poll of that caller's
+# own loop could plausibly take. A step past that bound is a jump, not elapsed
+# time. A correction then costs at most the single interval it landed in -
+# backward that interval's real time is dropped, forward it is charged the bound
+# in place of the jump, and neither touches the budget already spent - so the
+# accumulated elapsed time never decreases, never outruns the real wait by more
+# than one interval, and the budget always expires.
+#
+# The bound is the CALLER's to supply, because only the caller knows its own
+# poll interval and the work each poll does. A constant guessed in here would be
+# silently wrong for every loop but the one it happened to be written for, and
+# wrong in the direction that under-reports a real wait.
+fm_timing_step_ms() {  # <earlier-reading-ms> <later-reading-ms> <max-step-ms>
+  local earlier=${1:-0} later=${2:-0} max=${3:-} step
   case "$earlier" in ''|*[!0-9]*) earlier=0 ;; esac
   case "$later" in ''|*[!0-9]*) later=0 ;; esac
   step=$(( later - earlier ))
   [ "$step" -ge 0 ] || step=0
+  # A missing or non-positive bound leaves the step UNBOUNDED rather than
+  # clamping it to zero. Both are caller errors, but their failures are not
+  # equal: an unbounded step restores only the forward defect, while a zero step
+  # would stop the budget advancing at all and hang the wait past the very
+  # deadline this accumulation exists to keep.
+  case "$max" in
+    ''|*[!0-9]*|0) ;;
+    *) [ "$step" -le "$max" ] || step=$max ;;
+  esac
   printf '%s\n' "$step"
 }
 

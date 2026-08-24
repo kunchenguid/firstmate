@@ -858,7 +858,7 @@ test_exit_wait_budgets_real_time_and_reports_it() {
 # what is under test. Both directions are pinned - a correction must not extend
 # the budget, and the guard must not distort an ordinary wait.
 test_wait_budget_survives_a_backward_clock_correction() {
-  local base=1700000000000 budget_ms=1000 hour_ms=3600000
+  local base=1700000000000 budget_ms=1000 hour_ms=3600000 max_step=400
   local reading previous elapsed step endpoint
   local -a readings
 
@@ -878,7 +878,7 @@ test_wait_budget_survives_a_backward_clock_correction() {
   previous=
   for reading in "${readings[@]}"; do
     if [ -n "$previous" ]; then
-      step=$(fm_timing_step_ms "$previous" "$reading")
+      step=$(fm_timing_step_ms "$previous" "$reading" "$max_step")
       [ "$step" -ge 0 ] \
         || fail "a clock step must never be negative, got ${step}ms across the correction"
       elapsed=$(( elapsed + step ))
@@ -897,18 +897,85 @@ test_wait_budget_survives_a_backward_clock_correction() {
   [ "$elapsed" -eq "$budget_ms" ] \
     || fail "the correction should have cost only the one interval it landed in, but ${elapsed}ms was accumulated against a ${budget_ms}ms budget"
 
-  # An undisturbed wait still measures the real time it spent, to the millisecond.
+  # An undisturbed wait still measures the real time it spent, to the
+  # millisecond. Its 650ms step is a slow poll rather than a jump, so it is
+  # measured against a bound that sits above it.
   readings=("$base" "$(( base + 250 ))" "$(( base + 900 ))")
   elapsed=0
   previous=
   for reading in "${readings[@]}"; do
-    [ -z "$previous" ] || elapsed=$(( elapsed + $(fm_timing_step_ms "$previous" "$reading") ))
+    [ -z "$previous" ] || elapsed=$(( elapsed + $(fm_timing_step_ms "$previous" "$reading" 1000) ))
     previous=$reading
   done
   [ "$elapsed" -eq 900 ] \
     || fail "an undisturbed wait should accumulate its real 900ms, got ${elapsed}ms"
 
   pass "fm-control: an agent-state wait budget still expires across a backward clock correction"
+}
+
+# The mirror of the correction above, in the other direction. The same settable
+# clock moves FORWARD on an ntp correction, a manual clock set, or a resume from
+# suspend, and a forward step is elapsed time only while it is small enough to
+# have been one poll. A jump is not time the wait spent: added whole it spends
+# the entire budget in a single poll, so an exit or relaunch refuses having
+# really waited a fraction of what it was given - the same deadline the backward
+# case blew past, reached from the other side.
+#
+# The bound is the caller's own longest plausible poll iteration and is passed
+# in, because the library cannot know it. Ordinary steps must pass through
+# untouched: clamping them would under-report every real wait and expire the
+# budget late, which is the tick-counting lie this budget replaced.
+test_wait_budget_survives_a_forward_clock_correction() {
+  local base=1700000000000 budget_ms=1000 hour_ms=3600000 max_step=400
+  local reading previous elapsed step endpoint real_ms overshoot
+  local -a readings
+
+  # Two 200ms polls of a 1s budget, with the clock set FORWARD an hour between
+  # the second and third reading. Only 400ms of real time has passed.
+  readings=(
+    "$base"
+    "$(( base + 200 ))"
+    "$(( base + 400 + hour_ms ))"
+  )
+  real_ms=400
+
+  elapsed=0
+  previous=
+  for reading in "${readings[@]}"; do
+    if [ -n "$previous" ]; then
+      step=$(fm_timing_step_ms "$previous" "$reading" "$max_step")
+      [ "$step" -le "$max_step" ] \
+        || fail "a clock step must never exceed the ${max_step}ms bound it was given, got ${step}ms across the correction"
+      elapsed=$(( elapsed + step ))
+    fi
+    previous=$reading
+  done
+
+  # What the defect looked like: the raw forward difference is an hour, so a 1s
+  # budget read as spent after 400ms of real waiting.
+  endpoint=$(( previous - base ))
+  [ "$endpoint" -gt "$budget_ms" ] \
+    || fail "the fixture no longer moves the clock forward: endpoint difference was ${endpoint}ms"
+  [ "$elapsed" -lt "$budget_ms" ] \
+    || fail "a forward clock correction spent a ${budget_ms}ms budget in ${elapsed}ms of accumulated time after only ${real_ms}ms of real waiting, so the wait refused before its deadline"
+  # The correction costs at most the single interval it landed in.
+  overshoot=$(( elapsed - real_ms ))
+  [ "$overshoot" -le "$max_step" ] \
+    || fail "the correction should have cost at most the one ${max_step}ms interval it landed in, but ${overshoot}ms was charged beyond the ${real_ms}ms really waited"
+
+  # A step below the bound is elapsed time and passes through untouched, so the
+  # duration a human reads stays the real one.
+  readings=("$base" "$(( base + 250 ))" "$(( base + 550 ))")
+  elapsed=0
+  previous=
+  for reading in "${readings[@]}"; do
+    [ -z "$previous" ] || elapsed=$(( elapsed + $(fm_timing_step_ms "$previous" "$reading" "$max_step") ))
+    previous=$reading
+  done
+  [ "$elapsed" -eq 550 ] \
+    || fail "an undisturbed wait should accumulate its real 550ms, got ${elapsed}ms"
+
+  pass "fm-control: an agent-state wait budget survives a forward clock correction"
 }
 
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
@@ -1014,6 +1081,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_exit_wait_budgets_real_time_and_reports_it
 test_wait_budget_survives_a_backward_clock_correction
+test_wait_budget_survives_a_forward_clock_correction
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
