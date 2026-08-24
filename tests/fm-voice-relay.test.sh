@@ -1368,6 +1368,13 @@ check(client.parse_args(["--host", "desk", "--relay", "/other/relay.py"]).relay
 # Push to talk is the default for this build, and the only mode that runs.
 check(client.parse_args(["--host", "h"]).listen == client.PUSH_TO_TALK,
       "push to talk must be the default")
+check(client.parse_args(["--host", "h"]).wait_for_reply,
+      "waiting for each reply must be the default")
+check(client.parse_args(["--host", "h", "--wait-for-reply"]).wait_for_reply,
+      "--wait-for-reply must enable waiting")
+check(not client.parse_args(
+          ["--host", "h", "--no-wait-for-reply"]).wait_for_reply,
+      "--no-wait-for-reply must disable waiting")
 
 # An open microphone needs to know when the captain stopped speaking, and this
 # client cannot: it would open a turn and stream forever without ever marking a
