@@ -1541,7 +1541,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc thlog teardown_bin generic_cleanup
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1550,6 +1550,7 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
   thlog="$case_dir/treehouse.log"; : > "$thlog"
+  generic_cleanup="$case_dir/generic-cleanup-ran"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$thlog"
@@ -1573,12 +1574,18 @@ SH
           "$case_dir/test-root/bin/backends/herdr.sh"
         rm -f "$case_dir/test-root/bin/backends/herdr.sh.bak"
       fi
+      cat > "$case_dir/test-root/bin/fm-remote-job-reap-orphans.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_FAKE_GENERIC_CLEANUP:?}"
+SH
+      chmod +x "$case_dir/test-root/bin/fm-remote-job-reap-orphans.sh"
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
       ;;
   esac
   rc=0
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_GENERIC_CLEANUP="$generic_cleanup" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -1596,6 +1603,11 @@ SH
     || fail "herdr-preflight-$mode: refusal erased the turn-end record"
   [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
   [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
+  case "$mode" in
+    missing-adapter|missing-parser|missing-explicit-close-helper)
+      [ ! -e "$generic_cleanup" ] || fail "herdr-preflight-$mode: refusal ran generic cleanup before proving its adapter prerequisites"
+      ;;
+  esac
 }
 
 test_herdr_flat_teardown_preflight_refuses_before_changes() {

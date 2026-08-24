@@ -125,7 +125,8 @@ Ordinary non-projected task removal serializes through the same session lock, ap
 Task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child, then retains each child's durable identity unless that exact pane returns structured not-found after its close.
 Durable task records are erased only once the exact pane is confirmed gone through its structured presence: after every close path, only a structured not-found response counts as gone, while a present or unknown result retains every record with a visible, retryable error.
-Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
+Before generic teardown cleanup begins, Herdr task cleanup proves its adapter and required preflight and confirmation machinery are available.
+Missing or malformed endpoint identity, an unreadable Herdr adapter, or missing required machinery are ambiguity, never proof of a gone pane, and refuse without changing the isolated copy, endpoint, or durable records.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
 Recovery is deliberately conservative and presentation-only.
