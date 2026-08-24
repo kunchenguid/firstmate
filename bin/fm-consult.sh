@@ -16,10 +16,10 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
-# status with no id lists every consultation, including hidden and symlinked
-# entries, printing a refused line with a reason for any entry it cannot report
-# safely, and exits nonzero once the whole listing is printed. status with an id
-# refuses such an entry immediately.
+# status with no id lists every consultation on exactly one line each, including
+# hidden and symlinked entries, printing a refused line with a reason for any
+# entry it cannot report safely, and exits nonzero once the whole listing is
+# printed. status with an id refuses such an entry immediately.
 #
 # Transport is deliberately absent: this script makes no network calls and
 # assumes no browser, tunnel, API client, or advisor channel.
@@ -92,15 +92,29 @@ consult_id_ok() {
   return 1
 }
 
+# Render a name that came off the filesystem into one unambiguous line. A
+# consultation directory may be named anything, including embedded newlines and
+# control bytes, and a refusal reports names this script has already rejected -
+# so a name is never emitted raw, or a planted entry could forge extra listing
+# records.
+display_name() {
+  local name=$1
+  local LC_ALL=C
+  case "$name" in
+    *[![:print:]]*) printf '%q' "$name" ;;
+    *) printf '%s' "$name" ;;
+  esac
+}
+
 consult_directory_ok() {
-  local dir=$1
+  local dir=$1 label=$2
   CONSULT_REFUSAL=
   if [ -L "$dir" ]; then
-    CONSULT_REFUSAL="consultation directory must not be a symlink: $dir"
+    CONSULT_REFUSAL="$label directory must not be a symlink: $(display_name "$dir")"
     return 1
   fi
   if [ -e "$dir" ] && [ ! -d "$dir" ]; then
-    CONSULT_REFUSAL="consultation path is not a directory: $dir"
+    CONSULT_REFUSAL="$label path is not a directory: $(display_name "$dir")"
     return 1
   fi
   return 0
@@ -110,11 +124,11 @@ consult_file_ok() {
   local path=$1 label=$2
   CONSULT_REFUSAL=
   if [ -L "$path" ]; then
-    CONSULT_REFUSAL="$label must not be a symlink: $path"
+    CONSULT_REFUSAL="$label must not be a symlink: $(display_name "$path")"
     return 1
   fi
   if [ -e "$path" ] && [ ! -f "$path" ]; then
-    CONSULT_REFUSAL="$label is not a regular file: $path"
+    CONSULT_REFUSAL="$label is not a regular file: $(display_name "$path")"
     return 1
   fi
   return 0
@@ -125,16 +139,11 @@ validate_consult_id() {
 }
 
 validate_data_directory() {
-  if [ -L "$DATA" ]; then
-    die "data directory must not be a symlink: $DATA"
-  fi
-  if [ -e "$DATA" ] && [ ! -d "$DATA" ]; then
-    die "data path is not a directory: $DATA"
-  fi
+  consult_directory_ok "$DATA" data || die "$CONSULT_REFUSAL"
 }
 
 validate_consult_directory() {
-  consult_directory_ok "$1" || die "$CONSULT_REFUSAL"
+  consult_directory_ok "$1" consultation || die "$CONSULT_REFUSAL"
 }
 
 validate_consult_file() {
@@ -226,7 +235,7 @@ consult_state_line() {
   dir="$DATA/$id"
   brief="$dir/consult-brief.md"
   report="$dir/consult-report.md"
-  consult_directory_ok "$dir" || return 1
+  consult_directory_ok "$dir" consultation || return 1
   consult_file_ok "$brief" "consultation brief" || return 1
   consult_file_ok "$report" "consultation report" || return 1
   if [ -s "$report" ]; then
@@ -256,7 +265,8 @@ status_all() {
   }
   for dir in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
     [ -d "$dir" ] || [ -L "$dir" ] || continue
-    if [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
+    if [ -L "$dir" ] \
+      || [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
       || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]; then
       id=${dir##*/}
       found=1
@@ -264,7 +274,7 @@ status_all() {
         printf '%s\n' "$CONSULT_LINE"
       else
         refused=1
-        printf '%s: refused (%s)\n' "$id" "$CONSULT_REFUSAL"
+        printf '%s: refused (%s)\n' "$(display_name "$id")" "$(display_name "$CONSULT_REFUSAL")"
       fi
     fi
   done

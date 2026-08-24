@@ -288,6 +288,85 @@ test_status_all_reports_no_consultations_for_an_empty_data_directory() {
   pass "fm-consult: status reports no consultations for an empty data directory"
 }
 
+stdout_line_count() {
+  printf '%s\n' "$1" | wc -l | tr -d '[:space:]'
+}
+
+has_exact_line() {
+  printf '%s\n' "$1" | grep -Fxq -- "$2"
+}
+
+test_status_all_cannot_forge_a_status_line() {
+  local home planted out rc
+  home=$(new_home status-forgery)
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold zulu >/dev/null
+  planted=$(printf 'alpha: report received\nzzz')
+  mkdir -p "$home/data/$planted"
+  printf 'brief\n' > "$home/data/$planted/consult-brief.md"
+
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
+    || fail "listing dropped the real alpha line"
+  has_exact_line "$out" "zulu: brief written; still awaiting a report" \
+    || fail "listing dropped the entry after the planted name"
+  ! has_exact_line "$out" "alpha: report received" \
+    || fail "a planted directory name forged a legitimate-looking status line"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per data entry"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a refused entry"
+  pass "fm-consult: a planted entry name cannot forge an extra status line"
+}
+
+test_status_all_refuses_a_symlinked_directory_with_no_consult_files() {
+  local home target out rc
+  home=$(new_home status-symlink-bare)
+  target="$TMP_ROOT/status-symlink-bare-target"
+  mkdir -p "$target"
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold gamma >/dev/null
+  ln -s "$target" "$home/data/beta"
+
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
+    || fail "listing dropped the entry before the symlinked directory"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
+    || fail "listing dropped the entry after the symlinked directory"
+  assert_contains "$out" "beta: refused (" "listing silently skipped a symlink to a directory with no consult files"
+  assert_contains "$out" "consultation directory must not be a symlink" \
+    "refused line did not name the symlinked-directory reason"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per data entry"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a symlinked consultation directory"
+
+  rm "$home/data/beta"
+  ln -s "$TMP_ROOT/status-symlink-bare-nonexistent" "$home/data/beta"
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  assert_contains "$out" "beta: refused (" "listing silently skipped a dangling symlinked consultation directory"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
+    || fail "listing dropped the entry after the dangling symlink"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per data entry"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a dangling symlinked directory"
+
+  out=$(run_consult "$home" status beta 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "single status accepted a dangling symlinked consultation directory"
+  assert_contains "$out" "consultation directory must not be a symlink" \
+    "single status refusal did not name the symlinked directory"
+  pass "fm-consult: status refuses a symlinked directory even with no consult files behind it"
+}
+
+test_status_refuses_a_data_directory_that_is_a_symlink() {
+  local home target out rc
+  home=$(new_home status-data-symlink)
+  target="$TMP_ROOT/status-data-symlink-target"
+  mkdir -p "$target"
+  rmdir "$home/data"
+  ln -s "$target" "$home/data"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status accepted a symlinked data directory"
+  assert_contains "$out" "data directory must not be a symlink" \
+    "data-directory refusal lost its distinct label"
+  pass "fm-consult: a symlinked data directory is refused with its own label"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -302,3 +381,6 @@ test_status_one_still_dies_on_a_tampered_entry
 test_status_all_refuses_a_symlinked_consult_directory
 test_status_all_refuses_a_hidden_entry_without_dropping_the_rest
 test_status_all_reports_no_consultations_for_an_empty_data_directory
+test_status_all_cannot_forge_a_status_line
+test_status_all_refuses_a_symlinked_directory_with_no_consult_files
+test_status_refuses_a_data_directory_that_is_a_symlink
