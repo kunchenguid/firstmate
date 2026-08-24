@@ -152,6 +152,19 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
+fm_send_copilot_prompt_token() {
+  local id token_file
+  case "$TARGET_HARNESS" in copilot*) ;; *) return 1 ;; esac
+  [ -n "$TARGET_META" ] || return 1
+  id=$(fm_send_id_from_meta "$TARGET_META")
+  token_file="$STATE/$id.copilot-prompt-submitted"
+  if [ -f "$token_file" ]; then
+    cat "$token_file"
+  else
+    printf '%s\n' missing
+  fi
+}
+
 # fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
 # the composer when Escape cancels a turn, as real bright text (verified: fg
 # 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
@@ -572,6 +585,7 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  copilot_prompt_before=$(fm_send_copilot_prompt_token 2>/dev/null || true)
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
@@ -601,6 +615,17 @@ else
     :
   else
     send_rc=$?
+  fi
+  if [ "$TARGET_BACKEND" != remote ] \
+    && [ "$verdict" != empty ] && [ "$verdict" != send-failed ] \
+    && [ -n "$copilot_prompt_before" ]; then
+    copilot_prompt_after=$(fm_send_copilot_prompt_token 2>/dev/null || true)
+    if [ -n "$copilot_prompt_after" ] \
+      && [ "$copilot_prompt_after" != missing ] \
+      && [ "$copilot_prompt_after" != "$copilot_prompt_before" ]; then
+      verdict=empty
+      send_rc=0
+    fi
   fi
   if [ "$send_rc" -ne 0 ]; then
     if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then

@@ -17,13 +17,55 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^copilot(\.exe)?$|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi copilot copilot.exe pi-signed pi)
+
+# Git for Windows crosses from the native copilot.exe process into an MSYS
+# shell with PPID=1, so ordinary POSIX ancestry cannot see the owner. Copilot
+# publishes the native loader PID and a session id to every child tool. Accept
+# that bridge only when every marker is well formed and the native process table
+# still identifies that exact Windows PID as copilot.exe.
+fm_copilot_windows_pid_matches() {  # <native-windows-pid>
+  local pid=$1 command
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  command=$(LC_ALL=C ps -W 2>/dev/null | awk -v p="$pid" '
+    NR > 1 && $4 == p { print $NF; exit }
+  ') || return 1
+  case "$command" in
+    copilot.exe|*\\copilot.exe|*/copilot.exe) return 0 ;;
+  esac
+  return 1
+}
+
+fm_copilot_loader_pid() {
+  local pid=${COPILOT_LOADER_PID:-} session=${COPILOT_AGENT_SESSION_ID:-}
+  [ "${COPILOT_CLI:-}" = 1 ] || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$session" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  if kill -0 "$pid" 2>/dev/null; then
+    local comm args argv0 name
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    argv0=${args%% *}
+    name=
+    case "$(basename -- "$comm")" in
+      copilot|copilot.exe) name=copilot ;;
+    esac
+    if [ -z "$name" ]; then
+      name=$(fm_harness_path_name "$comm" 2>/dev/null || \
+        fm_harness_path_name "$argv0" 2>/dev/null || true)
+    fi
+    case "$name" in copilot|copilot.exe) ;; *) return 1 ;; esac
+  else
+    fm_copilot_windows_pid_matches "$pid" || return 1
+  fi
+  printf '%s\n' "$pid"
+}
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -108,6 +150,11 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  if pid=$(fm_copilot_loader_pid 2>/dev/null); then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  pid=$$
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -146,7 +193,10 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fm_copilot_windows_pid_matches "$pid"
+    return
+  fi
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"

@@ -59,7 +59,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" treehouse copilot
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -165,7 +165,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -177,13 +177,53 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   read_case_record "$rec"
 
   out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
+    FM_COPILOT_PARENT_STATE=/tmp/parent-state FM_COPILOT_PARENT_TASK_ID=parent-task \
+    FM_COPILOT_PARENT_BUSY_GEN=parent-gen \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
+  assert_contains "$launch" "-u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID" \
+    "non-copilot launch must clear inherited Copilot identity markers"
+  assert_contains "$launch" "env -u FM_COPILOT_PARENT_STATE -u FM_COPILOT_PARENT_TASK_ID -u FM_COPILOT_PARENT_BUSY_GEN" \
+    "child launches must clear inherited Copilot secondmate parent bindings"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+test_copilot_threads_model_effort_and_hooks() {
+  local rec id out status launch hooks exclude
+  id=profile-copilot-z1c
+  rec=$(make_spawn_case profile-copilot copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" copilot --model gpt-5.4 --effort high)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot gpt-5.4 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--allow-all --no-ask-user --model 'gpt-5.4' --effort 'high' --interactive" \
+    "copilot launch did not thread autonomous, model, effort, and interactive flags"
+  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+    "copilot launch did not clear inherited foreign harness markers"
+  hooks="$WT_DIR/.github/hooks/zz-firstmate-$id.json"
+  assert_present "$hooks" "copilot spawn did not install per-worker hooks"
+  jq -e '.hooks.userPromptSubmitted and .hooks.agentStop and .hooks.sessionEnd' "$hooks" \
+    >/dev/null || fail "copilot worker hook JSON is missing lifecycle events"
+  assert_grep '"bash":"bash' "$hooks" \
+    "copilot worker hooks do not invoke the cross-platform adapter through bash"
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  case "$exclude" in /*|?:/*) ;; *) exclude="$WT_DIR/$exclude" ;; esac
+  grep -Fxq '.github/hooks/zz-firstmate-*.json' "$exclude" \
+    || fail "copilot worker hook exclusion is not one stable repository pattern"
+  if grep -Fq ".github/hooks/zz-firstmate-$id.json" "$exclude"; then
+    fail "copilot worker hook exclusion accumulated a task-specific repository entry"
+  fi
+  [ "$(printf '%s\n' firstmate.json "zz-firstmate-$id.json" | LC_ALL=C sort -r | head -1)" = "zz-firstmate-$id.json" ] \
+    || fail "copilot worker hooks must load before the tracked primary stop hook"
+  pass "copilot launch threads model and effort and installs semantic worker hooks"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -546,8 +586,10 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   # break the isolation contract the spawn assertion depends on.
   assert_not_contains "$launch" " --worktree" "cursor launch must never allocate a second worktree"
   assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
-  # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
-  assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
+  # Inherited foreign markers must not relabel the Cursor worker.
+  assert_contains "$launch" "-u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID" \
+    "cursor launch must clear inherited Copilot identity markers"
+  assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear inherited Claude identity markers"
   assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
@@ -740,6 +782,37 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
+test_copilot_secondmate_uses_semantic_submission_hooks() {
+  local rec id sm out status launch hooks gen
+  id=profile-copilot-secondmate-z8e
+  rec=$(make_spawn_case profile-copilot-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' copilot > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Copilot persistent secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=copilot kind=secondmate" \
+    "Copilot secondmate spawn did not preserve its runtime identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot default default
+  assert_present "$HOME_DIR/state/$id.busy-gen" \
+    "Copilot secondmate did not arm its semantic lifecycle generation"
+  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
+  hooks="$sm/.github/hooks/zz-firstmate-$id.json"
+  assert_present "$hooks" "Copilot secondmate did not install its generated lifecycle hooks"
+  jq -e '.hooks.userPromptSubmitted and .hooks.agentStop and .hooks.sessionEnd' "$hooks" >/dev/null \
+    || fail "Copilot secondmate lifecycle hook registration is incomplete"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--allow-all --no-ask-user --interactive" \
+    "Copilot secondmate did not use the autonomous interactive launch"
+  assert_contains "$launch" "FM_COPILOT_PARENT_STATE='$HOME_DIR/state' FM_COPILOT_PARENT_TASK_ID='$id' FM_COPILOT_PARENT_BUSY_GEN='$gen'" \
+    "Copilot secondmate launch did not bind stop continuations to parent-visible busy state"
+  pass "Copilot secondmates publish semantic lifecycle and submission acknowledgements"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -770,7 +843,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -828,6 +901,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_copilot_threads_model_effort_and_hooks
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
@@ -852,6 +926,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_copilot_secondmate_uses_semantic_submission_hooks
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset

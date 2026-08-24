@@ -215,7 +215,7 @@ assert_policy() {
 }
 
 test_direct_policy_contract() {
-  local heredoc_data heredoc_watcher
+  local heredoc_data heredoc_watcher stdin_output upper_root rc
   assert_policy direct-data-pkill allow "echo 'pkill -f fm-watch'"
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
@@ -237,6 +237,24 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      upper_root=$(printf '%s' "$ROOT" | tr '[:lower:]' '[:upper:]')
+      assert_policy windows-casefold $'deny\twatcher-background' \
+        "$upper_root/BIN/FM-WATCH-ARM.SH &"
+      "$CHECK" --command "$upper_root/BIN/FM-WATCH-ARM.SH &" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -eq 2 ] \
+        || fail "Windows transport prefilter allowed a mixed-case protected watcher path"
+      ;;
+  esac
+  stdin_output=$(printf 'bin/fm-watch-arm.sh &' | \
+    node "$POLICY" --root "$ROOT" --home "$ROOT" --command-stdin)
+  case "$stdin_output" in
+    $'deny\twatcher-background\t'*) ;;
+    *) fail "--command-stdin did not preserve exact command bytes: $stdin_output" ;;
+  esac
+  pass "direct policy stdin transport preserves exact shell command bytes"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -353,6 +371,16 @@ test_prefilter_is_strict_superset() {
 
 # --- fail-open ----------------------------------------------------------------
 
+write_tool_proxy() {  # <fakebin> <tool>
+  local fakebin=$1 tool=$2 tool_path
+  tool_path=$(type -P "$tool") || return 1
+  cat > "$fakebin/$tool" <<EOF
+#!/bin/bash
+exec "$tool_path" "\$@"
+EOF
+  chmod +x "$fakebin/$tool"
+}
+
 test_failopen_empty_stdin() {
   local rc
   printf '' | "$CHECK" >/dev/null 2>&1
@@ -370,31 +398,28 @@ test_failopen_garbage_stdin() {
 }
 
 test_failopen_missing_jq() {
-  local dir fakebin rc real
+  local dir fakebin rc real_bash
   dir=$(fm_test_tmproot fm-arm-pretool-check)
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  local tool
-  for tool in bash grep sed tr; do
-    real=$(command -v "$tool")
-    ln -sf "$real" "$fakebin/$tool"
-  done
-  PATH="$fakebin" bash -c "printf '%s' '{\"tool_input\":{\"command\":\"bin/fm-watch-arm.sh &\"}}' | '$CHECK'" >/dev/null 2>&1
+  real_bash=$(command -v bash)
+  write_tool_proxy "$fakebin" cat
+  PATH="$fakebin" "$real_bash" -c \
+    "printf '%s' '{\"tool_input\":{\"command\":\"bin/fm-watch-arm.sh &\"}}' | '$real_bash' '$CHECK'" \
+    >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "missing jq must fail open (exit 0) rather than crash-deny, got exit $rc"
   pass "fail-open: missing jq on stdin path"
 }
 
 test_failopen_missing_node() {
-  local dir fakebin rc real tool
+  local dir fakebin rc real_bash
   dir=$(fm_test_tmproot fm-arm-pretool-node)
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  for tool in bash dirname; do
-    real=$(command -v "$tool")
-    ln -sf "$real" "$fakebin/$tool"
-  done
-  PATH="$fakebin" "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
+  real_bash=$(command -v bash)
+  write_tool_proxy "$fakebin" dirname
+  PATH="$fakebin" "$real_bash" "$CHECK" --command 'bin/fm-watch-arm.sh &' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "missing node must fail open (exit 0), got exit $rc"
   pass "fail-open: missing classifier runtime"

@@ -63,6 +63,13 @@ The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
 
+GitHub Copilot CLI 1.0.81-7 was verified separately on 2026-08-21 under Git for Windows.
+Its native process is `copilot.exe`, while the Git Bash child can terminate at `PPID=1` before reaching that process.
+The adapter therefore accepts `COPILOT_LOADER_PID` only when `ps -W` proves that exact Windows PID is live and named `copilot.exe`; the portable tmux classifier accepts both `copilot` and `copilot.exe`.
+`tests/fm-copilot-harness.test.sh` pins the Windows ownership bridge, and `tests/fm-harness-liveness-drift-live-e2e.test.sh` includes Copilot in the installed-binary drift guard.
+The same Copilot release ignored dot-prefixed repository hook files and loaded visible hook configurations in descending filename order.
+`tests/fm-copilot-hooks-live-e2e.test.sh` refreshes that discovery and ordering evidence against the installed CLI.
+
 Bounded observed output:
 
 ```text
@@ -171,7 +178,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, Copilot, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
 
@@ -203,6 +210,9 @@ The strict blank-row posture held live (a blank shell row deferred injection), a
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
+Copilot is also deliberately outside this screen-shape matrix.
+Its generated `userPromptSubmitted` hook advances a per-task acknowledgement after the semantic busy transition succeeds, and `fm-send` accepts that changed token as submission proof even when the backend composer verdict is unstructured.
+`tests/fm-send-strict.test.sh` pins both the positive acknowledgement and the no-acknowledgement refusal.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 

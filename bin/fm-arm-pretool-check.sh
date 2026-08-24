@@ -15,9 +15,8 @@
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
-# tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
-# no new extraction - only --cursor, which selects Cursor's own deny rendering
+# Claude and Codex. Cursor and Copilot deliver the same .tool_input.command
+# shape, so they need no new extraction - only their native deny rendering
 # and marks this invocation as the Cursor registration rather than the
 # Claude-settings duplicate Cursor also loads.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
@@ -29,9 +28,8 @@
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
 #          deny object on stdout unless --claude was supplied.
-#   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
-#          reads the returned object rather than the exit status, and only that
-#          rendering is verified to block the command and surface the reason.
+#   DENY, --cursor or --copilot - exit 0 and the harness's own decision object
+#          on stdout. Each reads the returned object rather than the exit status.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
@@ -39,7 +37,7 @@
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
-# Cursor consumes the stdout decision object.
+# Cursor and Copilot consume their native stdout decision objects.
 set -u
 
 CMD=""
@@ -47,13 +45,14 @@ CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
+COPILOT_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--copilot]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex/Cursor tool_input.command).
+toolInput.command, or Claude/Codex/Cursor/Copilot tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -91,6 +90,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --cursor)
       CURSOR_MODE=1
+      shift
+      ;;
+    --copilot)
+      COPILOT_MODE=1
       shift
       ;;
     -h|--help)
@@ -155,6 +158,11 @@ PREFILTER=${PREFILTER//\"/}
 PREFILTER=${PREFILTER//\'/}
 PREFILTER=${PREFILTER//$'\n'/}
 PREFILTER=${PREFILTER//$'\r'/}
+# A broader lowercase prefilter is harmless on case-sensitive hosts and keeps
+# Windows' case-insensitive executable paths inside the classifier boundary.
+PREFILTER_LOWER=$(printf '%s' "$PREFILTER" | LC_ALL=C tr '[:upper:]' '[:lower:]' 2>/dev/null) \
+  || PREFILTER_LOWER=fm-watch
+PREFILTER=$PREFILTER_LOWER
 case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
@@ -173,7 +181,7 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(printf '%s' "$CMD" | node "$POLICY" --command-stdin --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')
@@ -193,6 +201,10 @@ DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$COPILOT_MODE" -eq 1 ]; then
+  printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$ESCAPED"
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

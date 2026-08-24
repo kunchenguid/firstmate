@@ -44,10 +44,11 @@ CMD=""
 CMD_SET=0
 CLAUDE_MODE=0
 CURSOR_MODE=0
+COPILOT_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
+Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor|--copilot]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex tool_input.command).
@@ -81,6 +82,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --cursor)
       CURSOR_MODE=1
+      shift
+      ;;
+    --copilot)
+      COPILOT_MODE=1
       shift
       ;;
     -h|--help)
@@ -163,7 +168,7 @@ POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(printf '%s' "$CMD" | node "$POLICY" --command-stdin 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')
@@ -183,6 +188,10 @@ DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$COPILOT_MODE" -eq 1 ]; then
+  printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$ESCAPED"
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

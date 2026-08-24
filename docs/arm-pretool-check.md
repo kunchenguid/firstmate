@@ -24,13 +24,15 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
 - Stdin JSON at `.toolInput.command` for Grok.
+- Stdin JSON at `.tool_input.command` for GitHub Copilot CLI, rendered through `--copilot` as a native `permissionDecision: "deny"` response.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
-It passes both roots and the exact command string to the Node policy owner.
+It passes both roots as arguments and streams the exact command bytes to the Node policy owner over stdin.
+That split avoids Git for Windows argument conversion while the policy normalizes Windows drive paths and CRLF shell input to Git Bash semantics.
 
 The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
@@ -159,6 +161,7 @@ Prose may improve without changing adapter behavior.
 | --- | --- | --- |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
+| GitHub Copilot CLI | `.tool_input.command` | `.github/hooks/firstmate.json` matches `Bash` and forwards stdin through the Bash or PowerShell transport with `--copilot`; Copilot consumes the returned native permission decision. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
@@ -229,6 +232,9 @@ Native supervision paths were also validated in the same scratch project:
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
+
+GitHub Copilot CLI 1.0.81-7 was verified separately on 2026-08-21.
+The installed CLI surfaced `Denied by preToolUse hook` for a returned native deny, and `tests/fm-copilot-harness.test.sh` exercises `bin/fm-watch-arm.sh &` through the complete Windows PowerShell-to-Git-Bash transport.
 
 ## Automated validation
 

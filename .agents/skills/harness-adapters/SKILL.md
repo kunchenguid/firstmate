@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, copilot, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -59,7 +59,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
+The primary integrations for `claude`, `codex`, `copilot`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
@@ -68,6 +68,8 @@ muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin en
 `bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
 cursor HAS a full hooks system: 20 lifecycle events configurable at project scope in `.cursor/hooks.json`, plus a Claude-Code compatibility name map that also loads `<project>/.claude/settings.json`.
 Its `stop` step cannot block - exit 2 there is a silent no-op - so `bin/fm-turnend-guard-cursor.sh` parks the turn boundary on the watcher and returns one bounded `followup_message` instead.
+Copilot HAS repository hooks under `.github/hooks/*.json`; its `agentStop` can block natively with a JSON decision, so it reuses the synchronous park and renders `decision:block`.
+Copilot overrides an eighth consecutive blocked stop, so Firstmate's inner ceiling is seven and the final continuation reports the bound without arming again.
 Because Cursor loads the tracked Claude settings too, every Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
@@ -75,7 +77,7 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+The primary integrations for `claude`, `codex`, `copilot`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
@@ -127,6 +129,7 @@ The supported launch-profile flags below are verified locally; each row records 
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| copilot | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on GitHub Copilot CLI 1.0.81-7. The CLI also exposes `none` and `minimal`, which sit below Firstmate's shared profile vocabulary and remain unreachable. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -147,6 +150,7 @@ Use the discovery surface in the current authenticated environment because suppo
 |---|---|
 | claude | Open the current interactive session's `/model` picker; `claude --help` documents the accepted alias or full-model-name input shape. |
 | codex | Open the current interactive session's `/model` picker. |
+| copilot | Run `copilot --help` for the model input contract and use the interactive `/model` picker for the current authenticated account. |
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
@@ -168,6 +172,7 @@ Natural language is acceptable if uncertain.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
+- copilot: use the discovered skill by name in natural language unless its current slash-command surface has been verified in the running version.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
@@ -360,6 +365,41 @@ The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.
 The tracked Claude hook entries whose event Grok already covers through its own `.grok/hooks/` registration skip themselves under `GROK_AGENT` or `GROK_HOOK_EVENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path; the exact marker set and why `GROK_SESSION_ID` is excluded are owned by `docs/turnend-guard.md` "Harness integrations".
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+
+## copilot (VERIFIED CREWMATE/SCOUT/SECONDMATE/PRIMARY 2026-08-21, GitHub Copilot CLI 1.0.81-7)
+
+GitHub Copilot CLI runs crewmate, scout, secondmate, and primary work.
+Its primary supervision is the `agentStop` park in [`docs/supervision-protocols/copilot.md`](../../../docs/supervision-protocols/copilot.md), registered with session-start and pre-tool hooks in tracked `.github/hooks/firstmate.json`.
+
+| Fact | Value |
+|---|---|
+| Binary | Resolve `copilot` from `PATH`; the native Windows process is `copilot.exe`. |
+| Launch | `--allow-all --no-ask-user`, optional `--model <model>` and `--effort <level>`, then `--interactive <operational launch instructions>`. |
+| Busy state | Firstmate-generated repository hooks: `userPromptSubmitted` writes busy and advances the prompt-submission acknowledgement, while `agentStop` and `sessionEnd` write idle through source `copilot-hook`; the two closes also touch the turn-ended notification marker. |
+| Exit command | `/exit` |
+| Interrupt | Single `Ctrl+C`. |
+| Autonomy | `--allow-all` grants all tool, path, and URL permissions, while `--no-ask-user` removes the worker's ask-user escape hatch. |
+| Environment marker | `COPILOT_CLI=1`, `COPILOT_AGENT_SESSION_ID=<session-id>`, and `COPILOT_LOADER_PID=<native process pid>` on child tools. |
+| Primary hooks | `.github/hooks/firstmate.json` registers `sessionStart`, three `PreToolUse` seatbelts, and `agentStop`, each with Bash and PowerShell transports. |
+| Primary limit | Copilot overrides an eighth consecutive blocked `agentStop`; Firstmate stops at seven and uses the last block for a ceiling warning. |
+
+**Windows identity crosses a process-namespace boundary.**
+Under Git for Windows, the shell-side ancestry can terminate at `PPID=1` before it reaches native `copilot.exe`.
+`bin/fm-session-lock-lib.sh` accepts the loader bridge only when all three Copilot markers are valid and `ps -W` proves the recorded native PID is a live `copilot.exe`.
+MSYS `kill -0` cannot establish liveness for that native PID, so the validated Windows process table is the fallback for lock ownership and competing-owner checks.
+Copilot's marker check runs before inherited Claude, Pi, Grok, and Cursor markers, and `fm-spawn.sh` clears those foreign markers on Copilot launches while clearing Copilot markers on every non-Copilot launch.
+
+**Hook transport is cross-platform and host-gated.**
+Unix hook entries invoke `bin/fm-ghcp-hook.sh` through Bash.
+Windows entries invoke `bin/fm-ghcp-hook.ps1`, which resolves Git for Windows Bash through `bin/fm-windows-git-bash.ps1` rather than selecting WSL accidentally.
+The shared dispatcher is inert unless `COPILOT_CLI=1`, so repository hooks do not take over a cloud coding-agent or another consumer of `.github/hooks`.
+Worker hook files are generated under `.github/hooks/zz-firstmate-<task-id>.json`, which is visible to Copilot's loader and sorts before the tracked `firstmate.json` stop hook, and excluded locally from git.
+They are generated for Copilot secondmates as well as ordinary workers, so `fm-send` can confirm a submitted prompt from the hook acknowledgement without depending on a version-specific TUI composer shape.
+
+**Primary stop is native blocking with a bounded inner loop.**
+`agentStop` returns `{"decision":"block","reason":"..."}` for an actionable watcher close or a repair continuation.
+The payload's `stop_hook_active=false` resets the session-scoped continuation ledger because it proves a real captain prompt; `true` continues the ledger.
+The seventh block reports the ceiling without starting another watcher cycle, and the following stop is allowed before Copilot's vendor override can silently disable the hook.
 
 ## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, and SECONDMATE/PRIMARY 2026-08-13, Cursor Agent CLI 2026.08.11-e8db854)
 

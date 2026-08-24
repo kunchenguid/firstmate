@@ -14,8 +14,10 @@
 // runs only when this module is invoked directly, never on import.
 
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+
+const CASE_INSENSITIVE_PATHS = process.platform === "win32";
 
 const REASONS = {
   "watcher-background": "a protected watcher command cannot run in an asynchronous shell list or through nohup/disown",
@@ -29,12 +31,17 @@ const REASONS = {
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", commandArgumentSet: false, commandStdin: false, root: "", home: "" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
+    if (name === "--command-stdin") {
+      result.commandStdin = true;
+      continue;
+    }
     if (name === "--command" || name === "--root" || name === "--home") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
       result[name.slice(2)] = argv[i + 1];
+      if (name === "--command") result.commandArgumentSet = true;
       i += 1;
       continue;
     }
@@ -44,12 +51,18 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
+  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(
+    platformCaseFold(normalizeLineContinuations(command)),
+  );
 }
 
 function rawMentionsBroadKill(command) {
-  const normalized = normalizeLineContinuations(command);
+  const normalized = platformCaseFold(normalizeLineContinuations(command));
   return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+}
+
+function platformCaseFold(value) {
+  return CASE_INSENSITIVE_PATHS ? value.toLowerCase() : value;
 }
 
 function normalizeLineContinuations(source) {
@@ -57,7 +70,19 @@ function normalizeLineContinuations(source) {
 }
 
 function basename(value) {
-  return value.split("/").filter(Boolean).at(-1) || value;
+  return platformCaseFold(value.split("/").filter(Boolean).at(-1) || value);
+}
+
+function normalizeShellPath(value) {
+  const normalized = path.posix.normalize(value.replaceAll("\\", "/"));
+  const drivePath = normalized.match(/^([A-Za-z]):(\/.*)$/);
+  const shellPath = drivePath ? `/${drivePath[1].toLowerCase()}${drivePath[2]}` : normalized;
+  return platformCaseFold(shellPath);
+}
+
+function shellPathIsAbsolute(value) {
+  const normalized = value.replaceAll("\\", "/");
+  return normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized);
 }
 
 function extractBalanced(source, start, open, close) {
@@ -179,7 +204,7 @@ function decodeAnsiCQuoted(source, start) {
 
 export class Lexer {
   constructor(source) {
-    this.source = source;
+    this.source = source.replace(/\r\n/g, "\n");
     this.index = 0;
     this.error = "";
     this.tokens = [];
@@ -602,9 +627,9 @@ const PROTECTED_SCRIPTS = [
 ];
 
 function protectedIdentity(value, root) {
-  const normalized = path.normalize(value);
+  const normalized = normalizeShellPath(value);
   for (const { relative, kind } of PROTECTED_SCRIPTS) {
-    if (normalized === relative || normalized === path.join(root, relative) || normalized.endsWith(`/${relative}`)) return kind;
+    if (normalized === relative || normalized === path.posix.join(root, relative) || normalized.endsWith(`/${relative}`)) return kind;
   }
   return "";
 }
@@ -705,7 +730,7 @@ function contextWithAssignments(context, words) {
     const value = word.value.slice(word.value.indexOf("=") + 1);
     if (rawMentionsProtected(value) || wordReferencesAny(word, protectedVariables)) protectedVariables.add(name);
     else protectedVariables.delete(name);
-    if (/fm-watch/.test(value) || wordReferencesAny(word, watcherPatterns)) watcherPatterns.add(name);
+    if (/fm-watch/.test(platformCaseFold(value)) || wordReferencesAny(word, watcherPatterns)) watcherPatterns.add(name);
     else watcherPatterns.delete(name);
     if (wordReferencesAny(word, watcherPids)) watcherPids.add(name);
     else watcherPids.delete(name);
@@ -723,7 +748,7 @@ function nodeHasUnsafeSubstitution(tokens) {
 
 function isWatcherPgrep(position, context) {
   if (!position.command || basename(position.command.value) !== "pgrep") return false;
-  return position.words.slice(position.index + 1).some((word) => /(?:^|\/)fm-watch(?:\.sh)?\b/.test(word.value) || wordReferencesAny(word, context.watcherPatterns));
+  return position.words.slice(position.index + 1).some((word) => /(?:^|\/)fm-watch(?:\.sh)?\b/.test(platformCaseFold(word.value)) || wordReferencesAny(word, context.watcherPatterns));
 }
 
 function analyzeProgram(command, context, depth = 0) {
@@ -821,7 +846,7 @@ function analyzeProgram(command, context, depth = 0) {
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
-    if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
+    if (commandName === "pkill" && args.some((word) => /fm-watch/.test(platformCaseFold(word.value)) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
@@ -856,8 +881,8 @@ function analyzeProgram(command, context, depth = 0) {
 
 function xModePathAllowed(value, home) {
   if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
-  if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  if (!shellPathIsAbsolute(value)) return false;
+  return normalizeShellPath(value) === path.posix.join(normalizeShellPath(home), "config/x-mode.env");
 }
 
 function ordinaryWordsOnly(tokens) {
@@ -900,7 +925,7 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+  const context = { root: normalizeShellPath(root), home: normalizeShellPath(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
@@ -943,6 +968,8 @@ if (invokedDirectly()) {
   try {
     const args = parseArguments(process.argv.slice(2));
     if (!args.root || !args.home) throw new Error("--root and --home are required");
+    if (args.commandStdin && args.commandArgumentSet) throw new Error("--command and --command-stdin are mutually exclusive");
+    if (args.commandStdin) args.command = readFileSync(0, "utf8");
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {

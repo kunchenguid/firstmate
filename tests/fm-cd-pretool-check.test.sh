@@ -300,29 +300,37 @@ test_fail_open_unparseable_json() {
   pass "cd-guard: fails open on unparseable stdin JSON"
 }
 
+write_tool_proxy() {  # <fakebin> <tool>
+  local fakebin=$1 tool=$2 tool_path
+  tool_path=$(type -P "$tool") || return 1
+  cat > "$fakebin/$tool" <<EOF
+#!/bin/bash
+exec "$tool_path" "\$@"
+EOF
+  chmod +x "$fakebin/$tool"
+}
+
 test_fail_open_missing_node() {
-  local fakebin tool tool_path out rc
+  local fakebin out rc real_bash
   fakebin=$(fm_fakebin "$TMP_ROOT/nonode")
-  for tool in bash sh git dirname cat printf sed tr jq; do
-    tool_path=$(command -v "$tool") || continue
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
+  real_bash=$(type -P bash)
+  write_tool_proxy "$fakebin" git
+  write_tool_proxy "$fakebin" dirname
   # node deliberately absent from this PATH.
-  out=$(PATH="$fakebin" "$CHECK" --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(PATH="$fakebin" "$real_bash" "$CHECK" --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "transport must fail open when node is unavailable"
   [ -z "$out" ] || fail "transport produced output without node: $out"
   pass "cd-guard: fails open (never blocks) when node is missing"
 }
 
 test_fail_open_missing_jq_on_stdin() {
-  local fakebin tool tool_path out rc
+  local fakebin out rc real_bash
   fakebin=$(fm_fakebin "$TMP_ROOT/nojq")
-  for tool in bash sh git dirname cat printf sed tr node; do
-    tool_path=$(command -v "$tool") || continue
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
+  real_bash=$(type -P bash)
+  write_tool_proxy "$fakebin" cat
   # jq deliberately absent: the stdin transport cannot extract the command.
-  out=$(printf '{"tool_input":{"command":"cd projects/foo"}}' | PATH="$fakebin" "$CHECK" 2>&1); rc=$?
+  out=$(printf '{"tool_input":{"command":"cd projects/foo"}}' | \
+    PATH="$fakebin" "$real_bash" "$CHECK" 2>&1); rc=$?
   expect_code 0 "$rc" "stdin transport must fail open when jq is unavailable"
   [ -z "$out" ] || fail "transport produced output without jq on the stdin path: $out"
   pass "cd-guard: fails open on the stdin path when jq is missing"
@@ -331,15 +339,12 @@ test_fail_open_missing_jq_on_stdin() {
 # --- prefilter fast path ----------------------------------------------------
 
 test_prefilter_skips_node_without_cd_substring() {
-  local dir fakebin marker tool tool_path out rc
+  local dir fakebin marker out rc real_bash
   dir="$TMP_ROOT/prefilter"
   make_primary_fixture "$dir" >/dev/null
   fakebin=$(fm_fakebin "$TMP_ROOT/prefilter-fake")
   marker="$TMP_ROOT/prefilter-node-called"
-  for tool in bash sh git dirname cat printf sed tr jq; do
-    tool_path=$(command -v "$tool") || continue
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
+  real_bash=$(type -P bash)
   cat > "$fakebin/node" <<EOF
 #!/usr/bin/env bash
 : > "$marker"
@@ -348,7 +353,7 @@ EOF
   chmod +x "$fakebin/node"
   # No cd/pushd/popd substring: the prefilter must fast-allow before scoping or
   # the policy runtime is ever consulted.
-  out=$(PATH="$fakebin" "$dir/bin/fm-cd-pretool-check.sh" --command 'git status' 2>&1); rc=$?
+  out=$(PATH="$fakebin" "$real_bash" "$dir/bin/fm-cd-pretool-check.sh" --command 'git status' 2>&1); rc=$?
   expect_code 0 "$rc" "prefilter must fast-allow a command with no cd/pushd/popd substring"
   [ -z "$out" ] || fail "prefilter fast-allow produced output: $out"
   [ ! -e "$marker" ] || fail "prefilter fast-allow still invoked the node policy owner"
@@ -366,6 +371,8 @@ test_policy_cli_direct() {
     || fail "policy CLI must allow git -C"
   [ "$(node "$policy" --command '(cd projects/foo && pwd)')" = allow ] \
     || fail "policy CLI must allow a subshell-local cd"
+  [ "$(printf 'cd projects/foo' | node "$policy" --command-stdin | cut -f1)" = deny ] \
+    || fail "policy CLI must deny a bare top-level cd read from stdin"
   [ "$(node "$policy")" = allow ] \
     || fail "policy CLI must allow when no command is supplied"
   pass "cd-guard: fm-cd-command-policy.mjs CLI honors the deny/allow output contract"
