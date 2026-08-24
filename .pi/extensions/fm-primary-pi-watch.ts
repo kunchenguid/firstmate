@@ -10,12 +10,16 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  createBranchDispatchOffer,
+  FM_BRANCH_DISPATCH_EVENT,
+} from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
@@ -241,7 +245,6 @@ export default function (pi: ExtensionAPI) {
   async function sendWake(
     owner: SessionGeneration,
     message: string,
-    recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
     const content = encodeFirstmateOperationalInput(
@@ -249,17 +252,132 @@ export default function (pi: ExtensionAPI) {
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
-    if (recovery) {
+  }
+
+  function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
+    ok: boolean;
+    detail: string;
+  } {
+    try {
       const result = spawnSync(
         "bash",
         [armScript, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
         {
           cwd: fmRoot,
+          encoding: "utf8",
           env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
         },
       );
-      if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+      if (result.status === 0) return { ok: true, detail: "" };
+      const stderr = (result.stderr || "").trim();
+      return {
+        ok: false,
+        detail: `watcher: FAILED - handling delivery confirmation was rejected (status=${result.status ?? "none"} generation=${recovery.generation} watcherPid=${recovery.watcherPid})${stderr ? `\n${stderr}` : ""}`,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        detail: `watcher: FAILED - handling delivery confirmation could not be executed (generation=${recovery.generation} watcherPid=${recovery.watcherPid})\n${message}`,
+      };
     }
+  }
+
+  function confirmHandlingDeliveryWithRetry(
+    owner: SessionGeneration,
+    recovery: { generation: string; watcherPid: string },
+  ): { ok: boolean; detail: string } {
+    const snapshot = (): { generation: string; watcherPid: string } => {
+      const current = owner.child ? armRecovery.get(owner.child) : undefined;
+      return current ?? recovery;
+    };
+    const first = confirmHandlingDelivery(snapshot());
+    if (first.ok) return first;
+    return confirmHandlingDelivery(snapshot());
+  }
+
+  // Resolve every unread row that the branch's mandatory fm-wake-drain call
+  // would present. Only task-local signal/stale rows can be delegated: a
+  // fleet-wide check/heartbeat or an unresolvable task stays with main. This
+  // prevents one project's autonomy grant from authorizing work on another
+  // project merely because both projects share a firstmate home.
+  function projectsForUnreadWake(): string[] {
+    let queue = "";
+    try {
+      queue = readFileSync(`${state}/.wake-queue`, "utf8");
+    } catch {
+      return [];
+    }
+
+    const projects = new Set<string>();
+    const metadata = new Map<string, string>();
+    try {
+      for (const name of readdirSync(state)) {
+        if (!name.endsWith(".meta")) continue;
+        const task = name.slice(0, -5);
+        const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
+        const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
+        const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+        if (project) {
+          metadata.set(task, project);
+          if (window) metadata.set(window, project);
+        }
+      }
+    } catch {
+      return [];
+    }
+
+    let found = false;
+    for (const line of queue.split(/\r?\n/)) {
+      if (!line) continue;
+      const fields = line.split("\t");
+      if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) continue;
+      const kind = fields[2];
+      const key = fields[3];
+      let project = "";
+      if (kind === "signal") {
+        const task = key.replace(/\.(?:status|turn-ended)$/, "");
+        project = metadata.get(task) ?? "";
+      } else if (kind === "stale") {
+        project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+      } else {
+        return [];
+      }
+      if (!project) return [];
+      found = true;
+      projects.add(project);
+    }
+    return found ? [...projects] : [];
+  }
+
+  // Offer an ordinary, project-scoped actionable wake to the supervision
+  // branch. A synchronous accept means the branch now owns delivery and
+  // handling; every unsafe or unaccepted offer keeps today's main path.
+  function offerWakeToBranch(message: string): boolean {
+    const offer = createBranchDispatchOffer(message, projectsForUnreadWake());
+    pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
+    return offer.accepted;
+  }
+
+  async function deliverActionableWake(
+    owner: SessionGeneration,
+    message: string,
+    recovery?: { generation: string; watcherPid: string },
+  ): Promise<void> {
+    if (!generationIsLive(owner)) return;
+    if (recovery) {
+      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+      if (!confirmed.ok) {
+        const watcherPid = recovery.watcherPid;
+        if (!pidAlive(watcherPid)) {
+          await retireArm(owner.child);
+        }
+        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
+        return;
+      }
+    }
+    if (offerWakeToBranch(message)) return;
+    await sendWake(owner, message);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -448,16 +566,22 @@ export default function (pi: ExtensionAPI) {
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
+        if (owner.restoring) return;
         owner.retryFailures = 0;
         owner.restoring = true;
         void (async () => {
-          const restoration = await restoreAfterActionableClose(owner, predecessor);
-          if (generationIsLive(owner)) owner.restoring = false;
-          if (!generationIsLive(owner)) return;
-          const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-          await sendWake(owner, message, restoration.recovery);
-        })().catch(() => {
-        });
+          try {
+            const restoration = await restoreAfterActionableClose(owner, predecessor);
+            if (!generationIsLive(owner)) return;
+            const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
+            await deliverActionableWake(owner, message, restoration.recovery);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+          } finally {
+            if (generationIsLive(owner)) owner.restoring = false;
+          }
+        })();
         return;
       }
       if (owner.restoring) return;

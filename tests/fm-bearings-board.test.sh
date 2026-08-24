@@ -278,6 +278,16 @@ test_v2_refuses_invalid_usage_and_underway_rows() {
   [ "$rc" -ne 0 ] || fail "non-HTTPS Underway PR URL was accepted"
 
   write_valid_payload "$data"
+  jq '.underway[0].report_path = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a javascript Underway report path was accepted"
+
+  write_valid_payload "$data"
+  jq '.underway[0].report_path = "//external-host/report.md"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a protocol-relative Underway report path was accepted"
+
+  write_valid_payload "$data"
   latest=$(printf '%241s' '' | tr ' ' x)
   jq --arg latest "$latest" '.underway[0].latest = $latest' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
@@ -371,6 +381,17 @@ test_v2_renders_in_browser() {
   state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'JSON.stringify({defaults:document.querySelector("#bb-underway").textContent.includes("default"),report_links:document.querySelectorAll("#bb-underway .bb-underway-detail__links a").length})' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
   assert_contains "$state" '"defaults":false' "browser invented model or effort defaults: $state"
   assert_contains "$state" '"report_links":2' "browser did not render report_path as a link: $state"
+
+  write_valid_payload "$data"
+  jq '.underway += [
+    {"id":"a/b","repo":"sample","kind":"ship","owner":"crewmate","state":"working","state_detail":"working","doing":"Slash task","next":"Review slash task"},
+    {"id":"a:b","repo":"sample","kind":"ship","owner":"scout","state":"working","state_detail":"working","doing":"Colon task","next":"Review colon task"}
+  ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "could not build colliding task-id fixture"
+  CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi open "file://$board" >/dev/null 2>&1 || fail "browser could not reload colliding task-id fixture"
+  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval '(()=>{const b=[...document.querySelectorAll("#bb-underway .bb-underway-row__button")],d=[...document.querySelectorAll("#bb-underway .bb-underway-detail")],ids=d.map(x=>x.id),controls=b.map(x=>x.getAttribute("aria-controls")); return JSON.stringify({unique:new Set(ids).size===ids.length,paired:controls.every((id,i)=>id===ids[i])})})()' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
+  assert_contains "$state" '"unique":true' "browser emitted duplicate Underway detail IDs: $state"
+  assert_contains "$state" '"paired":true' "browser emitted ambiguous Underway aria-controls: $state"
   pass "v2 renders usage and accessible Underway detail in browser"
 }
 
@@ -384,7 +405,7 @@ test_build_injects_binds_then_arms() {
   out=$(run_board "$home" build "$data") || fail "a valid payload did not build"
   assert_contains "$out" "board: $board" "build did not report the board path: $out"
   assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
-  assert_contains "$out" "(any-origin)" "build did not report the any-origin binding: $out"
+  assert_contains "$out" "bound: " "build did not report the answer binding: $out"
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
   assert_present "$board" "build reported success without a board"
 

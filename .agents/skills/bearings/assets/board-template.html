@@ -483,10 +483,17 @@ __FM_BEARINGS_BOARD_DATA__
     (!data.usage.available ? typeof data.usage.reason === "string" && data.usage.reason.length > 0 : Array.isArray(data.usage.providers));
   var supervisorValid = data.supervisor && data.supervisor.identity === "firstmate" &&
     Number.isInteger(data.supervisor.crew_count) && data.supervisor.crew_count >= 0;
+  function isSafeReportPath(value) {
+    return typeof value === "string" && value.length === 0 ||
+      typeof value === "string" && value === value.trim() &&
+      !/[\u0000-\u001f\u007f]/.test(value) && value.indexOf("\\") === -1 &&
+      !/^\/\//.test(value) && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+  }
   var underwayItemsValid = Array.isArray(data.underway) && data.underway.every(function (item) {
     return item && typeof item.owner === "string" && item.owner.length > 0 &&
       typeof item.state_detail === "string" && item.state_detail.length > 0 &&
-      typeof item.next === "string" && item.next.length > 0;
+      typeof item.next === "string" && item.next.length > 0 &&
+      (item.report_path === undefined || isSafeReportPath(item.report_path));
   });
   if (!fleetLists.every(Array.isArray) || !callItemsValid || !usageValid || !supervisorValid || !underwayItemsValid) {
     renderBoardError("The board data does not have the required structure");
@@ -685,10 +692,14 @@ __FM_BEARINGS_BOARD_DATA__
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
+        /* close carries the composer-declared close mode: "release" frees a
+           captain-gated work item instead of completing a question task */
+        var ctxData = { question: item.key, answer: answer };
+        if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + answer,
           { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: { question: item.key, answer: answer } }
+            data: ctxData }
         );
       }
       card.classList.add("is-queued");
@@ -733,7 +744,7 @@ __FM_BEARINGS_BOARD_DATA__
   /* Underway */
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
-  data.underway.forEach(function (t) {
+  data.underway.forEach(function (t, index) {
     var runtimeParts = [t.harness, t.model, t.effort].filter(function (part) { return typeof part === "string" && part.length > 0; });
     var crewParts = [t.kind, t.harness, t.model, t.effort, t.repo || t.id].filter(function (part) { return typeof part === "string" && part.length > 0; });
     var row = el("div", "bb-underway-row");
@@ -741,7 +752,7 @@ __FM_BEARINGS_BOARD_DATA__
     button.type = "button";
     button.className = "bb-underway-row__button";
     button.setAttribute("aria-expanded", "false");
-    var detailId = "bb-underway-detail-" + t.id.replace(/[^A-Za-z0-9_-]/g, "-");
+    var detailId = "bb-underway-detail-" + index;
     button.setAttribute("aria-controls", detailId);
     var state = el("span", "bb-underway-row__state" + (t.state === "unknown" ? " bb-underway-row__state--unknown" : ""), t.state_detail);
     button.appendChild(state);

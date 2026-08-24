@@ -1369,6 +1369,65 @@ EOF
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
+test_branch_outcome_replay_and_lease_sweep() {
+  local rec root home fakebin out
+  rec=$(new_world branch-recovery)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+
+  # A crash window the locked start must close: the supervision branch stored
+  # an outcome durably that never reached main, plus one lease whose
+  # supervising process died and one still held by a live process.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'PR https://example.com/pr/b checks green' >/dev/null \
+    || fail "could not seed the unread branch outcome"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-live --actor branch \
+    || fail "could not seed the live lease"
+
+  out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):" \
+    "locked start did not replay the unread branch outcome"
+  assert_contains "$out" "https://example.com/pr/b" "replayed outcome lost its content"
+  [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
+  [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
+
+  # Replay is one-shot: presenting the digest is the delivery, so the next
+  # locked start stays silent about the same outcome.
+  out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
+  esac
+  pass "locked Pi session start replays unread branch outcomes once and sweeps only dead leases"
+}
+
+test_non_pi_session_start_leaves_branch_state_untouched() {
+  local rec root home fakebin out
+  rec=$(new_world non-pi-branch-recovery)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'unread Pi branch outcome' >/dev/null \
+    || fail "could not seed the non-Pi unread branch outcome"
+  rm -f "$home/state/.branch-outcomes-cursor"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"BRANCH OUTCOMES"*|*"unread Pi branch outcome"*) fail "non-Pi session replayed Pi branch outcomes" ;;
+  esac
+  [ -e "$home/state/.lease-task-dead" ] || fail "non-Pi session swept a Pi branch lease"
+  [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "non-Pi session marked a Pi branch outcome read"
+  pass "non-Pi session start neither sweeps nor replays Pi branch state"
+}
+
 # --- deferred network stage -------------------------------------------------
 
 # install_slow_gh <fakebin> <seconds>: one external-network call the digest used
@@ -2421,6 +2480,8 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_branch_outcome_replay_and_lease_sweep
+test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies

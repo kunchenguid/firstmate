@@ -151,6 +151,17 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+test_help_reports_the_complete_interface() {
+  local help
+  help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
+  assert_contains "$help" "--telemetry" "fm-lint.sh --help omitted --telemetry"
+  assert_contains "$help" "--required-version" "fm-lint.sh --help omitted --required-version"
+  assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
+  assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
+  assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  pass "fm-lint.sh --help reports the complete executable interface"
+}
+
 test_list_files_reports_the_shell_inventory() {
   local listed expected
   # CI=true forces the full canonical set regardless of the ambient branch or
@@ -227,7 +238,9 @@ fm_lint_write_diff_file() {
 # that answers --version with the pinned version and otherwise logs the file
 # roots it was asked to check (one per line) instead of actually analyzing
 # them, so changed-file mode tests can assert exactly which files fm-lint.sh
-# selected without depending on real ShellCheck findings.
+# selected without depending on real ShellCheck findings. When
+# FM_TEST_MODE_LOG is set, it records the effective analysis mode, treating
+# ShellCheck's default as full analysis.
 fm_lint_stub_shellcheck() {
   local fakebin=$1 log=$2
   : > "$log"
@@ -237,11 +250,114 @@ if [ "\${1:-}" = --version ]; then
   printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
   exit 0
 fi
-shift 3
+mode=on
+while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
+  [ "\$1" = --extended-analysis=false ] && mode=off
+  shift
+done
+if [ -n "\${FM_TEST_MODE_LOG:-}" ]; then
+  printf '%s\n' "\$mode" >> "\$FM_TEST_MODE_LOG"
+fi
+[ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
+}
+
+test_fast_mode_disables_extended_analysis() {
+  local tmp fakebin log mode_log telemetry fixture out
+  tmp=$(fm_test_tmproot fm-lint-fast-mode)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  telemetry="$tmp/telemetry.tsv"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" --fast --telemetry "$telemetry" "$fixture" 2>&1) \
+    || fail "fast lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = off ] \
+    || fail "fast lint mode did not disable extended analysis"
+  [ "$(cat "$log")" = "$fixture" ] \
+    || fail "fast lint mode did not lint the requested root"
+  assert_grep $'analysis_mode\tfast' "$telemetry" "telemetry did not record fast analysis mode"
+  pass "fm-lint.sh --fast disables ShellCheck extended analysis"
+}
+
+test_ci_defaults_to_full_analysis() {
+  local tmp fakebin log mode_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-ci-analysis)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_FAST=1 FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" "$fixture" 2>&1) \
+    || fail "CI full lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "CI default did not keep full ShellCheck analysis"
+  pass "fm-lint.sh keeps full ShellCheck analysis by default in CI"
+}
+
+test_ci_rejects_explicit_fast_mode() {
+  local tmp fakebin log fixture out rc
+  tmp=$(fm_test_tmproot fm-lint-ci-reject-fast)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    "$LINT" --fast "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "CI accepted explicit fast lint mode (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "--fast is local-only" \
+    "CI fast-mode rejection did not explain the policy"
+  [ ! -s "$log" ] || fail "CI invoked ShellCheck after rejecting fast mode"
+  pass "fm-lint.sh rejects explicit --fast mode in CI"
+}
+
+test_fast_mode_catches_a_real_lint_defect() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): fast lint-defect regression check"
+    return
+  fi
+  local tmp bad out rc
+  tmp=$(fm_test_tmproot fm-lint-fast-bad)
+  bad="$tmp/bad.sh"
+  cat > "$bad" <<'SH'
+#!/usr/bin/env bash
+foo() {
+  local a= b=
+  echo "$a$b"
+}
+foo
+SH
+  rc=0
+  out=$(GITHUB_ACTIONS='' CI='' "$LINT" --fast "$bad" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fast lint mode passed a known-bad fixture"$'\n'"$out"
+  assert_contains "$out" "SC1007" "fast lint mode did not report the expected ShellCheck finding"
+  pass "fm-lint.sh --fast catches an ordinary shell lint defect"
 }
 
 test_changed_mode_lints_only_the_changed_file() {
@@ -534,6 +650,25 @@ test_installer_rejects_unsupported_platform() {
   pass "ShellCheck installer rejects an unsupported OS or architecture"
 }
 
+test_missing_shellcheck_fails_closed() {
+  local tmp fakebin out rc tool
+  tmp=$(fm_test_tmproot fm-lint-noshellcheck)
+  fakebin=$(fm_fakebin "$tmp")
+  for tool in bash dirname; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  rc=0
+  out=$(PATH="$fakebin" CI=true GITHUB_ACTIONS=true "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "missing ShellCheck expected exit 1, got $rc"$'\n'"$out"
+  assert_contains "$out" "ShellCheck not found" \
+    "missing ShellCheck did not name the required linter"
+  assert_contains "$out" "$REQUIRED" \
+    "missing ShellCheck did not name the pinned version"
+  assert_contains "$out" "fm-install-shellcheck.sh" \
+    "missing ShellCheck did not name the pinned installer"
+  pass "missing ShellCheck fails closed"
+}
+
 test_rejects_wrong_shellcheck_version() {
   # Version-independent: a fake shellcheck reporting a different version must be
   # refused before any lint, proving local and CI cannot silently diverge.
@@ -692,6 +827,7 @@ SH
     || fail "telemetry-enabled clean lint failed"
   [ "$telemetry_out" = "$out_clean_2" ] || fail "quiet telemetry changed routine lint output"
   assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" "telemetry format marker is missing"
+  assert_grep $'analysis_mode\tfull' "$telemetry" "telemetry did not record full analysis mode"
   assert_grep $'jobs\t2' "$telemetry" "telemetry did not record bounded jobs"
   assert_grep $'root_count\t1' "$telemetry" "telemetry did not record root count"
   assert_grep $'wall_seconds\t' "$telemetry" "telemetry did not record wall time"
@@ -858,7 +994,12 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
+test_fast_mode_disables_extended_analysis
+test_ci_defaults_to_full_analysis
+test_ci_rejects_explicit_fast_mode
+test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_installer_selects_platform_archive_url_and_checksum
@@ -866,6 +1007,7 @@ test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
 test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
+test_missing_shellcheck_fails_closed
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
