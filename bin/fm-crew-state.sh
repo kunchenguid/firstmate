@@ -364,7 +364,14 @@ HAVE_RUN=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_ID=$(fm_nm_run_id_for_worktree "$WT" "$CREW_BRANCH")
+  # A durable source that cannot be consulted is NOT an answer: guessing from
+  # the ambient resolver, or falling through to the pane/status-log path as if
+  # no run existed, is what hid a genuinely parked run. Report unknown and name
+  # the missing source instead.
+  if ! fm_nm_run_id_for_worktree "$WT" "$CREW_BRANCH"; then
+    emit unknown run-step "run attribution unavailable: ${FM_NM_RUN_ID_UNAVAILABLE_REASON:-no durable source}"
+  fi
+  RUN_ID=$FM_NM_RUN_ID
   RUN_OUT=
   [ -z "$RUN_ID" ] || RUN_OUT=$(nm_run axi status --run "$RUN_ID")
   if [ -n "$RUN_OUT" ]; then

@@ -729,6 +729,84 @@ test_cancelled_run_never_outranks_live_lane_run() {
   pass "a cancelled run cannot outrank this lane's live run"
 }
 
+# --- attribution unavailability is reported, never guessed --------------------
+# The durable registry is the ONLY attribution source (the ambient resolver is
+# not one), so when it cannot be consulted there is no answer to give. Reading
+# that as "this crew has no run" is what let a genuinely parked ship crew report
+# pane/status-log state and let teardown remove it without aborting its run.
+
+# A crew whose run is genuinely parked, whose status log would otherwise be
+# believed, and whose registry cannot be reached.
+setup_unavailable_case() {  # <name> <id> <branch> -> echoes case dir
+  local name=$1 id=$2 branch=$3 d
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" "$branch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: refactoring the quota adapter\n' > "$d/state/$id.status"
+  # An idle pane and a believable status log: exactly the wrong answer this
+  # crew used to report while its run sat parked at a gate.
+  arm_idle_record "$d/state" "$id" >/dev/null
+  printf '%s\n' "$d"
+}
+
+test_missing_state_db_reports_unknown_naming_the_source() {
+  reset_fakes
+  local d out
+  d=$(setup_unavailable_case attribution-no-state-db feat-nodb fm/feat-nodb)
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-nodb)"
+  export FM_FAKE_AXI_STATUS
+  out=$(PATH="$d/fakebin:$PATH" FM_NM_STATE_DB="$d/relocated/state.sqlite" \
+    FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-nodb)
+  assert_contains "$out" "state: unknown" \
+    "a relocated no-mistakes home must not read as a crew with no run"
+  assert_contains "$out" "source: run-step" "the unknown verdict must name the attribution step"
+  assert_contains "$out" "$d/relocated/state.sqlite" \
+    "the unknown verdict must name the concrete missing state database"
+  assert_not_contains "$out" "source: status-log" \
+    "an unreachable registry must not fall back to the status log as current state"
+  pass "a missing no-mistakes state database reports unknown and names the database"
+}
+
+test_missing_sqlite3_reports_unknown_naming_the_source() {
+  reset_fakes
+  local d toolbin nosqlite out
+  d=$(setup_unavailable_case attribution-no-sqlite3 feat-nosql fm/feat-nosql)
+  toolbin=$(make_no_timeout_toolbin "$d")
+  nosqlite="$d/nosqlite3bin"
+  mkdir -p "$nosqlite"
+  ln -s "$d/fakebin/no-mistakes" "$nosqlite/no-mistakes"
+  ln -s "$d/fakebin/tmux" "$nosqlite/tmux"
+  ln -s "$d/fakebin/herdr" "$nosqlite/herdr"
+  command -v sqlite3 >/dev/null 2>&1 && [ -x "$nosqlite/sqlite3" ] \
+    && fail "the no-sqlite3 PATH must not expose sqlite3"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-nosql)"
+  export FM_FAKE_AXI_STATUS
+  out=$(PATH="$nosqlite:$toolbin" FM_NM_STATE_DB="$d/no-mistakes-state.sqlite" \
+    FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-nosql)
+  assert_contains "$out" "state: unknown" \
+    "a host without sqlite3 must not read as a crew with no run"
+  assert_contains "$out" "sqlite3" "the unknown verdict must name sqlite3 as the missing source"
+  assert_not_contains "$out" "source: status-log" \
+    "an unreadable registry must not fall back to the status log as current state"
+  pass "a host without sqlite3 reports unknown and names sqlite3"
+}
+
+test_no_origin_url_reports_unknown_naming_the_source() {
+  reset_fakes
+  local d out
+  d=$(setup_unavailable_case attribution-no-origin feat-noorigin fm/feat-noorigin)
+  git -C "$d/wt" remote remove origin 2>/dev/null || true
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-noorigin)"
+  export FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" feat-noorigin)
+  assert_contains "$out" "state: unknown" \
+    "a worktree with no origin remote must not read as a crew with no run"
+  assert_contains "$out" "remote.origin.url" \
+    "the unknown verdict must name the missing remote as the reason no repo row can be matched"
+  pass "a worktree with no origin remote reports unknown and names the missing remote"
+}
+
 # Regression for fm-axi-status-misattributes-concurrent-lanes: the ambient status response has lane B's real-looking run, while the registry binds lane A to a different id that must be read with `--run`.
 test_concurrent_lane_status_uses_this_lanes_bound_run_id() {
   reset_fakes
@@ -1149,7 +1227,7 @@ SH
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_NM_STATE_DB="$d/no-mistakes-state.sqlite" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
@@ -1467,6 +1545,9 @@ test_terminal_passed
 test_terminal_failed
 test_concurrent_lane_status_uses_this_lanes_bound_run_id
 test_cancelled_run_never_outranks_live_lane_run
+test_missing_state_db_reports_unknown_naming_the_source
+test_missing_sqlite3_reports_unknown_naming_the_source
+test_no_origin_url_reports_unknown_naming_the_source
 test_cross_branch_attribution_via_bound_run_id
 test_cross_branch_attribution_prefers_live_bound_run
 test_bound_run_ci_log_prevents_stale_ready_status

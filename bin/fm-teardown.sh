@@ -1475,7 +1475,14 @@ task_run_is_own_parked_run() {  # <worktree>
   # Accepted best-effort residual: query failures stay fail-open because making
   # no-mistakes availability a prerequisite would block ship tasks with no run.
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
-  run_id=$(fm_nm_run_id_for_worktree "$wt" "$branch")
+  # Unavailability is reported, never silently folded into "no parked run":
+  # teardown still fails open, but the operator sees which durable source was
+  # missing when the run it could not prove is left running.
+  if ! fm_nm_run_id_for_worktree "$wt" "$branch"; then
+    echo "warning: cannot prove whether $wt owns a parked no-mistakes run: ${FM_NM_RUN_ID_UNAVAILABLE_REASON:-no durable source}" >&2
+    return 1
+  fi
+  run_id=$FM_NM_RUN_ID
   [ -n "$run_id" ] || return 1
   out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id")
   task_status_is_own_parked_run "$wt" "$out" "$run_id"
