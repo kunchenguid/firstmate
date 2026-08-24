@@ -16,6 +16,7 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-close-exited-panes-optin)
 gate_result() {  # <home> [env-assignment...] -> "0" (enabled) or "1" (disabled)
   local home=$1
   shift
+  # shellcheck disable=SC2016 # inner bash -c body expands via its own positional params, not this shell
   env "$@" FM_STATE_OVERRIDE="$home/state" FM_HOME="$home" bash -c '
     SCRIPT_DIR="$1"
     STATE="$2"
