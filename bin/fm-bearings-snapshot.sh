@@ -355,7 +355,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
-               elif (.active_children | length) > 0 then "active_child_work"
+               elif ((.programs | length) + (.active_children | length)) > 0 then "active_child_work"
                elif ($backlog_holds | length) > 0 then "externally_held"
                else "unknown" end
              else .current.state end)
@@ -369,7 +369,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $secondmate_views[]
        | {id,state:.bearings_state,
           doing:((if .bearings_state == "active_child_work" then
-                    ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
+                    ([.active_children[] | .id + ": " + (.doing // .state)]
+                     + [.programs[] | .id + ": " + (.title // "program")]
+                     | join("; "))
                   elif .bearings_state == "captain_decision" then
                     ([.bearings_captain_holds[] | .summary] | join("; "))
                   elif .bearings_state == "externally_held" then
@@ -391,7 +393,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+            doing:([.active_children[] | .id + ": " + (.doing // .state)]
+                   + [.programs[] | .id + ": " + (.title // "program")]
+                   | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | select(($all_decisions == 1) or (.deferred_marker != true))

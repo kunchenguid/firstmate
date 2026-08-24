@@ -2117,6 +2117,47 @@ test_backlog_input_is_bounded_before_projection() {
   pass "canonical backlog input is rejected before unbounded projection work"
 }
 
+test_program_only_secondmate_is_current_work() {
+  local home mate fakebin canonical json
+  home=$(make_home program-only-current-work)
+  mate="$TMP_ROOT/program-only-current-work-home"
+  make_valid_secondmate_home program-only "$mate"
+  : > "$home/data/secondmates.md"
+  append_secondmate_registry "$home" program-only "$mate"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] rollout-program - Coordinate the rollout (repo: sample) (kind: program)
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "program-only")
+    | .current.state == "active_child_work"
+      and [.programs[].id] == ["rollout-program"]
+      and .active_children == []
+  ' >/dev/null || fail "a program-only secondmate was not canonical current work: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "program-only" and .state == "active_child_work"
+      and (.doing | contains("rollout-program"))))
+      and (.in_flight | any(.id == "program-only" and .state == "active_child_work"
+        and (.doing | contains("rollout-program"))))
+  ' >/dev/null || fail "Bearings omitted a program-only secondmate from current work: $json"
+  pass "program-only secondmates remain visible as current work"
+}
+
 test_main_captain_readiness_matches_secondmate_projection() {
   local home fakebin json
   home=$(make_home main-captain-readiness)
@@ -2219,6 +2260,7 @@ test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
+test_program_only_secondmate_is_current_work
 test_backlog_input_is_bounded_before_projection
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
