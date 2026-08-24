@@ -604,24 +604,26 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)).
+The production stale-registration recovery was reverified on 2026-08-24 with Herdr 0.8.0 on macOS arm64:
 
 ```sh
-tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-control-herdr-smoke.test.sh
 ```
 
 Observed output:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
-ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
-ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
-ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: interrupt refuses when Herdr has no registered agent
+ok - real herdr: stale idle registration over a login shell is agent-free for exit
+ok - real herdr: stale idle process-kill recovery relaunches Codex in the same pane and worktree
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The smoke starts a real OpenCode process in a helper-isolated lab pane and kills it with `SIGKILL`, so its stop hook cannot retract Herdr's registration.
+Herdr retains `agent_status=idle` while `pane process-info` reports the login shell.
+The lifecycle classifier treats that positive shell evidence as agent-free for `exit` and relaunch, while `fm_backend_herdr_tab_is_husk` retains its registration-only refusal path for destructive close-and-replace.
+Run this guard after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
 

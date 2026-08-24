@@ -612,6 +612,63 @@ test_terminal_done_is_agent_free_but_never_a_husk() {
   pass "fm_backend_herdr: terminal done is agent-free for relaunch while the husk check still refuses it"
 }
 
+test_live_registration_requires_a_matching_foreground_agent() {
+  local dir log resp fb out
+
+  dir="$TMP_ROOT/idle-registration-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"zsh","argv":["/bin/zsh"]}]}}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    lifecycle=$(fm_backend_herdr_pane_agent_state fmtest w1:p2)
+    if fm_backend_herdr_tab_is_husk fmtest w1:p2; then husk=accepts; else husk=refuses; fi
+    printf "%s %s" "$lifecycle" "$husk"
+  ' "$ROOT")
+  [ "$out" = "no-agent refuses" ] \
+    || fail "an idle registration over a lone shell must be agent-free without licensing husk close, got '$out'"
+
+  dir="$TMP_ROOT/idle-registration-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"opencode.exe","argv":["/usr/local/bin/opencode"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] || fail "a matching registered executable must remain live, got '$out'"
+
+  dir="$TMP_ROOT/idle-registration-versioned-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"codex-aarch64-a","argv":["/usr/local/bin/codex"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] || fail "a versioned process title with a matching executable argv must remain live, got '$out'"
+
+  dir="$TMP_ROOT/idle-registration-wrapper-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"codex","argv0":"codex"},{"name":"node","argv0":"node"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] || fail "a registered agent with a wrapper in its foreground group must remain live, got '$out'"
+
+  dir="$TMP_ROOT/idle-registration-child"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"less","argv":["/usr/bin/less"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = unknown ] || fail "a foreground command that is neither shell nor agent must refuse as unknown, got '$out'"
+  pass "fm_backend_herdr: a live registration needs matching foreground process evidence, while husk close stays conservative"
+}
+
 test_create_task_refuses_when_any_duplicate_label_is_live() {
   local dir log resp fb out status
   dir="$TMP_ROOT/dup-mixed-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1441,7 +1498,7 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
   out=$(ROOT="$ROOT" LOG="$log" bash -c '
     . "$ROOT/bin/backends/herdr.sh"
     fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
-    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_pane_registration_state() { printf live; }
     fm_backend_herdr_cli() {
       printf "%s\n" "$*" >> "$LOG"
       case "$2 $3" in
@@ -2655,7 +2712,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
         fm_backend_herdr_projection_live_binding_matches() {
           [ "$mode" != ambiguous ]
         }
-        fm_backend_herdr_pane_agent_state() {
+        fm_backend_herdr_pane_registration_state() {
           case "$mode" in
             live) printf live ;;
             unknown) printf unknown ;;
@@ -4482,6 +4539,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_terminal_done_is_agent_free_but_never_a_husk
+test_live_registration_requires_a_matching_foreground_agent
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk

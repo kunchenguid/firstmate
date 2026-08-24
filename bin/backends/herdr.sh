@@ -863,7 +863,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ -n "$required_agent_state" ]; then
-    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    state=$(fm_backend_herdr_pane_registration_state "$session" "$pane_id")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
@@ -1855,12 +1855,11 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   [ "$presence" = dead ]
 }
 
-# fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
-# calls - never from process exit status, since a business-logic "not found"
-# response is a normal, expected outcome here, not a call failure (real herdr
-# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
-# the JSON keeps this function correct against either).
+# fm_backend_herdr_pane_registration_snapshot: read Herdr's registration for
+# <pane-id> in <session>, printing `<state><TAB><agent>`. This is deliberately
+# registration-only: destructive cleanup uses its state view and must never
+# close a terminal pane merely because its foreground process looks like a
+# shell.
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
@@ -1877,61 +1876,134 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent).
 #   live     - `agent get` succeeds and reports a non-terminal agent_status
-#              (working, idle, or blocked). A registered agent is never a
-#              close-and-replace candidate.
+#              (working, idle, or blocked) plus an agent executable name.
 #   done     - `agent get` succeeds and reports Herdr's terminal `done`
-#              status. It is agent-free for lifecycle/relaunch purposes, but
-#              remains a registered pane and is never a close-and-replace
-#              candidate.
+#              status. It remains a registered pane and is never a
+#              close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
-fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+fm_backend_herdr_pane_registration_snapshot() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code presence status agent
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
-      dead|unknown) printf '%s' "$presence" ;;
-      *) printf 'unknown' ;;
+      dead|unknown) printf '%s\t\n' "$presence" ;;
+      *) printf 'unknown\t\n' ;;
     esac
     return 0
   fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    [ "$code" = "agent_not_found" ] && printf 'no-agent\t\n' || printf 'unknown\t\n'
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   case "$status" in
-    working|idle|blocked) printf 'live' ;;
-    done) printf 'done' ;;
+    working|idle|blocked) printf 'live\t%s\n' "$agent" ;;
+    done) printf 'done\t%s\n' "$agent" ;;
+    *) printf 'unknown\t\n' ;;
+  esac
+}
+
+# fm_backend_herdr_pane_registration_state: conservative registration-only
+# state for callers that may close or replace a pane.
+fm_backend_herdr_pane_registration_state() {  # <session> <pane_id>
+  local snapshot
+  snapshot=$(fm_backend_herdr_pane_registration_snapshot "$1" "$2")
+  printf '%s' "${snapshot%%$'\t'*}"
+}
+
+# fm_backend_herdr_pane_foreground_state: verify a live registration against
+# the foreground process group. A lone login shell proves no agent is running;
+# the registered executable anywhere in the group proves it is live; every
+# other process shape is unknown so lifecycle actions refuse.
+fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
+  local session=$1 pane_id=$2 agent=$3 info count name argv0 agent_name
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.foreground_processes | type) == "array"
+    and (.result.process_info.foreground_processes | length) > 0
+    and all(.result.process_info.foreground_processes[];
+      (.name | type == "string" and length > 0)
+      and ((.argv0 // .argv[0] // null) | type == "string" and length > 0)
+    )
+  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  count=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes | length' 2>/dev/null)
+  case "$count" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  agent_name=${agent#-}; agent_name=${agent_name##*/}; agent_name=${agent_name%.exe}
+  while IFS=$'\t' read -r name argv0; do
+    [ -n "$name" ] && [ -n "$argv0" ] || { printf 'unknown'; return 0; }
+    name=${name#-}; name=${name##*/}; name=${name%.exe}
+    argv0=${argv0#-}; argv0=${argv0##*/}; argv0=${argv0%.exe}
+    if [ "$name" = "$agent_name" ] || [ "$argv0" = "$agent_name" ]; then
+      printf 'live'
+      return 0
+    fi
+    if [ "$count" = 1 ]; then
+      case "$name:$argv0" in
+        sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish)
+          printf 'no-agent'
+          return 0
+          ;;
+      esac
+    fi
+  done < <(printf '%s' "$info" | jq -r '
+    .result.process_info.foreground_processes[]
+    | [(.name // empty), (.argv0 // .argv[0] // empty)] | @tsv
+  ' 2>/dev/null)
+  printf 'unknown'
+}
+
+# fm_backend_herdr_pane_agent_state: lifecycle state for <pane-id> in
+# <session>. A terminal done registration is agent-free. A non-terminal
+# registration needs its foreground process to agree: a lone shell is
+# agent-free, the registered executable is live, and any unreadable or
+# mismatched process refuses as unknown.
+fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
+  local snapshot state agent
+  snapshot=$(fm_backend_herdr_pane_registration_snapshot "$1" "$2")
+  state=${snapshot%%$'\t'*}
+  agent=${snapshot#*$'\t'}
+  case "$state" in
+    live)
+      [ -n "$agent" ] \
+        && fm_backend_herdr_pane_foreground_state "$1" "$2" "$agent" \
+        || printf 'unknown'
+      ;;
+    dead|no-agent|done|unknown) printf '%s' "$state" ;;
     *) printf 'unknown' ;;
   esac
 }
 
-# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
-# states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
-# confirm; live, done, and unknown all refuse (1), so a terminal registration
-# or an inconclusive read never licenses closing anything. Restored-layout
-# recovery depends on this fail-safe-toward-refusal behavior.
+# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative
+# registration states (dead, no-agent). A live or done registration and every
+# unreadable result refuse, so lifecycle's foreground-shell evidence never
+# licenses destructive pane replacement.
 fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
-  case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
+  case "$(fm_backend_herdr_pane_registration_state "$1" "$2")" in
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# fm_backend_herdr_agent_state: recovery-grade state for the same session-start
-# sweep as the tmux classifier. It reuses the husk classifier rather than
-# creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane or terminal `done` agent is `dead`, a
-# non-terminal registered agent is `alive`, and an unexpected or failed API
-# read is `unreadable`. `done` remains distinct in the pane classifier so the
-# husk path never mistakes a terminal registration for a closeable pane.
+# fm_backend_herdr_agent_state: recovery-grade lifecycle state for the same
+# session-start sweep as the tmux classifier. A structurally gone pane is
+# `missing`, a confirmed agent-less pane or terminal `done` agent is `dead`, a
+# foreground-verified non-terminal registration is `alive`, and an unexpected
+# or failed API read is `unreadable`. `done` remains distinct in the
+# registration classifier so the husk path never mistakes a terminal
+# registration for a closeable pane.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -2264,14 +2336,14 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
 
 fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
   local session=$1 new_pane=$2 state
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")
+  state=$(fm_backend_herdr_pane_registration_state "$session" "$new_pane")
   case "$state" in
     dead) return 0 ;;
     no-agent) ;;
-    live|unknown) return 1 ;;
+    live|done|unknown) return 1 ;;
   esac
   fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$new_pane" no-agent || return 1
-  [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
+  [ "$(fm_backend_herdr_pane_registration_state "$session" "$new_pane")" = dead ]
 }
 
 # fm_backend_herdr_projection_reclaim_task: replace one exact agent-free
@@ -2313,14 +2385,14 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
+  state=$(fm_backend_herdr_pane_registration_state "$session" "$meta_pane")
   case "$state" in
     no-agent) ;;
     dead)
       echo "warning: exact herdr presentation pane for $id is gone; spawning flat" >&2
       return 2
       ;;
-    live|unknown)
+    live|done|unknown)
       echo "error: exact herdr presentation pane for $id is $state; refusing duplicate launch" >&2
       return 1
       ;;
@@ -2366,10 +2438,10 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not verify its replacement pane; spawning flat" >&2
     return 2
   fi
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
+  state=$(fm_backend_herdr_pane_registration_state "$session" "$meta_pane")
   case "$state" in
     no-agent) ;;
-    live|unknown)
+    live|done|unknown)
       fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
       echo "error: herdr presentation pane for $id became $state during reclaim; refusing duplicate launch" >&2
       return 1
@@ -2392,7 +2464,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     state=$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     case "$state" in
-      live|unknown)
+      live|done|unknown)
         echo "error: herdr presentation pane for $id became $state at the close boundary; refusing duplicate launch" >&2
         return 1
         ;;
@@ -2400,7 +2472,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id could not close the exact old husk; spawning flat" >&2
     return 2
   fi
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")" != dead ]; then
+  if [ "$(fm_backend_herdr_pane_registration_state "$session" "$meta_pane")" != dead ]; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     return 1
   fi
@@ -2471,10 +2543,10 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      state=$(fm_backend_herdr_pane_registration_state "$session" "$pane")
       case "$state" in
         dead|no-agent) : ;;
-        live|unknown)
+        live|done|unknown)
           echo "error: quarantined herdr presentation for $id has a $state pane; refusing duplicate launch" >&2
           return 1
           ;;
