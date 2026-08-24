@@ -125,11 +125,9 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
-# Captain feedback (2026-08-12): no-mistakes ship PRs were shipping a
-# wall-of-text `## Intent` because the brief gave the worker zero guidance on
-# how to write it. The concise-intent guidance is scoped to the no-mistakes
-# DOD branch only - direct-PR and scout tasks never invoke `no-mistakes axi
-# run`, so they must not carry the guidance.
+# No-mistakes ship briefs own the PR-body contract for the intent statement.
+# The concise guidance must stay scoped to no-mistakes because direct-PR and
+# scout tasks never invoke `no-mistakes axi run`.
 test_no_mistakes_intent_guidance_is_scoped() {
   local home id brief
   home="$TMP_ROOT/intent-guidance-home"
@@ -140,14 +138,35 @@ test_no_mistakes_intent_guidance_is_scoped() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "no-mistakes brief was not scaffolded"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`## Problem`' "$brief" \
-    "no-mistakes DOD missing the Problem-bullet intent guidance"
+  assert_grep '`## What is the problem`' "$brief" \
+    "no-mistakes DOD missing the problem heading"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`## Fix`' "$brief" \
-    "no-mistakes DOD missing the Fix-bullet intent guidance"
+  assert_grep '`## What was the fix`' "$brief" \
+    "no-mistakes DOD missing the fix heading"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`## Proof`' "$brief" \
-    "no-mistakes DOD missing the Proof-bullet intent guidance"
+  assert_grep '`## Proof of work`' "$brief" \
+    "no-mistakes DOD missing the proof heading"
+  assert_grep "exactly these three top-level headings, in this order" "$brief" \
+    "no-mistakes DOD does not require the exact PR-body heading set"
+  assert_grep "latest effective decisions to evidence" "$brief" \
+    "no-mistakes DOD does not require decision-to-evidence mapping"
+  assert_grep "superseded decisions that were not followed" "$brief" \
+    "no-mistakes DOD does not require disclosure of superseded decisions"
+  assert_grep "relevant tests" "$brief" \
+    "no-mistakes DOD does not require relevant test evidence"
+  assert_grep "screenshots for UI work" "$brief" \
+    "no-mistakes DOD does not require UI screenshots"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep '`## Problem`' "$brief" \
+    "no-mistakes DOD retained the superseded Problem heading"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep '`## Fix`' "$brief" \
+    "no-mistakes DOD retained the superseded Fix heading"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep '`## Proof`' "$brief" \
+    "no-mistakes DOD retained the superseded Proof heading"
+  assert_no_grep "Any other section" "$brief" \
+    "no-mistakes DOD permits extra top-level sections"
   assert_grep "No single multi-paragraph run-on" "$brief" \
     "no-mistakes DOD missing the anti-wall-of-text instruction"
 
