@@ -367,6 +367,97 @@ test_status_refuses_a_data_directory_that_is_a_symlink() {
   pass "fm-consult: a symlinked data directory is refused with its own label"
 }
 
+test_status_all_refuses_any_non_directory_data_entry() {
+  local home out rc
+  home=$(new_home status-non-directory)
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold gamma >/dev/null
+  printf 'planted\n' > "$home/data/beta"
+
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
+    || fail "listing dropped the entry before the non-directory entry"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
+    || fail "listing dropped the entry after the non-directory entry"
+  assert_contains "$out" "beta: refused (" "listing silently skipped a non-directory data entry"
+  assert_contains "$out" "consultation path is not a directory" \
+    "refused line did not name the non-directory reason"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported data entry"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a non-directory data entry"
+
+  rm "$home/data/beta"
+  mkfifo "$home/data/beta"
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  assert_contains "$out" "beta: refused (" "listing silently skipped a non-regular, non-directory data entry"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
+    || fail "listing dropped the entry after a non-regular data entry"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported data entry"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a non-regular data entry"
+
+  out=$(run_consult "$home" status beta 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "single status accepted a non-directory data entry"
+  assert_contains "$out" "consultation path is not a directory" "single status refusal was not explicit"
+  pass "fm-consult: status refuses any non-directory data entry without dropping the rest"
+}
+
+test_status_all_ignores_a_directory_holding_no_consultation() {
+  local home out rc
+  home=$(new_home status-unrelated)
+  run_consult "$home" scaffold alpha >/dev/null
+  mkdir -p "$home/data/some-other-task"
+  printf 'unrelated\n' > "$home/data/some-other-task/ship-brief.md"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "an unrelated but safe data directory must not make status fail"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" || fail "listing dropped the consultation"
+  assert_not_contains "$out" "some-other-task" \
+    "a safe directory holding no consultation was reported as a consultation"
+  expect_code 1 "$(stdout_line_count "$out")" "status listed a directory that holds no consultation"
+  pass "fm-consult: a safe directory holding no consultation is neither listed nor refused"
+}
+
+test_data_override_redirects_every_command() {
+  local home override rel out rc report
+  home=$(new_home data-override)
+  override="$TMP_ROOT/data-override-elsewhere"
+  mkdir -p "$override"
+
+  out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" scaffold redirected)
+  assert_present "$override/redirected/consult-brief.md" "scaffold ignored FM_DATA_OVERRIDE"
+  assert_contains "$out" "$override/redirected/consult-brief.md" "scaffold printed the unredirected path"
+  assert_absent "$home/data/redirected" "scaffold wrote into the default home data directory"
+
+  out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status)
+  has_exact_line "$out" "redirected: brief written; still awaiting a report" \
+    || fail "status did not read the overridden data directory"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "default home status must still succeed"
+  assert_contains "$out" "no consultations" "the default home data directory was not left untouched"
+
+  report="$override/redirected/consult-report.md"
+  printf '# Answer\nEvidence.\n' > "$report"
+  out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" receive redirected)
+  assert_contains "$out" "received: $report" "receive did not read the overridden data directory"
+  out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status redirected)
+  has_exact_line "$out" "redirected: report received" "single status did not read the overridden data directory"
+
+  rel=$(basename "$override")
+  out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE="$rel" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status)
+  has_exact_line "$out" "redirected: report received" "a relative FM_DATA_OVERRIDE was not resolved"
+
+  out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE=data-override-missing FM_HOME="$home" \
+    "$ROOT/bin/fm-consult.sh" status 2>&1); rc=$?
+  expect_code 2 "$rc" "an unresolvable relative FM_DATA_OVERRIDE must be refused"
+  assert_contains "$out" "FM_DATA_OVERRIDE directory cannot be resolved" \
+    "the unresolvable override refusal did not name FM_DATA_OVERRIDE"
+
+  out=$(FM_DATA_OVERRIDE="$TMP_ROOT/data-override-absent" FM_HOME="$home" \
+    "$ROOT/bin/fm-consult.sh" status 2>&1); rc=$?
+  expect_code 0 "$rc" "an absolute FM_DATA_OVERRIDE that does not exist yet must be accepted"
+  assert_contains "$out" "no consultations" "an empty overridden data directory must report no consultations"
+  pass "fm-consult: FM_DATA_OVERRIDE redirects scaffold, receive, and status"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -384,3 +475,6 @@ test_status_all_reports_no_consultations_for_an_empty_data_directory
 test_status_all_cannot_forge_a_status_line
 test_status_all_refuses_a_symlinked_directory_with_no_consult_files
 test_status_refuses_a_data_directory_that_is_a_symlink
+test_status_all_refuses_any_non_directory_data_entry
+test_status_all_ignores_a_directory_holding_no_consultation
+test_data_override_redirects_every_command

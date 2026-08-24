@@ -16,10 +16,13 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
-# status with no id lists every consultation on exactly one line each, including
-# hidden and symlinked entries, printing a refused line with a reason for any
-# entry it cannot report safely, and exits nonzero once the whole listing is
-# printed. status with an id refuses such an entry immediately.
+# status with no id lists every consultation on exactly one line each, printing a
+# refused line with a reason for any data entry it cannot report safely, and
+# exits nonzero once the whole listing is printed. status with an id refuses such
+# an entry immediately.
+#
+# Consultations live under data/ in the active firstmate home, or under
+# FM_DATA_OVERRIDE when that is set.
 #
 # Transport is deliberately absent: this script makes no network calls and
 # assumes no browser, tunnel, API client, or advisor channel.
@@ -74,7 +77,22 @@ case "$FM_HOME_INPUT" in
 esac
 FM_HOME=$(CDPATH='' cd -- "$FM_HOME_INPUT" 2>/dev/null && pwd -P) \
   || die "FM_HOME directory cannot be resolved: $FM_HOME_INPUT"
-DATA="$FM_HOME/data"
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) \
+    || die "$name directory cannot be resolved: $path"
+  printf '%s\n' "$resolved"
+}
+
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 2
+else
+  DATA="$FM_HOME/data"
+fi
 
 # The consult_*_ok checks decide one consultation; they never exit. They set
 # CONSULT_REFUSAL to a specific, actionable reason and return 1 so a caller can
@@ -248,6 +266,15 @@ consult_state_line() {
   return 0
 }
 
+# Whether an already-validated consultation directory holds consultation
+# artifacts at all. Asked only after the validator has cleared the entry, so it
+# decides what an entry *is*, never whether it was safe to look at.
+consult_entry_present() {
+  local dir=$1
+  [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
+    || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]
+}
+
 status_one() {
   local id=$1
   validate_consult_id "$id"
@@ -264,18 +291,16 @@ status_all() {
     return 0
   }
   for dir in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
-    [ -d "$dir" ] || [ -L "$dir" ] || continue
-    if [ -L "$dir" ] \
-      || [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
-      || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]; then
-      id=${dir##*/}
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    id=${dir##*/}
+    if consult_id_ok "$id" && consult_state_line "$id"; then
+      consult_entry_present "$DATA/$id" || continue
       found=1
-      if consult_id_ok "$id" && consult_state_line "$id"; then
-        printf '%s\n' "$CONSULT_LINE"
-      else
-        refused=1
-        printf '%s: refused (%s)\n' "$(display_name "$id")" "$(display_name "$CONSULT_REFUSAL")"
-      fi
+      printf '%s\n' "$CONSULT_LINE"
+    else
+      found=1
+      refused=1
+      printf '%s: refused (%s)\n' "$(display_name "$id")" "$(display_name "$CONSULT_REFUSAL")"
     fi
   done
   [ "$found" -eq 1 ] || printf '%s\n' 'no consultations'
