@@ -59,6 +59,26 @@ MANY_BOTS="[$(bot 'Greptile Review' SUCCESS),$(bot 'Coverage' SUCCESS),$(bot 'Si
   || fail "many passing third-party checks must still be no-repo-ci"
 pass "no number of passing third-party checks adds up to repository CI"
 
+# The two shapes actually recorded on the pull requests this rule exists for,
+# copied from their own statusCheckRollup rather than reconstructed, so the
+# regression is pinned to what GitHub really served. Both are a lone Greptile
+# check with an empty workflowName and no suite anywhere, and the defect had
+# both polarities: on 2584 the bot PASSED and was read as CI passing, and on
+# 2855 the bot FAILED while the run that produced it still reported passed.
+# Neither may ever classify as passing, and neither is a real CI result.
+PR_2584_ROLLUP='[{"__typename":"CheckRun","completedAt":"2026-08-22T23:25:48Z","conclusion":"SUCCESS","detailsUrl":"https://greptile.com/","name":"Greptile Review","startedAt":"2026-08-22T23:18:08Z","status":"COMPLETED","workflowName":""}]'
+PR_2855_ROLLUP='[{"__typename":"CheckRun","completedAt":"2026-08-23T10:58:04Z","conclusion":"FAILURE","detailsUrl":"https://greptile.com/","name":"Greptile Review","startedAt":"2026-08-23T10:56:06Z","status":"COMPLETED","workflowName":""}]'
+
+GOT=$(fm_ci_checks_state "$PR_2584_ROLLUP")
+[ "$GOT" != passing ] || fail "the recorded PR 2584 rollup must never be passing"
+[ "$GOT" = no-repo-ci ] || fail "the recorded PR 2584 rollup must be no-repo-ci, got: $GOT"
+pass "the passing-bot rollup recorded on PR 2584 classifies as no-repo-ci, not passing"
+
+GOT=$(fm_ci_checks_state "$PR_2855_ROLLUP")
+[ "$GOT" != passing ] || fail "the recorded PR 2855 rollup must never be passing"
+[ "$GOT" = no-repo-ci ] || fail "the recorded PR 2855 rollup must be no-repo-ci, got: $GOT"
+pass "the failing-bot rollup recorded on PR 2855 classifies as no-repo-ci, not passing"
+
 # A legacy commit status is not a check run and cannot stand in for a suite.
 LEGACY='[{"__typename":"StatusContext","context":"ci/external","state":"SUCCESS"}]'
 [ "$(fm_ci_checks_state "$LEGACY")" = no-repo-ci ] \
@@ -187,6 +207,91 @@ if fm_ci_runs_state '{"workflow_runs":[]}' >/dev/null 2>&1; then
 fi
 pass "an unreadable workflow-runs payload is refused instead of being classified"
 
+# --- the roster in the workflow-runs shape ------------------------------------
+#
+# fm_ci_runs_state above answers only "is any CI run here red or unfinished".
+# A run concludes success whenever no job in it failed, and a job that never
+# ran because it was skipped does not fail, so that answer cannot establish
+# that the required suites ran. The shape is real and recorded: cli/cli run
+# 32701833535 concluded success with one job successful and two skipped. That
+# is the P1 false-green reported against this file - a successful head-repository
+# run authorizing a green claim with the roster absent - and fm_ci_run_jobs_state
+# is what closes it, by judging the run JOBS against the same roster the rollup
+# shape uses.
+job() { printf '{"name":"%s","status":"%s","conclusion":%s}' "$1" "$2" "$3"; }
+complete_jobs() {
+  printf '%s' "$FM_CI_REQUIRED_SUITES" \
+    | jq -c '[.[] | {name: ., status: "completed", conclusion: "success"}]'
+}
+GOOD_RUN="[$(run 42 completed '"success"')]"
+COMPLETE_JOBS=$(complete_jobs)
+
+# The demonstration that the run-level answer alone is the defect: the exact
+# same successful run is passing to fm_ci_runs_state and refused once its jobs
+# are read. Without this change the guard acts on the first answer.
+[ "$(fm_ci_runs_state "$GOOD_RUN")" = passing ] \
+  || fail "the run-level classifier must still call a successful CI run passing"
+ONLY_LINT_JOB="[$(job Lint completed '"success"')]"
+GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$ONLY_LINT_JOB")
+[ "$GOT" != passing ] || fail "a successful CI run carrying only one job must never be passing"
+[ "$GOT" = incomplete ] \
+  || fail "a successful CI run short of the required roster must be incomplete, got: $GOT"
+pass "a successful head-repository CI run whose jobs are short of the roster is incomplete, not passing"
+
+# The recorded cli/cli 32701833535 shape: the run succeeded, and it succeeded
+# because skipped jobs do not fail a run.
+SKIPPED_JOBS="[$(job Lint completed '"success"'),$(job 'Repo invariants' completed '"skipped"')]"
+GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$SKIPPED_JOBS")
+[ "$GOT" != passing ] || fail "a successful CI run with a skipped job must never be passing"
+pass "a successful CI run whose jobs were skipped is refused rather than read as a clean pass"
+
+# The roster read from the jobs is what a passing verdict now rests on.
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$COMPLETE_JOBS")" = passing ] \
+  || fail "a successful CI run carrying the complete green roster must be passing"
+pass "the complete required-suite roster among the run jobs is what makes a head-repository run passing"
+
+ALMOST_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[1:]')
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$ALMOST_JOBS")" = incomplete ] \
+  || fail "a run roster missing one required suite must be incomplete"
+pass "a head-repository run missing one required suite is incomplete even when every job present is green"
+
+# Jobs that could not be read at all are not inherited from the run conclusion.
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" '[]')" = incomplete ] \
+  || fail "a successful run whose jobs could not be read must be incomplete"
+pass "a run whose jobs are unreadable is incomplete rather than inheriting the verdict of the run itself"
+
+# A red or unfinished job refuses the verdict the same way the rollup does.
+RED_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[0].conclusion = "failure"')
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$RED_JOBS")" = failing ] \
+  || fail "a red job in an otherwise complete roster must be failing"
+PENDING_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[0] = {name: "Lint", status: "in_progress", conclusion: null}')
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$PENDING_JOBS")" = pending ] \
+  || fail "an unfinished job in an otherwise complete roster must be pending"
+pass "a red or unfinished job refuses a passing head-repository verdict"
+
+# The run-level states still decide first, so a red or unfinished run is never
+# reported as a roster problem, and no CI run at all is still none.
+[ "$(fm_ci_run_jobs_state "[$(run 42 completed '"failure"')]" "$COMPLETE_JOBS")" = failing ] \
+  || fail "a red CI run must be failing whatever its jobs say"
+[ "$(fm_ci_run_jobs_state "[$(run 42 in_progress null)]" "$COMPLETE_JOBS")" = pending ] \
+  || fail "an unfinished CI run must be pending whatever its jobs say"
+[ "$(fm_ci_run_jobs_state '[]' "$COMPLETE_JOBS")" = none ] \
+  || fail "no CI run at all must be none"
+[ "$(fm_ci_run_jobs_state "$ONLY_OTHER_RUN" "$COMPLETE_JOBS")" = none ] \
+  || fail "a run of a workflow other than CI must not count as CI having run"
+pass "the run-level states are decided before the roster, so each refusal names its own cause"
+
+if fm_ci_run_jobs_state "$GOOD_RUN" 'not json' >/dev/null 2>&1; then
+  fail "an unreadable jobs payload must be refused, not classified"
+fi
+if fm_ci_run_jobs_state 'not json' "$COMPLETE_JOBS" >/dev/null 2>&1; then
+  fail "an unreadable runs payload must be refused, not classified"
+fi
+if fm_ci_run_jobs_state "$GOOD_RUN" '{"jobs":[]}' >/dev/null 2>&1; then
+  fail "a non-array jobs payload must be refused, not classified"
+fi
+pass "an unreadable runs or jobs payload is refused instead of being classified"
+
 # --- the guard ---------------------------------------------------------------
 
 # gh is stubbed for both reads the guard makes - the pull request itself and the
@@ -196,7 +301,12 @@ pass "an unreadable workflow-runs payload is refused instead of being classified
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = api ]; then
-  printf '%s\n' "${FM_TEST_RUNS:-[]}"
+  # The guard makes two different API reads: the workflow runs at the commit,
+  # and then the jobs of each CI run among them.
+  case "${2:-}" in
+    */jobs*) printf '%s\n' "${FM_TEST_JOBS:-[]}" ;;
+    *)       printf '%s\n' "${FM_TEST_RUNS:-[]}" ;;
+  esac
   exit 0
 fi
 if [ -n "${FM_TEST_HEAD_REPO:-}" ]; then
@@ -214,9 +324,12 @@ PATH="$FAKEBIN:$PATH"
 # only set in this shell.
 FM_TEST_ROLLUP='[]'
 FM_TEST_RUNS='[]'
+# The default head-repository run reports its whole roster green, so a test
+# that is not about the roster gets the ordinary validated-fork case.
+FM_TEST_JOBS=$COMPLETE_JOBS
 FM_TEST_SHA=deadbeef
 FM_TEST_HEAD_REPO=
-export PATH FM_TEST_ROLLUP FM_TEST_RUNS FM_TEST_SHA FM_TEST_HEAD_REPO
+export PATH FM_TEST_ROLLUP FM_TEST_RUNS FM_TEST_JOBS FM_TEST_SHA FM_TEST_HEAD_REPO
 
 URL=https://github.com/example/repo/pull/7
 verify() { "$ROOT/bin/fm-pr-ci-verify.sh" "$URL" 2>&1; }
@@ -291,6 +404,43 @@ assert_contains "$OUT" "checks do not cover the required suite roster" \
   "the verdict must say why the base repository was not evidence"
 pass "fm-pr-ci-verify.sh falls through an incomplete base-repo rollup to a validated head-repository run"
 
+# The head-repository false green, end to end: the upstream pull request has
+# only the bot, the fork run concluded success, and its roster is a single job.
+# Before the roster was read from the jobs this exited 0 and reported the commit
+# validated - the P1 finding against this guard.
+FM_TEST_ROLLUP="$ONLY_BOT"
+FM_TEST_RUNS="$GOOD_RUN"
+FM_TEST_JOBS="$ONLY_LINT_JOB"
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a successful fork run short of the roster must be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "incomplete" "the refusal must name the incomplete fork state"
+assert_contains "$OUT" "required suite roster" "the refusal must say the fork roster is short"
+assert_contains "$OUT" "Test coverage guard" "the refusal must name a required suite that never ran"
+assert_not_contains "$OUT" "validated:" "a roster-short fork run must not be reported as validated"
+pass "fm-pr-ci-verify.sh refuses a successful head-repository run whose jobs are short of the required roster"
+
+# The same run with a skipped job: still success at the run level, still refused.
+FM_TEST_JOBS="$SKIPPED_JOBS"
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a fork run with a skipped job must be refused, exited $CODE: $OUT"
+assert_not_contains "$OUT" "validated:" "a partially-skipped fork run must not be reported as validated"
+pass "fm-pr-ci-verify.sh refuses a head-repository run that concluded success with a skipped job"
+
+# The recorded pull requests, driven through the whole guard. 2584 is the
+# passing bot and 2855 the failing one; with nothing behind either, both are
+# refused, and neither may be reported as validated.
+FM_TEST_JOBS='[]'
+FM_TEST_RUNS='[]'
+for recorded in "$PR_2584_ROLLUP" "$PR_2855_ROLLUP"; do
+  FM_TEST_ROLLUP=$recorded
+  OUT=$(verify); CODE=$?
+  [ "$CODE" = 1 ] || fail "a recorded lone-bot pull request must be refused, exited $CODE: $OUT"
+  assert_contains "$OUT" "Greptile Review" "the refusal must name the check it did see"
+  assert_not_contains "$OUT" "validated:" "a lone-bot pull request must never be reported as validated"
+done
+pass "fm-pr-ci-verify.sh refuses both recorded lone-bot pull requests, whichever way the bot concluded"
+
+FM_TEST_JOBS=$COMPLETE_JOBS
 FM_TEST_ROLLUP="$ONLY_BOT"
 FM_TEST_RUNS="[$(run 42 completed '"failure"')]"
 OUT=$(verify); CODE=$?

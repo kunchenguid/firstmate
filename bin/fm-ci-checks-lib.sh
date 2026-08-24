@@ -28,26 +28,50 @@
 # a distinct state from passing and from an empty rollup's none, and no caller
 # can collapse it into success by counting conclusions.
 #
-# GitHub offers this evidence in two shapes and the file owns both. A pull
-# request carries a check rollup, which mixes everyone's checks together and so
-# needs the workflowName discriminator above. A commit in a given repository
-# carries workflow runs, which are that repository's own by construction, but
-# still mix every workflow the repository owns together - the CI workflow
-# alongside a PR-body policy check or a manually dispatched spike - so
-# fm_ci_runs_state applies the same by-name filter to that shape too, rather
-# than accepting any repository-owned run as a stand-in for the one that
-# actually ran the suites. The second shape is what answers "did MY fork
-# validate this commit?" when the first shape says the upstream pull request
-# has no repository check on it.
+# GitHub offers this evidence in two shapes and the file owns both, and both
+# have to establish the same thing: that every required suite ran and passed.
+# A pull request carries a check rollup, which mixes everyone's checks together
+# and so needs the workflowName discriminator above, and whose entries are the
+# individual job check runs the roster is read from directly. A commit in a
+# given repository carries workflow runs, which are that repository's own by
+# construction, but still mix every workflow the repository owns together - the
+# CI workflow alongside a PR-body policy check or a manually dispatched spike -
+# so this file applies the same by-name filter to that shape too, rather than
+# accepting any repository-owned run as a stand-in for the one that actually
+# ran the suites. The second shape is what answers "did MY fork validate this
+# commit?" when the first shape says the upstream pull request has no
+# repository check on it.
 #
-# States, in the order the classifier decides them:
-#   none        the commit carries no checks at all
+# A workflow run's own conclusion is NOT roster evidence, which is why this
+# file reads that shape's JOBS rather than stopping at the run. GitHub
+# concludes a run "success" whenever no job in it failed, and a job that never
+# ran because it was skipped does not fail: cli/cli run 32701833535 concluded
+# success with one job successful and two skipped. A CI run that lost most of
+# its roster - a job that gained an if: condition, a matrix that did not
+# expand, a path filter, or simply a thinner ci.yml on the branch under test -
+# therefore still reports success, and reading only that conclusion is the same
+# false-green shape as the third-party bot above, arriving from inside the
+# repository's own workflow instead of outside it. fm_ci_run_jobs_state takes
+# the run's jobs alongside the runs and applies the roster to them, so this
+# shape refuses a run that cannot show every required suite inside it.
+#
+# States, in the order the classifier decides them. Both shapes use the same
+# set, except no-repo-ci, which only the rollup shape can observe:
+#   none        the commit carries no checks at all, or no CI workflow run
 #   no-repo-ci  checks exist, but the CI workflow itself never produced one
 #   failing     at least one check reached a red conclusion
 #   pending     at least one check has not finished
 #   incomplete  the CI workflow reported, and everything it reported succeeded,
 #               but fewer than its full required roster of suites is in there
 #   passing     the CI workflow ran and every required suite succeeded
+#
+# Only passing is evidence. Read against the three outcomes a caller has to
+# tell apart - the required suites ran and passed, the required suites ran and
+# did not pass, the required suites cannot be shown to have run - passing is
+# the first, failing and pending are the second, and none, no-repo-ci and
+# incomplete are all the third. No caller may collapse any of that third group
+# into the first, which is the whole reason they are distinct states rather
+# than one "not passing".
 #
 # failing and pending are judged over EVERY check, not only the repository's
 # own, so a red third-party check refuses a green verdict instead of hiding
@@ -139,29 +163,51 @@ def fm_ci_state:
     elif any($all[]; fm_ci_check_unfinished) then "pending"
     elif (($all | fm_ci_missing_suites) | length) > 0 then "incomplete"
     else "passing" end;
-# No fm_ci_missing_suites counterpart here: a workflow run entry is an
-# aggregate GitHub computes over the full job graph scheduled for that run -
-# it cannot conclude "success" while any job in it is still missing,
-# unfinished, or red - so the roster is already enforced by the platform for
-# this shape. The rollup shape above has no such guarantee: a
-# statusCheckRollup entry is one job check run, so a rollup that never
-# received a job check run is structurally missing evidence, not
-# disagreeing with it.
+# The REST shapes - a workflow run and a workflow job - carry the same status
+# and conclusion fields in the same lower case, unlike the upper-case GraphQL
+# spelling of the rollup shape, so one pair of predicates classifies both.
 def fm_ci_run_from_ci_workflow:
   ((.name // "") | tostring) == fm_ci_workflow_name;
-def fm_ci_run_red:
+def fm_ci_rest_red:
   (((.conclusion // "") | tostring | ascii_downcase)) as $c
   | $c == "failure" or $c == "cancelled" or $c == "timed_out"
     or $c == "action_required" or $c == "startup_failure" or $c == "stale"
     or $c == "skipped" or $c == "neutral";
-def fm_ci_run_unfinished:
+def fm_ci_rest_unfinished:
   ((.status // "") | tostring | ascii_downcase) != "completed";
+# The run-level judgement on its own: whether the CI workflow ran at all here,
+# and whether the runs it produced are red or unfinished. It deliberately does
+# NOT answer "did the required suites run", because the conclusion of a run
+# cannot answer that - see the header on cli/cli run 32701833535. Every caller that
+# needs a green verdict goes through fm_ci_run_jobs_state instead.
 def fm_ci_runs_state:
   (. // []) as $all
   | [$all[] | select(fm_ci_run_from_ci_workflow)] as $runs
   | if ($runs | length) == 0 then "none"
-    elif any($runs[]; fm_ci_run_red) then "failing"
-    elif any($runs[]; fm_ci_run_unfinished) then "pending"
+    elif any($runs[]; fm_ci_rest_red) then "failing"
+    elif any($runs[]; fm_ci_rest_unfinished) then "pending"
+    else "passing" end;
+# The roster in the jobs shape, the counterpart of fm_ci_missing_suites: the
+# required suites that no job of the CI runs at this commit reported.
+def fm_ci_jobs_missing_suites:
+  (. // []) as $jobs
+  | ([$jobs[] | ((.name // "") | tostring)] | unique) as $job_names
+  | fm_ci_required_suites - $job_names;
+# {runs, jobs} -> the same states the rollup shape produces. jobs are the jobs
+# of the CI runs in runs, so an empty jobs array under a successful run means
+# the roster could not be read at all, which is refused as incomplete rather
+# than inherited from the conclusion of the run itself.
+def fm_ci_run_jobs_state:
+  (.runs // []) as $all
+  | (.jobs // []) as $jobs
+  | [$all[] | select(fm_ci_run_from_ci_workflow)] as $runs
+  | if ($runs | length) == 0 then "none"
+    elif any($runs[]; fm_ci_rest_red) then "failing"
+    elif any($runs[]; fm_ci_rest_unfinished) then "pending"
+    elif ($jobs | length) == 0 then "incomplete"
+    elif any($jobs[]; fm_ci_rest_red) then "failing"
+    elif any($jobs[]; fm_ci_rest_unfinished) then "pending"
+    elif (($jobs | fm_ci_jobs_missing_suites) | length) > 0 then "incomplete"
     else "passing" end;
 '
 
@@ -172,13 +218,33 @@ fm_ci_checks_state() {
   fm_ci_classify "$1" fm_ci_state
 }
 
-# fm_ci_runs_state <workflow-runs-json>: print the state of one repository's own
-# workflow runs at a commit, refusing unreadable input the same way. Every run
-# in that array came from the repository it was read from, but a repository
-# can own more than one workflow, so this still narrows to the CI workflow's
-# own runs before judging red, pending, or passing.
+# fm_ci_runs_state <workflow-runs-json>: print the run-level state of one
+# repository's own workflow runs at a commit, refusing unreadable input the
+# same way. Every run in that array came from the repository it was read from,
+# but a repository can own more than one workflow, so this still narrows to the
+# CI workflow's own runs before judging red, pending, or passing. Its passing
+# means "no CI run here is red or unfinished", NOT "the required suites ran":
+# a caller deciding whether to call a commit green wants fm_ci_run_jobs_state.
 fm_ci_runs_state() {
   fm_ci_classify "$1" fm_ci_runs_state
+}
+
+# fm_ci_run_jobs_state <workflow-runs-json> <ci-jobs-json>: print the state of a
+# repository's own CI runs at a commit judged against the required suite
+# roster, where the second argument is the jobs of those CI runs. This is the
+# workflow-runs answer to the same question the rollup shape answers, and the
+# only one of the two that can return a passing verdict a caller may act on.
+# Either payload being unreadable is refused rather than classified, so a
+# truncated reply can never arrive at passing.
+fm_ci_run_jobs_state() {
+  local runs=$1 jobs=$2 state
+  state=$(jq -rn --argjson runs "$runs" --argjson jobs "$jobs" \
+    "$FM_CI_CHECKS_JQ_DEFS"'
+    if ($runs | type) == "array" and ($jobs | type) == "array"
+    then {runs: $runs, jobs: $jobs} | fm_ci_run_jobs_state
+    else error("payload is not an array") end' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  printf '%s\n' "$state"
 }
 
 fm_ci_classify() {

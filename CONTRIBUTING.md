@@ -39,7 +39,9 @@ These are two separate things, and treating them as one is what leaves a branch 
 
 Every branch pushed to your fork runs the full suite there, because [`.github/workflows/ci.yml`](.github/workflows/ci.yml) triggers on a push to any branch.
 Step 7 above already pushes your branch to your fork, so that run happens on its own and needs nobody's approval.
-Read it with `gh run list -R <you>/firstmate`, and treat its conclusion as the answer about your change.
+Read it with `gh run list -R <you>/firstmate`, but do not stop at the run's conclusion.
+A run concludes `success` whenever no job in it failed, and a job that never ran because it was skipped does not fail, so a run that lost most of its jobs still reports success.
+The answer about your change is the suite roster inside that run, which `bin/fm-pr-ci-verify.sh` below reads for you.
 
 The pull request this repo receives is a separate question, and it is about whether the change gets taken, not whether it works.
 GitHub holds a first-time fork contributor's workflow runs on that pull request until a maintainer approves them, so it can sit with no repository check on it for as long as that takes.

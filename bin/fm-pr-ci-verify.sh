@@ -16,6 +16,10 @@
 #      no upstream suite at all. The fork ran them on the branch push, and that
 #      run is real validation of the same commit. Accepting it is what makes an
 #      upstream approval a contribution question rather than a validation one.
+#      That acceptance is granted on the run's JOBS, never on the run's own
+#      conclusion: a run concludes success whenever nothing in it failed, which
+#      a run whose jobs were skipped or never expanded also does, so only the
+#      required suite roster appearing green among those jobs is evidence.
 #
 # A commit validated only in the fork is reported as exactly that, naming the
 # repository and run, so a green verdict always says where its evidence came
@@ -139,13 +143,48 @@ runs=$(gh api "repos/$head_repo/actions/runs?head_sha=$head_sha&per_page=100" \
   || unreadable "the workflow runs in $head_repo"
 [ -n "$runs" ] || unreadable "the workflow runs in $head_repo"
 
-fork_state=$(fm_ci_runs_state "$runs") || unreadable "the workflow runs in $head_repo"
+# The run's own conclusion cannot answer whether the required suites ran, so
+# the jobs of every CI run at this commit are read and judged against the same
+# roster the rollup shape uses. bin/fm-ci-checks-lib.sh owns why a successful
+# run is not that evidence.
+ci_run_ids=$(printf '%s' "$runs" | jq -r "$FM_CI_CHECKS_JQ_DEFS"'
+  .[] | select(fm_ci_run_from_ci_workflow) | (.id // empty) | tostring' 2>/dev/null) \
+  || unreadable "the workflow runs in $head_repo"
+
+ci_jobs='[]'
+for run_id in $ci_run_ids; do
+  # A run with more jobs than one page would truncate the roster, which can
+  # only ever lose a required suite and so can only refuse, never pass.
+  run_jobs=$(gh api "repos/$head_repo/actions/runs/$run_id/jobs?per_page=100" \
+    --jq '[.jobs[] | {name, status, conclusion}]' 2>/dev/null) \
+    || unreadable "the jobs of run $run_id in $head_repo"
+  [ -n "$run_jobs" ] || unreadable "the jobs of run $run_id in $head_repo"
+  ci_jobs=$(jq -cn --argjson a "$ci_jobs" --argjson b "$run_jobs" '$a + $b' 2>/dev/null) \
+    || unreadable "the jobs of run $run_id in $head_repo"
+done
+
+fork_state=$(fm_ci_run_jobs_state "$runs" "$ci_jobs") \
+  || unreadable "the workflow runs in $head_repo"
 fork_roster=$(printf '%s' "$runs" | jq -r '
   .[] | "  run " + ((.id // "-") | tostring) + " " + ((.conclusion // .status) | tostring)
     + "\t" + ((.name // "-") | tostring) + " (" + ((.event // "-") | tostring) + ")"' 2>/dev/null) \
   || fork_roster=''
 [ -z "$fork_roster" ] || printf '%s\n' "$fork_roster"
+# The jobs are printed for every outcome, the passing one included, so a green
+# verdict carries the suite names it was granted on rather than only a state.
+job_roster=$(printf '%s' "$ci_jobs" | jq -r '
+  .[] | "  job " + ((.conclusion // .status // "pending") | tostring)
+    + "\t" + ((.name // "-") | tostring)' 2>/dev/null) || job_roster=''
+[ -z "$job_roster" ] || printf '%s\n' "$job_roster"
 printf '%s runs: %s\n' "$head_repo" "$fork_state"
+
+if [ "$fork_state" = incomplete ]; then
+  fork_missing=$(printf '%s' "$ci_jobs" | jq -r "$FM_CI_CHECKS_JQ_DEFS"'
+    fm_ci_jobs_missing_suites | .[]' 2>/dev/null) || fork_missing=''
+  if [ -n "$fork_missing" ]; then
+    printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$fork_missing" | sed 's/^/  /')"
+  fi
+fi
 
 case "$fork_state" in
   passing)
@@ -161,6 +200,15 @@ case "$fork_state" in
       printf 'error: refusing to call %s green: no suite ran on this commit in either %s or %s.\n' \
         "$URL" "$BASE_REPO" "$head_repo"
       printf 'Push the branch to %s and let its own run validate the commit.\n' "$head_repo"
+    } >&2
+    exit 1
+    ;;
+  incomplete)
+    {
+      printf 'error: refusing to call %s green: the %s CI run does not cover the required suite roster (see above).\n' \
+        "$URL" "$head_repo"
+      echo "A workflow run concludes success when no job failed, which a run whose jobs"
+      echo "were skipped or never expanded also does, so that is not evidence the suites ran."
     } >&2
     exit 1
     ;;
