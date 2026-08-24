@@ -149,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fleet/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -271,6 +275,10 @@
     {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/fleet-board.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",

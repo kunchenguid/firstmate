@@ -218,7 +218,8 @@ family_for_basename() {
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
+    fm-bearings-snapshot.test.sh|fm-fleet-board.test.sh|fm-fleet-snapshot-view.test.sh|\
+    fm-task-risk.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -1015,6 +1016,7 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
+    bin/fleet-board/*|bin/fm-fleet-board.sh|bin/fm-task-risk.sh|\
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;

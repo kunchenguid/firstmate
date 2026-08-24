@@ -1,0 +1,72 @@
+# Fleet board
+
+The fleet board is Firstmate's always-on local browser application for seeing every current task as a Kanban card.
+It keeps task status scannable without creating a second project-management system.
+
+Run `/fleet` from the Firstmate conversation to start or reopen it.
+From a shell, run `bin/fm-fleet-board.sh open` for the same result.
+The application keeps running independently of the page until `bin/fm-fleet-board.sh stop` is called.
+
+## What the board shows
+
+The primary view has six status lanes.
+
+1. **Backlog** contains queued work that is ready to start.
+2. **In Progress** contains work an agent is actively executing.
+3. **Verification** contains work whose current activity is tests, review, or another recorded validation step.
+4. **Needs You** contains a current decision or blocker that requires the captain.
+5. **Waiting** contains blocked, held, paused, failed, unavailable, or otherwise non-progressing work.
+6. **Done** contains the recent completion baseline retained by the canonical backlog and registered secondmate summaries.
+
+Cards do not support drag and drop.
+A card's lane is a direct projection of current Firstmate state, so manual movement would make the interface less truthful.
+The browser refreshes automatically and exposes a manual Refresh control when an immediate read is useful.
+
+Each card shows the task title, home, risk, current status, concise context, and evidence count.
+Opening a card reveals the risk rationale, repository, work type, status source, full projected context, and linked pull request or report evidence.
+Search and home or risk filters narrow the view without mutating it.
+
+## Captain actions
+
+Needs You cards expose **Answer Firstmate**.
+Every open structured card exposes **Request more details**.
+
+Both actions create a durable instruction in Firstmate's existing inbox and wake the normal Firstmate session.
+The server does not release a hold, close a task, steer a worker, or change a lane directly.
+The card remains in its canonical lane with a sent confirmation until Firstmate processes the instruction and the next snapshot observes the resulting state.
+
+This routing is deliberate because Firstmate already owns task authority, remote secondmate routing, decision release, and lifecycle safety.
+
+## Risk
+
+Risk is not inferred from priority, title, repository, or presentation text.
+Firstmate records an explicit low, medium, or high assessment with a short rationale when it files or materially rescopes a task.
+The assessment considers blast radius, reversibility, uncertainty, and security, privacy, data, payment, production, compliance, or external-user impact.
+Homes using the configured manual backlog backend preserve the same owned record during their normal manual task-body edit.
+
+Legacy or not-yet-assessed tasks appear as **Unassessed**.
+An invalid risk record also stays unknown rather than being guessed.
+`bin/fm-task-risk.sh` owns the exact assessment record and update mechanics.
+
+## Availability and safety
+
+The application binds only to `127.0.0.1` and is not a remote collaboration server.
+It serves bundled assets without third-party scripts, fonts, analytics, or network dependencies.
+State-changing HTTP requests require a per-process action token and a matching loopback origin.
+Repeated action request ids are deduplicated before reaching the Firstmate inbox.
+
+The board keeps a short in-memory snapshot cache so multiple browser requests do not fan out into duplicate fleet reads.
+If a refresh fails after a successful read, it keeps the last good board visible and marks it stale with the failure reason.
+Registered-home bounds and omissions remain visible as warnings rather than silently hiding work.
+
+Runtime identity and logs live under `state/fleet-board` in the selected Firstmate home.
+The stop command signals a process only after its health endpoint proves the recorded instance identity.
+
+## Operator commands
+
+Run `bin/fm-fleet-board.sh status` to verify the application and print its URL.
+Run `bin/fm-fleet-board.sh url` when only the verified URL is needed.
+Run `bin/fm-fleet-board.sh stop` to stop the verified application.
+Run `bin/fm-fleet-board.sh serve` only when a foreground process is required by a supervisor or a test.
+
+`bin/fm-fleet-board.sh --help` owns the exact command and environment contract.

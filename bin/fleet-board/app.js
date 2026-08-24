@@ -1,0 +1,390 @@
+"use strict";
+
+const state = {
+  board: null,
+  csrf: "",
+  selectedKey: null,
+  pending: new Map(),
+  loading: false,
+};
+
+const elements = {
+  board: document.querySelector("#board"),
+  empty: document.querySelector("#empty-state"),
+  search: document.querySelector("#search"),
+  homeFilter: document.querySelector("#home-filter"),
+  riskFilter: document.querySelector("#risk-filter"),
+  refresh: document.querySelector("#refresh"),
+  freshnessDot: document.querySelector("#freshness-dot"),
+  freshnessLabel: document.querySelector("#freshness-label"),
+  warnings: document.querySelector("#warnings"),
+  needsYouCount: document.querySelector("#needs-you-count"),
+  openCount: document.querySelector("#open-count"),
+  riskCount: document.querySelector("#risk-count"),
+  needsYouSignal: document.querySelector("#needs-you-signal"),
+  dialog: document.querySelector("#task-dialog"),
+  dialogTitle: document.querySelector("#dialog-title"),
+  dialogHome: document.querySelector("#dialog-home"),
+  dialogBody: document.querySelector("#dialog-body"),
+  dialogActions: document.querySelector("#dialog-actions"),
+  dialogClose: document.querySelector("#dialog-close"),
+  laneTemplate: document.querySelector("#lane-template"),
+  cardTemplate: document.querySelector("#card-template"),
+};
+
+function node(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined && text !== null) element.textContent = text;
+  return element;
+}
+
+function riskLabel(risk) {
+  return risk.level === "unknown" ? "Unassessed" : `${risk.level} risk`;
+}
+
+function relativeTime(value) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "just now";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
+}
+
+function visibleCards() {
+  if (!state.board) return [];
+  const query = elements.search.value.trim().toLocaleLowerCase();
+  const home = elements.homeFilter.value;
+  const risk = elements.riskFilter.value;
+  return state.board.cards.filter((card) => {
+    if (home !== "all" && card.home.id !== home) return false;
+    if (risk !== "all" && card.risk.level !== risk) return false;
+    if (!query) return true;
+    const haystack = [
+      card.title,
+      card.id,
+      card.repo,
+      card.kind,
+      card.context,
+      card.status.label,
+      card.status.detail,
+      card.status.wait_reason,
+      card.home.label,
+      card.risk.rationale,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function updateHomeFilter() {
+  const selected = elements.homeFilter.value;
+  const fragment = document.createDocumentFragment();
+  const all = node("option", "", "All homes");
+  all.value = "all";
+  fragment.append(all);
+  for (const home of state.board.homes) {
+    const option = node("option", "", `${home.label}${home.remote ? " · remote" : ""}`);
+    option.value = home.id;
+    fragment.append(option);
+  }
+  elements.homeFilter.replaceChildren(fragment);
+  elements.homeFilter.value = [...elements.homeFilter.options].some((option) => option.value === selected)
+    ? selected
+    : "all";
+}
+
+function cardNode(card) {
+  const fragment = elements.cardTemplate.content.cloneNode(true);
+  const article = fragment.querySelector(".task-card");
+  const open = fragment.querySelector(".card-open");
+  const risk = fragment.querySelector(".risk-badge");
+  const home = fragment.querySelector(".home-badge");
+  const pending = state.pending.get(card.key);
+  article.dataset.key = card.key;
+  risk.dataset.risk = card.risk.level;
+  risk.textContent = riskLabel(card.risk);
+  home.textContent = card.home.label;
+  fragment.querySelector(".card-title").textContent = card.title;
+  fragment.querySelector(".card-status").textContent = pending
+    ? "Sent to Firstmate"
+    : card.status.wait_reason || card.status.label;
+  fragment.querySelector(".card-context").textContent = card.context || "";
+  fragment.querySelector(".card-evidence").textContent = card.evidence.length
+    ? `${card.evidence.length} evidence ${card.evidence.length === 1 ? "item" : "items"}`
+    : "No linked evidence yet";
+  fragment.querySelector(".card-id").textContent = card.id || "Unstructured record";
+  open.setAttribute("aria-label", `Open details for ${card.title}`);
+  open.addEventListener("click", () => openCard(card.key));
+  return fragment;
+}
+
+function renderBoard() {
+  if (!state.board) return;
+  const cards = visibleCards();
+  const fragment = document.createDocumentFragment();
+  for (const lane of state.board.lanes) {
+    const laneFragment = elements.laneTemplate.content.cloneNode(true);
+    const section = laneFragment.querySelector(".lane");
+    const laneCards = laneFragment.querySelector(".lane-cards");
+    const matches = cards.filter((card) => card.lane === lane.id);
+    section.dataset.lane = lane.id;
+    section.setAttribute("aria-label", `${lane.label}, ${matches.length} tasks`);
+    laneFragment.querySelector(".lane-title").textContent = lane.label;
+    laneFragment.querySelector(".lane-description").textContent = lane.description;
+    laneFragment.querySelector(".lane-count").textContent = String(matches.length);
+    if (!matches.length) {
+      laneCards.append(node("p", "lane-empty", "No tasks in this lane"));
+    } else {
+      for (const card of matches) laneCards.append(cardNode(card));
+    }
+    fragment.append(laneFragment);
+  }
+  elements.board.replaceChildren(fragment);
+  elements.empty.hidden = cards.length > 0;
+}
+
+function renderWarnings() {
+  const messages = [...state.board.warnings];
+  if (state.board.health?.stale && state.board.health.error) {
+    messages.unshift(`Showing the last good snapshot: ${state.board.health.error}`);
+  }
+  elements.warnings.hidden = messages.length === 0;
+  elements.warnings.replaceChildren(...messages.map((message) => node("p", "", message)));
+}
+
+function renderSummary() {
+  const summary = state.board.summary;
+  elements.needsYouCount.textContent = String(summary.needs_you);
+  elements.openCount.textContent = String(summary.open);
+  elements.riskCount.textContent = String(summary.high_risk_open);
+  elements.needsYouSignal.dataset.active = String(summary.needs_you > 0);
+}
+
+function detailCell(label, value) {
+  const cell = node("div", "detail-cell");
+  cell.append(node("span", "detail-label", label));
+  cell.append(node("p", "detail-value", value || "Not recorded"));
+  return cell;
+}
+
+function evidenceSection(card) {
+  const section = node("section", "detail-section");
+  section.append(node("span", "detail-label", "Evidence"));
+  if (!card.evidence.length) {
+    section.append(node("p", "detail-value", "No evidence has been linked yet."));
+    return section;
+  }
+  const list = node("ul", "evidence-list");
+  for (const item of card.evidence) {
+    const row = node("li");
+    row.append(node("span", "", item.label));
+    if (item.url && /^https?:\/\//.test(item.url)) {
+      const link = node("a", "", item.value);
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      row.append(link);
+    } else {
+      row.append(node("code", "", item.value));
+    }
+    list.append(row);
+  }
+  section.append(list);
+  return section;
+}
+
+function openCard(key) {
+  const card = state.board.cards.find((item) => item.key === key);
+  if (!card) return;
+  state.selectedKey = key;
+  elements.dialogHome.textContent = `${card.home.label} · ${card.lane.replaceAll("_", " ")}`;
+  elements.dialogTitle.textContent = card.title;
+
+  const lead = node("section", "detail-lead");
+  lead.dataset.captain = String(card.status.waiting_for_captain);
+  lead.append(node("strong", "", state.pending.has(card.key) ? "Instruction sent to Firstmate" : card.status.label));
+  lead.append(
+    node(
+      "p",
+      "",
+      state.pending.has(card.key)
+        ? "The card stays in its canonical lane until Firstmate processes the instruction."
+        : card.status.wait_reason || card.status.detail || "No further status detail is recorded."
+    )
+  );
+  const grid = node("div", "detail-grid");
+  grid.append(detailCell("Risk", riskLabel(card.risk)));
+  grid.append(detailCell("Risk rationale", card.risk.rationale || "Firstmate has not assessed this task yet."));
+  grid.append(detailCell("Repository", card.repo));
+  grid.append(detailCell("Work type", card.kind));
+  grid.append(detailCell("Task", card.id));
+  grid.append(detailCell("Status source", card.status.source));
+
+  const context = node("section", "detail-section");
+  context.append(node("span", "detail-label", "Context"));
+  context.append(node("p", "detail-value", card.context || "No additional task context is recorded."));
+
+  elements.dialogBody.replaceChildren(lead, grid, context, evidenceSection(card));
+  renderDialogActions(card);
+  if (!elements.dialog.open) elements.dialog.showModal();
+}
+
+function renderDialogActions(card) {
+  elements.dialogActions.hidden = false;
+  elements.dialogActions.replaceChildren();
+  if (!card.actions.request_details && !card.actions.answer) return;
+  const pending = state.pending.has(card.key);
+  if (card.actions.request_details) {
+    const details = node("button", "action-button secondary", "Request more details");
+    details.type = "button";
+    details.disabled = pending;
+    details.addEventListener("click", () => showComposer(card, "request_details"));
+    elements.dialogActions.append(details);
+  }
+  if (card.actions.answer) {
+    const answer = node("button", "action-button captain", "Answer Firstmate");
+    answer.type = "button";
+    answer.disabled = pending;
+    answer.addEventListener("click", () => showComposer(card, "answer"));
+    elements.dialogActions.append(answer);
+  }
+}
+
+function showComposer(card, action) {
+  document.querySelector(".action-composer")?.remove();
+  elements.dialogActions.hidden = true;
+  const composer = node("form", "action-composer");
+  const id = `action-${crypto.randomUUID()}`;
+  const label = node("label", "", action === "answer" ? "Your answer" : "What should Firstmate clarify?");
+  label.htmlFor = id;
+  const textarea = node("textarea");
+  textarea.id = id;
+  textarea.name = "text";
+  textarea.maxLength = 8000;
+  textarea.required = true;
+  textarea.placeholder = action === "answer"
+    ? "Give Firstmate the decision and any constraints that matter."
+    : "Please summarize the current status, remaining risk, evidence, and the exact decision you need from me.";
+  if (action === "request_details") textarea.value = textarea.placeholder;
+  const footer = node("div", "composer-footer");
+  footer.append(node("p", "composer-note", "This queues a durable instruction. The status changes only after Firstmate handles it."));
+  const submit = node("button", `action-button ${action === "answer" ? "captain" : ""}`, action === "answer" ? "Send answer" : "Send request");
+  submit.type = "submit";
+  footer.append(submit);
+  composer.append(label, textarea, footer);
+  composer.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    submit.textContent = "Sending…";
+    try {
+      await sendAction(card, action, textarea.value);
+      state.pending.set(card.key, { action, at: Date.now() });
+      showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
+      renderBoard();
+      openCard(card.key);
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = action === "answer" ? "Send answer" : "Send request";
+      showToast(error.message || "The action could not be sent.", "error");
+    }
+  });
+  elements.dialogBody.append(composer);
+  textarea.focus();
+}
+
+async function sendAction(card, action, text) {
+  const requestId = crypto.randomUUID();
+  const response = await fetch("/api/v1/actions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Firstmate-CSRF": state.csrf,
+    },
+    body: JSON.stringify({
+      action,
+      task_id: card.id,
+      home_id: card.home.id,
+      text,
+      request_id: requestId,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `Firstmate returned ${response.status}`);
+  return payload;
+}
+
+function showToast(message, kind = "success") {
+  document.querySelector(".toast")?.remove();
+  const toast = node("div", "toast", message);
+  toast.dataset.kind = kind;
+  toast.setAttribute("role", kind === "error" ? "alert" : "status");
+  document.body.append(toast);
+  window.setTimeout(() => toast.remove(), 4500);
+}
+
+function setFreshness(status, label) {
+  elements.freshnessDot.dataset.state = status;
+  elements.freshnessLabel.textContent = label;
+}
+
+async function loadBoard(force = false) {
+  if (state.loading) return;
+  state.loading = true;
+  elements.refresh.disabled = true;
+  setFreshness("loading", "Reading the fleet…");
+  try {
+    const response = await fetch(`/api/v1/board${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Firstmate returned ${response.status}`);
+    state.board = payload;
+    state.csrf = payload.actions.csrf_token;
+    for (const [key, pending] of state.pending) {
+      const card = payload.cards.find((item) => item.key === key);
+      if (!card || Date.now() - pending.at > 300000) state.pending.delete(key);
+    }
+    updateHomeFilter();
+    renderSummary();
+    renderWarnings();
+    renderBoard();
+    if (state.selectedKey && elements.dialog.open && !document.querySelector(".action-composer")) {
+      openCard(state.selectedKey);
+    }
+    if (payload.health.stale) {
+      setFreshness("stale", `Last good snapshot ${relativeTime(payload.generated)}`);
+    } else {
+      setFreshness("fresh", `Updated ${relativeTime(payload.generated)}`);
+    }
+  } catch (error) {
+    setFreshness("error", error.message || "Fleet unavailable");
+    showToast(error.message || "The fleet could not be loaded.", "error");
+  } finally {
+    state.loading = false;
+    elements.refresh.disabled = false;
+  }
+}
+
+elements.search.addEventListener("input", renderBoard);
+elements.homeFilter.addEventListener("change", renderBoard);
+elements.riskFilter.addEventListener("change", renderBoard);
+elements.refresh.addEventListener("click", () => loadBoard(true));
+elements.dialogClose.addEventListener("click", () => elements.dialog.close());
+elements.dialog.addEventListener("close", () => {
+  state.selectedKey = null;
+});
+elements.dialog.addEventListener("click", (event) => {
+  if (event.target === elements.dialog) elements.dialog.close();
+});
+elements.needsYouSignal.addEventListener("click", () => {
+  document.querySelector('[data-lane="needs_you"]')?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+});
+
+loadBoard();
+window.setInterval(() => {
+  if (!document.hidden) loadBoard();
+}, 10000);

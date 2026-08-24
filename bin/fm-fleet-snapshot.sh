@@ -21,6 +21,9 @@
 #     unresolved_blocker_ids, captain_actionable, and deferred_marker fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done, and missing ids stay open.
+#     risk is the explicit low, medium, high, or unknown assessment recorded by
+#     bin/fm-task-risk.sh in the task body; malformed records stay unknown and
+#     expose source=invalid rather than being guessed from priority or prose.
 #     captain_actionable means "waiting on the captain now": queued, held for
 #     the captain, unblocked, and due (no hold_until, or hold_until at or
 #     before the observation date, matching tasks-axi's own date-gate rule).
@@ -339,6 +342,24 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def structured_row($line):
       ($line | test("^[-*][[:space:]]+\\[[ xX]\\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+"))
       or ($line | test("^[-*][[:space:]]+\\*\\*[^*]+\\*\\*[[:space:]]+-[[:space:]]+"));
+    def task_risk:
+      .body_lines as $lines
+      | ([range(0; ($lines | length)) as $i
+          | select($lines[$i] == "Risk assessment recorded by fm-task-risk.")
+          | $i][0] // null) as $i
+      | if $i == null then
+          {level:"unknown",rationale:null,source:"absent"}
+        else
+          ($lines[$i + 1] // "") as $level_line
+          | ($lines[$i + 2] // "") as $rationale_line
+          | (($level_line | capture("^Risk level: (?<v>low|medium|high)$")? | .v) // null) as $level
+          | (($rationale_line | capture("^Risk rationale: (?<v>.+)$")? | .v) // null) as $rationale
+          | if $level == null or $rationale == null then
+              {level:"unknown",rationale:null,source:"invalid"}
+            else
+              {level:$level,rationale:$rationale,source:"task-body"}
+            end
+        end;
     def parse_row($line; $section; $order):
       row_match($line) as $m
       | if $m == null then
@@ -394,6 +415,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         if (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
+    | .records |= map(if .structured then .risk = task_risk else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
@@ -685,6 +707,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
+            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
             hold_until:(.hold_until // null),
             deferred_marker:(.deferred_marker // false),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
@@ -729,6 +752,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
+            title:(($work.title // .id) | trunc(120)),
+            repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+            context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
+            risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
+            pr_url:(($work.pr_url // .pr.url // null) | if . == null then null else trunc(500) end),
+            report_path:(($work.report_path // .paths.report.path // null) | if . == null then null else trunc(500) end),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
@@ -736,6 +765,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
+            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
+            context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
@@ -745,6 +776,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
+              risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
+              context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
@@ -786,6 +819,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           deferred_marker:(.deferred_marker // false),
           captain_actionable:(.captain_actionable // false),
+          risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
+          context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
+          pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
+          report_path:((.report_path // null) | if . == null then null else trunc(500) end),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
