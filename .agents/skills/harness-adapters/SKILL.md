@@ -53,6 +53,7 @@ Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-si
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
 When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+Also observe, in a real child of a real session of that harness, whether it exports a launch marker naming its own session pid: `FM_SESSION_LAUNCH_MARKERS` in `bin/fm-session-lock-lib.sh` has a verified row for Claude alone, and every other harness decides session-lock ownership by process ancestry until a row is verified for it, which [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md#session-lock-identity-and-the-suspended-holder) owns.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
