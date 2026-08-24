@@ -756,7 +756,7 @@ worker_supervise_linux() {
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
-  WORKER_LOCK="$FM_REMOTE_JOB_STATE/supervisor.lock"
+  WORKER_LOCK=$(fm_remote_job_supervisor_lock_path)
   trap worker_supervisor_cleanup EXIT
   worker_acquire_lock "$account_home"
   lock_status=$?

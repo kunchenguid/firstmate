@@ -23,6 +23,8 @@ SUPERVISOR_PID=
 SUPERVISOR_CHILD_PID=
 SUPERVISOR_SLEEP_PID=
 RESTART_SUPERVISOR_PID=
+RACE_INCUMBENT_PID=
+RACE_SUPERVISOR_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -35,6 +37,8 @@ cleanup_remote_job_fixture() {
   [ -z "$SUPERVISOR_CHILD_PID" ] || kill -KILL "$SUPERVISOR_CHILD_PID" 2>/dev/null || true
   [ -z "$SUPERVISOR_SLEEP_PID" ] || kill -KILL "$SUPERVISOR_SLEEP_PID" 2>/dev/null || true
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
+  [ -z "$RACE_INCUMBENT_PID" ] || kill -KILL "$RACE_INCUMBENT_PID" 2>/dev/null || true
+  [ -z "$RACE_SUPERVISOR_PID" ] || fm_remote_job_stop_worker_tree "$RACE_SUPERVISOR_PID" || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -730,10 +734,11 @@ cat > "$SUPERVISOR_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
 #!/bin/bash
 set -u
 [ "${1:-}" = --serve ] || exit 2
+term_delay=${FM_TEST_SUPERVISOR_CHILD_TERM_DELAY:-0}
 printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
 sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS" &
 sleep_pid=$!
-trap 'kill "$sleep_pid" 2>/dev/null || true; wait "$sleep_pid" 2>/dev/null || true; exit 143' HUP INT TERM
+trap 'kill "$sleep_pid" 2>/dev/null || true; wait "$sleep_pid" 2>/dev/null || true; sleep "$term_delay"; exit 143' HUP INT TERM
 wait "$sleep_pid" 2>/dev/null || true
 trap - HUP INT TERM
 exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
@@ -850,5 +855,57 @@ assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_RO
   "the restart guard did not explain why it stopped"
 assert_absent "$RESTART_STATE/supervisor.lock" "the exhausted restart guard retained supervisor ownership"
 pass "barely healthy worker failures remain bounded by the restart guard"
+
+# A supervisor singleton makes every replacement exit as a duplicate while an
+# incumbent still owns the account, so the start boundary has to release that
+# incumbent instead of spawning against it. The incumbent below owns the
+# account with no serving worker of its own - a supervisor between children -
+# and its own child takes a second to finish shutting down, so a start that
+# assumes ownership is free the moment it signals still races a live holder.
+# It is started detached so it is reparented away from this shell, the way a
+# supervisor outlives the fm-on invocation that launched it.
+RACE_HOME="$TMP_ROOT/race-account"
+RACE_STATE="$TMP_ROOT/race-state"
+RACE_CHILD_LOG="$TMP_ROOT/race-children"
+mkdir -p "$RACE_HOME"
+RACE_INCUMBENT_PID=$(HOME="$RACE_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$RACE_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_TEST_SUPERVISOR_CHILD_LOG="$RACE_CHILD_LOG" FM_TEST_SUPERVISOR_CHILD_SECONDS=300 \
+  FM_TEST_SUPERVISOR_CHILD_STATUS=1 FM_TEST_SUPERVISOR_CHILD_TERM_DELAY=1 \
+  bash -c 'nohup "$1" > "$2" 2> "$3" < /dev/null & printf "%s\n" "$!"' _ \
+    "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+    "$TMP_ROOT/race-incumbent.out" "$TMP_ROOT/race-incumbent.err")
+for _ in $(seq 1 300); do
+  [ -f "$RACE_STATE/supervisor.lock/pid" ] && [ -s "$RACE_CHILD_LOG" ] && break
+  sleep 0.05
+done
+[ "$(cat "$RACE_STATE/supervisor.lock/pid" 2>/dev/null || true)" = "$RACE_INCUMBENT_PID" ] \
+  || fail "the incumbent supervisor fixture did not take account ownership"
+assert_absent "$RACE_STATE/worker.ready" "the incumbent supervisor fixture published a serving worker"
+FM_REMOTE_JOB_STATE_ROOT="$RACE_STATE"
+fm_remote_job_start_linux_worker "$REMOTE_ROOT" "$RACE_HOME" \
+  || fail "${FM_REMOTE_JOB_ERROR:-a start against an incumbent supervisor failed}"
+[ "$FM_REMOTE_JOB_WORKER_START" = started ] \
+  || fail "a start against an incumbent supervisor reported '$FM_REMOTE_JOB_WORKER_START' instead of starting one"
+kill -0 "$RACE_INCUMBENT_PID" 2>/dev/null \
+  && fail "the replaced incumbent supervisor was left running beside its replacement"
+fm_remote_job_wait_for_probe "$REMOTE_ROOT" "$RACE_HOME" \
+  || fail "the account was left with no supervisor serving the requested code root"
+RACE_SUPERVISOR_PID=$(fm_remote_job_supervisor_owner "$RACE_HOME") \
+  || fail "no live supervisor owns the account after the replacement started"
+[ "$RACE_SUPERVISOR_PID" != "$RACE_INCUMBENT_PID" ] \
+  || fail "the incumbent supervisor was reported as its own replacement"
+RACE_INCUMBENT_PID=
+fm_remote_job_start_linux_worker "$REMOTE_ROOT" "$RACE_HOME" \
+  || fail "${FM_REMOTE_JOB_ERROR:-a start against a serving worker failed}"
+[ "$FM_REMOTE_JOB_WORKER_START" = serving ] \
+  || fail "a start against a genuinely serving worker reported '$FM_REMOTE_JOB_WORKER_START'"
+[ "$(fm_remote_job_supervisor_owner "$RACE_HOME")" = "$RACE_SUPERVISOR_PID" ] \
+  || fail "a genuinely serving account had its supervisor replaced anyway"
+fm_remote_job_stop_worker_tree "$RACE_SUPERVISOR_PID" || true
+wait "$RACE_SUPERVISOR_PID" 2>/dev/null || true
+RACE_SUPERVISOR_PID=
+FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
+pass "a start releases an incumbent supervisor instead of being refused as its duplicate"
 
 echo "ALL TESTS PASSED"
