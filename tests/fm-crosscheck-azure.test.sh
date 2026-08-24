@@ -236,7 +236,7 @@ ledger = {"findings": []}
 config = {
     "harness": "pi",
     "account_selector": "PI_CODING_AGENT_DIR",
-    "model": "accounts/fireworks/models/glm-5p2",
+    "model": "accounts/fireworks/routers/glm-5p2-fast",
 }
 verdict_schema = {
     "type": "object",
@@ -761,7 +761,7 @@ BASE=$1
 PROMPT=$BASE/prompt.txt
 RESULT=$BASE/reviewer-result.json
 ACCOUNT=$BASE/account
-MODEL=accounts/fireworks/models/glm-5p2
+MODEL=accounts/fireworks/routers/glm-5p2-fast
 EFFORT=xhigh
 PI_PROVIDER=fireworks-glm
 REVIEW_GENERATION=0123456789abcdef01234567
@@ -789,6 +789,7 @@ capture.mkdir(exist_ok=True)
 
 scenario = os.environ["FAKE_PI_SCENARIO"]
 valid = json.dumps({"verdict": {"summary": "clear"}, "evidence_files": {}})
+reported_model = "accounts/fireworks/routers/glm-5p2-fast"
 if scenario == "nonzero-first":
     sys.stderr.buffer.write(
         b"HOSTILE_FIRST_STDERR" + b"\n\r\t\x00\x1b" * 1500 + b"Z" * 5000
@@ -796,7 +797,9 @@ if scenario == "nonzero-first":
     raise SystemExit(17)
 if scenario == "terminal-error":
     message = {
-        "role": "assistant", "stopReason": "error", "content": [],
+        "role": "assistant", "provider": "fireworks-glm",
+        "model": "accounts/fireworks/routers/glm-5p2-fast",
+        "stopReason": "error", "content": [],
         "errorMessage": "provider failed before an artifact",
     }
     print(json.dumps({"type": "turn_end", "message": message}))
@@ -804,6 +807,9 @@ if scenario == "terminal-error":
     raise SystemExit(0)
 if scenario == "valid-first":
     artifact = valid
+elif scenario == "wrong-serving-route":
+    artifact = valid
+    reported_model = "accounts/fireworks/models/glm-5p2"
 elif scenario == "prose-valid":
     artifact = "Looking at this PR... UNIQUE_PRIOR_PROSE" if count == 1 else valid
 elif scenario == "missing-valid":
@@ -846,6 +852,8 @@ else:
 
 message = {
     "role": "assistant",
+    "provider": "fireworks-glm",
+    "model": reported_model,
     "stopReason": "stop",
     "content": [{"type": "text", "text": artifact}],
 }
@@ -917,7 +925,7 @@ def run_scenario(scenario):
 def assert_protocol(argvs, metas):
     expected = [
         "--mode", "json", "--provider", "fireworks-glm", "--model",
-        "accounts/fireworks/models/glm-5p2", "--thinking", "xhigh",
+        "accounts/fireworks/routers/glm-5p2-fast", "--thinking", "xhigh",
         "--no-tools", "--no-session", "--no-extensions", "--no-skills",
         "--no-prompt-templates", "--no-themes", "--no-context-files",
         "--no-approve",
@@ -936,6 +944,13 @@ completed, count, prompts, argvs, metas, value = run_scenario("valid-first")
 assert completed.returncode == 0, (completed.stdout, completed.stderr)
 assert count == 1 and prompts == [original_prompt], (count, prompts)
 assert value == valid_value, value
+assert_protocol(argvs, metas)
+
+completed, count, prompts, argvs, metas, value = run_scenario("wrong-serving-route")
+assert completed.returncode == 125, (completed.stdout, completed.stderr)
+assert count == 1 and value is None, (count, value)
+assert "reported model" in completed.stderr, completed.stderr
+assert "accounts/fireworks/models/glm-5p2" in completed.stderr, completed.stderr
 assert_protocol(argvs, metas)
 
 for scenario, forbidden in (
@@ -1023,10 +1038,21 @@ assert module.CROSS_FAMILY_LANES == core.CROSS_FAMILY_LANES, (
     module.CROSS_FAMILY_LANES,
     core.CROSS_FAMILY_LANES,
 )
-assert module.CROSS_FAMILY_LANES["fireworks-glm"]["model"] == (
-    "accounts/fireworks/models/glm-5p2"
+assert module.LEGACY_CROSS_FAMILY_MODELS == core.LEGACY_CROSS_FAMILY_MODELS, (
+    module.LEGACY_CROSS_FAMILY_MODELS,
+    core.LEGACY_CROSS_FAMILY_MODELS,
 )
+assert module.CROSS_FAMILY_LANES["fireworks-glm"]["model"] == (
+    "accounts/fireworks/routers/glm-5p2-fast"
+)
+assert module.cross_family_lane_for_model(
+    "accounts/fireworks/models/glm-5p2"
+) is None
+assert module.recorded_cross_family_lane_for_model(
+    "accounts/fireworks/models/glm-5p2"
+) is module.CROSS_FAMILY_LANES["fireworks-glm"]
 for lane in module.CROSS_FAMILY_LANES.values():
+    assert lane["model"].endswith("/routers/glm-5p2-fast"), lane
     # Per-lane consistency, NOT one hardcoded host. Asserting a single host for
     # every lane meant any genuinely new lane failed HERE first, so the
     # registration-completeness guard in the model-guest unit - the one this
@@ -1086,7 +1112,7 @@ identity = {
     "provider_host": "api.example.com",
     "provider_port": "443",
     "reviewer_harness": "pi",
-    "reviewer_model": "accounts/fireworks/models/glm-5p2",
+    "reviewer_model": "accounts/fireworks/routers/glm-5p2-fast",
     "reviewer_effort": "xhigh",
     "reviewer_account_digest": "sha256:" + "2" * 64,
     "ledger_digest": "sha256:" + "f" * 64,
@@ -1105,7 +1131,7 @@ identity.update({
 reviewer = {
     "execution_mode": "azure-compartment-v1",
     "harness": "pi",
-    "model": "accounts/fireworks/models/glm-5p2",
+    "model": "accounts/fireworks/routers/glm-5p2-fast",
     "effort": "xhigh",
     "reviewer_account_identity_sha256": "2" * 64,
     "azure_identity": identity,
