@@ -40,14 +40,19 @@ cursor_state() {
   cat "${FM_FAKE_CURSOR_STATE:-}" 2>/dev/null || true
 }
 cursor_screen() {
-  local state brief
+  local state
   state=$(cursor_state)
-  brief=${FM_FAKE_BRIEF_REAL:-/tmp/brief.md}
   case "$state" in
-    delivered)
-      printf 'Read the brief at %s and follow it exactly.\n\n  → Add a follow-up\n\n  Composer 2.5 · 5.0%%                                          Run Everything\n' "$brief"
+    trust)
+      printf 'Workspace Trust Required\n\n[a] Trust this workspace\n'
       ;;
-    ready|brief-typed)
+    doorbell-typed)
+      printf '  → Firstmate instruction waiting: list /tmp/inbox/*.msg\n\n  Composer 2.5                                          Run Everything\n'
+      ;;
+    delivered)
+      printf '  → Add a follow-up\n\n  Composer 2.5                                          Run Everything\n'
+      ;;
+    ready)
       printf '  → Plan, search, build anything\n\n  Composer 2.5                                          Run Everything\n'
       ;;
     *)
@@ -76,10 +81,10 @@ case "${1:-}" in
           if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
             printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           fi
-          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'launched\n' > "$FM_FAKE_CURSOR_STATE"
+          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'launch-typed\n' > "$FM_FAKE_CURSOR_STATE"
           ;;
-        *'Read the brief at'*)
-          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'brief-typed\n' > "$FM_FAKE_CURSOR_STATE"
+        'Firstmate instruction waiting:'*)
+          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'doorbell-typed\n' > "$FM_FAKE_CURSOR_STATE"
           ;;
         *)
           if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -92,8 +97,9 @@ case "${1:-}" in
     case " $* " in
       *' Enter '*)
         case "$(cursor_state)" in
-          launched) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'ready\n' > "$FM_FAKE_CURSOR_STATE" ;;
-          brief-typed) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'delivered\n' > "$FM_FAKE_CURSOR_STATE" ;;
+          launch-typed) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'trust\n' > "$FM_FAKE_CURSOR_STATE" ;;
+          trust) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'ready\n' > "$FM_FAKE_CURSOR_STATE" ;;
+          doorbell-typed) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'delivered\n' > "$FM_FAKE_CURSOR_STATE" ;;
         esac
         ;;
     esac
@@ -117,6 +123,11 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+  if [ -n "${FM_FAKE_CURSOR_REQUIRED_API_KEY:-}" ] \
+    && [ "${CURSOR_API_KEY:-}" != "$FM_FAKE_CURSOR_REQUIRED_API_KEY" ]; then
+    printf '%s\n' 'Available models' 'parent-account-model - Parent Account Model'
+    exit 0
+  fi
   printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
 fi
 exit 0
@@ -177,8 +188,9 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_CURSOR_REQUIRED_API_KEY="${FM_TEST_CURSOR_REQUIRED_API_KEY:-}" \
     FM_FAKE_CURSOR_STATE="$home/state/.fake-cursor-state" \
-    FM_CURSOR_LAUNCH_POLLS=4 FM_CURSOR_DELIVERY_POLLS=4 FM_CURSOR_POLL_INTERVAL=0 \
+    FM_CURSOR_LAUNCH_POLLS=4 FM_CURSOR_POLL_INTERVAL=0 \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -573,15 +585,16 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
-  local rec id out status launch auth_env
+  local rec id out status launch auth_env brief_real inbox_record inbox_body
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
   auth_env="$HOME_DIR/config/crew-router/env"
   mkdir -p "$(dirname -- "$auth_env")"
-  printf 'export CURSOR_API_KEY=dummy\n' > "$auth_env"
+  printf 'CURSOR_API_KEY=crew-router-key\n' > "$auth_env"
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
 
-  out=$(FM_CURSOR_AUTH_ENV="$auth_env" FM_FAKE_BRIEF_REAL="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md" \
+  out=$(FM_CURSOR_AUTH_ENV="$auth_env" FM_TEST_CURSOR_REQUIRED_API_KEY=crew-router-key \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model cursor-grok-4.5-high --effort high)
   status=$?
@@ -624,6 +637,13 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
+  inbox_record="$HOME_DIR/state/$id.inbox/001.msg"
+  [ -f "$inbox_record" ] || fail "cursor spawn did not durably enqueue its brief pointer through fm-send"
+  inbox_body=$(sed '1,/^--$/d' "$inbox_record")
+  [ "$inbox_body" = "Read the brief at $brief_real and follow it exactly." ] \
+    || fail "cursor brief inbox body was '$inbox_body'"
+  [ "$(cat "$HOME_DIR/state/.fake-cursor-state")" = delivered ] \
+    || fail "cursor spawn did not pass through trust acceptance before ringing the brief inbox"
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 

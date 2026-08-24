@@ -1276,8 +1276,19 @@ case "$HARNESS" in
         exit 1
       fi
     fi
+    cursor_list_models_for_spawn() {
+      if [ "$KIND" = secondmate ]; then
+        fm_cursor_list_models "$CURSOR_BIN"
+        return
+      fi
+      (
+        . "$CURSOR_AUTH_ENV" || exit 1
+        export CURSOR_API_KEY
+        fm_cursor_list_models "$CURSOR_BIN"
+      )
+    }
     if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
-      if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
+      if CURSOR_MODELS=$(cursor_list_models_for_spawn); then
         if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
           echo "error: Cursor model '$MODEL' is not available from '$CURSOR_BIN --list-models'; choose an id listed by that command or omit --model" >&2
           exit 1
@@ -2260,29 +2271,6 @@ cursor_wait_for_launch_ready() {
   return 1
 }
 
-cursor_delivery_is_confirmed() {  # <plain-pane-capture>
-  local pane=$1
-  if printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; then
-    return 0
-  fi
-  cursor_composer_is_empty || return 1
-  if printf '%s\n' "$pane" | grep -qiE '·[[:space:]]*[0-9]+\.[0-9]+%|[[:space:]][0-9]+\.[0-9]+%'; then
-    return 0
-  fi
-  return 1
-}
-
-cursor_wait_for_delivery() {
-  local pane i=0 max=${FM_CURSOR_DELIVERY_POLLS:-40} interval=${FM_CURSOR_POLL_INTERVAL:-0.5}
-  while [ "$i" -lt "$max" ]; do
-    pane=$(cursor_capture)
-    cursor_delivery_is_confirmed "$pane" && return 0
-    i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "$interval"
-  done
-  return 1
-}
-
 cursor_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
@@ -2946,21 +2934,9 @@ if [ "$HARNESS" = cursor ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   CURSOR_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  CURSOR_SUBMIT_RETRIES=${FM_CURSOR_SUBMIT_RETRIES:-3}
-  CURSOR_SUBMIT_SLEEP=${FM_CURSOR_SUBMIT_SLEEP:-${FM_CURSOR_POLL_INTERVAL:-0.5}}
-  CURSOR_SUBMIT_SETTLE=${FM_CURSOR_SUBMIT_SETTLE:-0}
-  CURSOR_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-    "$BACKEND" "$T" "$CURSOR_POINTER" "$CURSOR_SUBMIT_RETRIES" \
-    "$CURSOR_SUBMIT_SLEEP" "$CURSOR_SUBMIT_SETTLE" "$W") || {
-    cursor_spawn_fail "cursor brief pointer could not be submitted"
-    exit 1
-  }
-  if [ "$CURSOR_SUBMIT_VERDICT" = send-failed ]; then
-    cursor_spawn_fail "cursor brief pointer could not be submitted"
-    exit 1
-  fi
-  if ! cursor_wait_for_delivery; then
-    cursor_spawn_fail "cursor brief pointer delivery was not confirmed"
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$FM_ROOT/bin/fm-send.sh" "$ID" "$CURSOR_POINTER"; then
+    cursor_spawn_fail "cursor brief pointer could not be delivered through fm-send"
     exit 1
   fi
 fi
