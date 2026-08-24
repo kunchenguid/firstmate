@@ -356,6 +356,253 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# --- background-session layer: which pid the WRITER records -------------------
+#
+# A daemon-hosted background session sits several harness-named hops below the
+# session that launched it: session -> pty host -> daemon -> launching session,
+# with no non-harness process anywhere in between. The whole chain therefore
+# reads as one contiguous harness run, so resolving "this session" as the
+# outermost pid of that run reaches past this session's own processes and lands
+# on the launching session. The fixtures below build that real shape and drive
+# the real bin/fm-lock.sh and the real Stop auto-arm through it.
+
+install_guard_scripts() {  # <dir>
+  local dir=$1
+  cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  # The guard shells out for its repair line and matches watcher identity by
+  # this path; neither decides anything these cases assert.
+  cat > "$dir/bin/fm-supervision-instructions.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm supervision\n'
+SH
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-watch.sh"
+}
+
+# A primary home plus the three-level launcher/daemon/session fixture. Each
+# level runs through a real executable named "claude" so the ancestry walk sees
+# a genuine contiguous harness run, and each records its own pid before doing
+# anything else so bash cannot tail-exec-collapse two levels into one.
+make_bg_session_home() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+  : > "$dir/state/task.meta"
+  install_autoarm_scripts "$dir"
+  install_guard_scripts "$dir"
+
+  # The session a background job is launched FROM. It stays alive for the whole
+  # case, so its pid is always a live harness pid.
+  cat > "$dir/launcher.sh" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 400 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+printf '%s\n' "$$" > "$FM_HOME/state/launcher-pid"
+if [ "${FM_FIXTURE_LAUNCHER_TAKES_LOCK:-0}" = 1 ]; then
+  CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/launcher-lock.out" 2>&1
+  printf '%s\n' "$?" > "$FM_HOME/state/launcher-lock.rc"
+fi
+"$FM_CLAUDE_BIN" "$FM_HOME/daemon.sh" &
+i=0
+while [ "$i" -lt 600 ] && [ ! -e "$FM_HOME/state/lock-done" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+if [ "${FM_FIXTURE_LAUNCHER_EXITS:-0}" = 1 ]; then
+  : > "$FM_HOME/state/launcher-gone"
+  exit 0
+fi
+i=0
+while [ "$i" -lt 900 ] && [ ! -e "$FM_HOME/state/finished" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+SH
+
+  # The shared daemon that hosts background sessions. It exits once the session
+  # has taken the lock, which is what severs the chain above the session and
+  # leaves the session's own recorded identity unreachable from its ancestry.
+  cat > "$dir/daemon.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
+"$FM_CLAUDE_BIN" "$FM_HOME/session.sh" &
+i=0
+while [ "$i" -lt 600 ] && [ ! -e "$FM_HOME/state/lock-done" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+exit 0
+SH
+
+  # The background session itself: session start first, then the Stop hooks
+  # after the daemon above it has gone.
+  cat > "$dir/session.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
+# The harness names the session process to everything it spawns; the fixture
+# stands in for that. FM_FIXTURE_STALE_DECLARATION models an inherited value
+# from the launching session instead of a per-session one.
+if [ "${FM_FIXTURE_STALE_DECLARATION:-0}" = 1 ]; then
+  export CLAUDE_PID=$(cat "$FM_HOME/state/launcher-pid")
+else
+  export CLAUDE_PID=$$
+fi
+"$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/session-lock.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/session-lock.rc"
+cp "$FM_HOME/state/.lock" "$FM_HOME/state/lock-after-start" 2>/dev/null
+: > "$FM_HOME/state/lock-done"
+i=0
+while [ "$i" -lt 600 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+if [ "${FM_FIXTURE_LAUNCHER_EXITS:-0}" = 1 ]; then
+  i=0
+  while [ "$i" -lt 600 ] && [ ! -e "$FM_HOME/state/launcher-gone" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+fi
+"$FM_HOME/bin/fm-claude-stop-autoarm.sh" </dev/null > "$FM_HOME/state/hook.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
+printf '%s' '{"session_id":"fixture","stop_hook_active":false}' \
+  | "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$FM_HOME/state/guard.out" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/guard.rc"
+: > "$FM_HOME/state/finished"
+SH
+  chmod +x "$dir/launcher.sh" "$dir/daemon.sh" "$dir/session.sh"
+}
+
+# Start the fixture detached, so the launcher itself is orphaned and the walk
+# can never climb out of the fixture into the session running this suite.
+run_bg_session_tree() {  # <dir> [<env assignment>...]
+  local dir=$1 i
+  shift
+  env FM_HOME="$dir" FM_CLAUDE_BIN="$NAMED_CLAUDE" "$@" \
+    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/launcher.sh"
+  i=0
+  while [ "$i" -lt 900 ] && [ ! -e "$dir/state/finished" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/state/finished" ] || fail "the background-session fixture never finished"
+}
+
+fixture_pid() {  # <dir> <name>
+  tr -d '[:space:]' < "$1/state/$2"
+}
+
+assert_distinct_chain() {  # <dir>
+  local dir=$1 launcher daemon session
+  launcher=$(fixture_pid "$dir" launcher-pid)
+  daemon=$(fixture_pid "$dir" daemon-pid)
+  session=$(fixture_pid "$dir" session-pid)
+  [ -n "$launcher" ] && [ -n "$daemon" ] && [ -n "$session" ] \
+    && [ "$launcher" != "$daemon" ] && [ "$daemon" != "$session" ] && [ "$launcher" != "$session" ] \
+    || fail "fixture did not produce three distinct harness levels: launcher=$launcher daemon=$daemon session=$session"
+}
+
+test_bg_session_records_its_own_identity_and_keeps_arming() {
+  local dir launcher session recorded
+  dir="$TMP_ROOT/bg-session-sole"
+  make_bg_session_home "$dir"
+  run_bg_session_tree "$dir"
+  assert_distinct_chain "$dir"
+  launcher=$(fixture_pid "$dir" launcher-pid)
+  session=$(fixture_pid "$dir" session-pid)
+  recorded=$(fixture_pid "$dir" lock-after-start)
+
+  [ "$recorded" != "$launcher" ] \
+    || fail "session start recorded the LAUNCHING session's pid $launcher as this session's identity"
+  [ "$recorded" = "$session" ] \
+    || fail "session start recorded '$recorded' as this session's identity, expected the session pid $session"
+  expect_code 2 "$(hook_rc "$dir")" \
+    "a background session that owns its home must claim it and rewake after the daemon above it has gone"
+  [ -e "$dir/state/arm-ran" ] \
+    || fail "supervision never armed for a background session that owns its home"
+  [ "$(epoch_outcome "$dir")" = rewake ] \
+    || fail "no claim was recorded for a background session, got: $(epoch_outcome "$dir")"
+  pass "session-lock: a background session records its own identity and keeps claiming its home"
+}
+
+test_bg_session_never_claims_a_home_a_live_session_owns() {
+  local dir launcher recorded
+  dir="$TMP_ROOT/bg-session-competing"
+  make_bg_session_home "$dir"
+  run_bg_session_tree "$dir" FM_FIXTURE_LAUNCHER_TAKES_LOCK=1
+  assert_distinct_chain "$dir"
+  launcher=$(fixture_pid "$dir" launcher-pid)
+  recorded=$(fixture_pid "$dir" lock-after-start)
+
+  expect_code 1 "$(fixture_pid "$dir" session-lock.rc)" \
+    "a background session must be refused the lock a live launching session already holds"
+  grep -q 'another live firstmate session holds the lock' "$dir/state/session-lock.out" \
+    || fail "the refusal did not name the competing live session: $(cat "$dir/state/session-lock.out")"
+  [ "$recorded" = "$launcher" ] \
+    || fail "the live owner's lock was overwritten: expected $launcher, got $recorded"
+  expect_code 0 "$(hook_rc "$dir")" "a session that does not own the home must stay inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a session that does not own the home armed supervision"
+  [ -z "$(epoch_outcome "$dir")" ] || fail "a non-owning session wrote an auto-arm claim"
+  pass "session-lock: a background session never claims a home a live launching session owns"
+}
+
+test_bg_session_recovers_a_genuinely_dead_owner() {
+  local dir session recorded
+  dir="$TMP_ROOT/bg-session-stale"
+  make_bg_session_home "$dir"
+  run_bg_session_tree "$dir" FM_FIXTURE_LAUNCHER_TAKES_LOCK=1 FM_FIXTURE_LAUNCHER_EXITS=1
+  assert_distinct_chain "$dir"
+  session=$(fixture_pid "$dir" session-pid)
+  recorded=$(tr -d '[:space:]' < "$dir/state/.lock")
+
+  expect_code 2 "$(hook_rc "$dir")" "a demonstrably dead owner must be reclaimed and the home claimed"
+  [ -e "$dir/state/arm-ran" ] || fail "supervision never armed after reclaiming a dead owner"
+  [ "$recorded" = "$session" ] \
+    || fail "the reclaimed lock does not name the recovering session: expected $session, got $recorded"
+  pass "session-lock: a background session still reclaims a genuinely dead owner"
+}
+
+test_bg_session_stays_inert_while_away_mode_owns_supervision() {
+  local dir
+  dir="$TMP_ROOT/bg-session-afk"
+  make_bg_session_home "$dir"
+  : > "$dir/state/.afk"
+  run_bg_session_tree "$dir"
+  expect_code 0 "$(hook_rc "$dir")" "away mode must keep the auto-arm inert"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the auto-arm armed supervision while away mode owned it"
+  [ -z "$(epoch_outcome "$dir")" ] || fail "the auto-arm claimed the home while away mode owned it"
+  pass "session-lock: away mode still owns supervision for a background session"
+}
+
+test_bg_session_falls_back_when_no_per_session_identity_is_declared() {
+  local dir launcher recorded
+  dir="$TMP_ROOT/bg-session-stale-declaration"
+  make_bg_session_home "$dir"
+  run_bg_session_tree "$dir" FM_FIXTURE_STALE_DECLARATION=1
+  assert_distinct_chain "$dir"
+  launcher=$(fixture_pid "$dir" launcher-pid)
+  recorded=$(fixture_pid "$dir" lock-after-start)
+
+  # An inherited declaration naming the launching session is indistinguishable
+  # from a genuine one, so identity falls back to the contiguous run's outermost
+  # pid. This case pins that fallback as unchanged prior behavior rather than a
+  # silent new failure mode: the recorded owner is the launching session, and the
+  # auto-arm consequently stays inert.
+  [ "$recorded" = "$launcher" ] \
+    || fail "an inherited declaration did not fall back to prior behavior: got '$recorded', expected $launcher"
+  expect_code 0 "$(hook_rc "$dir")" "the documented fallback keeps the hook inert, not arming blind"
+  pass "session-lock: an inherited session declaration falls back to the prior identity unchanged"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
@@ -363,3 +610,8 @@ test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_bg_session_records_its_own_identity_and_keeps_arming
+test_bg_session_never_claims_a_home_a_live_session_owns
+test_bg_session_recovers_a_genuinely_dead_owner
+test_bg_session_stays_inert_while_away_mode_owns_supervision
+test_bg_session_falls_back_when_no_per_session_identity_is_declared
