@@ -426,13 +426,12 @@ inbox_steer_check() {  # <window> <task>
 # bounding the wake rate, which would have suppressed genuinely stopped workers.
 #
 # Every negative outcome returns 1, so absence of evidence surfaces exactly as
-# before: a secondmate without authoritative proof, an unresolvable task, a task
-# with no uniquely attributable recorded endpoint, no previous hash to compare
-# against (nothing has been polled yet), a capture that fails or comes back empty,
-# an exhausted deferral bound, and of course an unchanged pane. A .status file
-# without authoritative proof also returns 1: an authored append is content the
-# supervisor may need to read, so only the mechanical turn-end marker gets the
-# fallback.
+# before: any batch that references a secondmate, an unresolvable task, a task with
+# no uniquely attributable recorded endpoint, no previous hash to compare against
+# (nothing has been polled yet), a capture that fails or comes back empty, an
+# exhausted deferral bound, and of course an unchanged pane. Any .status file also
+# returns 1: an authored append is content the supervisor may need to read, so only
+# the mechanical turn-end marker gets the fallback.
 #
 # NOT a pure read: one bounded pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
