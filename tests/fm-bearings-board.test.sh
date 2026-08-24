@@ -278,6 +278,16 @@ test_v2_refuses_invalid_usage_and_underway_rows() {
   [ "$rc" -ne 0 ] || fail "non-HTTPS Underway PR URL was accepted"
 
   write_valid_payload "$data"
+  jq '.underway[0].report_path = "javascript:alert(1)"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a javascript Underway report path was accepted"
+
+  write_valid_payload "$data"
+  jq '.underway[0].report_path = "//external-host/report.md"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a protocol-relative Underway report path was accepted"
+
+  write_valid_payload "$data"
   latest=$(printf '%241s' '' | tr ' ' x)
   jq --arg latest "$latest" '.underway[0].latest = $latest' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
