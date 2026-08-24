@@ -9,8 +9,8 @@
 # holder that is this same session in another process tree, or a durably
 # suspended one, does not block. Every acquisition then converges the lock onto
 # the acquiring session's own pid, so repeated runs are idempotent, and any live
-# holder it converged onto or took over from is named on stdout rather than being
-# silent.
+# holder it converged onto, took over from, or could not identify is named on
+# stdout rather than being silent.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
@@ -110,9 +110,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
       echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
       exit 1
     fi
-    # Reclaiming a dead owner has always been silent and stays that way. The two
-    # holders that are alive and still yield are the surprising ones, so name
-    # them rather than moving the lock out from under a visible process quietly.
+    # Reclaiming an owner that is gone has always been silent and stays that
+    # way. The three holders that are alive and still yield are the surprising
+    # ones - this session's own holder in another tree, a durably suspended
+    # session, and a live process the identity rules cannot type as a harness -
+    # so name them rather than moving the lock out from under a visible process
+    # quietly.
     # The predicate supplies the whole clause and leaves it empty for the silent
     # case, so this is one assignment rather than a second liveness question that
     # could disagree with the classification that just ran.

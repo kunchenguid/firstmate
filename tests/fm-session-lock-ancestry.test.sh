@@ -1065,6 +1065,8 @@ SH
     "acquiring the home from inside its own cohort failed: $(cat "$dir/lock.out" 2>/dev/null)"
   assert_contains "$(cat "$dir/lock.out")" "converged onto this session's own holder pid $holder" \
     "acquisition did not name the holder it converged onto"
+  assert_not_contains "$(cat "$dir/lock.out")" "not recognised as a harness" \
+    "a live holder in this session's own cohort was reported as unidentified"
   assert_not_contains "$(cat "$dir/lock.out")" "took over from" \
     "acquisition told this session it took the home over from itself"
   pass "session-lock: a session still owns its home once the lock names the session it started"
@@ -1490,6 +1492,8 @@ test_acquisition_names_a_takeover_from_a_suspended_holder() {
     "acquisition did not name the suspended holder it took the home from"$'\n'"$out"
   assert_not_contains "$out" 'converged onto' \
     "a takeover from a separate suspended session was reported as this session converging its own lock"$'\n'"$out"
+  assert_not_contains "$out" 'not recognised as a harness' \
+    "a live holder the identity rules DID type as a harness was reported as unidentified"$'\n'"$out"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$acquirer" ] || fail \
     "acquisition did not converge the lock onto the acquiring session: expected $acquirer, got $(cat "$dir/state/.lock")"
   wait_for_state "$holder" running "the fixture holder never resumed"
@@ -1570,6 +1574,117 @@ test_unusable_stop_sampling_settings_cannot_release_a_live_holder() {
   pass "session-lock: unusable stop-sampling settings fall back to the default and never release a live holder"
 }
 
+# Ask the shared predicate about a recorded holder and print the clause it left
+# behind, so a case can assert what an operator would be told rather than only
+# the verdict. A competing holder prints nothing and exits non-zero, which no
+# case below drives.
+yield_reason() {  # <pid>
+  "${COHORT_ENV_ARGV[@]}" bash -c '. "$0"
+if fm_session_lock_holder_competes "$1"; then exit 1; fi
+printf "%s\n" "$FM_SESSION_HOLDER_YIELD_REASON"' "$LIB" "$1"
+}
+
+# A live process whose reported command name is `node` and whose script argument
+# is an npm `claude-code` layout path. Identification declines it on purpose -
+# the package component is `claude-code` and not `claude` - and the same rule
+# also judges a RECORDED holder, so a lock an older firstmate wrote for a session
+# of exactly this shape is reclaimed while that session is still running. The
+# reclaim is not being changed; it is required to announce itself.
+test_reclaim_of_a_live_unidentified_holder_names_itself() {
+  local dir layout holder out acquirer reason
+  dir="$TMP_ROOT/cohort-unidentified-holder"
+  make_cohort_fixture "$dir"
+  # A real interpreter-named executable, so `node` is produced by the kernel and
+  # by ps rather than by a fixture that was told what to print.
+  layout="$dir/npm/lib/node_modules/@anthropic-ai/claude-code"
+  mkdir -p "$layout" "$dir/npm/bin"
+  cp /bin/bash "$dir/npm/bin/node"
+  cat > "$layout/cli.js" <<'SH'
+printf '%s\n' "$$" > "$FM_FIX/holder-pid"
+sleep 120
+:
+SH
+  "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" "$dir/npm/bin/node" "$layout/cli.js" \
+    > "$dir/holder.out" 2>&1 &
+  COHORT_PIDS+=("$!")
+  holder=$(wait_for_file "$dir/holder-pid" "the npm-layout fixture holder pid")
+
+  # The case is only about the holder the identity rules decline, so prove they
+  # decline it before asserting anything about the reclaim.
+  if lib_probe "fm_harness_pid_alive $holder"; then
+    fail "the npm-layout fixture was identified as a harness, so this case cannot reach the reclaim it exists to pin"
+  fi
+  kill -0 "$holder" 2>/dev/null || fail "the npm-layout fixture holder was not a live process"
+
+  reason=$(yield_reason "$holder") || fail \
+    "a live but unidentified holder blocked acquisition, which is the read-only lockout this must not introduce"
+  [ -n "$reason" ] || fail "reclaiming a live but unidentified holder stayed silent"
+  assert_contains "$reason" "$holder" \
+    "the reclaim clause did not name the holder pid an operator would have to look up"
+  assert_contains "$reason" 'alive but not recognised as a harness' \
+    "the reclaim clause did not say the holder was alive and unrecognised"
+
+  # The line the captain would actually see, through the real acquisition path.
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  out=$("${COHORT_ENV_ARGV[@]}" FM_HOME="$dir" "$NAMED_CLAUDE" \
+    -c 'printf "acquirer=%s\n" "$$"; "$0"; exit $?' "$ROOT/bin/fm-lock.sh" 2>&1)
+  acquirer=$(printf '%s\n' "$out" | sed -n 's/^acquirer=//p')
+  [ -n "$acquirer" ] && [ "$acquirer" != "$holder" ] || fail \
+    "the fixture did not produce a distinct acquiring session: acquirer=$acquirer holder=$holder"$'\n'"$out"
+  assert_contains "$out" "lock acquired: harness pid $acquirer" \
+    "acquisition did not succeed against a live but unidentified holder"$'\n'"$out"
+  assert_contains "$out" "alive but not recognised as a harness" \
+    "acquisition reclaimed a visibly live holder without saying so"$'\n'"$out"
+  assert_contains "$out" "$holder" \
+    "acquisition did not name the live holder it reclaimed the home from"$'\n'"$out"
+  assert_not_contains "$out" 'converged onto' \
+    "a reclaim from an unidentified process was reported as this session converging its own lock"$'\n'"$out"
+  assert_not_contains "$out" 'took over from suspended' \
+    "a reclaim from an unidentified process was reported as a takeover from a suspended session"$'\n'"$out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$acquirer" ] || fail \
+    "acquisition did not converge the lock onto the acquiring session: expected $acquirer, got $(cat "$dir/state/.lock")"
+  kill -0 "$holder" 2>/dev/null || fail \
+    "the unidentified holder died during the case, so the reclaim it pinned may have been the ordinary silent one"
+  pass "session-lock: reclaiming a live but unidentified holder names it instead of moving the lock silently"
+}
+
+# The other side of that distinction, and the common case by far: a holder that
+# is simply gone has always been reclaimed in silence, so an ordinary session
+# start must gain no new line at all.
+test_a_gone_holder_is_reclaimed_silently() {
+  local dir gone out acquirer reason i
+  dir="$TMP_ROOT/cohort-gone-holder"
+  make_cohort_fixture "$dir"
+  "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" "$NAMED_CLAUDE" \
+    -c 'printf "%s\n" "$$" > "$FM_FIX/gone-pid"' &
+  gone=$!
+  wait "$gone" 2>/dev/null || true
+  gone=$(wait_for_file "$dir/gone-pid" "the exited fixture holder pid")
+  i=0
+  while kill -0 "$gone" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$gone" 2>/dev/null; then
+    fail "the fixture holder never exited, so this case cannot pin the gone reclaim"
+  fi
+
+  reason=$(yield_reason "$gone") || fail "a holder that no longer exists blocked acquisition"
+  [ -z "$reason" ] || fail \
+    "reclaiming a holder that no longer exists announced itself: '$reason'"
+
+  printf '%s\n' "$gone" > "$dir/state/.lock"
+  out=$("${COHORT_ENV_ARGV[@]}" FM_HOME="$dir" "$NAMED_CLAUDE" \
+    -c 'printf "acquirer=%s\n" "$$"; "$0"; exit $?' "$ROOT/bin/fm-lock.sh" 2>&1)
+  acquirer=$(printf '%s\n' "$out" | sed -n 's/^acquirer=//p')
+  [ -n "$acquirer" ] || fail "the fixture did not produce an acquiring session"$'\n'"$out"
+  assert_contains "$out" "lock acquired: harness pid $acquirer" \
+    "acquisition did not succeed against a holder that no longer exists"$'\n'"$out"
+  assert_not_contains "$out" '(' \
+    "reclaiming a holder that no longer exists gained a reason clause, so every ordinary session start now reports one"$'\n'"$out"
+  pass "session-lock: a holder that no longer exists is still reclaimed silently"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_node_main_thread_identity_comes_only_from_the_script_path
@@ -1593,5 +1708,7 @@ test_container_signal_alone_carries_co_location
 test_terminal_signal_alone_carries_co_location
 test_suspended_holder_releases_and_resumes
 test_acquisition_names_a_takeover_from_a_suspended_holder
+test_reclaim_of_a_live_unidentified_holder_names_itself
+test_a_gone_holder_is_reclaimed_silently
 test_momentary_stop_is_not_a_suspended_holder
 test_unusable_stop_sampling_settings_cannot_release_a_live_holder

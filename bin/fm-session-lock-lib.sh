@@ -250,6 +250,18 @@ fm_harness_process_matches() {  # <comm> <args>
   # identified at all. Both bound identification for the ancestry walk and the
   # liveness predicate only; neither can reach the cohort's acceptance decision,
   # which fm_harness_exec_kind below settles from executable identity alone.
+  #
+  # The npm-layout limit runs in BOTH directions, and the second direction is
+  # stated here because this lands on a running fleet by in-place update. The
+  # liveness predicate also judges a RECORDED holder, so a session lock an older
+  # firstmate wrote for a still-live session of one of those unidentified shapes
+  # now reads as not-a-harness and is reclaimed while that session is still
+  # running. It is bounded to that adoption window rather than being a standing
+  # hole, because this rule refuses to record such a holder in the first place,
+  # and it is not closed. The mitigation is that fm_session_lock_holder_competes
+  # below classifies a live-but-unidentified holder apart from a gone one, so the
+  # reclaim announces itself rather than moving the lock out from under a visible
+  # process in silence.
   case "$comm" in
     *node*|*python*)
       rest=${args#* }
@@ -418,16 +430,42 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# Classify recorded pid $1 and print exactly one of three words. This is the
+# single place the question is answered, so no caller can ask it a second time
+# and disagree with the classification that already ran about a holder that died
+# in between.
+#
+#   gone          not a live process, or it vanished before its command could be
+#                 read
+#   unidentified  a live process whose command WAS read and which the identity
+#                 rules above then declined to type as a harness
+#   harness       a live process typed as a harness
+#
+# The middle word exists because those first two are not the same event for a
+# pid recorded in a session lock: reclaiming a holder that is simply gone has
+# always been silent, while reclaiming one that is still visibly running has to
+# be able to name itself. A process that disappears between the liveness probe
+# and the read of its command is therefore `gone`, so a holder that merely
+# exited can never produce that line.
+fm_harness_pid_state() {  # <pid>
+  local pid=$1 comm args
+  kill -0 "$pid" 2>/dev/null || { printf 'gone\n'; return 0; }
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || { printf 'gone\n'; return 0; }
+  [ -n "$comm" ] || { printf 'gone\n'; return 0; }
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  if fm_harness_process_matches "$comm" "$args"; then
+    printf 'harness\n'
+  else
+    printf 'unidentified\n'
+  fi
+}
+
 # True if $1 is a live process that looks like a verified harness.
 # Pure liveness: a STOPPED harness satisfies this, because it exists. Whether a
 # stopped holder still holds the lock is a separate question, decided by
 # fm_harness_pid_suspended and fm_session_lock_holder_competes below.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  [ "$(fm_harness_pid_state "$1")" = harness ]
 }
 
 # --- session cohort: same-session evidence the process tree cannot carry -----
@@ -841,25 +879,35 @@ fm_harness_pid_suspended() {  # <pid>
 # to. This is the question every caller of the old bare liveness check was
 # actually asking, and it is the single owner of the answer.
 #
-# Not competing: a dead or non-harness pid, a pid in this process's own session
-# cohort, and a durably suspended harness. Everything else is.
+# Not competing: a pid that is gone, a live pid the identity rules decline to
+# type as a harness, a pid in this process's own session cohort, and a durably
+# suspended harness. Everything else is.
 #
 # FM_SESSION_HOLDER_YIELD_REASON is a whole clause rather than a noun phrase,
-# because the three cases are not the same event and a caller that prefixed one
+# because those cases are not the same event and a caller that prefixed one
 # verb onto all of them would report the cohort case - one session converging its
 # own lock onto its own pid - as a home changing hands.
 #
-# The dead or non-harness case leaves it EMPTY, because reclaiming that holder has
-# always been silent. That keeps one classification deciding both the verdict and
-# whether there is anything to say about it, so a caller cannot ask the liveness
-# question a second time and disagree with this one about a holder that died in
-# between.
+# Only the GONE case leaves it EMPTY, because reclaiming a holder that no longer
+# exists has always been silent and is the ordinary path every session start
+# takes. The other three reclaim a process an operator can still see, so each
+# says so. The verdict and the reason both come from ONE classification of the
+# recorded pid, so a caller cannot ask the liveness question again and disagree
+# with this one about a holder that died in between, and a holder that exits
+# between the probe and the command read is classified gone rather than
+# reported as a live process nobody could identify.
 # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
 FM_SESSION_HOLDER_YIELD_REASON=
 fm_session_lock_holder_competes() {  # <pid>
-  local pid=$1
+  local pid=$1 state
   FM_SESSION_HOLDER_YIELD_REASON=
-  if ! fm_harness_pid_alive "$pid"; then
+  state=$(fm_harness_pid_state "$pid")
+  if [ "$state" = gone ]; then
+    return 1
+  fi
+  if [ "$state" != harness ]; then
+    # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
+    FM_SESSION_HOLDER_YIELD_REASON="reclaimed from pid $pid, which is alive but not recognised as a harness"
     return 1
   fi
   if fm_session_same_cohort "$pid" '' 1; then
