@@ -67,8 +67,10 @@ write_maintenance_section_with_eol() {
 MAINT_INJECTED=0
 ensure_maintenance_section() {
   MAINT_INJECTED=0
-  if grep -Fqx '## Maintaining this file' "$AGENTS" ||
-    grep -Fqx $'## Maintaining this file\r' "$AGENTS"; then
+  # A heading line starting with '## Maintaining this file' counts as present,
+  # so a titled suffix variant such as '## Maintaining this file (Budget ...)'
+  # is recognized; in a CRLF file the \r trails the matched prefix.
+  if grep -Eq '^## Maintaining this file' "$AGENTS"; then
     return 0
   fi
   local eol=$'\n' sep=''
