@@ -11,15 +11,25 @@
 #   5. A missing tmux session is recreated and revived (the reboot path).
 #   6. A present fleet stop does not block the revival (leadership returns;
 #      the stop keeps everything else down).
+#   7. A boot newer than the last recorded revival is a BOOT REVIVAL: it types
+#      exactly one /clear before arming the kicker with an existing stamp file.
+#   8. A day-hang revival (boot older than the last revival) arms the kicker
+#      without ever clearing.
+#   9. When the fresh digest never arrives, the boot path still clears on its
+#      deadline fallback and still arms the kicker (bounded, no hang).
 #
-# Isolation: throwaway FM_HOME and a private tmux server (-L socket); the
-# notifier is disabled. Nothing touches the live fleet.
+# Isolation: throwaway FM_HOMEs and a private tmux server (-L socket); the
+# notifier is disabled. Cases 1-6 pin day-hang mode via an unparseable proc-stat
+# and an empty kicker. Cases 7-9 swap in a fake FM_ROOT whose fm-tmux-lib.sh
+# stub records every call instead of touching tmux screens, plus a stub kicker
+# recording its argv. Nothing touches the live fleet.
 # shellcheck disable=SC2015 # ok/fail are echo-only, so `A && ok || fail` cannot misfire.
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOTMANN="$REPO/bin/fm-totmann.sh"
 TMP="$(mktemp -d)"
+export TMP
 SOCK="totmann-test-$$"
 trap 'tmux -L "$SOCK" kill-server 2>/dev/null; rm -rf "$TMP"' EXIT
 HOME_A="$TMP/home"
@@ -32,7 +42,8 @@ ok() { echo "ok: $1"; }
 run() {
   FM_HOME="$HOME_A" FM_TOTMANN_TMUX="-L $SOCK" FM_TOTMANN_TARGET="fmtest:0" \
   FM_TOTMANN_RELAUNCH_CMD="echo REVIVED >> $TMP/revive.log" FM_TOTMANN_NOTIFY="" \
-  FM_TOTMANN_DEBOUNCE=1800 "$TOTMANN" "$@"
+  FM_TOTMANN_DEBOUNCE=1800 FM_TOTMANN_PROC_STAT="$TMP/procstat-day" \
+  FM_TOTMANN_ANSTOSS="" "$TOTMANN" "$@"
 }
 revive_count() { [ -f "$TMP/revive.log" ] && wc -l < "$TMP/revive.log" | tr -d ' ' || echo 0; }
 wait_for_count() { # wait_for_count <n> -> 0 when revive.log reaches n lines
@@ -43,6 +54,7 @@ wait_for_count() { # wait_for_count <n> -> 0 when revive.log reaches n lines
   return 1
 }
 
+printf 'not-a-procstat\n' > "$TMP/procstat-day"
 tmux -L "$SOCK" new-session -d -s fmtest -c "$TMP" || { echo "tmux unavailable" >&2; exit 1; }
 tmux -L "$SOCK" new-window -t fmtest:1 -n worker -c "$TMP"
 
@@ -114,6 +126,125 @@ tmux -L "$SOCK" kill-server 2>/dev/null
 run check >/dev/null || fail "check under a fleet stop must still revive"
 wait_for_count 1 && ok "the fleet stop does not block the leadership revival" \
   || fail "the revival must run under a fleet stop"
+
+# --- fixtures for the boot-vs-day-hang cases (7-9) -------------------------
+FAKEROOT="$TMP/fakeroot"
+mkdir -p "$FAKEROOT/bin"
+cat > "$FAKEROOT/bin/fm-tmux-lib.sh" <<'STUB'
+#!/usr/bin/env bash
+# test stub: records every call into $FMSTUB_LOG and answers from files in
+# ${FMSTUB_DIR:-$TMP/stub-default}; nothing touches real tmux screens.
+fmstub_note() { printf '%s\n' "$*" >>"$FMSTUB_LOG"; }
+fmstub_answer() { cat "${FMSTUB_DIR:-$TMP/stub-default}/$1" 2>/dev/null; }
+fm_pane_busy_state() { fmstub_note "busy:$1"; fmstub_answer busy; }
+fm_tmux_composer_state() { fmstub_note "composer:$1"; fmstub_answer composer; }
+fm_tmux_submit_core() { fmstub_note "submit:$1:$2"; fmstub_answer verdict; }
+STUB
+mkdir -p "$TMP/stub-default"
+printf 'idle\n' > "$TMP/stub-default/busy"
+printf 'empty\n' > "$TMP/stub-default/composer"
+printf 'empty\n' > "$TMP/stub-default/verdict"
+KICKER="$TMP/kicker-stub"
+cat > "$KICKER" <<STUB
+#!/usr/bin/env bash
+printf 'kicker:%s|%s|%s\n' "\$1" "\$2" "\$3" >>"\${FMSTUB_LOG:?}"
+STUB
+chmod +x "$KICKER"
+NOW=$(date +%s)
+BT=$((NOW - 4000)) # the machine booted well over a debounce ago
+STAMP_OLD=$((BT - 120))
+
+run_mode() { # run_mode <state-home> <procstat> -> check, boot-capable env
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$FAKEROOT" FM_TOTMANN_TMUX="-L $SOCK" \
+  FM_TOTMANN_TARGET="fmtest:0" FM_TOTMANN_RELAUNCH_CMD="echo REVIVED-M >> $TMP/revive-mode.log" \
+  FM_TOTMANN_NOTIFY="" FM_TOTMANN_DEBOUNCE=60 FM_TOTMANN_READY_SECS=10 \
+  FM_TOTMANN_PROC_STAT="$2" FM_TOTMANN_ANSTOSS="$KICKER" \
+  FMSTUB_LOG="${FMSTUB_LOG:-$TMP/mode-stub.log}" \
+  "$TOTMANN" check
+}
+
+# --- 7. boot newer than the last revival -> one /clear, then the kicker ----
+BOOTPS="$TMP/procstat-boot"
+printf 'cpu  x\nbtime %d\nintr 0\n' "$BT" > "$BOOTPS"
+HOME_M="$TMP/home-mode"
+mkdir -p "$HOME_M/state"
+printf '%d\n' "$((BT - 100))" > "$HOME_M/state/.totmann-last-restart"
+touch -d "@$STAMP_OLD" "$HOME_M/state/.startup-network.timings"
+: > "$TMP/mode-stub.log"; rm -f "$TMP/revive-mode.log"
+( sleep 0.6; touch "$HOME_M/state/.startup-network.timings" ) & # first digest lands
+TOUCHER=$!
+if run_mode "$HOME_M" "$BOOTPS" >"$TMP/boot-run.out" 2>&1; then
+  ok "the boot revival exits 0"
+else
+  fail "the boot revival must exit 0: $(cat "$TMP/boot-run.out")"
+fi
+wait "$TOUCHER" 2>/dev/null || true
+grep -q REVIVED-M "$TMP/revive-mode.log" \
+  && ok "the boot revival relaunches the seat" \
+  || fail "the boot revival must type the relaunch"
+[ "$(grep -c '^submit:fmtest:0:/clear$' "$TMP/mode-stub.log")" = 1 ] \
+  && ok "the boot path types exactly one /clear" \
+  || fail "the boot path must submit exactly one /clear (log: $(tr '\n' ';' < "$TMP/mode-stub.log"))"
+grep -q '^warn:' "$TMP/boot-run.out" \
+  && fail "a proven boot clear must not warn ($(cat "$TMP/boot-run.out"))" \
+  || ok "the proven boot clear stays silent about fallbacks"
+SUB_LINE=$(grep -n '^submit:' "$TMP/mode-stub.log" | head -1 | cut -d: -f1)
+KICK_LINE=$(grep -n '^kicker:' "$TMP/mode-stub.log" | head -1 | cut -d: -f1)
+if [ -n "$SUB_LINE" ] && [ -n "$KICK_LINE" ] && [ "$SUB_LINE" -lt "$KICK_LINE" ]; then
+  ok "the /clear is submitted before the kicker is armed"
+else
+  fail "ordering broken: submit at ${SUB_LINE:-none}, kicker at ${KICK_LINE:-none}"
+fi
+KICK_REC=$(grep '^kicker:' "$TMP/mode-stub.log" | head -1)
+case "$KICK_REC" in
+  'kicker:--hintergrund|fmtest:0|'*)
+    STAMP_GIVEN=${KICK_REC#'kicker:--hintergrund|fmtest:0|'}
+    [ -f "$STAMP_GIVEN" ] && ok "the kicker receives an existing stamp file" \
+      || fail "the stamped file $STAMP_GIVEN must exist for the kicker"
+    ;;
+  *) fail "the kicker must be called as --hintergrund <target> <stamp>, got: $KICK_REC" ;;
+esac
+
+# --- 8. day-hang (boot older than the last revival) -> kick without clear --
+printf '%d\n' "$((NOW - 120))" > "$HOME_M/state/.totmann-last-restart" # after the boot
+SUB_BEFORE=$(grep -c '^submit:' "$TMP/mode-stub.log")
+KICK_BEFORE=$(grep -c '^kicker:' "$TMP/mode-stub.log")
+run_mode "$HOME_M" "$BOOTPS" >/dev/null 2>&1 || fail "the day-hang revival must exit 0"
+[ "$(grep -c '^submit:' "$TMP/mode-stub.log")" = "$SUB_BEFORE" ] \
+  && ok "the day-hang path never clears" \
+  || fail "the day-hang path must not submit a /clear"
+[ "$(grep -c '^kicker:' "$TMP/mode-stub.log")" = "$((KICK_BEFORE + 1))" ] \
+  && ok "the day-hang path arms the kicker" \
+  || fail "the day-hang path must arm the kicker once"
+[ "$(wc -l < "$TMP/revive-mode.log" | tr -d ' ')" = 2 ] \
+  && ok "both revivals typed the relaunch" \
+  || fail "expected two relaunch lines, got $(cat "$TMP/revive-mode.log")"
+
+# --- 9. digest never arrives -> deadline fallback clears, no hang ----------
+HOME_D="$TMP/home-deadline"
+mkdir -p "$HOME_D/state"
+printf '%d\n' "$((BT - 100))" > "$HOME_D/state/.totmann-last-restart"
+OVER="$TMP/stub-overrun"
+mkdir -p "$OVER"
+printf 'busy\n' > "$OVER/busy"; printf 'pending\n' > "$OVER/composer"; printf 'pending\n' > "$OVER/verdict"
+: > "$TMP/dl-stub.log"
+DL_OUT=$(FM_HOME="$HOME_D" FM_ROOT_OVERRIDE="$FAKEROOT" FM_TOTMANN_TMUX="-L $SOCK" \
+  FM_TOTMANN_TARGET="fmtest:0" FM_TOTMANN_RELAUNCH_CMD="echo REVIVED-D >> $TMP/revive-dl.log" \
+  FM_TOTMANN_NOTIFY="" FM_TOTMANN_DEBOUNCE=60 FM_TOTMANN_READY_SECS=2 \
+  FM_TOTMANN_PROC_STAT="$BOOTPS" FM_TOTMANN_ANSTOSS="$KICKER" \
+  FMSTUB_LOG="$TMP/dl-stub.log" FMSTUB_DIR="$OVER" \
+  "$TOTMANN" check 2>&1) && DL_RC=0 || DL_RC=$?
+[ "$DL_RC" = 0 ] && ok "the deadline fallback exits 0 (no hang)" \
+  || fail "the deadline fallback must not hang or crash (rc=$DL_RC): $DL_OUT"
+grep -q '^submit:fmtest:0:/clear$' "$TMP/dl-stub.log" \
+  && ok "the deadline fallback still clears" \
+  || fail "the deadline fallback must attempt the /clear"
+grep -q '^kicker:' "$TMP/dl-stub.log" \
+  && ok "the deadline fallback still arms the kicker" \
+  || fail "the deadline fallback must arm the kicker"
+printf '%s\n' "$DL_OUT" | grep -q 'warn:' \
+  && ok "the unproven clear warns loudly" \
+  || fail "an unconfirmed /clear must warn: $DL_OUT"
 
 echo
 if [ "$FAILS" -eq 0 ]; then
