@@ -165,11 +165,25 @@ except es.AmbiguousSparkStateError:
     refused = True
 check("mismatch_refused", refused and ops.builds == 0)
 
-# 4. Initializing: id-not-yet-assigned and startup probe -> waiting, no build.
-ops = FakeOps(ctx=object(), id_exc=RuntimeError("application id not assigned yet"))
+# 4. Initializing: a startup-classified id or probe failure -> waiting, no build.
+ops = FakeOps(ctx=object(), id_exc=RuntimeError("Application has not yet been assigned an id"))
 status = es.ensure_spark(FULL, ops=ops, initializing_max_attempts=0)
 check("init_id_waiting", status["state"] == es.INITIALIZING and status["action"] == "waiting")
 check("init_id_no_build", ops.builds == 0)
+
+# 4a. Dead-gateway id failure classifies absent -> rebuild exactly once.
+ops = FakeOps(ctx=object(), id_exc=RuntimeError("Java gateway process exited before sending its port"))
+status = es.ensure_spark(FULL, ops=ops)
+check("init_id_dead_gateway_rebuilt_once", status["action"] == "initialized" and ops.builds == 1)
+
+# 4a-b. Unrecognized id failure classifies ambiguous -> refusal, never build or wait.
+ops = FakeOps(ctx=object(), id_exc=RuntimeError("py4j network error while fetching the application id"))
+refused = False
+try:
+    es.ensure_spark(FULL, ops=ops)
+except es.AmbiguousSparkStateError:
+    refused = True
+check("init_id_unrecognized_refused", refused and ops.builds == 0)
 
 ops = FakeOps(ctx=object(), probe_exc=RuntimeError("Initial job has not accepted any resources"))
 status = es.ensure_spark(FULL, ops=ops, initializing_max_attempts=0)

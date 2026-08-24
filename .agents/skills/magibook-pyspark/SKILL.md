@@ -81,8 +81,8 @@ Fill every `<...>` placeholder from the captain-preference owner before running,
 
 ## Evidence
 
-The validated CLI/API path is recorded in the private report at `data/validate-magibook-pyspark-sql/report.md` (SG, `magibook` 0.3.22).
-Cell `1129483` (the validated SG `Init Pyspark` Cell) is read-only reference evidence for the init configuration shape; view it if needed, but do not modify or run it as part of routine analysis.
+The validated CLI/API path and the validated init Cell (read-only reference for the init configuration shape) are recorded by the captain-preference owner (`data/captain.md`, or `data/captain-shared.md` for a secondmate home), not in this shared skill.
+View the recorded init Cell read-only if needed, but do not modify or run it as part of routine analysis.
 
 ## Maintaining this file
 

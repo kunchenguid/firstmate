@@ -166,8 +166,14 @@ def assess_spark_state(ops, *, expected_app_id=None):
 
     try:
         app_id = ops.application_id(ctx)
-    except Exception as exc:  # noqa: BLE001 - id unavailable means still starting
-        return INITIALIZING, None, "application id not yet assigned: " + _truncate(exc)
+    except Exception as exc:  # noqa: BLE001 - classify, never swallow
+        verdict = classify_spark_error(exc)
+        detail = "{}: {}".format(type(exc).__name__, _truncate(exc))
+        if verdict == ABSENT:
+            return ABSENT, None, "application id shows context gone: " + detail
+        if verdict == INITIALIZING:
+            return INITIALIZING, None, "application id not yet assigned: " + detail
+        return AMBIGUOUS, None, "application id check failed, health unclear: " + detail
     if not app_id:
         return INITIALIZING, None, "application id not yet assigned"
 
