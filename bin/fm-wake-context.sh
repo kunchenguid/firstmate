@@ -350,9 +350,7 @@ finish_with_collection_timeout() {
     fm_run_timed "$COLLECTION_TIMEOUT" finish_presentation
 }
 
-main() {
-  local status
-  [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
+normalize_timeouts() {
   case "$BACKEND_TIMEOUT" in
     ''|*[!0-9]*) BACKEND_TIMEOUT=3 ;;
     *)
@@ -361,6 +359,9 @@ main() {
       ;;
   esac
   case "$COLLECTION_TIMEOUT" in ''|*[!0-9]*|0) COLLECTION_TIMEOUT=10 ;; esac
+}
+
+prepare_presentation() {
   fm_session_lock_owned_by_self "$STATE" || fail_before_presentation "this session does not own the fleet lock"
   replay_cached && exit 0
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
@@ -370,13 +371,28 @@ main() {
   copy_queue "$TMP_DIR/queue" || fail_before_presentation "the wake queue could not be read safely"
   validate_queue "$TMP_DIR/queue" || fail_before_presentation "the queue is malformed"
   preflight "$TMP_DIR/queue"
+}
+
+drain_presentation() {
   if ! FM_WAKE_CONTEXT_NONMUTATING=1 FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE="$TMP_DIR/status-cursor.after" \
     "$SCRIPT_DIR/fm-wake-drain.sh" > "$TMP_DIR/drain.out" 2> "$TMP_DIR/drain.err"; then
     emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"; exit 1
   fi
+}
+
+finish_collection() {
+  local status
   finish_with_collection_timeout; status=$?
   [ "$status" -ne 124 ] || emit_fallback "$TMP_DIR/drain.out" "$TMP_DIR/drain.err"
   return "$status"
+}
+
+main() {
+  [ "${1:-}" = --present ] && [ "$#" -eq 1 ] || usage
+  normalize_timeouts
+  prepare_presentation
+  drain_presentation
+  finish_collection
 }
 
 main "$@"

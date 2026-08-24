@@ -22,20 +22,24 @@ install_fixture() { # <home>
   install_stubs "$home"
 }
 
-install_stubs() { # <home>
-  local bin=$1/bin
-  printf '%s\n' 'fm_session_lock_owned_by_self() { return 0; }' > "$bin/fm-session-lock-lib.sh"
-  cat > "$bin/fm-classify-lib.sh" <<'SH'
+write_classify_stub() { # <bin>
+  cat > "$1/fm-classify-lib.sh" <<'SH'
 status_open_decisions() {
   printf 'choice\tneeds-decision\tchoose safely\n'
 }
 SH
-  cat > "$bin/fm-backend.sh" <<'SH'
+}
+
+write_backend_stub() { # <bin>
+  cat > "$1/fm-backend.sh" <<'SH'
 fm_backend_is_known() { return 0; }
 fm_backend_agent_state() { printf 'alive\n'; }
 fm_run_timed() { printf '%s\n' "$1" >> "$FM_HOME/backend-timeout"; shift; "$@"; }
 SH
-cat > "$bin/fm-crew-state.sh" <<'SH'
+}
+
+write_crew_state_stub() { # <bin>
+  cat > "$1/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 [ -f "$FM_HOME/drain.calls" ] || exit 9
 printf '%s\n' "$1" >> "$FM_HOME/crew-state.calls"
@@ -50,7 +54,10 @@ esac
 if [ -n "${FM_CREW_STATE_LARGE:-}" ]; then head -c 70000 /dev/zero | tr '\0' x; exit 0; fi
 printf 'state: working · source: pane · implementing\n'
 SH
-cat > "$bin/fm-wake-drain.sh" <<'SH'
+}
+
+write_drain_stub() { # <bin>
+  cat > "$1/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'drained\n' >> "$FM_HOME/drain.calls"
 if [ "${FM_DRAIN_MANY_STATUS:-0}" = 1 ]; then
@@ -60,6 +67,13 @@ fi
 [ "${FM_DRAIN_APPEND_WAKE:-0}" != 1 ] || printf '1\t17\tsignal\talpha.status\tlate wake\n' >> "$FM_STATE_OVERRIDE/.wake-queue"
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-1\n' "${FM_DRAIN_ACK_THROUGH:-1}" >&2
 SH
+}
+
+install_stubs() { # <home>
+  local bin=$1/bin
+  printf '%s\n' 'fm_session_lock_owned_by_self() { return 0; }' > "$bin/fm-session-lock-lib.sh"
+  write_classify_stub "$bin"; write_backend_stub "$bin"
+  write_crew_state_stub "$bin"; write_drain_stub "$bin"
   chmod +x "$bin"/*.sh
 }
 
