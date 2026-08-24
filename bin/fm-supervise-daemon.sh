@@ -1273,7 +1273,9 @@ handle_wake() {  # <reason> <state>
         # markers even if their prose once looked captain-relevant or was seen.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-          if status_is_terminal_verb "$last"; then
+          if status_is_superseded_by_run_step "$task" "$last"; then
+            _clear_wedge=0
+          elif status_is_terminal_verb "$last"; then
             _clear_wedge=1
           else
             case "$(status_line_verb "$last")" in

@@ -154,10 +154,13 @@ status_is_validation_handoff() {  # <status-line>
 status_is_actionable_now() {  # <task> <status-line>
   local task=$1 line=$2
   status_is_captain_relevant "$line" || return 1
-  if status_is_validation_handoff "$line" && crew_is_in_active_run "$task"; then
-    return 1
-  fi
+  status_is_superseded_by_run_step "$task" "$line" && return 1
   return 0
+}
+
+status_is_superseded_by_run_step() {  # <task> <status-line>
+  local task=$1 line=$2
+  status_is_validation_handoff "$line" && crew_has_attributed_run_step "$task"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -1237,13 +1240,11 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
-crew_is_in_active_run() {  # <id>
-  local id=$1 line state src
+crew_has_attributed_run_step() {  # <id>
+  local id=$1 line src
   [ -n "$id" ] || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
   case "$line" in state:*) ;; *) return 1 ;; esac
-  state=${line#state: }; state=${state%% *}
-  [ "$state" = working ] || return 1
   src=${line#*source: }; src=${src%% *}
   [ "$src" = run-step ]
 }
