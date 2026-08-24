@@ -178,6 +178,9 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
+That arming predates the landing-target guard added 2026-08-23.
+`kunchenguid/firstmate` is the read-only upstream, so the same command now refuses instead; see [`docs/verification/pr-landing-target.md`](verification/pr-landing-target.md) for current evidence.
+
 ## Upgrade path from an existing armed watch
 
 The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
