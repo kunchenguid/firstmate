@@ -25,6 +25,7 @@ SUPERVISOR_SLEEP_PID=
 RESTART_SUPERVISOR_PID=
 RACE_INCUMBENT_PID=
 RACE_SUPERVISOR_PID=
+SAME_SUPERVISOR_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -39,6 +40,7 @@ cleanup_remote_job_fixture() {
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   [ -z "$RACE_INCUMBENT_PID" ] || kill -KILL "$RACE_INCUMBENT_PID" 2>/dev/null || true
   [ -z "$RACE_SUPERVISOR_PID" ] || fm_remote_job_stop_worker_tree "$RACE_SUPERVISOR_PID" || true
+  [ -z "$SAME_SUPERVISOR_PID" ] || fm_remote_job_stop_worker_tree "$SAME_SUPERVISOR_PID" || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -907,5 +909,44 @@ wait "$RACE_SUPERVISOR_PID" 2>/dev/null || true
 RACE_SUPERVISOR_PID=
 FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 pass "a start releases an incumbent supervisor instead of being refused as its duplicate"
+
+# Remote operations arrive unserialized, so a start routinely lands inside the
+# startup window of a healthy supervisor for the very root it wants: ownership
+# is already published while the first serving child is still claiming the
+# worker lock and publishing its identity. An unowned worker lock with a fresh
+# mtime holds that child in its ordinary acquisition wait, so the window is a
+# fixed state rather than a timing accident.
+SAME_HOME="$TMP_ROOT/same-root-account"
+SAME_STATE="$TMP_ROOT/same-root-state"
+mkdir -p "$SAME_HOME"
+FM_REMOTE_JOB_STATE_ROOT="$SAME_STATE"
+fm_remote_job_prepare_state "$SAME_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+mkdir "$SAME_STATE/worker.lock" || fail "the startup-window fixture could not hold the worker lock"
+fm_remote_job_start_linux_worker "$REMOTE_ROOT" "$SAME_HOME" \
+  || fail "${FM_REMOTE_JOB_ERROR:-the startup-window fixture could not start a supervisor}"
+[ "$FM_REMOTE_JOB_WORKER_START" = started ] \
+  || fail "the first start reported '$FM_REMOTE_JOB_WORKER_START' instead of starting a supervisor"
+for _ in $(seq 1 300); do
+  [ -f "$SAME_STATE/supervisor.lock/pid" ] && break
+  sleep 0.05
+done
+SAME_SUPERVISOR_PID=$(fm_remote_job_supervisor_owner "$SAME_HOME") \
+  || fail "the started supervisor never took account ownership"
+fm_remote_job_worker_owned_alive "$REMOTE_ROOT" "$SAME_HOME" \
+  && fail "the startup-window fixture was already serving before the concurrent start"
+rmdir "$SAME_STATE/worker.lock" || fail "the startup-window fixture could not release the worker lock"
+fm_remote_job_start_linux_worker "$REMOTE_ROOT" "$SAME_HOME" \
+  || fail "${FM_REMOTE_JOB_ERROR:-a start concurrent with a healthy supervisor failed}"
+[ "$FM_REMOTE_JOB_WORKER_START" = serving ] \
+  || fail "a start inside a healthy supervisor's startup window reported '$FM_REMOTE_JOB_WORKER_START'"
+[ "$(fm_remote_job_supervisor_owner "$SAME_HOME")" = "$SAME_SUPERVISOR_PID" ] \
+  || fail "a start inside a healthy same-root supervisor's startup window replaced it"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$SAME_HOME" \
+  || fail "the surviving supervisor did not serve the requested code root"
+fm_remote_job_stop_worker_tree "$SAME_SUPERVISOR_PID" || true
+wait "$SAME_SUPERVISOR_PID" 2>/dev/null || true
+SAME_SUPERVISOR_PID=
+FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
+pass "a healthy same-root supervisor survives a start inside its startup window"
 
 echo "ALL TESTS PASSED"

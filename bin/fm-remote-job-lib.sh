@@ -48,12 +48,15 @@
 # signal a group whose leader is not itself a worker, so a worker inherited
 # from an older build or from launchd's own session is still stopped safely as
 # a single process. Because a Linux supervisor is a per-account singleton that
-# refuses to run beside an incumbent, the start path also releases the
-# incumbent supervisor before launching a replacement: a replacement launched
-# against a live supervisor exits as a duplicate instead of serving.
-# fm_remote_job_start_linux_worker reports which of the three outcomes it
-# reached in FM_REMOTE_JOB_WORKER_START, so a refusal can never be mistaken for
-# a start. fm_remote_job_root_is_live is the shared predicate for
+# refuses to run beside an incumbent, the start path first waits out whatever
+# supervisor already owns the account: one launched from the same code root is
+# left to finish coming up and reported as already serving, one that cannot
+# serve the requested root is released before a replacement is launched, and a
+# supervisor that neither serves nor releases within that bound is reported as
+# a failure to start rather than replaced. fm_remote_job_start_linux_worker
+# reports which of those outcomes it reached in FM_REMOTE_JOB_WORKER_START, so
+# a refusal can never be mistaken for a start.
+# fm_remote_job_root_is_live is the shared predicate for
 # whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
@@ -863,6 +866,39 @@ fm_remote_job_supervisor_owner() { # <account-home>
   printf '%s\n' "$FM_REMOTE_JOB_OWNER_PID"
 }
 
+# The code root an owning supervisor was launched from, proven the same way a
+# serving worker is attributed to its root: the supervisor is exec'd as
+# <root>/bin/fm-remote-job-worker.sh, so its own command names the root it can
+# ever serve. A command that cannot be read, or that names another root, is not
+# proof of this root.
+fm_remote_job_supervisor_serves_root() { # <remote-root> <pid>
+  local root=$1 pid=$2 command
+  command=$(fm_remote_job_process_command "$pid") || return 1
+  case "$command" in *"$root/bin/fm-remote-job-worker.sh"*) return 0 ;; esac
+  return 1
+}
+
+# Whether a start may spawn beside the supervisor that currently owns this
+# account, waiting out the states that are still resolving themselves. Returns
+# 0 once no supervisor is provably live, so the spawn proceeds under the
+# acquiring supervisor's own staleness and quarantine policy; 2 once an
+# incumbent launched from this same code root has published a ready worker with
+# matching identity, which is a healthy supervisor that must not be replaced; 3
+# for an incumbent that cannot serve this root, which the caller releases; and
+# 1 when a same-root incumbent neither serves nor releases within the bound.
+fm_remote_job_await_supervisor() { # <remote-root> <account-home>
+  local root=$1 account_home=$2 pid waited=0
+  while [ "$waited" -lt 200 ]; do
+    pid=$(fm_remote_job_supervisor_owner "$account_home") || return 0
+    fm_remote_job_supervisor_serves_root "$root" "$pid" || return 3
+    fm_remote_job_probe "$account_home" &&
+      fm_remote_job_worker_identity_matches "$root" "$account_home" && return 2
+    waited=$((waited + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
 # A live supervisor refuses its replacement as a duplicate, so a replacement
 # may only be launched once no supervisor is provably still serving. Stop the
 # incumbent's tree once, then wait out its shutdown - a supervisor that is
@@ -1010,15 +1046,27 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
   fi
-  # A supervisor can outlive the serving child stopped above - it was signalled
-  # as a lone process because its group was not provable, or it was already
-  # between children and had no serving child at all. It still owns this
-  # account, so a replacement launched now would exit as a duplicate and leave
-  # the account served by the supervisor being replaced.
-  fm_remote_job_release_supervisor "$account_home" || {
-    FM_REMOTE_JOB_ERROR="the running remote job worker supervisor did not release ownership"
-    return 1
-  }
+  # A supervisor can own this account with no serving worker of its own - one
+  # that outlived the child stopped above, one still bringing its first child
+  # up, or one between children. A replacement launched beside it exits as a
+  # duplicate, so wait out what it is doing: a supervisor for this same root
+  # gets the chance to finish coming up, and only one that cannot serve this
+  # root is released.
+  fm_remote_job_await_supervisor "$root" "$account_home"
+  case $? in
+    0) ;;
+    2) FM_REMOTE_JOB_WORKER_START=serving; return 0 ;;
+    3)
+      fm_remote_job_release_supervisor "$account_home" || {
+        FM_REMOTE_JOB_ERROR="the running remote job worker supervisor did not release ownership"
+        return 1
+      }
+      ;;
+    *)
+      FM_REMOTE_JOB_ERROR="the running remote job worker supervisor neither served nor released this account"
+      return 1
+      ;;
+  esac
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.
