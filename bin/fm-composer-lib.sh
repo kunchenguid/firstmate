@@ -127,11 +127,21 @@ fm_composer_strip_ansi() {
 #   U+202F NARROW NO-BREAK SPACE      U+205F MEDIUM MATHEMATICAL SPACE
 #   U+3000 IDEOGRAPHIC SPACE
 # ASCII whitespace is absent because POSIX `[[:space:]]` already covers it.
-# U+200B ZERO WIDTH SPACE is deliberately absent: Unicode gives it
-# White_Space=No (a format character), so listing it would substitute this
-# owner's own guess for the property it claims to follow. The live harness
-# guard (bin/fm-test-run.sh, live-harness-optin) is what catches a harness
-# that starts drawing its composer with a character outside this property.
+# The zero-width format characters - U+200B ZERO WIDTH SPACE, U+2060 WORD
+# JOINER, U+FEFF ZERO WIDTH NO-BREAK SPACE - are all deliberately absent:
+# Unicode gives every one of them White_Space=No, so listing them would
+# substitute this owner's own guess for the property it claims to follow. Two
+# further reasons hold the line exactly there. Mapping them onto a SPACE would
+# be wrong in substance: this table substitutes rather than deletes precisely
+# because its members occupy width the harness drew, while a zero-width
+# character occupies none and a space would invent a separation that was never
+# rendered. And the failure directions are not symmetric: a row of zero-width
+# characters classifies `pending`, which only DEFERS an injection - the safe
+# direction, and one the max-defer alarm surfaces - whereas admitting an
+# unproven character widens `empty`, the direction that types an escalation
+# over a captain's half-written line. The live harness guard
+# (bin/fm-test-run.sh, live-harness-optin) is what catches a harness that
+# starts drawing its composer with a character outside this property.
 FM_COMPOSER_UNICODE_SPACES=()
 for _fm_composer_space_octal in \
   '\0302\0205' '\0302\0240' '\0341\0232\0200' \

@@ -170,6 +170,70 @@ assert_screen() {
   [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
 }
 
+# --- The Unicode-whitespace boundary ---------------------------------------
+
+# assert_content <label> <want> <bordered> <content>: one content verdict,
+# asserted under the ambient locale AND LC_ALL=C, because the whole defect
+# class this pins is a trim that changed meaning with the ambient locale.
+assert_content() {
+  local label=$1 want=$2 bordered=$3 content=$4 out
+  out=$(classify "$bordered" "$content")
+  [ "$out" = "$want" ] || fail "$label: expected $want, got '$out'"
+  out=$(LC_ALL=C classify "$bordered" "$content")
+  [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
+}
+
+test_unicode_whitespace_padding_is_empty() {
+  # Invisible padding a harness draws AROUND nothing is an empty composer. The
+  # away-mode injector types only into an affirmative `empty`, so a false
+  # `pending` here silently disables every escalation (issue #1988).
+  local fig nnbsp
+  fig=$(printf '\342\200\207')    # U+2007 FIGURE SPACE
+  nnbsp=$(printf '\342\200\257')  # U+202F NARROW NO-BREAK SPACE
+  assert_content "bare glyph" empty 1 '❯'
+  assert_content "glyph + ASCII space" empty 1 '❯ '
+  assert_content "glyph + U+00A0" empty 1 "❯$NBSP"
+  assert_content "glyph + U+2007" empty 1 "❯$fig"
+  assert_content "glyph + U+202F" empty 1 "❯$nnbsp"
+  assert_content "glyph + mixed unicode padding" empty 1 "❯$NBSP$fig$nnbsp"
+  # A row that is nothing BUT invisible whitespace, with no glyph at all.
+  assert_content "unicode whitespace only" empty 1 "$NBSP$fig$nnbsp"
+  pass "fm_composer_classify_content: unicode whitespace padding reads empty in both locales (#1988)"
+}
+
+test_unicode_whitespace_around_text_stays_pending() {
+  # The guard in the other direction, and the one that protects a captain's
+  # half-typed line: invisible characters AROUND visible content never make
+  # that content disappear. Widening `empty` to cover these would type an
+  # escalation over real input.
+  local fig nnbsp
+  fig=$(printf '\342\200\207')
+  nnbsp=$(printf '\342\200\257')
+  assert_content "glyph + U+00A0 + text" pending 1 "❯${NBSP}fix the login bug"
+  assert_content "glyph + text + U+00A0" pending 1 "❯ fix the login bug$NBSP"
+  assert_content "text wrapped in unicode padding" pending 1 "❯$fig deploy staging$nnbsp"
+  assert_content "unicode padding around bare text" pending 1 "${NBSP}rerun the failing check${NBSP}"
+  pass "fm_composer_classify_content: unicode whitespace around real text stays pending"
+}
+
+test_zero_width_format_chars_defer() {
+  # The deliberate line (bin/fm-composer-lib.sh's FM_COMPOSER_UNICODE_SPACES):
+  # zero-width format characters are White_Space=No and are NOT admitted, so a
+  # row of them defers rather than claiming to be an injectable empty composer.
+  # Deferring is the safe direction and the max-defer alarm surfaces it; a
+  # false `empty` would not be surfaced at all. Pinned so that admitting one
+  # later has to be a deliberate edit to this expectation, backed by a real
+  # harness that draws it.
+  local wj zwnbsp zwsp
+  wj=$(printf '\342\201\240')      # U+2060 WORD JOINER
+  zwnbsp=$(printf '\357\273\277')  # U+FEFF ZERO WIDTH NO-BREAK SPACE
+  zwsp=$(printf '\342\200\213')    # U+200B ZERO WIDTH SPACE
+  assert_content "glyph + U+2060" pending 1 "❯$wj"
+  assert_content "glyph + U+FEFF" pending 1 "❯$zwnbsp"
+  assert_content "glyph + U+200B" pending 1 "❯$zwsp"
+  pass "fm_composer_classify_content: zero-width format chars defer, never widen empty"
+}
+
 test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
@@ -612,6 +676,9 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_unicode_whitespace_padding_is_empty
+test_unicode_whitespace_around_text_stays_pending
+test_zero_width_format_chars_defer
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss

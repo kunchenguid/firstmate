@@ -1126,6 +1126,22 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
+# _composer_defer_reason: the deferral cause for ONE composer verdict, in that
+# verdict's own words. The verdicts mean different things and send a reader to
+# different places, so they never share a sentence: this line once read
+# "pending input, dead-shell prompt, or unreadable pane" for every non-empty
+# verdict, and a `pending` pane sent the first reader hunting a dead shell that
+# did not exist. bin/fm-composer-lib.sh owns the verdict vocabulary.
+_composer_defer_reason() {  # <verdict>
+  case "$1" in
+    pending)          printf 'state=pending: real unsubmitted text sits in the composer' ;;
+    pending-unproven) printf 'state=pending-unproven: composer text that an unstyled capture cannot prove is real' ;;
+    unknown)          printf 'state=unknown: dead-shell prompt, unidentified row, or unreadable pane' ;;
+    '')               printf 'state=absent: the backend returned no verdict' ;;
+    *)                printf 'state=%s: unrecognized verdict, refused as unsafe' "$1" ;;
+  esac
+}
+
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
@@ -1164,7 +1180,7 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject deferred: supervisor composer not confirmed-empty ($(_composer_defer_reason "$composer"))"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
