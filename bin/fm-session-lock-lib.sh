@@ -99,8 +99,16 @@ fm_harness_process_matches() {  # <comm> <args> [self=0]
   # fm_harness_pid_alive checks membership in that same walk before passing
   # self=1 for a lock-file pid, so a pid from a genuinely different session
   # never borrows the caller's marker.
+  #
+  # Deliberately do NOT set FM_HARNESS_IS_CLAUDE here even though omp is
+  # Claude-backed: that flag tells fm_harness_ancestry_pids to keep climbing
+  # past this match the way native Claude Code's nested worker chain requires,
+  # and the comment above is explicit that omp has no such chain to climb. Omp
+  # is its own session boundary, exactly like every other non-Claude harness -
+  # setting the flag would let the walk continue into whatever unrelated
+  # process happens to be omp's parent (a launcher or daemon) and report that
+  # outer pid as the lock identity instead of omp's own.
   if [ "$base" = omp ] && [ "$self" -eq 1 ] && [ "${CLAUDECODE:-}" = "1" ]; then
-    FM_HARNESS_IS_CLAUDE=1
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
@@ -178,7 +186,40 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# Path to the sibling record of state dir $1's session lock naming the one
+# omp pid, if any, that fm-lock.sh verified as CLAUDECODE=1 at the moment it
+# wrote that exact pid into state/.lock. See fm_harness_record_omp_claude and
+# fm_harness_pid_alive below for why this exists.
+fm_harness_omp_claude_marker_path() {  # <state>
+  printf '%s/.lock.omp-claude' "$1"
+}
+
+# Record whether $2 - the pid fm-lock.sh just wrote into state dir $1's session
+# lock - is an omp process, so a foreign checker can later trust that this
+# exact pid was CLAUDECODE-verified without needing to read $2's own
+# environment (see fm_harness_pid_alive). Callable only from the writer's own
+# context immediately after a successful lock write, because that is the one
+# place $CLAUDECODE is sound evidence about $2: fm_harness_ancestry_pid (which
+# produced $2) never returns an omp pid unless this same environment's
+# CLAUDECODE=1 already gated it in via fm_harness_process_matches's self=1
+# path. Always called on every lock write, omp or not, so a later non-omp
+# acquisition clears a stale marker rather than leaving it pointing at a pid
+# some unrelated future process could reuse.
+fm_harness_record_omp_claude() {  # <state> <pid>
+  local state=$1 pid=$2 comm marker
+  marker=$(fm_harness_omp_claude_marker_path "$state")
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=""
+  if [ "$(basename -- "$comm")" = omp ] && [ "${CLAUDECODE:-}" = "1" ]; then
+    printf '%s\n' "$pid" > "$marker" 2>/dev/null || true
+  else
+    rm -f "$marker" 2>/dev/null || true
+  fi
+}
+
+# True if $1 is a live process that looks like a verified harness. $2 is the
+# state dir the lock naming $1 lives in, so a persisted omp record can be
+# consulted; pass "" when no such state dir applies (only the non-omp
+# evidence in fm_harness_process_matches is then available).
 #
 # $1 is read from a lock file and may belong to an entirely different session
 # than the caller - the whole point of this check is telling a live competing
@@ -191,8 +232,16 @@ EOF
 # fm_harness_ancestry_pids(), the same membership test fm_session_lock_owned_by_self
 # already uses to answer the identical question - never assumed from the
 # caller's context.
-fm_harness_pid_alive() {  # <pid>
-  local pid=$1 comm args self=0 ancestry ap
+#
+# When $1 is a genuinely foreign omp pid (self=0), no amount of local
+# evidence can prove it was CLAUDECODE-verified: that marker lives only in
+# $1's own environment, which this process cannot read. The lock-writing
+# session already did that verification before it ever became the lock
+# holder, so trust its persisted fm_harness_record_omp_claude record instead -
+# requiring an exact pid match guards against a later, unrelated process
+# reusing $1's old pid number after the verified session has exited.
+fm_harness_pid_alive() {  # <pid> <state>
+  local pid=$1 state=${2:-} comm args self=0 ancestry ap base marker
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -202,7 +251,11 @@ fm_harness_pid_alive() {  # <pid>
   done <<EOF
 $ancestry
 EOF
-  fm_harness_process_matches "$comm" "$args" "$self"
+  fm_harness_process_matches "$comm" "$args" "$self" && return 0
+  base=$(basename -- "$comm")
+  [ "$base" = omp ] && [ -n "$state" ] || return 1
+  marker=$(fm_harness_omp_claude_marker_path "$state")
+  [ "$(cat "$marker" 2>/dev/null || true)" = "$pid" ]
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor

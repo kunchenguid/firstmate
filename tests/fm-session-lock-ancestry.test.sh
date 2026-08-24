@@ -322,6 +322,122 @@ SH
   pass "session-lock: a foreign omp pid outside this ancestry is never classified as alive from the checker's own CLAUDECODE marker"
 }
 
+test_omp_ancestry_stops_at_omp_and_does_not_extend_into_a_claude_parent() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-no-extend"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  500:comm=) printf '%s\n' omp ;;
+  500:args=) printf '%s\n' omp ;;
+  500:ppid=) printf '%s\n' 600 ;;
+  600:comm=) printf '%s\n' claude ;;
+  600:args=) printf '%s\n' claude ;;
+  600:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 500 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # omp (pid 500) is directly parented by an unrelated claude-named launcher
+  # (pid 600). omp's own comment states it has no nested worker chain to
+  # climb the way native Claude Code does, so the walk must stop at 500 and
+  # never report the launcher's pid - reporting 600 would make the lock look
+  # held for as long as the launcher lives, even after omp itself exits.
+  got=$(CLAUDECODE=1 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "an omp session parented by a claude-named launcher was not recognized as a harness process"
+  [ "$got" = 500 ] || fail "ancestry resolved '$got', expected omp to be its own session boundary at pid 500, not its claude-named parent"
+  pass "session-lock: the ancestry walk stops at omp and never extends into a claude-named parent"
+}
+
+test_persisted_omp_claude_marker_lets_a_foreign_checker_see_a_live_omp_session() {
+  local dir fakebin marker
+  dir="$TMP_ROOT/omp-persisted-marker"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  marker="$dir/state/.lock.omp-claude"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  500:comm=) printf '%s\n' omp ;;
+  500:args=) printf '%s\n' omp ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' claude ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 650 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  # pid 500 is a genuinely live, CLAUDECODE-verified omp session in an
+  # entirely different session tree - this checker descends from the
+  # unrelated harness 650 instead, and carries no CLAUDECODE of its own. No
+  # amount of local evidence can prove pid 500's own environment from here,
+  # so fm-lock.sh must have persisted that verification when it wrote pid 500
+  # into the lock; only that persisted record can make this checker trust it.
+  printf '500\n' > "$dir/state/.lock"
+
+  # fm_harness_record_omp_claude, called from the writer's own context where
+  # CLAUDECODE=1 is sound evidence about pid 500, is what produces that record.
+  CLAUDECODE=1 lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 500"
+  [ "$(cat "$marker" 2>/dev/null || true)" = 500 ] \
+    || fail "fm_harness_record_omp_claude did not persist the verified omp pid"
+
+  # Without the marker, this foreign checker correctly still cannot confirm
+  # pid 500 - this is the pre-existing fail-closed behavior and must not
+  # regress.
+  rm -f "$marker"
+  if lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
+    fail "a foreign omp pid was seen as alive with no persisted marker present"
+  fi
+
+  # With the persisted marker in place, this foreign checker now correctly
+  # sees the live omp session as alive, without needing its own CLAUDECODE.
+  printf '500\n' > "$marker"
+  lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'" \
+    || fail "a live, marker-verified omp session held by a different session tree was classified as stale"
+
+  # A marker naming a different pid than the one being checked - the
+  # signature of a reused pid number after the verified session exited -
+  # must never be trusted for this pid.
+  printf '999\n' > "$marker"
+  if lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
+    fail "a marker naming a different pid was accepted as evidence for pid 500"
+  fi
+
+  # fm_harness_record_omp_claude must also clear a stale marker when the pid
+  # it is now given is not omp, so a later non-omp acquisition never leaves a
+  # foreign checker trusting a leftover record for a reused pid number.
+  printf '500\n' > "$marker"
+  lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 650"
+  [ -e "$marker" ] && fail "fm_harness_record_omp_claude left a stale marker after a non-omp pid was recorded"
+
+  pass "session-lock: a foreign checker trusts the lock writer's persisted omp+CLAUDECODE record, never its own ambient marker"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -464,6 +580,8 @@ test_omp_is_claude_identified_only_with_claudecode_marker
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_foreign_omp_pid_does_not_borrow_the_checkers_own_claudecode_marker
+test_omp_ancestry_stops_at_omp_and_does_not_extend_into_a_claude_parent
+test_persisted_omp_claude_marker_lets_a_foreign_checker_see_a_live_omp_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
