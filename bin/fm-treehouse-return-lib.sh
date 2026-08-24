@@ -10,7 +10,9 @@
 # When HEAD has no durable ref, the wrapper adds
 # refs/firstmate/rescue/<task-id>/<timestamp> at HEAD before it returns the
 # worktree. If Git cannot resolve HEAD, enumerate the allowed refs, or create
-# the rescue ref, it refuses without calling Treehouse.
+# the rescue ref, it refuses without calling Treehouse and exits
+# FM_TREEHOUSE_RETURN_GUARD_REFUSED; committed work that could not be certified
+# must never be discarded, so callers must preserve the worktree on that status.
 
 fm_treehouse_return_task_id_safe() {
   local id=${1-}
@@ -112,9 +114,19 @@ fm_treehouse_return_guard() {
   done
 }
 
-fm_treehouse_return() {
-  local task_id=$1 worktree=$2
+# Exit status reserved for a guard refusal, so callers can tell "the committed
+# work here was never certified" apart from an ordinary Treehouse failure and
+# keep the worktree instead of reclaiming its slot.
+FM_TREEHOUSE_RETURN_GUARD_REFUSED=3
 
-  fm_treehouse_return_guard "$task_id" "$worktree" || return 1
-  treehouse return --force "$worktree"
+fm_treehouse_return() {
+  local task_id=$1 worktree=$2 rc
+
+  fm_treehouse_return_guard "$task_id" "$worktree" \
+    || return "$FM_TREEHOUSE_RETURN_GUARD_REFUSED"
+
+  treehouse return --force "$worktree" && return 0
+  rc=$?
+  [ "$rc" -ne "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ] || rc=1
+  return "$rc"
 }

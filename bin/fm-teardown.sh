@@ -1236,6 +1236,10 @@ STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
+# A committed-work guard refusal (bin/fm-treehouse-return-lib.sh): reachability
+# could not be certified or the rescue ref could not be created, so the worktree
+# still holds the only handle on those commits and must be preserved.
+TEARDOWN_TREEHOUSE_GUARD_REFUSED=5
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -1300,15 +1304,21 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} task_id=${5:-$ID}
-  local out lock attempt=0 max_retries lock_desc
+  local out rc lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ); then
+  out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
+
+  if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
+    echo "teardown: $label return refused by the committed-work guard; preserving $dir and every commit it still holds" >&2
+    return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
 
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
@@ -1329,12 +1339,18 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ); then
+    out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
+
+    if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
+      echo "teardown: $label return refused by the committed-work guard; preserving $dir and every commit it still holds" >&2
+      return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+    fi
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
@@ -1356,12 +1372,17 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ); then
+      out=$( ( cd "$cd_dir" && fm_treehouse_return "$task_id" "$dir" ) 2>&1 ) && rc=0 || rc=$?
+      if [ "$rc" -eq 0 ]; then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
+      if [ "$rc" -eq "$FM_TREEHOUSE_RETURN_GUARD_REFUSED" ]; then
+        echo "teardown: $label return refused by the committed-work guard after stale-lock cleanup; preserving $dir and every commit it still holds" >&2
+        return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+      fi
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi
@@ -2481,6 +2502,10 @@ cleanup_firstmate_home_children() {
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+            echo "REFUSED: committed work in child worktree $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"

@@ -205,6 +205,59 @@ test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
   pass "an unreadable worktree inside another repository refuses instead of borrowing its HEAD"
 }
 
+test_guard_refusal_preserves_child_worktree_commits() {
+  local case_dir home subhome childproj childwt head out rc
+  case_dir="$TMP_ROOT/child-guard-refusal"
+  home="$case_dir/home"
+  subhome="$case_dir/subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$case_dir/child-worktree"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$case_dir/fakebin"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+
+  fm_git_worktree "$childproj" "$childwt" fm/child-branch
+  git -C "$childwt" checkout -q --detach
+  git -C "$childwt" commit -q --allow-empty -m unnamed-child-work
+  head=$(git -C "$childwt" rev-parse HEAD)
+  # A file at refs/firstmate/rescue/<child-id> blocks the <id>/<timestamp> ref
+  # below it, so this detached commit can be neither certified nor rescued. It
+  # points at the baseline, so it never makes HEAD durable by itself.
+  mkdir -p "$childproj/.git/refs/firstmate/rescue"
+  git -C "$childproj" rev-parse refs/heads/fm/child-branch \
+    > "$childproj/.git/refs/firstmate/rescue/child"
+
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' \
+    "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    'window=firstmate:fm-child' \
+    'endpoint_task_id=child' \
+    "worktree=$childwt" \
+    "project=$childproj" \
+    'harness=echo' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'yolo=off'
+
+  set +e
+  out=$(FM_HOME="$home" FM_TREEHOUSE_RETURN_MARKER="$case_dir/treehouse-return-called" \
+    PATH="$case_dir/fakebin:$PATH" "$TEARDOWN" domain --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced teardown ignored an unrescuable child commit: $out"
+  [ -d "$childwt" ] || fail "guard refusal deleted the child worktree holding unreferenced commits: $out"
+  [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
+    || fail "child worktree no longer holds its unreferenced commit"
+  assert_contains "$out" "$childwt" \
+    "guard refusal did not name the preserved child worktree"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "guard refusal did not report why the committed work could not be rescued"
+  pass "a committed-work guard refusal preserves the child worktree and its commits"
+}
+
 test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo() {
   local case_dir other target out rc
   case_dir="$TMP_ROOT/ambient-git-dir"
@@ -299,6 +352,7 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
 test_broken_ref_store_still_rescues_detached_commit
 test_worktree_inside_another_repo_refuses_instead_of_borrowing_it
 test_ambient_git_dir_cannot_stand_in_for_the_worktree_repo
+test_guard_refusal_preserves_child_worktree_commits
 test_unrescuable_commit_reports_the_concrete_git_reason
 test_durable_branch_returns_even_with_an_unusable_task_id
 test_unusable_task_id_refuses_unrescuable_committed_work
