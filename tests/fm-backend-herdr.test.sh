@@ -742,6 +742,66 @@ test_agent_free_verdict_requires_the_panes_own_shell() {
   pass "fm_backend_herdr: the agent-free verdict is corroborated against the pane's own shell pid"
 }
 
+test_shared_harness_matcher_is_a_second_route_to_live() {
+  local dir log resp fb out
+
+  # Claude Code's native installer names the per-session executable by its
+  # version, so exact equality with the registered `agent` sees nothing while
+  # the install path still says claude. Before the shared matcher was
+  # consulted this genuinely live pane read unreadable and every lifecycle
+  # verb refused on it.
+  dir="$TMP_ROOT/foreground-versioned-claude"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"2.1.220","argv0":"/Users/x/.local/share/claude/versions/2.1.220"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] \
+    || fail "a version-named Claude Code executable must be recognized as live, got '$out'"
+
+  # A harness that runs under a bare interpreter reports `node` as its process
+  # name, which exact equality with the registered `agent` can never match;
+  # the shared matcher owns the interpreter-plus-harness-script rule.
+  dir="$TMP_ROOT/foreground-interpreter-harness"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"node","argv0":"node","argv":["node","/usr/local/lib/opencode/bin/opencode.js"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] \
+    || fail "a harness running under a bare interpreter must be recognized as live, got '$out'"
+
+  # The second route may only ADD live. A lone login shell over a stale
+  # registration stays agent-free, and an unrelated process stays unknown.
+  dir="$TMP_ROOT/foreground-matcher-keeps-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh","argv":["-zsh"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = no-agent ] \
+    || fail "the shared matcher must not disturb the lone-login-shell verdict, got '$out'"
+
+  dir="$TMP_ROOT/foreground-matcher-unrelated-node"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"node","argv0":"node","argv":["node","/Users/x/projects/unrelated/server.js"]}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "an unrelated node process must stay unknown and refuse, got '$out'"
+
+  pass "fm_backend_herdr: the shared harness matcher adds a second route to live without widening agent-free"
+}
+
 test_endpoint_closeable_keeps_registration_only_safety() {
   local dir log resp fb out
 
@@ -4712,6 +4772,7 @@ test_terminal_done_needs_foreground_evidence_and_is_never_a_husk
 test_live_registration_requires_a_matching_foreground_agent
 test_foreground_proof_settles_transient_prompt_helpers
 test_agent_free_verdict_requires_the_panes_own_shell
+test_shared_harness_matcher_is_a_second_route_to_live
 test_endpoint_closeable_keeps_registration_only_safety
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk

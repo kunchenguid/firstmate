@@ -161,7 +161,7 @@ cmd_launch() {
         ;;
       dead)
         fm_backend_endpoint_closeable "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
-          || die "remote endpoint runs no agent process but still carries a registered agent record; refusing to close it - relaunch it in place with bin/fm-spawn.sh $id --relaunch"
+          || die "remote endpoint $REMOTE_ENDPOINT_TARGET runs no agent process but still carries a stale registered agent record, which blocks a fresh launch into the same label; refusing to close it - relaunch it in place on this host with: HERDR_SESSION=$REMOTE_HERDR_SESSION FM_HOME=$FM_ROOT FM_ROOT_OVERRIDE=$FM_ROOT FM_STATE_OVERRIDE=$CONTROL_STATE FM_DATA_OVERRIDE=$CONTROL_DATA FM_CONFIG_OVERRIDE=$TARGET_HOME/config $SCRIPT_DIR/fm-spawn.sh $id --relaunch"
         fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
           || die "could not remove the confirmed agent-less endpoint"
         ;;

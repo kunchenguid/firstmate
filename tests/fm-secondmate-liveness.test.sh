@@ -373,9 +373,8 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 # make_liveness_herdr: a stateless `herdr` stub for the ONE endpoint shape the
 # destructive-path regression needs - a stale idle registration whose pane has
 # returned to its own login shell. Every call is logged. Only the three reads
-# the lifecycle classifier makes succeed; anything else fails, so the sweep's
-# respawn attempt stops at container setup instead of driving the real spawn
-# machinery through a fake server.
+# the lifecycle classifier makes succeed; anything else fails, so any call
+# beyond those three is itself evidence the sweep went further than it should.
 make_liveness_herdr() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/herdrbin"
   mkdir -p "$fb"
@@ -430,9 +429,20 @@ test_sweep_never_closes_a_registered_herdr_endpoint() {
   # close in, so the endpoint teardown path must never even be entered.
   assert_not_contains "$(cat "$log")" "session list" \
     "the sweep must not enter the Herdr endpoint teardown path at all"
-  assert_contains "$out" "endpoint still carries a registered agent record" \
-    "the sweep should report that it refused to close the registered endpoint"
-  pass "sweep: a dead-classified Herdr secondmate pane with a live registration is never killed"
+  # A fresh --secondmate respawn is refused by the very same registration view
+  # that just blocked the close (the label is still taken), so the sweep must
+  # escalate to the operator instead of looping on a respawn that cannot work.
+  assert_not_contains "$(cat "$log")" "tab list" \
+    "the sweep must not attempt a fresh spawn into a still-registered label"
+  assert_contains "$out" "stale registered agent record" \
+    "the sweep should name the stale registration as the blocker"
+  assert_contains "$out" "fmtest:w1:p2" \
+    "the escalation should name the exact endpoint"
+  assert_contains "$out" "bin/fm-spawn.sh sm1 --relaunch" \
+    "the escalation should hand the operator one runnable recovery command"
+  assert_not_contains "$out" "respawn failed" \
+    "the sweep must escalate instead of reporting a respawn it never should have tried"
+  pass "sweep: a dead-classified Herdr secondmate pane with a live registration is escalated, never killed or respawned"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {

@@ -78,6 +78,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
+# Shared harness process identity (fm_harness_process_matches, and through it
+# fm_harness_path_name and bin/fm-cursor-lib.sh's structural Cursor rule).
+# Owned by bin/fm-session-lock-lib.sh and reused by the tmux recovery
+# classifier, so the foreground liveness proof below can recognize the harness
+# process shapes those owners already document - a version-named Claude Code
+# executable, a bare `node` running a bundled cursor-agent - instead of
+# re-deriving process identity here.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
+
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
 # subscriber (fm_backend_herdr_wait_transition) normalizes every
@@ -1954,62 +1964,107 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 # observation for fm_backend_herdr_pane_foreground_state, which owns the
 # contract and the settle retry. Prints live, no-agent, `ambiguous` (the one
 # retryable shape), or unknown.
+# live has two routes, in this order. The PRIMARY route is exact equality
+# between Herdr's own registered `agent` value and the basename of a
+# foreground process name or argv0 - the registry and the process table naming
+# the same executable is the strongest evidence available, and it is what the
+# real-lab OpenCode and Codex evidence measures. The SECOND route is the
+# repository's shared harness process matcher (fm_harness_process_matches),
+# which recognizes the shapes that matcher's owners already document and exact
+# equality cannot see: a version-named Claude Code executable identified by its
+# install path, and a bare `node` running a bundled cursor-agent. The second
+# route is consulted ONLY for a process the shell allowlist below does not
+# claim, so it can add `live` but can never turn a lone login shell into one,
+# and it never participates in the no-agent decision at all: an unmatched
+# process stays unknown and refuses exactly as before.
+#
 # no-agent is the only verdict that licenses action (relaunch and the
 # already-stopped exit report), so it is corroborated exactly like the sibling
 # fm_backend_herdr_pane_idle_shell_sample proof reading the same payload: the
 # lone foreground process must BE the pane's own shell (shell_pid ==
 # foreground_process_group_id == foreground_processes[0].pid), never merely
 # some shell holding the foreground while the agent sits stopped behind it.
+#
+# One jq pass reads the whole payload: its first line carries the pid
+# corroboration verdict and every following line is one foreground process, so
+# a proof that may run FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS times inside the
+# settle loop, per window, per fleet poll, forks jq once per sample.
 fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
-  local session=$1 pane_id=$2 agent=$3 info count name argv0 agent_name lone_name lone_argv0
+  local session=$1 pane_id=$2 agent=$3 info rows pid_state count=0
+  local name argv0 argv agent_name kind lone_kind
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
     printf 'unknown'
     return 0
   }
-  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and (.result.process_info.foreground_processes | type) == "array"
-    and (.result.process_info.foreground_processes | length) > 0
-    and all(.result.process_info.foreground_processes[];
-      (.name | type == "string" and length > 0)
-      and ((.argv0 // .argv[0] // null) | type == "string" and length > 0)
-    )
-  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-  count=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes | length' 2>/dev/null)
-  case "$count" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  agent_name=${agent#-}; agent_name=${agent_name##*/}; agent_name=${agent_name%.exe}
-  lone_name=""; lone_argv0=""
-  while IFS=$'\t' read -r name argv0; do
-    [ -n "$name" ] && [ -n "$argv0" ] || { printf 'unknown'; return 0; }
-    name=${name#-}; name=${name##*/}; name=${name%.exe}
-    argv0=${argv0#-}; argv0=${argv0##*/}; argv0=${argv0%.exe}
-    if [ "$name" = "$agent_name" ] || [ "$argv0" = "$agent_name" ]; then
-      printf 'live'
-      return 0
-    fi
-    lone_name=$name; lone_argv0=$argv0
-  done < <(printf '%s' "$info" | jq -r '
-    .result.process_info.foreground_processes[]
-    | [(.name // empty), (.argv0 // .argv[0] // empty)] | @tsv
-  ' 2>/dev/null)
-  [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
-  case "$lone_name:$lone_argv0" in
-    sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish) ;;
+  rows=$(printf '%s' "$info" | jq -r --arg pane "$pane_id" '
+    .result as $r
+    | if ($r.type == "pane_process_info"
+          and $r.process_info.pane_id == $pane
+          and ($r.process_info.foreground_processes | type) == "array"
+          and ($r.process_info.foreground_processes | length) > 0
+          and all($r.process_info.foreground_processes[];
+            (.name | type == "string" and length > 0)
+            and ((.argv0 // .argv[0] // null) | type == "string" and length > 0)))
+      then
+        $r.process_info as $p
+        | (if (($p.shell_pid | type == "number" and . > 1)
+               and ($p.foreground_process_group_id | type == "number" and . > 1)
+               and ($p.foreground_processes[0].pid | type == "number" and . > 1))
+           then (if ($p.foreground_process_group_id == $p.shell_pid
+                     and $p.foreground_processes[0].pid == $p.shell_pid)
+                 then "own-shell" else "foreign-shell" end)
+           else "no-pids" end),
+          ($p.foreground_processes[]
+           | [.name, (.argv0 // .argv[0]), ((.argv // []) | join(" "))] | @tsv)
+      else empty end
+  ' 2>/dev/null) || { printf 'unknown'; return 0; }
+  pid_state=${rows%%$'\n'*}
+  case "$pid_state" in own-shell|foreign-shell|no-pids) ;; *) printf 'unknown'; return 0 ;; esac
+  case "$rows" in
+    *$'\n'*) rows=${rows#*$'\n'} ;;
     *) printf 'unknown'; return 0 ;;
   esac
-  printf '%s' "$info" | jq -e '
-    .result.process_info as $p
-    | ($p.shell_pid | type == "number" and . > 1)
-    and ($p.foreground_process_group_id | type == "number" and . > 1)
-    and ($p.foreground_processes[0].pid | type == "number" and . > 1)
-  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-  printf '%s' "$info" | jq -e '
-    .result.process_info as $p
-    | ($p.foreground_process_group_id == $p.shell_pid)
-    and ($p.foreground_processes[0].pid == $p.shell_pid)
-  ' >/dev/null 2>&1 || { printf 'ambiguous'; return 0; }
-  printf 'no-agent'
+  agent_name=${agent#-}; agent_name=${agent_name##*/}; agent_name=${agent_name%.exe}
+  lone_kind=other
+  while IFS=$'\t' read -r name argv0 argv; do
+    [ -n "$name" ] && [ -n "$argv0" ] || { printf 'unknown'; return 0; }
+    count=$((count + 1))
+    kind=$(fm_backend_herdr_classify_foreground_process "$name" "$argv0" "$argv" "$agent_name")
+    [ "$kind" = agent ] && { printf 'live'; return 0; }
+    lone_kind=$kind
+  done < <(printf '%s\n' "$rows")
+  [ "$count" -gt 0 ] || { printf 'unknown'; return 0; }
+  [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
+  [ "$lone_kind" = shell ] || { printf 'unknown'; return 0; }
+  case "$pid_state" in
+    own-shell) printf 'no-agent' ;;
+    foreign-shell) printf 'ambiguous' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_herdr_classify_foreground_process: agent|shell|other for one
+# foreground process, given <registered-agent-basename>. Exact registry
+# equality first, then the shell allowlist (which the shared matcher may never
+# override), then the shared harness matcher as the second route to agent.
+fm_backend_herdr_classify_foreground_process() {  # <name> <argv0> <argv> <agent-name>
+  local name=$1 argv0=$2 argv=$3 agent_name=$4 base_name base_argv0
+  base_name=${name#-}; base_name=${base_name##*/}; base_name=${base_name%.exe}
+  base_argv0=${argv0#-}; base_argv0=${base_argv0##*/}; base_argv0=${base_argv0%.exe}
+  if [ -n "$agent_name" ] \
+    && { [ "$base_name" = "$agent_name" ] || [ "$base_argv0" = "$agent_name" ]; }; then
+    printf 'agent'
+    return 0
+  fi
+  case "$base_name:$base_argv0" in
+    sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish) printf 'shell'; return 0 ;;
+  esac
+  if fm_harness_process_matches "$name" "${argv:-$argv0}" \
+    || fm_harness_process_matches "$argv0" "${argv:-$argv0}"; then
+    printf 'agent'
+    return 0
+  fi
+  printf 'other'
 }
 
 # fm_backend_herdr_pane_agent_state: lifecycle state for <pane-id> in

@@ -626,7 +626,13 @@ The lifecycle classifier treats that positive shell evidence as agent-free for `
 No registration status alone proves a pane agent-free: Herdr's `done` is a per-turn status of a still-attached agent, so terminal and non-terminal registrations alike are resolved against `pane process-info`, and an ambiguous group (a shell transiently hosting a prompt helper) is resampled over a bounded settle window before it refuses as unknown.
 The agent-free verdict is corroborated against the pane's own shell (`shell_pid == foreground_process_group_id == foreground_processes[0].pid`), so a shell holding the foreground in front of a stopped agent never reads as agent-free.
 A lifecycle `dead` verdict means only that no agent process is running; it is never permission to close a pane.
-Recovery callers that would destroy an endpoint ask `fm_backend_endpoint_closeable`, which Herdr answers from the registration-only husk view, so a still-registered pane is recovered in place through `fm-spawn` rather than closed.
+Recovery callers that would destroy an endpoint ask `fm_backend_endpoint_closeable`, which Herdr answers from the registration-only husk view.
+A still-registered stale endpoint is therefore neither closed nor auto-respawned: a fresh `--secondmate` spawn would be refused by that same registration view (the tab label is still taken), so the session-start sweep and the remote launch path escalate to the operator with the exact endpoint and one runnable `fm-spawn --relaunch` command, which is the path the smoke above proves end to end.
+Known follow-up: an automatic in-place recovery flow for a stale registered secondmate is deliberately out of scope here; today it is operator-driven.
+
+Live evidence scope. The primary live signal is exact equality between Herdr's registered `agent` value and a foreground process name or `argv0`; that is what the OpenCode and Codex runs above measure on Herdr 0.8.0.
+Harnesses whose process name does not carry their registered identity are recognized through the repository's shared harness process matcher (`fm_harness_process_matches`, also used by the tmux recovery classifier), which is consulted only as a second route to `live` — a version-named Claude Code executable and a harness running under a bare interpreter are covered by the portable falsifiers in `tests/fm-backend-herdr.test.sh` rather than by a live Herdr run.
+The matcher can only add `live`; it never participates in the agent-free decision, so an unrecognized process stays `unknown` and refuses.
 Run this guard after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
