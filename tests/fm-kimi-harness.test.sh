@@ -81,7 +81,12 @@ case "${1:-}" in
     prev=
     literal=
     for arg in "$@"; do
-      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      if [ "$prev" = -l ]; then
+        # fm-send ends its option parsing with a bare `--` before the payload
+        # so dash-leading steer text can never be read as flags.
+        [ "$arg" = "--" ] && continue
+        literal=$arg; break
+      fi
       prev=$arg
     done
     if [ -n "$literal" ]; then
