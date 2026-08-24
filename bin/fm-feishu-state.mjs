@@ -551,6 +551,7 @@ function validateOutboundReceipt(receipt) {
 function validateOutboundIntent(intent) {
   if (intent.schema !== OUTBOUND_INTENT_SCHEMA || intent.source !== "pi-assistant") throw new Error("invalid Feishu outbound registration intent");
   requireString(intent.intent_id, "outbound intent id", /^reg_[a-f0-9]{40}$/);
+  if (intent.event_id !== undefined) requireString(intent.event_id, "outbound intent event id", OUTBOUND_EVENT_ID);
   requireString(intent.assistant_entry_id, "outbound intent Assistant entry", SESSION_ENTRY_ID);
   requireSafeInteger(intent.session_order, "outbound intent session order");
   requireString(intent.session_id, "outbound intent session", SESSION_ID);
@@ -916,14 +917,17 @@ export function convergeConfiguredSession(home, input, session, options = {}) {
       priorBinding.session_header_id === identity.headerId &&
       priorBinding.session_header_cwd_realpath === identity.headerCwd;
     if (bindingMatches) {
+      if (options.hardTakeover) fencePriorLiveSessionsLocked(paths);
       if (JSON.stringify(priorPairing.inbound_types) === JSON.stringify(SUPPORTED_INBOUND_TYPES)) return { changed: false, pairing: priorPairing, binding: priorBinding };
       const upgradedPairing = { ...priorPairing, inbound_types: [...SUPPORTED_INBOUND_TYPES], updated_at: nowIso() };
       atomicJson(paths.pairing, upgradedPairing);
       return { changed: true, pairing: upgradedPairing, binding: priorBinding };
     }
-    for (const name of safeJsonNames(paths.inboundPending)) {
-      const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-      if (ledger.state === "offered") throw new Error("cannot replace a configured Feishu binding while a message belongs to the prior Pi native queue");
+    if (!options.hardTakeover || !pairingMatches || !priorIdentityConsistent) {
+      for (const name of safeJsonNames(paths.inboundPending)) {
+        const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+        if (ledger.state === "offered") throw new Error("cannot replace a configured Feishu binding while a message belongs to the prior Pi native queue");
+      }
     }
     const generation = Number(priorBinding?.generation ?? 0) + 1;
     if (!Number.isSafeInteger(generation) || generation <= 0) throw new Error("invalid Feishu binding generation");
@@ -963,7 +967,8 @@ export function convergeConfiguredSession(home, input, session, options = {}) {
       previous_binding_id: priorBinding?.binding_id ?? null,
     };
     if (pairingMatches && priorIdentityConsistent) {
-      retargetPendingIngressLocked(paths, binding);
+      retargetPendingIngressLocked(paths, binding, { includeOffered: options.hardTakeover === true });
+      if (options.hardTakeover) retargetPendingOutboundLocked(paths, priorBinding, binding);
     } else {
       for (const name of safeJsonNames(paths.inboundPending)) {
         const path = join(paths.inboundLedger, name);
@@ -979,43 +984,112 @@ export function convergeConfiguredSession(home, input, session, options = {}) {
       }
       syncInboundPendingCount(paths);
     }
+    if (options.hardTakeover) fencePriorLiveSessionsLocked(paths);
     atomicJson(paths.pairing, pairing);
     atomicJson(join(paths.bindings, `generation-${String(generation).padStart(8, "0")}.json`), binding);
     atomicJson(paths.activeBinding, binding);
     return { changed: true, pairing, binding };
   };
   return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => (
-    options.requireEmptyDeliveryState
-      ? withLock(paths, "outbound-state", () => {
-        assertManualRebindSafeLocked(paths);
-        return converge();
-      })
+    options.hardTakeover
+      ? withLock(paths, "outbound-state", () => withLock(paths, "live-session", converge))
       : converge()
   )));
 }
 
-function retargetPendingIngressLocked(paths, binding) {
+function retargetPendingIngressLocked(paths, binding, { includeOffered = false } = {}) {
   repairInboundPublicationsLocked(paths);
   const names = safeJsonNames(paths.inboundPending);
   for (const name of names) {
     const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    if (ledger.state === "offered") throw new Error("cannot rebind while a Feishu message belongs to the current Pi native queue");
+    if (ledger.state === "offered" && !includeOffered) throw new Error("cannot rebind while a Feishu message belongs to the current Pi native queue");
   }
   for (const name of names) {
     const path = join(paths.inboundLedger, name);
     const ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    if (ledger.state !== "pending") continue;
-    validateInboundEvent(readJson(join(paths.inbox, name)));
+    if (!new Set(["pending", ...(includeOffered ? ["offered"] : [])]).has(ledger.state)) continue;
+    const event = validateInboundEvent(readJson(join(paths.inbox, name)));
     atomicJson(path, {
       ...ledger,
+      state: "pending",
+      offered_at: null,
       original_binding_id: ledger.original_binding_id ?? ledger.binding_id,
       original_binding_generation: ledger.original_binding_generation ?? ledger.binding_generation,
       binding_id: binding.binding_id,
       binding_generation: binding.generation,
       target_session_id: binding.session_id,
+      last_error: ledger.state === "offered" ? "prior Pi session was fenced before native queue delivery could be confirmed" : ledger.last_error,
+      retargeted_at: nowIso(),
+    });
+    for (const part of event.content ?? []) {
+      if (part.type !== "image") continue;
+      const media = readInboundMedia(paths, part.media_id);
+      if (media?.state !== "downloading") continue;
+      atomicJson(mediaRecordPath(paths, media.media_id), {
+        ...media,
+        state: "pending",
+        owner_nonce: null,
+        next_attempt_at_ms: null,
+        last_error_kind: "binding-takeover",
+        download_started_at: null,
+      });
+    }
+  }
+  syncInboundPendingCount(paths);
+}
+
+function retargetPendingOutboundLocked(paths, priorBinding, binding) {
+  repairOutboundStateLocked(paths, priorBinding);
+  if (!priorBinding) return;
+  for (const name of safeJsonNames(paths.outboundRegistrationIntents)) {
+    const path = join(paths.outboundRegistrationIntents, name);
+    const intent = validateOutboundIntent(readJson(path));
+    if (intent.binding_id !== priorBinding.binding_id || intent.binding_generation !== priorBinding.generation || intent.session_id !== priorBinding.session_id) continue;
+    atomicJson(path, {
+      ...intent,
+      original_binding_id: intent.original_binding_id ?? intent.binding_id,
+      original_binding_generation: intent.original_binding_generation ?? intent.binding_generation,
+      original_session_id: intent.original_session_id ?? intent.session_id,
+      binding_id: binding.binding_id,
+      binding_generation: binding.generation,
+      session_id: binding.session_id,
       retargeted_at: nowIso(),
     });
   }
+  for (const name of safeJsonNames(paths.outbox)) {
+    const outboxPath = join(paths.outbox, name);
+    const ledgerPath = join(paths.outboundLedger, name);
+    const outbox = validateOutbound(readJson(outboxPath));
+    const ledger = validateOutboundLedger(readJson(ledgerPath));
+    if (!["pending", "retryable", "sending"].includes(ledger.state)) continue;
+    if (outbox.binding_id !== priorBinding.binding_id || outbox.binding_generation !== priorBinding.generation || outbox.session_id !== priorBinding.session_id) continue;
+    const retargetedOutbox = {
+      ...outbox,
+      original_binding_id: outbox.original_binding_id ?? outbox.binding_id,
+      original_binding_generation: outbox.original_binding_generation ?? outbox.binding_generation,
+      original_session_id: outbox.original_session_id ?? outbox.session_id,
+      binding_id: binding.binding_id,
+      binding_generation: binding.generation,
+      session_id: binding.session_id,
+      retargeted_at: nowIso(),
+    };
+    atomicJson(outboxPath, retargetedOutbox);
+    atomicJson(ledgerPath, {
+      ...ledger,
+      original_binding_generation: ledger.original_binding_generation ?? ledger.binding_generation,
+      binding_generation: binding.generation,
+      retargeted_at: nowIso(),
+    });
+    writeOutboundPendingIndex(paths, name, retargetedOutbox);
+  }
+}
+
+function fencePriorLiveSessionsLocked(paths) {
+  for (const name of safeJsonNames(paths.liveSession)) {
+    readJson(join(paths.liveSession, name));
+    unlinkSync(join(paths.liveSession, name));
+  }
+  fsyncDirectory(paths.liveSession);
 }
 
 function safeJsonNames(path) {
@@ -1868,6 +1942,10 @@ export function claimLiveSession(home, binding, session, ownerToken) {
   const paths = ensurePrivateLayout(home);
   const path = join(paths.liveSession, `${sha(binding.binding_id)}.json`);
   return withLock(paths, "live-session", () => {
+    const active = readJson(paths.activeBinding, { optional: true });
+    if (!active || active.status !== "active" || active.binding_id !== binding.binding_id || active.generation !== binding.generation || active.session_id !== session.sessionId || active.session_file_realpath !== session.sessionFile || active.session_cwd_realpath !== session.sessionCwd) {
+      return { ok: false, reason: "binding is no longer owned by this Pi session" };
+    }
     const prior = readJson(path, { optional: true });
     if (prior && prior.owner_token !== ownerToken && pidAlive(prior.pid)) {
       return { ok: false, reason: "another identity-matched live Pi owns this binding" };
@@ -1888,6 +1966,16 @@ export function claimLiveSession(home, binding, session, ownerToken) {
     atomicJson(path, record);
     return { ok: true, record };
   });
+}
+
+export function liveSessionOwnsBinding(home, binding, session, ownerToken) {
+  const paths = pathsForHome(home);
+  privateDir(paths.liveSession);
+  const record = readJson(join(paths.liveSession, `${sha(binding.binding_id)}.json`), { optional: true });
+  if (!record || record.binding_id !== binding.binding_id || record.binding_generation !== binding.generation || record.home_id !== binding.home_id || record.fm_home_realpath !== paths.home || record.session_id !== binding.session_id || record.session_file_realpath !== binding.session_file_realpath || record.session_cwd_realpath !== binding.session_cwd_realpath || !pidAlive(record.pid)) return false;
+  if (session && (record.session_id !== session.sessionId || record.session_file_realpath !== session.sessionFile || record.session_cwd_realpath !== session.sessionCwd)) return false;
+  if (ownerToken !== undefined && record.owner_token !== ownerToken) return false;
+  return true;
 }
 
 export function releaseLiveSession(home, bindingId, ownerToken) {
@@ -1914,36 +2002,6 @@ export function ingressCounts(home) {
     else counts.other += 1;
   }
   return counts;
-}
-
-function assertManualRebindSafeLocked(paths) {
-  repairInboundLedgersLocked(paths);
-  const bindingRaw = readJson(paths.activeBinding, { optional: true });
-  const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
-  repairOutboundStateLocked(paths, binding);
-  const inbound = { pending: 0, offered: 0 };
-  for (const name of safeJsonNames(paths.inboundPending)) {
-    const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    if (ledger.state === "pending") inbound.pending += 1;
-    if (ledger.state === "offered") inbound.offered += 1;
-  }
-  let outboundPending = 0;
-  let outboundUncertain = 0;
-  for (const name of safeJsonNames(paths.outboundLedger)) {
-    const ledger = requireSchema(readJson(join(paths.outboundLedger, name)), OUTBOUND_LEDGER_SCHEMA, "outbound ledger");
-    if (["pending", "retryable", "sending"].includes(ledger.state)) outboundPending += 1;
-    if (ledger.state === "delivery_uncertain") outboundUncertain += 1;
-  }
-  if (inbound.pending > 0 || inbound.offered > 0 || outboundPending > 0 || outboundUncertain > 0) {
-    throw new Error("manual Feishu rebind requires zero pending, offered, or uncertain delivery work; run /fm-feishu-status locally and wait for it to settle");
-  }
-}
-
-export function assertManualRebindSafe(home) {
-  const paths = ensurePrivateLayout(home);
-  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => withLock(paths, "outbound-state", () => {
-    assertManualRebindSafeLocked(paths);
-  })));
 }
 
 const SECRET_PATTERNS = [
@@ -2450,16 +2508,21 @@ function outboundEventId(homeId, input) {
   return stableId("out_", `${homeId}\0${input.bindingGeneration}\0${input.sessionId}\0${input.assistantEntryId}`, 40);
 }
 
+function outboundEventIdForIntent(homeId, intent) {
+  if (intent.event_id) return intent.event_id;
+  return outboundEventId(homeId, {
+    bindingGeneration: intent.original_binding_generation ?? intent.binding_generation,
+    sessionId: intent.original_session_id ?? intent.session_id,
+    assistantEntryId: intent.assistant_entry_id,
+  });
+}
+
 function outboundLogicalQueueCount(paths, pairing) {
   const pending = new Set(safeJsonNames(paths.outboundPending));
   let count = pending.size;
   for (const name of safeJsonNames(paths.outboundRegistrationIntents)) {
-    const intent = readJson(join(paths.outboundRegistrationIntents, name));
-    const eventId = outboundEventId(pairing.home_id, {
-      bindingGeneration: intent.binding_generation,
-      sessionId: intent.session_id,
-      assistantEntryId: intent.assistant_entry_id,
-    });
+    const intent = validateOutboundIntent(readJson(join(paths.outboundRegistrationIntents, name)));
+    const eventId = outboundEventIdForIntent(pairing.home_id, intent);
     if (!pending.has(`${sha(eventId)}.json`)) count += 1;
   }
   return count;
@@ -2595,6 +2658,7 @@ export function persistAssistantOutboundIntent(home, input) {
     const record = {
       schema: OUTBOUND_INTENT_SCHEMA,
       intent_id: intentId,
+      event_id: eventId,
       source: "pi-assistant",
       assistant_entry_id: assistantEntryId,
       session_order: sessionOrder,
@@ -2610,6 +2674,13 @@ export function persistAssistantOutboundIntent(home, input) {
     const path = join(paths.outboundRegistrationIntents, `${sha(intentId)}.json`);
     const prior = readJson(path, { optional: true });
     if (prior) {
+      if (prior.event_id === undefined) {
+        const { event_id: _eventId, ...legacyRecord } = record;
+        if (JSON.stringify({ ...prior, created_at: record.created_at }) !== JSON.stringify(legacyRecord)) throw new Error("conflicting Feishu outbound registration intent");
+        const upgraded = { ...prior, event_id: record.event_id };
+        atomicJson(path, upgraded);
+        return upgraded;
+      }
       if (JSON.stringify({ ...prior, created_at: record.created_at }) !== JSON.stringify(record)) throw new Error("conflicting Feishu outbound registration intent");
       return prior;
     }
@@ -2671,7 +2742,16 @@ export function registerAssistantOutbound(home, input) {
   const text = typeof input.text === "string" ? input.text : "";
   if (text.trim().length === 0) return { status: "skipped", reason: "empty" };
   if (isLocalRoutineAssistantText(text)) return { status: "skipped", reason: "routine" };
-  const eventId = outboundEventId(pairing.home_id, { bindingGeneration: binding.generation, sessionId: input.sessionId, assistantEntryId });
+  let registrationIntent;
+  if (input.registrationIntentId) {
+    const intent = readJson(join(paths.outboundRegistrationIntents, `${sha(input.registrationIntentId)}.json`), { optional: true });
+    registrationIntent = intent ? validateOutboundIntent(intent) : undefined;
+    const matches = registrationIntent && registrationIntent.intent_id === input.registrationIntentId && registrationIntent.source === "pi-assistant" && registrationIntent.assistant_entry_id === assistantEntryId && registrationIntent.session_order === sessionOrder && registrationIntent.session_entry_timestamp === sessionEntryTimestamp && registrationIntent.session_id === input.sessionId && registrationIntent.binding_generation === input.bindingGeneration && registrationIntent.text_hash === `sha256:${sha(text)}`;
+    if (!matches) throw new Error("outbound registration does not match its durable intent");
+  }
+  const eventId = registrationIntent
+    ? outboundEventIdForIntent(pairing.home_id, registrationIntent)
+    : outboundEventId(pairing.home_id, { bindingGeneration: binding.generation, sessionId: input.sessionId, assistantEntryId });
   const maxOutboundBytes = positiveInteger(input.maxOutboundBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_BYTES, DEFAULT_MAX_OUTBOUND_BYTES);
   const minFreeBytes = positiveInteger(process.env.FM_FEISHU_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES);
   const free = statfsSync(paths.stateRoot);
@@ -2728,7 +2808,7 @@ export function registerAssistantOutbound(home, input) {
     let transferringIntent = false;
     if (input.registrationIntentId) {
       const intent = readJson(join(paths.outboundRegistrationIntents, `${sha(input.registrationIntentId)}.json`), { optional: true });
-      transferringIntent = Boolean(intent && intent.intent_id === input.registrationIntentId && intent.source === "pi-assistant" && intent.assistant_entry_id === assistantEntryId && intent.session_order === sessionOrder && intent.session_entry_timestamp === sessionEntryTimestamp && intent.session_id === input.sessionId && intent.binding_generation === input.bindingGeneration && intent.text_hash === `sha256:${sha(text)}`);
+      transferringIntent = Boolean(intent && intent.intent_id === registrationIntent.intent_id && intent.event_id === registrationIntent.event_id && intent.session_id === input.sessionId && intent.binding_generation === input.bindingGeneration && intent.text_hash === `sha256:${sha(text)}`);
       if (!transferringIntent) throw new Error("outbound registration does not match its durable intent");
     }
     if (!transferringIntent && outboundLogicalQueueCount(paths, pairing) >= maxPendingOutbound(input)) {
@@ -2804,7 +2884,7 @@ export function claimNextOutbound(home, options = {}) {
       if (ledger.retry_at_ms > now) continue;
       candidates.push({ name, path, ledger, outbox });
     }
-    candidates.sort((a, b) => a.outbox.session_order - b.outbox.session_order || a.outbox.assistant_entry_id.localeCompare(b.outbox.assistant_entry_id));
+    candidates.sort((a, b) => a.outbox.created_at.localeCompare(b.outbox.created_at) || a.outbox.session_order - b.outbox.session_order || a.outbox.assistant_entry_id.localeCompare(b.outbox.assistant_entry_id));
     const candidate = candidates[0];
     if (!candidate) return undefined;
     const chunk = candidate.outbox.chunks[candidate.ledger.next_chunk];
@@ -3069,6 +3149,7 @@ export function statusSummary(home) {
     allowed_user: pairing?.allowed_users?.[0] ?? null,
     transport_phase: health?.phase ?? "stopped",
     transport_healthy: binding ? transportHealthAllowsDispatch(home, binding) : false,
+    live_session_owned: binding ? liveSessionOwnsBinding(home, binding) : false,
     inbound,
     outbound_pending: outboundPending,
     outbound_uncertain: outboundUncertain,
@@ -3085,6 +3166,7 @@ export function publicStatusSummary(home) {
     binding_generation: status.binding_generation,
     transport_phase: status.transport_phase,
     transport_healthy: status.transport_healthy,
+    live_session_owned: status.live_session_owned,
     inbound_pending: status.inbound.pending,
     inbound_queued: status.inbound.queued,
     outbound_pending: status.outbound_pending,
@@ -3111,6 +3193,7 @@ async function main(argv) {
       process.stdout.write(
         `FEISHU: paired=${value.paired === true ? "yes" : "no"} binding=${value.binding_status ?? "absent"}` +
         ` generation=${value.binding_generation ?? "none"} transport=${value.transport_phase ?? "stopped"}` +
+        ` session_owned=${value.live_session_owned === true ? "yes" : "no"}` +
         ` inbox_pending=${value.inbound_pending ?? value.inbound?.pending ?? 0}` +
         ` outbox_pending=${value.outbound_pending ?? 0} uncertain=${value.outbound_uncertain ?? 0}\n`,
       );

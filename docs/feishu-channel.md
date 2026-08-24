@@ -72,20 +72,24 @@ Pre-binding Assistant history is never backfilled.
 An ephemeral `--no-session` session cannot bind.
 The bridge activates only in trusted TUI mode while the current process owns the Firstmate session lock and every stored identity matches.
 
-Starting, resuming, forking, or replacing the eligible persisted Pi session converges the binding to that exact current session.
+Starting, resuming, forking, replacing, or continuing the eligible persisted Pi session directly hard-binds the channel to that exact current session whenever its live Pi ownership is absent or stale.
 `/reload` reconstructs the extensions but deliberately does not rerun the ownership-acquiring operational session-start digest.
 It therefore converges only when this Pi already owns the lock; reload while ownership is missing or belongs to another session remains safely inert, and a later owned agent start retries without duplicating the transport.
-Replacement validates credentials and P2P identity first, then waits for the verified prior transport to stop, rejects any event already submitted to the prior Pi native queue, increments the binding generation, and starts one new transport.
+Replacement validates credentials and P2P identity first, then waits for the verified prior transport to stop, atomically transfers pending and previously offered inbound plus reconcilable outbound work, increments the binding generation, and starts one new transport.
 The prior transport is fully stopped before binding publication, so an old-generation send cannot race the replacement.
-Pending events retarget only when none already belongs to the prior Pi native queue.
+The same-session recovery path fences any prior live Pi owner and restores current live-session ownership without changing the binding generation or restarting an already healthy matching transport.
 Changing the configured app, user, or chat supersedes unsent events from the prior authorization identity rather than redirecting them.
 
 Use `/fm-feishu-disable` to stop the verified transport gracefully, retire the pairing and binding, and atomically set `FM_FEISHU_ENABLED=false`.
 Use `/fm-feishu-status` for the detailed local identity and queue view.
-Use `/fm-feishu-rebind` only from the trusted local Pi TUI when explicit recovery must move the configured channel to that exact current persisted session.
-The command reuses configuration-driven replacement, refuses pending or offered inbound work and pending or uncertain outbound work, keeps the prior-transport shutdown and generation fences, and reports success only after the exact current binding and transport are healthy.
+The trusted startup and owned-turn lifecycle performs this hard bind directly; it does not depend on a slash command.
+The compatibility-named `/fm-feishu-rebind` may still invoke the same action from the trusted local Pi TUI.
+After configuration and P2P identity probing and any required graceful prior-transport shutdown, one state-owner transaction advances the binding generation when the session changes, retargets pending inbound and outbound work, clears prior live-session ownership, and publishes the exact current session as the sole owner.
+Pending and previously offered inbound keep their stable delivery reference and original order, while the new generation prevents every prior Pi from offering them or mirroring later Assistant entries.
+Pending Assistant-registration intents and outbox records keep their stable event and chunk UUID identities across takeover; receipts are reconciled first, and terminal delivery uncertainty remains recorded without replay or blocking the ownership move.
+The command has no alternate rebind mode, force flag, or second confirmation, and reports success only after the exact current binding and transport are healthy.
 An already-current healthy binding is an idempotent success without generation or transport churn.
-On refusal, follow the body-free local status and configuration checks named by the command; never delete private records or restart only the transport to bypass an ownership ambiguity.
+On refusal, follow the body-free local status and configuration checks named by the command; never delete private records or restart only the transport to bypass a trust, configuration, or graceful-stop failure.
 No Feishu message can enable, disable, pair, bind, rebind, or move the channel.
 
 ## Direct SDK long connection
@@ -200,7 +204,8 @@ Delivered or terminally refused media is removed after a bounded 24-hour retenti
 A live lock owner is distinguishable from stale dead-owner reclamation, a fresh dead owner still inside the stale-owner grace period, and malformed or unsafe lock state; only live-owner contention is retried by the active ingress pump.
 
 Healthy normal startup prints no Feishu status or success line.
-Public status shows only enabled state, binding status, generation, body-free transport phase, and aggregate counts.
+Public status shows only enabled state, binding status, generation, body-free transport phase, the separate body-free `live_session_owned` ownership bit, and aggregate counts.
+`transport_healthy=true` with `live_session_owned=false` means the no-Agent SDK connection is healthy but no current Pi bridge owns native delivery; the next trusted owned Pi boundary performs a same-generation hard bind without a transport-only restart.
 They do not show credentials, app IDs, user/chat IDs, message bodies, session paths, or raw diagnostics.
 A malformed, unsafe, incomplete, or credential-rejected configuration stops activation safely, preserves unrelated Pi and Firstmate operation, and reports one body-free local remediation.
 A missing SDK dependency reports its existing optional-feature prerequisite without activating the channel.
@@ -209,7 +214,7 @@ A missing SDK dependency reports its existing optional-feature prerequisite with
 
 The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
 It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
-It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, native image content, ordered text plus multiple images, image-only input, media byte binding and private modes, download replay and retry, size/count/MIME/signature refusal, path containment and expiry, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, manual rebind stale-session replacement, already-current idempotence, Feishu-origin refusal, pending or uncertain delivery refusal, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
+It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, native image content, ordered text plus multiple images, image-only input, media byte binding and private modes, download replay and retry, size/count/MIME/signature refusal, path containment and expiry, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, public-lifecycle hard takeover of live and stale owners, pending inbound handoff, pending and uncertain outbound identity reconciliation, old-session fencing, already-current idempotence, Feishu-origin refusal, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
 
 That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
 A post-PR live integration check requires the captain to send one image and one ordered text-plus-image message through the already configured P2P channel, then verify that the exact current Pi can inspect both images.

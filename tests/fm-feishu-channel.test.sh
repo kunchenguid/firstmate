@@ -69,8 +69,8 @@ import { createHash } from "node:crypto";
 import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  assertManualRebindSafe,
   bindSession,
+  claimLiveSession,
   claimNextOutbound,
   claimTransportOwner,
   completeFeishuMediaDownload,
@@ -83,6 +83,7 @@ import {
   findInboundByDeliveryRef,
   ingressCounts,
   IDEMPOTENCY_WINDOW_MS,
+  liveSessionOwnsBinding,
   offerFeishuIngress,
   pendingFeishuMedia,
   pathsForHome,
@@ -90,6 +91,7 @@ import {
   persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  readAssistantOutboundIntents,
   reconcileFeishuIngress,
   renderFeishuPostMarkdown,
   registerAssistantOutbound,
@@ -773,16 +775,51 @@ mkdirSync(rebindSession);
 const rebindFile = join(rebindSession, "s.jsonl");
 writeFileSync(rebindFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: rebindSession })}\n`);
 const rebindBinding = bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession });
-const rebindInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind", message_id: "om_rebindSource1234" }));
-assert.throws(() => assertManualRebindSafe(rebindHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted pending ingress");
-assert.throws(() => offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation + 1 }), /binding fence mismatch/, "changed generation reached the native Pi queue");
-offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation });
-assert.throws(() => assertManualRebindSafe(rebindHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted ingress already offered to Pi");
-assert.throws(() => bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession }, { rebind: true }), /belongs to the current Pi native queue/);
+assert.equal(claimLiveSession(rebindHome, rebindBinding, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession }, `pi_${process.pid}_${"a".repeat(24)}`).ok, true);
+const pendingTakeoverInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind_pending", message_id: "om_rebindPending1234" }));
+const offeredTakeoverInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind_offered", message_id: "om_rebindOffered1234" }));
+offerFeishuIngress(rebindHome, offeredTakeoverInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation });
+
+const uncertainResult = registerAssistantOutbound(rebindHome, {
+  text: "uncertain outbound across hard bind",
+  assistantEntryId: "feed1000",
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-12T00:01:00.000Z",
+  sessionId,
+  bindingGeneration: rebindBinding.generation,
+});
+assert.equal(uncertainResult.status, "registered");
+const uncertainClaim = claimNextOutbound(rebindHome, { nowMs: 1000 });
+assert(uncertainClaim, "uncertainty fixture did not claim outbound delivery");
+failOutboundAttempt(rebindHome, uncertainClaim, new Error("ambiguous fixture"), { ambiguous: true, nowMs: 1000 });
+assert.equal(claimNextOutbound(rebindHome, { nowMs: 1000 + IDEMPOTENCY_WINDOW_MS }), undefined);
+const pendingResult = registerAssistantOutbound(rebindHome, {
+  text: "pending outbound across hard bind",
+  assistantEntryId: "feed1001",
+  sessionOrder: 2,
+  sessionEntryTimestamp: "2026-08-12T00:01:01.000Z",
+  sessionId,
+  bindingGeneration: rebindBinding.generation,
+});
+assert.equal(pendingResult.status, "registered");
+const takeoverPaths = pathsForHome(rebindHome);
+const pendingOutboxPath = join(takeoverPaths.outbox, `${sha(pendingResult.eventId)}.json`);
+const uncertainOutboxPath = join(takeoverPaths.outbox, `${sha(uncertainResult.eventId)}.json`);
+const pendingBeforeTakeover = JSON.parse(readFileSync(pendingOutboxPath, "utf8"));
+const uncertainBeforeTakeover = JSON.parse(readFileSync(uncertainOutboxPath, "utf8"));
+const intentBeforeTakeover = persistAssistantOutboundIntent(rebindHome, {
+  text: "registration intent across hard bind",
+  assistantEntryId: "feed1002",
+  sessionOrder: 3,
+  sessionEntryTimestamp: "2026-08-12T00:01:02.000Z",
+  sessionId,
+  bindingGeneration: rebindBinding.generation,
+});
+
 const replacementId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const replacementFile = join(rebindSession, "replacement.jsonl");
 writeFileSync(replacementFile, `${JSON.stringify({ type: "session", version: 3, id: replacementId, cwd: rebindSession })}\n`);
-assert.throws(() => convergeConfiguredSession(rebindHome, {
+const hardTakeover = convergeConfiguredSession(rebindHome, {
   appIdFingerprint: process.env.APP_FINGERPRINT,
   allowedUser: "ou_captain1234",
   allowedChat: "oc_chat1234",
@@ -792,32 +829,56 @@ assert.throws(() => convergeConfiguredSession(rebindHome, {
   sessionCwd: rebindSession,
   headerId: replacementId,
   headerCwd: rebindSession,
-}), /belongs to the prior Pi native queue/);
-
-const uncertainHome = join(home, "uncertain-home");
-mkdirSync(join(uncertainHome, "data"), { recursive: true });
-mkdirSync(join(uncertainHome, "state"), { recursive: true });
-createPairing(uncertainHome, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
-const uncertainSession = join(uncertainHome, "session");
-mkdirSync(uncertainSession);
-const uncertainFile = join(uncertainSession, "s.jsonl");
-writeFileSync(uncertainFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: uncertainSession })}\n`);
-const uncertainBinding = bindSession(uncertainHome, { sessionId, sessionFile: uncertainFile, sessionCwd: uncertainSession, headerId: sessionId, headerCwd: uncertainSession });
-assert.equal(registerAssistantOutbound(uncertainHome, {
-  text: "uncertain outbound",
-  assistantEntryId: "feed1000",
-  sessionOrder: 1,
-  sessionEntryTimestamp: "2026-08-12T00:01:00.000Z",
-  sessionId,
-  bindingGeneration: uncertainBinding.generation,
-}).status, "registered");
-assert.throws(() => assertManualRebindSafe(uncertainHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted pending outbound delivery");
-const uncertainClaim = claimNextOutbound(uncertainHome, { nowMs: 1000 });
-assert(uncertainClaim, "uncertainty fixture did not claim outbound delivery");
-failOutboundAttempt(uncertainHome, uncertainClaim, new Error("ambiguous fixture"), { ambiguous: true, nowMs: 1000 });
-assert.equal(claimNextOutbound(uncertainHome, { nowMs: 1000 + IDEMPOTENCY_WINDOW_MS }), undefined);
-assert.equal(statusSummary(uncertainHome).outbound_uncertain, 1, "uncertainty fixture did not reach terminal delivery uncertainty");
-assert.throws(() => assertManualRebindSafe(uncertainHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted uncertain outbound delivery");
+}, { hardTakeover: true });
+assert.equal(hardTakeover.binding.generation, rebindBinding.generation + 1, "hard takeover did not advance exactly one generation");
+assert.equal(hardTakeover.binding.session_id, replacementId, "hard takeover did not bind the exact replacement session");
+assert.equal(claimLiveSession(rebindHome, rebindBinding, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession }, `pi_${process.pid}_${"b".repeat(24)}`).ok, false, "prior live Pi reclaimed ownership after hard takeover");
+assert.equal(claimLiveSession(rebindHome, hardTakeover.binding, { sessionId: replacementId, sessionFile: replacementFile, sessionCwd: rebindSession }, `pi_${process.pid}_${"c".repeat(24)}`).ok, true, "replacement Pi could not claim sole live ownership");
+assert.equal(liveSessionOwnsBinding(rebindHome, hardTakeover.binding), true, "replacement live-session ownership was not observable separately from transport health");
+assert.deepEqual(pendingFeishuIngress(rebindHome, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation }), [], "prior Pi retained inbound work after hard takeover");
+const transferredInbound = pendingFeishuIngress(rebindHome, { sessionId: replacementId, bindingId: hardTakeover.binding.binding_id, bindingGeneration: hardTakeover.binding.generation });
+assert.deepEqual(transferredInbound.map(({ event }) => event.delivery_ref), [pendingTakeoverInbound.deliveryRef, offeredTakeoverInbound.deliveryRef], "pending and offered inbound did not transfer once in original order");
+assert.throws(() => offerFeishuIngress(rebindHome, offeredTakeoverInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation }), /binding fence mismatch/, "prior Pi offered inbound after hard takeover");
+assert(offerFeishuIngress(rebindHome, offeredTakeoverInbound.deliveryRef, { sessionId: replacementId, bindingId: hardTakeover.binding.binding_id, bindingGeneration: hardTakeover.binding.generation }), "replacement Pi did not receive the transferred native delivery identity");
+assert.equal(offerFeishuIngress(rebindHome, offeredTakeoverInbound.deliveryRef, { sessionId: replacementId, bindingId: hardTakeover.binding.binding_id, bindingGeneration: hardTakeover.binding.generation }), undefined, "transferred inbound was offered twice to the replacement Pi");
+assert.throws(() => persistAssistantOutboundIntent(rebindHome, { text: "stale mirror", assistantEntryId: "feed1003", sessionOrder: 4, sessionEntryTimestamp: "2026-08-12T00:01:03.000Z", sessionId, bindingGeneration: rebindBinding.generation }), /does not match the active binding/, "prior Pi mirrored an Assistant reply after hard takeover");
+const transferredPending = claimNextOutbound(rebindHome, { nowMs: 1000 + IDEMPOTENCY_WINDOW_MS + 1 });
+assert.equal(transferredPending?.outbox.event_id, pendingResult.eventId, "pending outbound stable identity was dropped during hard takeover");
+assert.equal(transferredPending?.chunk.idempotency_key, pendingBeforeTakeover.chunks[0].idempotency_key, "pending outbound stable UUID changed during hard takeover");
+assert.equal(transferredPending?.outbox.binding_id, hardTakeover.binding.binding_id, "pending outbound did not move behind the new owner fence");
+const uncertainAfterTakeover = JSON.parse(readFileSync(uncertainOutboxPath, "utf8"));
+assert.equal(uncertainAfterTakeover.event_id, uncertainBeforeTakeover.event_id, "uncertain outbound stable identity changed during hard takeover");
+assert.equal(uncertainAfterTakeover.chunks[0].idempotency_key, uncertainBeforeTakeover.chunks[0].idempotency_key, "uncertain outbound stable UUID changed during hard takeover");
+assert.equal(statusSummary(rebindHome).outbound_uncertain, 1, "hard takeover dropped or replayed terminal delivery uncertainty");
+const transferredIntents = readAssistantOutboundIntents(rebindHome, { sessionId: replacementId, bindingId: hardTakeover.binding.binding_id, bindingGeneration: hardTakeover.binding.generation });
+assert.equal(transferredIntents.length, 1, "durable outbound registration intent did not transfer to the replacement owner");
+assert.equal(transferredIntents[0].record.assistant_entry_id, "feed1002");
+assert.equal(transferredIntents[0].record.event_id, intentBeforeTakeover.event_id, "outbound registration intent changed its stable event identity during hard takeover");
+const registeredTransferredIntent = registerAssistantOutbound(rebindHome, {
+  text: transferredIntents[0].record.text,
+  assistantEntryId: transferredIntents[0].record.assistant_entry_id,
+  sessionOrder: transferredIntents[0].record.session_order,
+  sessionEntryTimestamp: transferredIntents[0].record.session_entry_timestamp,
+  sessionId: transferredIntents[0].record.session_id,
+  bindingGeneration: transferredIntents[0].record.binding_generation,
+  registrationIntentId: transferredIntents[0].record.intent_id,
+});
+assert.equal(registeredTransferredIntent.eventId, intentBeforeTakeover.event_id, "transferred registration intent replayed under a new outbound event identity");
+const idempotentTakeover = convergeConfiguredSession(rebindHome, {
+  appIdFingerprint: process.env.APP_FINGERPRINT,
+  allowedUser: "ou_captain1234",
+  allowedChat: "oc_chat1234",
+}, {
+  sessionId: replacementId,
+  sessionFile: replacementFile,
+  sessionCwd: rebindSession,
+  headerId: replacementId,
+  headerCwd: rebindSession,
+}, { hardTakeover: true });
+assert.equal(idempotentTakeover.changed, false, "already-current hard bind churned the generation");
+assert.equal(idempotentTakeover.binding.generation, hardTakeover.binding.generation);
+assert.equal(liveSessionOwnsBinding(rebindHome, idempotentTakeover.binding), false, "already-current hard takeover left a prior live Pi owner unfenced");
+assert.equal(claimLiveSession(rebindHome, idempotentTakeover.binding, { sessionId: replacementId, sessionFile: replacementFile, sessionCwd: rebindSession }, `pi_${process.pid}_${"e".repeat(24)}`).ok, true, "current Pi could not reclaim sole ownership after idempotent hard takeover");
 
 const secretHome = join(home, "secret-home");
 mkdirSync(join(secretHome, "data"), { recursive: true });
@@ -911,8 +972,8 @@ process.stdin.on("end", () => {
     appIdFingerprint: process.env.APP_FINGERPRINT,
     allowedUser: "ou_captain1234",
     allowedChat: "oc_chat1234",
-  }, identity);
-  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${action === "manual-rebind" ? "manual-rebind:" : ""}${identity.sessionId}\n`);
+  }, identity, action === "hard-bind" ? { hardTakeover: true } : undefined);
+  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${action === "hard-bind" ? "hard-bind:" : ""}${identity.sessionId}\n`);
   const transportDir = `${process.env.FM_HOME}/state/feishu/transport`;
   const owner = `${transportDir}/fixture-owner`;
   if (!existsSync(owner)) {
@@ -975,11 +1036,12 @@ BRIDGE_SESSION="$BRIDGE_SESSION" \
 BRIDGE_SESSION_FILE="$BRIDGE_SESSION_FILE" \
 BRIDGE_LIFECYCLE_LOG="$BRIDGE_LIFECYCLE_LOG" \
 BRIDGE_TRANSPORT_LOG="$BRIDGE_TRANSPORT_LOG" \
+BRIDGE_STATE="$BRIDGE_FIXTURE/bin/fm-feishu-state.mjs" \
 SID="$SID" \
 APP_FINGERPRINT="$APP_FINGERPRINT" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 function fakeEventBus() {
   const channels = new Map();
@@ -1022,6 +1084,7 @@ async function emit(pi, name, event, ctx) {
 }
 const bridge = await import(pathToFileURL(process.env.BRIDGE).href);
 const turnend = await import(pathToFileURL(process.env.TURNEND).href);
+const feishuState = await import(pathToFileURL(process.env.BRIDGE_STATE).href);
 let pi = fakePi();
 bridge.default(pi);
 assert.deepEqual([...pi.commands.keys()].sort(), [
@@ -1050,7 +1113,7 @@ await emit(pi, "session_start", { reason: "startup" }, ctx);
 for (let attempt = 0; attempt < 100 && !existsSync(process.env.BRIDGE_LIFECYCLE_LOG); attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID]);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [`hard-bind:${process.env.SID}`]);
 assert(existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "post-session-start ownership signal did not publish the loaded marker");
 const binding = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
 assert.equal(binding.session_id, process.env.SID);
@@ -1058,14 +1121,31 @@ assert.equal(binding.session_file_realpath, process.env.BRIDGE_SESSION_FILE);
 assert.equal(binding.session_cwd_realpath, process.env.BRIDGE_SESSION);
 events.emit("firstmate:session-start-settled", { reason: "startup" });
 await emit(pi, "agent_start", {}, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "repeated settled or agent_start boundary duplicated configured lifecycle reconciliation");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [`hard-bind:${process.env.SID}`], "repeated settled or agent_start boundary duplicated configured lifecycle reconciliation");
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "repeated settled or agent_start boundary duplicated transport startup");
+
+const initialPaths = feishuState.pathsForHome(process.env.FM_HOME);
+const initialLiveOwners = readdirSync(initialPaths.liveSession);
+assert.equal(initialLiveOwners.length, 1, "initial bind did not publish sole live Pi ownership");
+rmSync(`${initialPaths.liveSession}/${initialLiveOwners[0]}`);
+const ownershipGap = feishuState.publicStatusSummary(process.env.FM_HOME);
+assert.equal(ownershipGap.transport_healthy, true, "ownership-gap fixture did not preserve healthy transport");
+assert.equal(ownershipGap.live_session_owned, false, "body-free status collapsed missing current-session ownership into transport health");
+const generationBeforeOwnershipRecovery = ownershipGap.binding_generation;
+const transportBeforeOwnershipRecovery = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8");
+await emit(pi, "agent_start", {}, ctx);
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [`hard-bind:${process.env.SID}`, `hard-bind:${process.env.SID}`], "owned Pi turn did not directly hard-bind after live-session ownership disappeared");
+const ownershipRecovered = feishuState.publicStatusSummary(process.env.FM_HOME);
+assert.equal(ownershipRecovered.transport_healthy, true, "direct ownership recovery lost transport health");
+assert.equal(ownershipRecovered.live_session_owned, true, "direct hard bind did not restore exact current Pi live ownership");
+assert.equal(ownershipRecovered.binding_generation, generationBeforeOwnershipRecovery, "exact-current ownership recovery churned the binding generation");
+assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportBeforeOwnershipRecovery, "exact-current ownership recovery relied on a transport restart");
 
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
 const deniedBefore = notices.length;
 await pi.commands.get("fm-feishu-rebind").handler("", ctx);
 assert.equal(notices.length, deniedBefore + 1, "wrong-owner rebind did not return one local refusal");
-assert(notices.at(-1).includes("fully exit other Pi processes"), "wrong-owner refusal omitted the safe local recovery action");
+assert(notices.at(-1).includes("current Firstmate session lock"), "wrong-owner refusal omitted the exact local trust requirement");
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
 
 const originalConfig = readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8");
@@ -1089,23 +1169,81 @@ const replacementCtx = {
     getEntries() { return []; },
   },
 };
-await pi.commands.get("fm-feishu-rebind").handler("", replacementCtx);
+const takeoverInbound = feishuState.publishFeishuInbound(process.env.FM_HOME, {
+  event_id: "evt_public_hard_bind",
+  message_id: "om_publicHardBind1234",
+  sender_id: "ou_captain1234",
+  sender_type: "user",
+  chat_id: "oc_chat1234",
+  chat_type: "p2p",
+  message_type: "text",
+  content: "pending through automatic hard bind",
+  content_size_bytes: 32,
+});
+feishuState.offerFeishuIngress(process.env.FM_HOME, takeoverInbound.deliveryRef, {
+  sessionId: process.env.SID,
+  bindingId: binding.binding_id,
+  bindingGeneration: binding.generation,
+});
+const uncertainPublic = feishuState.registerAssistantOutbound(process.env.FM_HOME, {
+  text: "uncertain public hard-bind reply",
+  assistantEntryId: "fab10000",
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-12T00:02:00.000Z",
+  sessionId: process.env.SID,
+  bindingGeneration: binding.generation,
+});
+const uncertainPublicClaim = feishuState.claimNextOutbound(process.env.FM_HOME, { nowMs: 1000 });
+feishuState.failOutboundAttempt(process.env.FM_HOME, uncertainPublicClaim, new Error("ambiguous public fixture"), { ambiguous: true, nowMs: 1000 });
+assert.equal(feishuState.claimNextOutbound(process.env.FM_HOME, { nowMs: 1000 + feishuState.IDEMPOTENCY_WINDOW_MS }), undefined);
+const pendingPublic = feishuState.registerAssistantOutbound(process.env.FM_HOME, {
+  text: "pending public hard-bind reply",
+  assistantEntryId: "fab10001",
+  sessionOrder: 2,
+  sessionEntryTimestamp: "2026-08-12T00:02:01.000Z",
+  sessionId: process.env.SID,
+  bindingGeneration: binding.generation,
+});
+const publicPaths = feishuState.pathsForHome(process.env.FM_HOME);
+const publicOutboxes = readdirSync(publicPaths.outbox).map((name) => JSON.parse(readFileSync(`${publicPaths.outbox}/${name}`, "utf8")));
+const pendingPublicBefore = publicOutboxes.find((record) => record.event_id === pendingPublic.eventId);
+const uncertainPublicBefore = publicOutboxes.find((record) => record.event_id === uncertainPublic.eventId);
+await emit(pi, "session_start", { reason: "persisted-session-replacement" }, replacementCtx);
 let rebound = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
-assert.equal(rebound.generation, 2, "manual stale-session replacement did not advance exactly one generation");
-assert.equal(rebound.session_id, replacementId, "manual stale-session replacement did not bind the exact command session");
-assert.equal(notices.at(-1), "Feishu channel rebound to this Pi session and is healthy.");
+assert.equal(rebound.generation, 2, "automatic hard bind did not advance exactly one generation");
+assert.equal(rebound.session_id, replacementId, "automatic hard bind did not bind the exact persisted session");
+for (let attempt = 0; attempt < 100 && !pi.sends.some((send) => JSON.stringify(send.content).includes(takeoverInbound.deliveryRef)); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+assert.equal(pi.sends.filter((send) => JSON.stringify(send.content).includes(takeoverInbound.deliveryRef)).length, 1, "automatic hard bind did not hand offered inbound to the new Pi exactly once");
+feishuState.reconcileFeishuIngress(process.env.FM_HOME, [{ sessionId: replacementId, bindingGeneration: rebound.generation, deliveryRef: takeoverInbound.deliveryRef }], { sessionId: replacementId, bindingGeneration: rebound.generation });
+assert.deepEqual(feishuState.pendingFeishuIngress(process.env.FM_HOME, { sessionId: process.env.SID, bindingId: binding.binding_id, bindingGeneration: binding.generation }), [], "old Pi retained pending inbound after automatic hard bind");
+assert.equal(feishuState.claimLiveSession(process.env.FM_HOME, binding, { sessionId: process.env.SID, sessionFile: process.env.BRIDGE_SESSION_FILE, sessionCwd: process.env.BRIDGE_SESSION }, `pi_${process.pid}_${"d".repeat(24)}`).ok, false, "old live Pi reclaimed the channel after automatic hard bind");
+assert.throws(() => feishuState.persistAssistantOutboundIntent(process.env.FM_HOME, { text: "old-session mirror", assistantEntryId: "fab10002", sessionOrder: 3, sessionEntryTimestamp: "2026-08-12T00:02:02.000Z", sessionId: process.env.SID, bindingGeneration: binding.generation }), /does not match the active binding/, "old Pi mirrored after automatic hard bind");
+const transferredPublic = feishuState.claimNextOutbound(process.env.FM_HOME, { nowMs: 1000 + feishuState.IDEMPOTENCY_WINDOW_MS + 1 });
+assert.equal(transferredPublic?.outbox.event_id, pendingPublic.eventId, "automatic hard bind dropped pending outbound");
+assert.equal(transferredPublic?.chunk.idempotency_key, pendingPublicBefore.chunks[0].idempotency_key, "automatic hard bind changed the pending outbound stable UUID");
+const publicOutboxesAfter = readdirSync(publicPaths.outbox).map((name) => JSON.parse(readFileSync(`${publicPaths.outbox}/${name}`, "utf8")));
+const uncertainPublicAfter = publicOutboxesAfter.find((record) => record.event_id === uncertainPublic.eventId);
+assert.equal(uncertainPublicAfter.event_id, uncertainPublicBefore.event_id, "automatic hard bind dropped uncertain outbound identity");
+assert.equal(uncertainPublicAfter.chunks[0].idempotency_key, uncertainPublicBefore.chunks[0].idempotency_key, "automatic hard bind replayed uncertain outbound under a new UUID");
+assert.equal(feishuState.statusSummary(process.env.FM_HOME).outbound_uncertain, 1, "automatic hard bind lost terminal delivery uncertainty");
 const transportAfterReplacement = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8");
 await pi.commands.get("fm-feishu-rebind").handler("", replacementCtx);
 rebound = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
-assert.equal(rebound.generation, 2, "already-current manual rebind changed the binding generation");
-assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportAfterReplacement, "already-current manual rebind churned the healthy transport");
+assert.equal(rebound.generation, 2, "already-current hard bind changed the binding generation");
+assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportAfterReplacement, "already-current hard bind churned the healthy transport");
 assert.equal(notices.at(-1), "Feishu channel is already bound to this Pi session and healthy.");
+const lifecycleBeforeFeishuOrigin = readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8");
+await pi.commands.get("fm-feishu-rebind").handler("", { ...replacementCtx, mode: "rpc", hasUI: false });
+assert.equal(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8"), lifecycleBeforeFeishuOrigin, "non-local Feishu-origin control reached hard-bind lifecycle");
+assert(notices.at(-1).startsWith("Feishu hard bind refused."), "non-local hard bind did not fail closed");
 const commandMessages = notices.slice(deniedBefore);
 for (const privateValue of ["private-config-value-must-not-leak", process.env.APP_FINGERPRINT, process.env.SID, replacementId, process.env.BRIDGE_SESSION_FILE, replacementFile, "ou_captain1234", "oc_chat1234"]) {
-  assert(!commandMessages.some((message) => message.includes(privateValue)), `manual rebind result leaked private value: ${privateValue}`);
+  assert(!commandMessages.some((message) => message.includes(privateValue)), `hard-bind result leaked private value: ${privateValue}`);
 }
-const lifecycleAfterManualRebind = readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n");
-const transportAfterManualRebind = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n");
+const lifecycleAfterHardBind = readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n");
+const transportAfterHardBind = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n");
 
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
 await emit(pi, "session_shutdown", { reason: "reload" }, ctx);
@@ -1114,21 +1252,21 @@ pi = fakePi();
 bridge.default(pi);
 turnend.default(pi);
 await emit(pi, "session_start", { reason: "reload" }, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterManualRebind, "reload bypassed the missing lock owner");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterHardBind, "reload bypassed the missing lock owner");
 assert(!existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "unowned reload published the loaded marker");
 await emit(pi, "agent_start", {}, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterManualRebind, "post-reload wrong-owner agent_start activated the channel");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterHardBind, "post-reload wrong-owner agent_start activated the channel");
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
 await emit(pi, "agent_start", {}, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterManualRebind, process.env.SID], "first owned turn after reload did not converge the configured channel");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterHardBind, `hard-bind:${process.env.SID}`], "first owned turn after reload did not hard-bind the configured channel");
 assert(existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "first owned turn after reload did not publish the loaded marker");
-const transportAfterReload = [...transportAfterManualRebind, "start generation=3"];
+const transportAfterReload = [...transportAfterHardBind, "start generation=3"];
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), transportAfterReload, "reload recovery did not converge exactly once");
 
 await pi.commands.get("fm-feishu-disable").handler("", ctx);
 assert(existsSync(process.env.BRIDGE_TRANSPORT_LOG), notices.join("\n"));
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"]);
-assert(notices.filter((message) => message.includes("refused")).every((message) => message.startsWith("Feishu rebind refused.")), notices.join("\n"));
+assert(notices.filter((message) => message.includes("refused")).every((message) => message.startsWith("Feishu hard bind refused.")), notices.join("\n"));
 
 rmSync(`${process.env.FM_HOME}/data/feishu`, { recursive: true });
 rmSync(`${process.env.FM_HOME}/state/feishu`, { recursive: true });
@@ -1140,9 +1278,9 @@ turnend.default(pi);
 await emit(pi, "session_start", { reason: "reload" }, ctx);
 await emit(pi, "agent_start", {}, ctx);
 assert(!existsSync(`${process.env.FM_HOME}/data/feishu`) && !existsSync(`${process.env.FM_HOME}/state/feishu`), "disabled public lifecycle created Feishu state");
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterManualRebind, process.env.SID], "disabled public lifecycle reconciled a pairing");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterHardBind, `hard-bind:${process.env.SID}`], "disabled public lifecycle reconciled a pairing");
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"], "disabled public lifecycle started a transport");
-console.log("ok - local Pi bridge converges after delayed ownership and exposes safe local status, rebind, and disable controls");
+console.log("ok - local Pi bridge distinguishes transport health and directly hard-binds exact persisted-session recovery");
 JS
 
 # The transport test replaces the official SDK boundary with one local module.

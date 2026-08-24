@@ -20,6 +20,7 @@ import {
   claimLiveSession,
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
+  liveSessionOwnsBinding,
   loadFeishuIngressContent,
   offerFeishuIngress,
   pendingFeishuIngress,
@@ -83,7 +84,7 @@ const markerPattern = /^\u2063FIRSTMATE_FEISHU: v1 ref=(in_[a-f0-9]{24}) g=([1-9
 const LOCK_RETRY_BASE_MS = 250;
 const LOCK_RETRY_MAX_MS = 4000;
 export interface FeishuNativeChannelControls {
-  rebind(ctx: ExtensionCommandContext): Promise<"already-current" | "rebound">;
+  hardBind(ctx: ExtensionCommandContext): Promise<"already-current" | "hard-bound">;
 }
 
 const registeredApis = new WeakMap<object, FeishuNativeChannelControls>();
@@ -212,7 +213,7 @@ function runtimeIsCurrent(runtime: ActiveRuntime): boolean {
   const binding = readActiveBinding(fmHome);
   if (!pairing || pairing.disabled_at !== null || !binding || pairing.home_id !== binding.home_id) return false;
   if (binding.binding_id !== runtime.binding.binding_id || binding.generation !== runtime.binding.generation) return false;
-  return identityMatches(binding, runtime.identity);
+  return identityMatches(binding, runtime.identity) && liveSessionOwnsBinding(fmHome, binding, runtime.identity, runtime.ownerToken);
 }
 
 function inboundForMarker(marker: FeishuMarker): InboundEvent | undefined {
@@ -242,7 +243,7 @@ function updateStatus(runtime: ActiveRuntime): void {
   runtime.ctx.ui.setStatus("fm-feishu", value);
 }
 
-function reconcileConfiguredLifecycle(identity: SessionIdentity, action: "reconcile" | "manual-rebind" = "reconcile"): Promise<void> {
+function reconcileConfiguredLifecycle(identity: SessionIdentity, action: "reconcile" | "hard-bind" = "reconcile"): Promise<void> {
   const reconcile = () => new Promise<void>((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [lifecycleScript, action], {
       cwd: fmRoot,
@@ -432,7 +433,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
   }
   const identity = currentFirstmateSessionIdentity(ctx);
   if (!identity || !identityMatches(binding, identity)) {
-    ctx.ui.setStatus("fm-feishu", "Feishu: suspended - binding belongs to another Pi session; rebind locally to move it");
+    ctx.ui.setStatus("fm-feishu", "Feishu: suspended - binding belongs to another Pi session; hard-bind it locally to move it");
     return undefined;
   }
   const ownerToken = `pi_${process.pid}_${randomBytes(12).toString("hex")}`;
@@ -517,13 +518,19 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
   let lifecycleEpoch = 0;
   let runningEpoch = -1;
   let convergedEpoch = -1;
+  let activeExpectedEpoch = -1;
   let currentContext: ExtensionContext | undefined;
   let stopListeningForSessionStart: (() => void) | undefined;
   const converge = async (ctx: ExtensionContext, epoch: number) => {
-    if (epoch !== lifecycleEpoch || runningEpoch === epoch || convergedEpoch === epoch) return;
+    if (epoch !== lifecycleEpoch || runningEpoch === epoch) return;
+    if (convergedEpoch === epoch) {
+      if (activeExpectedEpoch !== epoch) return;
+      if (activeRuntime?.token === token && runtimeIsCurrent(activeRuntime)) return;
+    }
     try {
       if (!configPathPresent()) {
         activate(pi, ctx, token);
+        activeExpectedEpoch = -1;
         convergedEpoch = epoch;
         return;
       }
@@ -537,9 +544,12 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
         return;
       }
       runningEpoch = epoch;
-      await reconcileConfiguredLifecycle(identity);
+      await reconcileConfiguredLifecycle(identity, "hard-bind");
       if (epoch !== lifecycleEpoch) return;
       activate(pi, ctx, token);
+      const pairing = readPairing(fmHome);
+      const binding = readActiveBinding(fmHome);
+      activeExpectedEpoch = pairing && pairing.disabled_at === null && binding && identityMatches(binding, identity) ? epoch : -1;
       convergedEpoch = epoch;
     }
     catch (error) {
@@ -551,13 +561,13 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
       if (runningEpoch === epoch) runningEpoch = -1;
     }
   };
-  let manualRebindTask: Promise<"already-current" | "rebound"> | undefined;
+  let hardBindTask: Promise<"already-current" | "hard-bound"> | undefined;
   const controls: FeishuNativeChannelControls = {
-    async rebind(ctx) {
-      if (manualRebindTask) return manualRebindTask;
-      const run = async (): Promise<"already-current" | "rebound"> => {
+    async hardBind(ctx) {
+      if (hardBindTask) return hardBindTask;
+      const run = async (): Promise<"already-current" | "hard-bound"> => {
         if (ctx.mode !== "tui" || !ctx.hasUI || !ctx.isProjectTrusted() || firstmateSessionLockOwnership() !== "owned") {
-          throw new Error("manual Feishu rebind requires the trusted local Pi TUI and verified session-lock ownership");
+          throw new Error("Feishu hard bind requires the trusted local Pi TUI and verified session-lock ownership");
         }
         if (!configPathPresent()) throw new Error("local Feishu configuration is absent");
         const identity = currentFirstmateSessionIdentity(ctx);
@@ -569,29 +579,29 @@ export function registerFeishuNativeChannel(pi: ExtensionAPI): FeishuNativeChann
           identityMatches(priorBinding, identity) &&
           transportHealthAllowsDispatch(fmHome, priorBinding),
         );
-        await reconcileConfiguredLifecycle(identity, "manual-rebind");
+        await reconcileConfiguredLifecycle(identity, "hard-bind");
         if (epoch !== lifecycleEpoch || !sameIdentity(currentFirstmateSessionIdentity(ctx), identity)) {
-          throw new Error("Pi session changed while manual Feishu rebind was running");
+          throw new Error("Pi session changed while Feishu hard bind was running");
         }
         let runtime = activeRuntime;
         if (!runtime || runtime.token !== token || !runtimeIsCurrent(runtime)) runtime = activate(pi, ctx, token) ?? null;
         for (let attempt = 0; attempt < 600; attempt += 1) {
           if (epoch !== lifecycleEpoch || !sameIdentity(currentFirstmateSessionIdentity(ctx), identity)) {
-            throw new Error("Pi session changed before manual Feishu rebind became healthy");
+            throw new Error("Pi session changed before Feishu hard bind became healthy");
           }
           const binding = readActiveBinding(fmHome);
           if (binding && identityMatches(binding, identity) && transportHealthAllowsDispatch(fmHome, binding) && runtime?.active && runtimeIsCurrent(runtime)) {
             const unchanged = alreadyCurrent &&
               binding.binding_id === priorBinding?.binding_id &&
               binding.generation === priorBinding.generation;
-            return unchanged ? "already-current" : "rebound";
+            return unchanged ? "already-current" : "hard-bound";
           }
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
         }
         throw new Error("configured Feishu binding or transport did not become current and healthy");
       };
-      manualRebindTask = run().finally(() => { manualRebindTask = undefined; });
-      return manualRebindTask;
+      hardBindTask = run().finally(() => { hardBindTask = undefined; });
+      return hardBindTask;
     },
   };
   registeredApis.set(pi as object, controls);

@@ -164,7 +164,7 @@ export function convergeConfiguredSession(home: string, input: {
   headerId: string;
   headerCwd: string;
   outboundAfterEntryId?: string | null;
-}, options?: { requireEmptyDeliveryState?: boolean }): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
+}, options?: { hardTakeover?: boolean }): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
 export function publishFeishuInbound(home: string, raw: Record<string, unknown>, options?: {
   maxInboundBytes?: number;
   maxInboundAttachments?: number;
@@ -216,9 +216,13 @@ export function claimLiveSession(home: string, binding: BindingRecord, session: 
   sessionFile: string;
   sessionCwd: string;
 }, ownerToken: string): { ok: boolean; reason?: string; record?: Record<string, unknown> };
+export function liveSessionOwnsBinding(home: string, binding: BindingRecord, session?: {
+  sessionId: string;
+  sessionFile: string;
+  sessionCwd: string;
+}, ownerToken?: string): boolean;
 export function releaseLiveSession(home: string, bindingId: string, ownerToken: string): boolean;
 export function ingressCounts(home: string): { pending: number; queued: number; delivered: number; other: number };
-export function assertManualRebindSafe(home: string): void;
 export function assistantSecretPattern(text: string): string | null;
 export function renderFeishuPostMarkdown(text: string): string;
 export function deterministicChunks(text: string, maxBytes?: number): string[];
@@ -266,6 +270,7 @@ export interface OutboundClaim {
 export interface OutboundRegistrationIntent {
   schema: string;
   intent_id: string;
+  event_id?: string;
   source: "pi-assistant";
   assistant_entry_id: string;
   session_order: number;

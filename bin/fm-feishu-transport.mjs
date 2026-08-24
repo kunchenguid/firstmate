@@ -14,7 +14,6 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  assertManualRebindSafe,
   claimNextOutbound,
   claimTransportOwner,
   cleanupFeishuMedia,
@@ -825,7 +824,7 @@ function currentTransportMatches(config, binding) {
   );
 }
 
-async function reconcileConfiguredLifecycle({ manualRebind = false } = {}) {
+async function reconcileConfiguredLifecycle({ hardBind = false } = {}) {
   const session = configuredSessionFromStdin();
   let config;
   try {
@@ -844,7 +843,6 @@ async function reconcileConfiguredLifecycle({ manualRebind = false } = {}) {
     if (pairing) disablePairing(HOME);
     return;
   }
-  if (manualRebind) assertManualRebindSafe(HOME);
   loadConfiguredCredentials(config);
   const desired = configuredIdentity(config);
   const stateMatches = configuredSessionMatches(HOME, desired, session);
@@ -859,11 +857,9 @@ async function reconcileConfiguredLifecycle({ manualRebind = false } = {}) {
       throw error;
     }
   }
-  if (manualRebind) assertManualRebindSafe(HOME);
   if (!stateMatches || !transportMatches) await stopOwned({ replacement: true });
-  if (manualRebind) assertManualRebindSafe(HOME);
   assertConfigUnchanged(config);
-  if (!stateMatches) convergeConfiguredSession(HOME, desired, session, { requireEmptyDeliveryState: manualRebind });
+  if (!stateMatches || hardBind) convergeConfiguredSession(HOME, desired, session, { hardTakeover: hardBind });
   assertConfigUnchanged(config);
   await startDetached();
 }
@@ -935,7 +931,7 @@ async function stopOwned({ replacement = false } = {}) {
 }
 
 function usage() {
-  return "usage: fm-feishu-transport.sh reconcile|manual-rebind|disable-config|config-check|probe|start|stop|restart|status|run [--once]";
+  return "usage: fm-feishu-transport.sh reconcile|hard-bind|disable-config|config-check|probe|start|stop|restart|status|run [--once]";
 }
 
 async function main(argv) {
@@ -951,7 +947,7 @@ async function main(argv) {
     return probeConfiguration();
   }
   if (command === "reconcile") return reconcileConfiguredLifecycle();
-  if (command === "manual-rebind") return reconcileConfiguredLifecycle({ manualRebind: true });
+  if (command === "hard-bind") return reconcileConfiguredLifecycle({ hardBind: true });
   if (command === "disable-config") return disableConfiguredLifecycle();
   if (command === "start") {
     const config = loadConfiguredCredentialsIfNeeded();
