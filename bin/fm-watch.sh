@@ -15,6 +15,10 @@
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
+# A finished ship or scout whose recovery-grade classifier reports the agent
+# gone is closed through bin/fm-teardown.sh --close-pane instead of a stale
+# wake, so an empty pane waiting on merge does not keep alarming; the copy stays
+# until landed teardown. Live agents and unfinished exits are left alone.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -368,6 +372,7 @@ recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" pane_closed)" = 1 ] && continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
     case "$seen" in
@@ -376,6 +381,42 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+# Close a finished ship/scout pane whose agent has actually exited, without
+# landing the copy. Cheap local gates avoid calling teardown on every poll:
+# unfinished crash husks stay visible for recovery. Teardown owns the close.
+close_finished_exited_pane() {  # <window> <task>
+  local win=$1 task=$2 meta kind last agent_state data_dir report
+  [ -n "$task" ] || return 1
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  [ "$(fm_meta_get "$meta" pane_closed)" = 1 ] && return 0
+  kind=$(window_kind "$win")
+  case "$kind" in
+    ship|scout) ;;
+    *) return 1 ;;
+  esac
+  data_dir="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+  report="$data_dir/$task/report.md"
+  last=$(last_status_line "$STATE/$task.status")
+  if [ -z "$(fm_meta_get "$meta" pr)" ]; then
+    case "$last" in
+      done:*|failed:*) ;;
+      *)
+        if [ "$kind" != scout ] || [ ! -f "$report" ] || [ -L "$report" ]; then
+          return 1
+        fi
+        ;;
+    esac
+  fi
+  agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null || printf 'unreadable')
+  case "$agent_state" in
+    dead|missing) ;;
+    *) return 1 ;;
+  esac
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-teardown.sh" "$task" --close-pane >/dev/null 2>&1
 }
 
 # Print the oldest structurally valid row in a local secondmate's foreign queue.
@@ -1304,6 +1345,12 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    if [ -n "$task" ] && close_finished_exited_pane "$w" "$task"; then
+      key=$(window_key "$w")
+      clear_pause_tracking "$key"
+      triage_log "closed exited pane: $w"
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
