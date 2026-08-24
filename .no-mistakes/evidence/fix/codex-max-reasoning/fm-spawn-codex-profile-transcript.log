@@ -1,0 +1,29 @@
+fm-spawn request: --harness codex --model gpt-5.6-sol --effort xhigh
+warning: <redacted-fixture-home>/data/sol-review/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned sol-review harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-sol-review worktree=<redacted-fixture-worktree>
+persisted profile:
+harness=codex
+model=gpt-5.6-sol
+effort=xhigh
+launch delivered to tmux:
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort="xhigh"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<redacted-fixture-home>/state/sol-review.turn-ended'\"]" "$('<worktree-root>/bin/fm-operational-input.sh' encode launch-brief < '<redacted-fixture-home>/data/sol-review/brief.md')"
+
+fm-spawn request: --harness codex --model gpt-5.6-sol --effort max
+warning: <redacted-fixture-home>/data/sol-max/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned sol-max harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-sol-max worktree=<redacted-fixture-worktree>
+persisted profile:
+harness=codex
+model=gpt-5.6-sol
+effort=max
+launch delivered to tmux:
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort="max"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<redacted-fixture-home>/state/sol-max.turn-ended'\"]" "$('<worktree-root>/bin/fm-operational-input.sh' encode launch-brief < '<redacted-fixture-home>/data/sol-max/brief.md')"
+
+fm-spawn request: --harness codex --model gpt-5.6-luna --effort max
+warning: <redacted-fixture-home>/data/luna-max/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned luna-max harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-luna-max worktree=<redacted-fixture-worktree>
+persisted profile:
+harness=codex
+model=gpt-5.6-luna
+effort=max
+launch delivered to tmux:
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort="max"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '<redacted-fixture-home>/state/luna-max.turn-ended'\"]" "$('<worktree-root>/bin/fm-operational-input.sh' encode launch-brief < '<redacted-fixture-home>/data/luna-max/brief.md')"

@@ -1,0 +1,8 @@
+Command: codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --model gpt-5.6-sol -c 'model_reasoning_effort="max"' --json 'Reply with exactly MAX_REASONING_ACCEPTED and do not call tools.'
+
+Reading additional input from stdin...
+{"type":"thread.started","thread_id":"01a03445-1558-7941-ac4a-620e1b9b17f1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"MAX_REASONING_ACCEPTED"}}
+{"type":"turn.completed","usage":{"input_tokens":26936,"cached_input_tokens":6912,"cache_write_input_tokens":0,"output_tokens":9,"reasoning_output_tokens":0}}

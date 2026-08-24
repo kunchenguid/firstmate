@@ -1,0 +1,32 @@
+Acceptance-profile fixture supplied to fm-bootstrap:
+{
+  "rules": [
+    {
+      "when": "review or audit work",
+      "use": {
+        "harness": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh"
+      }
+    },
+    {
+      "when": "explicit max-reasoning work on sol",
+      "use": {
+        "harness": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "max"
+      }
+    }
+  ],
+  "default": {
+    "harness": "codex",
+    "model": "gpt-5.6-luna",
+    "effort": "max"
+  }
+}
+
+fm-bootstrap verbose dispatch surface:
+BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json
+BOOTSTRAP_INFO: crew dispatch rule: review or audit work -> codex/gpt-5.6-sol/xhigh
+BOOTSTRAP_INFO: crew dispatch rule: explicit max-reasoning work on sol -> codex/gpt-5.6-sol/max
+BOOTSTRAP_INFO: crew dispatch default: codex/gpt-5.6-luna/max

@@ -1,0 +1,17 @@
+{
+  "architecture": {
+    "harness": "codex",
+    "model": "gpt-5.6-sol",
+    "effort": "max"
+  },
+  "routine_implementation": {
+    "harness": "codex",
+    "model": "gpt-5.6-luna",
+    "effort": "max"
+  },
+  "review_audit": {
+    "harness": "codex",
+    "model": "gpt-5.6-sol",
+    "effort": "xhigh"
+  }
+}
