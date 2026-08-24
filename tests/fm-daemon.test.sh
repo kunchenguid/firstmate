@@ -1349,6 +1349,28 @@ test_delivery_selftest_records_a_durable_ok() {
   pass "delivery_selftest proves one injection and records a durable ok"
 }
 
+test_delivery_selftest_survives_leading_zero_timing() {
+  local dir state fakebin sent errs
+  dir=$(make_bordered_case selftest-leading-zero)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"; errs="$dir/selftest.err"
+  afk_enter "$state"
+  # "09" is all digits but invalid octal in $((...)); the deadline arithmetic
+  # must coerce it to decimal instead of erroring and losing the retry window.
+  # Subshell: a bash arithmetic error unwinds the calling function, so without
+  # it the failure would silently skip this test's own pass/fail reporting.
+  ( PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DELIVERY_SELFTEST_SECS=09 FM_DELIVERY_SELFTEST_SLEEP=01 \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_INJECT_CONFIRM_SLEEP=0.05 \
+    delivery_selftest "$state" ) 2> "$errs" \
+    || fail "delivery_selftest choked on leading-zero timing values (octal parse): $(cat "$errs")"
+  grep -q 'value too great\|arithmetic' "$errs" \
+    && fail "leading-zero timing hit an arithmetic error: $(cat "$errs")"
+  grep -q '^ok ' "$state/.subsuper-delivery-selftest" \
+    || fail "leading-zero timing did not record ok: $(cat "$state/.subsuper-delivery-selftest" 2>/dev/null)"
+  pass "delivery_selftest treats leading-zero timing values as decimal"
+}
+
 test_delivery_selftest_records_failure_and_alarms() {
   local dir state fakebin sent log
   dir=$(make_supercase selftest-undeliverable)
@@ -2188,6 +2210,7 @@ test_max_defer_delivers_past_a_busy_pane
 test_busy_guard_veto_is_bounded_not_permanent
 test_busy_guard_escape_still_respects_a_pending_composer
 test_delivery_selftest_records_a_durable_ok
+test_delivery_selftest_survives_leading_zero_timing
 test_delivery_selftest_records_failure_and_alarms
 test_afk_launch_verify_reads_the_durable_verdict
 test_max_defer_pending_composer_alarms_without_typing

@@ -1015,12 +1015,13 @@ delivery_selftest() {  # <state>
   window=${FM_DELIVERY_SELFTEST_SECS:-45}
   case "$window" in
     ''|*[!0-9]*) window=45 ;;
-    *) [ "$window" -gt 0 ] 2>/dev/null || window=45 ;;
+    # 10# strips leading zeros so "09" is decimal 9, not invalid octal.
+    *) window=$((10#$window)); [ "$window" -gt 0 ] || window=45 ;;
   esac
   sleep_secs=${FM_DELIVERY_SELFTEST_SLEEP:-3}
   case "$sleep_secs" in
     ''|*[!0-9]*) sleep_secs=3 ;;
-    *) [ "$sleep_secs" -gt 0 ] 2>/dev/null || sleep_secs=3 ;;
+    *) sleep_secs=$((10#$sleep_secs)); [ "$sleep_secs" -gt 0 ] || sleep_secs=3 ;;
   esac
   rm -f "$record" 2>/dev/null || true
   afk_active "$state" || { printf 'skipped afk-inactive\n' > "$record"; return 0; }
