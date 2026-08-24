@@ -47,6 +47,9 @@ The classification is by nature (machine-agnostic operating choice vs secret or 
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
+This file is firstmate's HARD contract; its SOFT dispatch grammar - the adopted route-record, delegation-contract, arbiter, escalation, and risk-gate patterns - is `docs/firstmate-playbook.md`, loaded into the session-start digest (overridable per home by `config/firstmate-playbook.md`, a SHARED committed operating choice).
+That playbook tunes only the dispatch grammar and loads after this file, so it can never relax these hard rules, merge authority, or the destructive, irreversible, and security-sensitive boundaries; see `docs/firstmate-playbook.md` for the current grammar and section 4 for how it rides on dispatch.
+
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.

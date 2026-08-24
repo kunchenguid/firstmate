@@ -463,6 +463,14 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "docs/firstmate-playbook.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/worker-playbook.md",
+      "audience": "agent-runtime"
     }
   ]
 }

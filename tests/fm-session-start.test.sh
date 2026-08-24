@@ -137,8 +137,15 @@ list_help() {
 }
 case "${1:-}" in
   --version|-v|-V)
-    printf '%s\n' '0.2.4'
+    printf '%s\n' '0.3.0'
     exit 0
+    ;;
+  add)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi add <id> "<title>" --epic <slug> [flags]'
+      printf '%s\n' '  --epic <slug>      required epic membership'
+      exit 0
+    fi
     ;;
   update)
     if [ "${2:-}" = --help ]; then

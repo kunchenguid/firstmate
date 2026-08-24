@@ -14,30 +14,24 @@ TMP_ROOT=$(fm_test_tmproot fm-tasks-axi-lib)
 fake_tasks_axi() {  # <fakebin-dir> <version> <add-help>
   local dir=$1 version=$2 help=$3
   mkdir -p "$dir"
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'case "$1" in\n'
-    printf '  --version) echo "%s" ;;\n' "$version"
-    printf '  add)\n'
-    printf '    if [ "${2:-}" = "--help" ]; then\n'
-    printf '      cat <<HELP\n%s\nHELP\n' "$help"
-    printf '      exit 0\n'
-    printf '    fi\n'
-    printf '    exit 0\n'
-    printf '    ;;\n'
-    # For update --help, always claim --archive-body so the pre-existing
-    # probes stay green - we are testing the epic probe specifically here.
-    printf '  update)\n'
-    printf '    if [ "${2:-}" = "--help" ]; then echo "--archive-body"; exit 0; fi\n'
-    printf '    exit 0\n'
-    printf '    ;;\n'
-    printf '  mv)\n'
-    printf '    if [ "${2:-}" = "--help" ]; then echo "[<id>...]"; exit 0; fi\n'
-    printf '    exit 0\n'
-    printf '    ;;\n'
-    printf '  *) exit 0 ;;\n'
-    printf 'esac\n'
-  } > "$dir/tasks-axi"
+  # Write the version and add --help text into files the fake reads, then use a
+  # quoted heredoc for the static dispatch so the fake's own $1/$2 reach it
+  # verbatim without SC2016 single-quote-printf gymnastics. update --help
+  # always claims --archive-body and mv --help claims [<id>...] so the pre-
+  # existing probes stay green; this fake exercises the epic probe specifically.
+  printf '%s\n' "$version" > "$dir/.version"
+  printf '%s\n' "$help" > "$dir/.add-help"
+  cat > "$dir/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+here=$(cd "$(dirname "$0")" && pwd)
+case "$1" in
+  --version) cat "$here/.version" ;;
+  add) [ "${2:-}" = "--help" ] && cat "$here/.add-help"; exit 0 ;;
+  update) [ "${2:-}" = "--help" ] && echo "--archive-body"; exit 0 ;;
+  mv) [ "${2:-}" = "--help" ] && echo "[<id>...]"; exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
   chmod +x "$dir/tasks-axi"
 }
 

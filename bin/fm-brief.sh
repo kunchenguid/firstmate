@@ -6,6 +6,14 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
+# HARD/SOFT split (story fmops-07 §2; architecture.md §7): the generated brief
+# is a style-neutral HARD skeleton (phase intents, the plan-review GATE, the
+# native report path; it names NO skill) with the SOFT worker playbook spliced
+# in from a swappable source - a per-home config/worker-playbook.md override
+# when present, else the fleet default docs/worker-playbook.md. Changing the
+# worker working style is a one-file edit to that playbook, never a code change
+# to this generator. Scout and ship briefs carry the SOFT block; a secondmate
+# charter does not.
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--base <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
@@ -104,6 +112,11 @@ resolve_directory_input() {
 }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# The default SOFT worker playbook ships as tracked code beside bin/, so it is
+# resolved from this script's own location, not from FM_ROOT (which
+# FM_ROOT_OVERRIDE relocates for tests and alternate homes). A per-home
+# override still comes from CONFIG below.
+CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
@@ -114,6 +127,11 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
 else
   STATE="$FM_HOME/state"
+fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
 fi
 KIND=ship
 HERDR_LAB=0
@@ -226,6 +244,37 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# emit_soft_playbook: print the worker SOFT playbook that splices into a brief
+# (story fmops-07 §2; architecture.md §7). The HARD skeleton names no skill;
+# this SOFT block names them. Source is the swappable file: a per-home
+# override at config/worker-playbook.md wins wholesale, else the fleet default
+# docs/worker-playbook.md. HTML-comment maintainer preamble lines are stripped
+# so only the playbook body reaches the worker. Fails loudly if neither source
+# exists rather than silently emitting an empty style block.
+emit_soft_playbook() {
+  local override="$CONFIG/worker-playbook.md" default="$CODE_ROOT/docs/worker-playbook.md" src
+  if [ -f "$override" ]; then
+    src="$override"
+  elif [ -f "$default" ]; then
+    src="$default"
+  else
+    echo "error: no worker playbook found (looked for $override then $default); the SOFT style block cannot be spliced" >&2
+    exit 1
+  fi
+  # Drop a leading HTML-comment maintainer block (<!-- ... -->) so the brief
+  # carries only the playbook itself. Everything from the first line after the
+  # closing --> onward is emitted verbatim.
+  awk '
+    NR==1 && /^<!--/ { incomment=1 }
+    incomment { if (/-->/) { incomment=0 }; next }
+    { print }
+  ' "$src"
+}
+# A secondmate charter is not a delivery brief and does not carry the worker
+# spine, so the playbook is resolved only for scout and ship scaffolds.
+SOFT_PLAYBOOK=""
+[ "$KIND" = secondmate ] || SOFT_PLAYBOOK=$(emit_soft_playbook)
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -410,6 +459,8 @@ If your deliverable is a visual artifact the captain will review and iterate on,
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+
+$SOFT_PLAYBOOK
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -582,5 +633,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+$SOFT_PLAYBOOK
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

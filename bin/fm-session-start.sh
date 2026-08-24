@@ -55,8 +55,12 @@
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       data/captain-shared.md, data/learnings.md, and the
+#                       firstmate SOFT playbook (config/firstmate-playbook.md
+#                       override else docs/firstmate-playbook.md, story
+#                       fmops-07 §2/§7b): read-only, always safe, always runs.
+#                       The playbook loads AFTER AGENTS.md so it can never relax
+#                       the HARD contract's rules or safety boundaries.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -219,6 +223,10 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# The default SOFT firstmate playbook ships as tracked code beside bin/, so it
+# is resolved from this script's own location, not FM_ROOT (which
+# FM_ROOT_OVERRIDE relocates). A per-home override still comes from CONFIG.
+CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -380,6 +388,33 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+# print_firstmate_playbook: emit the firstmate SOFT dispatch grammar
+# (story fmops-07 §2, §7b; architecture.md §11). Source is swappable: a
+# per-home config/firstmate-playbook.md override wins wholesale, else the fleet
+# default docs/firstmate-playbook.md. The leading HTML-comment maintainer block
+# is stripped so only the grammar reaches the digest. This loads AFTER AGENTS.md
+# (the always-loaded HARD contract), so AGENTS.md's hard rules, merge authority,
+# and destructive/irreversible/security boundaries always take precedence: the
+# playbook tunes only the dispatch GRAMMAR and can never relax them.
+print_firstmate_playbook() {
+  local override="$CONFIG/firstmate-playbook.md" default="$CODE_ROOT/docs/firstmate-playbook.md" src label
+  if [ -f "$override" ]; then
+    src="$override"; label="firstmate playbook (SOFT dispatch grammar; per-home override at config/firstmate-playbook.md)"
+  elif [ -f "$default" ]; then
+    src="$default"; label="firstmate playbook (SOFT dispatch grammar; docs/firstmate-playbook.md)"
+  else
+    subsection "firstmate playbook (SOFT dispatch grammar)"
+    printf 'ABSENT\n'
+    return 0
+  fi
+  subsection "$label"
+  awk '
+    NR==1 && /^<!--/ { incomment=1 }
+    incomment { if (/-->/) { incomment=0 }; next }
+    { print }
+  ' "$src"
 }
 
 print_backlog_pointer() {
@@ -791,7 +826,8 @@ cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+data/learnings.md, and the firstmate SOFT playbook (config/firstmate-playbook.md
+override else docs/firstmate-playbook.md).
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -916,6 +952,7 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_firstmate_playbook
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
