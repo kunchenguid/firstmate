@@ -923,8 +923,26 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+# Guided exit for missing mandatory positionals: under set -u an absent POS[0]
+# or POS[1] would die as "unbound variable" deep in the launch path instead of
+# naming what is missing. This sits after flag validation and batch routing, so
+# every valid shape - including a single-pair batch - still takes its ordinary
+# path unchanged.
+[ "${#POS[@]}" -ge 1 ] || {
+  echo "error: missing task id; usage: fm-spawn.sh <task-id> <project-dir> [flags] | fm-spawn.sh <task-id> [<firstmate-home>] [flags] --secondmate | fm-spawn.sh <task-id> --relaunch" >&2
+  exit 1
+}
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# A ship or scout spawn needs the project directory as its second positional.
+# A secondmate home argument is optional and --relaunch reads the project from
+# the task's own record, so both are exempt here.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  [ "${#POS[@]}" -ge 2 ] || {
+    echo "error: missing project directory; $KIND spawn '$ID' requires it as the second positional argument: fm-spawn.sh <task-id> <project-dir> [flags]" >&2
+    exit 1
+  }
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
