@@ -4,6 +4,7 @@ description: >-
   Self-update a running firstmate and its secondmates to the latest from origin.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
   Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Also performs pull-only upstream sync from `kunchenguid/firstmate`, merging upstream commits into this repo's main through the validated gate, when the captain says "sync upstream" (or asks to bring in upstream commits).
 user-invocable: true
 metadata:
   internal: true
@@ -52,6 +53,60 @@ This touches only the firstmate repo and its own worktrees, never anything under
    For example: "Captain, firstmate and both second mates are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
 
+## Upstream sync (kunchenguid/firstmate -> pruge/firstmate)
+
+This repo is a downstream of the true upstream `kunchenguid/firstmate`, whose `main` evolves daily while ours carries local commits such as the planning-family skills.
+Syncing means merging `upstream/main` into this repo's `main` through the same validated gate as any project change, then refreshing the fleet onto the synced commit.
+This mode runs only when the captain invokes it by saying "sync upstream" (or asking to bring in upstream commits); it is pull-only - nothing is ever pushed to `kunchenguid/firstmate`.
+
+1. **Confirm preconditions.**
+   The captain asked for this sync.
+   This repo has no uncommitted tracked changes.
+   Prefer landing or rebasing in-flight feature PRs first, so conflicts resolve once instead of twice.
+
+2. **Ensure the upstream remote exists, then fetch it:**
+   ```sh
+   git remote add upstream https://github.com/kunchenguid/firstmate.git
+   git fetch upstream main
+   ```
+
+3. **Quantify divergence and report it to the captain:**
+   ```sh
+   git rev-list --left-right --count main...upstream/main
+   ```
+
+4. **Branch off `main`:**
+   ```sh
+   git switch -c sync/upstream-<YYYY-MM-DD>
+   ```
+
+5. **Merge upstream and resolve conflicts under the UNION policy:**
+   ```sh
+   git merge upstream/main
+   ```
+   Keep every downstream addition - planning-family skills, their AGENTS.md/docs references, documentation-audiences entries - AND take upstream's newer machinery everywhere else.
+   Where both sides edited the same lines, prefer upstream unless doing so erases a planning-family reference.
+   Never delete downstream-only files.
+
+6. **Validate locally; green is required before push:**
+   ```sh
+   bin/fm-lint.sh
+   bin/fm-test-run.sh
+   ```
+
+7. **Push through the gate, never straight to origin:**
+   ```sh
+   git push no-mistakes sync/upstream-<date>
+   ```
+   The pipeline validates the branch independently and opens the PR with its body signature.
+
+8. **Leave merge authority with the captain.**
+   On approval, merge the PR with a merge commit (`--merge`), never squash.
+   Squashing would orphan upstream ancestry and break future syncs.
+
+9. **After landing, rerun the origin refresh flow above (`bin/fm-update.sh`).**
+   Every running home then fast-forwards onto the synced `main`, re-reads `AGENTS.md` when told, and nudges secondmates.
+
 ## Safety
 
 - **Fast-forward only.**
@@ -62,3 +117,5 @@ This touches only the firstmate repo and its own worktrees, never anything under
 - **Secondmates are never disrupted.**
   A local or remote secondmate gets a tracked-files fast-forward only when its own checkout is safe to advance, plus a gentle re-read nudge when it changed.
   It is never torn down, interrupted, or forced.
+- **Upstream sync is pull-only.**
+  Nothing is ever pushed to `kunchenguid/firstmate`; syncing only ever merges fetched upstream commits into this repo.
