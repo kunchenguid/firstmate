@@ -48,6 +48,10 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          # fm-send ends its option parsing with a bare `--` before the
+          # payload so dash-leading text can never be read as flags.
+          # Keep scanning from `-l` so the real payload is still caught next.
+          [ "$a" = "--" ] && continue
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
