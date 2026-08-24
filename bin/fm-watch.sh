@@ -303,18 +303,39 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
-# Cursor updates one in-place status line during long reasoning turns. Generic
-# pane churn cannot defeat the completed-turn bound, but Cursor's numeric token
-# count and context percentage are direct progress: when either value changes,
-# the current poll is live even after BUSY_TURN_MAX_SECS. Keep this deliberately
-# Cursor-only and numeric rather than growing a presentation-liveness framework.
+# Cursor updates one in-place status line during long reasoning turns. Numeric
+# progress is read only from its reserved status and model-footer positions in
+# the structurally anchored composer block. Unrecognized structure is explicitly
+# unknown, so arbitrary pane content can never become progress evidence.
 cursor_progress_signature() {  # <tail40>
-  local tail40=$1 token context
-  token=$(printf '%s\n' "$tail40" \
+  local tail40=$1 block status footer token context
+  block=$(printf '%s\n' "$tail40" | awk '
+    { line[NR] = $0 }
+    END {
+      for (i = NR - 1; i >= 5; i--) {
+        if (line[i - 4] ~ /^[[:space:]]*[^[:alnum:][:space:]]+[[:space:]]*$/ &&
+            line[i - 3] ~ /^[[:space:]]*.*Add a follow-up[[:space:]]+ctrl\+c to stop[[:space:]]*$/ &&
+            line[i - 2] ~ /^[[:space:]]*[^[:alnum:][:space:]]+[[:space:]]*$/ &&
+            line[i - 1] ~ /^[[:space:]]*[0-9]+ tasks?[[:space:]]*$/ &&
+            line[i] ~ /^[[:space:]]*Cursor .+ · [0-9]+([.][0-9]+)?[[:space:]]*%[[:space:]]+Run Everything[[:space:]]*$/ &&
+            line[i + 1] ~ /^[[:space:]]*[^[:space:]].* · [[:xdigit:]]+[[:space:]]*$/) {
+          printf "%s\t%s\n", line[i - 5], line[i]
+          exit
+        }
+      }
+    }
+  ')
+  case "$block" in
+    *$'\t'*) ;;
+    *) printf 'unknown=cursor-progress-structure-unrecognized'; return 0 ;;
+  esac
+  status=${block%%$'\t'*}
+  footer=${block#*$'\t'}
+  token=$(printf '%s\n' "$status" \
+    | grep -E '^[[:space:]]*[^[:space:]]*⠆[[:space:]]+.+[[:space:]][0-9]+([.][0-9]+)?[kKmM]?[[:space:]]+tokens[[:space:]]*$' \
     | grep -Eo '[0-9]+([.][0-9]+)?[kKmM]?[[:space:]]+tokens' \
     | tail -1 | tr -d '[:space:]' || true)
-  context=$(printf '%s\n' "$tail40" \
-    | grep -Ei 'context|^[[:space:]]*Cursor .* · ' \
+  context=$(printf '%s\n' "$footer" \
     | grep -Eo '[0-9]+([.][0-9]+)?[[:space:]]*%' \
     | tail -1 | tr -d '[:space:]' || true)
   printf 'token=%s context=%s' "$token" "$context"
@@ -334,6 +355,10 @@ cursor_progress_changed() {  # <window> <tail40> <window-key>
   sig=$(cursor_progress_signature "$tail40") || return 1
   prev=$(cat "$marker" 2>/dev/null || true)
   printf '%s' "$sig" > "$marker" || return 1
+  case "$sig" in
+    token=*' context='*) ;;
+    *) return 1 ;;
+  esac
   [ -n "$prev" ] || return 1
   case "$prev" in
     token=*' context='*) ;;

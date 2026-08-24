@@ -178,6 +178,11 @@ record_cursor_busy() {  # <case-dir> <id>
     > "$state/$id.cursor-session"
 }
 
+write_cursor_progress_pane() {  # <capture-file> <status-row> <context-percent>
+  printf '%s\n ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up                   ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · %s%%           Run Everything\n  ~/.treehouse/cursor-task · 39418af\n' \
+    "$2" "$3" > "$1"
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -1608,7 +1613,7 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   )
   dir=$(make_case cursor-progress-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cursor-progress"
-  printf ' ⠁⠆ Processing  1.00k tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
+  write_cursor_progress_pane "$capture_file" ' ⠁⠆ Processing  1.00k tokens' 7
   printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/cursor-progress.meta"
   record_cursor_busy "$dir" cursor-progress
   printf 'working: setup complete\n' > "$state/cursor-progress.status"
@@ -1631,8 +1636,7 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   # A changed token count is current liveness even though the turn is over-age.
   for sample in "${progress_samples[@]}"; do
     IFS='|' read -r verb tokens <<< "$sample"
-    printf ' ⠋⠆ %s  %s tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' \
-      "$verb" "$tokens" > "$capture_file"
+    write_cursor_progress_pane "$capture_file" " ⠋⠆ $verb  $tokens tokens" 7
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1648,7 +1652,7 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   done
 
   # Context growth carries the same liveness verdict.
-  printf ' ⠙⠆ Running  61.16k tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  write_cursor_progress_pane "$capture_file" ' ⠙⠆ Running  61.16k tokens' 8
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1663,7 +1667,7 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor context-progress watcher stop"
 
   # Rotating only the spinner is generic pane churn and must not hide a wedge.
-  printf ' ⠸⠆ Running  61.16k tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  write_cursor_progress_pane "$capture_file" ' ⠸⠆ Running  61.16k tokens' 8
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1680,7 +1684,7 @@ test_cursor_progress_marker_write_failure_fails_closed() {
   dir=$(make_case cursor-progress-marker-unwritable); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
   window="test:fm-cursor-progress-unwritable"
-  printf ' ⠋⠆ Working  60 tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
+  write_cursor_progress_pane "$capture_file" ' ⠋⠆ Working  60 tokens' 7
   printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/cursor-progress-unwritable.meta"
   record_cursor_busy "$dir" cursor-progress-unwritable
   printf 'working: setup complete\n' > "$state/cursor-progress-unwritable.status"
@@ -1705,17 +1709,17 @@ test_cursor_progress_marker_write_failure_fails_closed() {
 }
 
 test_cursor_progress_requires_shared_numeric_field() {
-  local fixture name previous pane id dir state fakebin out capture_file window key sig pid marker
+  local fixture name previous id dir state fakebin out capture_file window key sig pid marker
   local -a fixtures=(
-    'field-disappearance|token=60tokens context=7%| ⠋⠆ Working  60 tokens\n'
-    'empty-intersection|token= context=7%| ⠋⠆ Working  60 tokens\n'
+    'field-disappearance|token=60tokens context=7%'
+    'empty-intersection|token=60tokens context='
   )
   for fixture in "${fixtures[@]}"; do
-    IFS='|' read -r name previous pane <<< "$fixture"
+    IFS='|' read -r name previous <<< "$fixture"
     id="cursor-$name"
     dir=$(make_case "$id"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$id"
-    printf '%b' "$pane" > "$capture_file"
+    write_cursor_progress_pane "$capture_file" 'ordinary response output' 7
     printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/$id.meta"
     record_cursor_busy "$dir" "$id"
     printf 'working: setup complete\n' > "$state/$id.status"
@@ -1736,6 +1740,47 @@ test_cursor_progress_requires_shared_numeric_field() {
       || fail "Cursor $name did not preserve wedge escalation: $(cat "$out")"
   done
   pass "Cursor progress requires a changed numeric field shared by consecutive samples"
+}
+
+test_cursor_progress_rejects_content_masquerade() {
+  local dir state fakebin out capture_file window key sig pid marker
+  dir=$(make_case cursor-progress-content); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cursor-progress-content"
+  printf 'ordinary tool output processed 61 tokens\ncontext report reached 8%%\n' > "$capture_file"
+  printf ' ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up                   ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n  ~/.treehouse/cursor-task · 39418af\n' >> "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/cursor-progress-content.meta"
+  record_cursor_busy "$dir" cursor-progress-content
+  printf 'working: setup complete\n' > "$state/cursor-progress-content.status"
+  sig=$(seen_sig "$state/cursor-progress-content.status")
+  printf '%s' "$sig" > "$state/.seen-cursor-progress-content_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  marker="$state/.cursor-progress-$key"
+  printf 'token=60tokens context=7%%' > "$marker"
+  touch -t 200001010000 "$state/cursor-progress-content.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "ordinary Cursor pane content masqueraded as numeric progress"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "ordinary Cursor pane content suppressed wedge escalation: $(cat "$out")"
+  [ "$(cat "$marker")" = 'token= context=7%' ] \
+    || fail "ordinary Cursor pane content entered the progress marker: $(cat "$marker")"
+  pass "Cursor progress ignores convincing numeric text outside its reserved rows"
+}
+
+test_cursor_progress_unrecognized_structure_is_unknown() {
+  local dir state out
+  dir=$(make_case cursor-progress-unknown); state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-watch.sh"
+    cursor_progress_signature "ordinary output says Working 61 tokens and context reached 8%"
+  ' _ "$ROOT")
+  [ "$out" = 'unknown=cursor-progress-structure-unrecognized' ] \
+    || fail "unrecognized Cursor structure did not return an explicit reasoned unknown: $out"
+  pass "unrecognized Cursor progress structure returns a reasoned unknown"
 }
 
 test_busy_pane_turn_end_touch_resets_age() {
@@ -2796,6 +2841,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_cursor_progress_resets_busy_turn_wedge_timer
 test_cursor_progress_marker_write_failure_fails_closed
 test_cursor_progress_requires_shared_numeric_field
+test_cursor_progress_rejects_content_masquerade
+test_cursor_progress_unrecognized_structure_is_unknown
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
