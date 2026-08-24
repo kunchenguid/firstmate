@@ -163,6 +163,21 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
+record_cursor_busy() {  # <case-dir> <id>
+  local dir=$1 id=$2 state projects workspace project conversation
+  state="$dir/state"
+  projects="$dir/cursor-projects"
+  workspace="$dir/worktree"
+  project="$projects/project"
+  conversation='conversation-1'
+  mkdir -p "$workspace" "$project/agent-transcripts/$conversation"
+  printf '{"workspacePath":"%s"}\n' "$workspace" > "$project/.workspace-trusted"
+  printf '{"role":"user","message":{"content":"work"}}\n' \
+    > "$project/agent-transcripts/$conversation/$conversation.jsonl"
+  printf 'projects_root=%s\nworkspace_root=%s\n' "$projects" "$workspace" \
+    > "$state/$id.cursor-session"
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -1579,6 +1594,77 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
+# Cursor's progress counters are stronger than generic pane churn. Once a
+# long turn crosses the completed-turn bound, advancing either numeric value
+# resets its wedge timer, while a spinner-only redraw with unchanged values
+# still escalates.
+test_cursor_progress_resets_busy_turn_wedge_timer() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case cursor-progress-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cursor-progress"
+  printf ' ⠁⠆ Running  59 tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/cursor-progress.meta"
+  record_cursor_busy "$dir" cursor-progress
+  printf 'working: setup complete\n' > "$state/cursor-progress.status"
+  sig=$(seen_sig "$state/cursor-progress.status"); printf '%s' "$sig" > "$state/.seen-cursor-progress_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/cursor-progress.meta"
+
+  # Establish the first numeric sample and the over-age wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "Cursor's first progress sample escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "Cursor's first progress sample did not preserve the busy-turn bound"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor baseline watcher stop"
+
+  # A changed token count is current liveness even though the turn is over-age.
+  printf ' ⠋⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "Cursor's advancing token count was reported as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "Cursor's advancing token count did not reset the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor token-progress watcher stop"
+
+  # Context growth carries the same liveness verdict.
+  printf ' ⠙⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "Cursor's advancing context percentage was reported as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "Cursor's advancing context percentage did not reset the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor context-progress watcher stop"
+
+  # Rotating only the spinner is generic pane churn and must not hide a wedge.
+  printf ' ⠸⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "Cursor's spinner-only redraw hid an over-age busy-turn wedge"
+  grep -F "possible wedge" "$out" >/dev/null || fail "Cursor's spinner-only redraw did not preserve wedge escalation"
+  pass "Cursor token or context progress resets the busy-turn wedge timer; spinner-only redraws do not"
+}
+
 test_busy_pane_turn_end_touch_resets_age() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2634,6 +2720,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_cursor_progress_resets_busy_turn_wedge_timer
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s

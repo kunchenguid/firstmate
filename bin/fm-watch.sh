@@ -46,7 +46,9 @@
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; every other pane goes through
+#                          pause recheck cadence; changed Cursor token or context
+#                          counters are positive liveness and reset the timer;
+#                          every other pane goes through
 #                          the same wedge timer and surfaces with the identical
 #                          "stale: ..." reason, escalation count, and
 #                          demand-deep-inspection marker, for human inspection
@@ -289,8 +291,9 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
+# .wedge-escalations-, .paused-*, .writing-*, .cursor-progress-), and live homes
+# hold those markers on disk under the current format, so the format lives here
+# alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
 # poll of one window derives it once.
@@ -298,6 +301,42 @@ window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
   printf '%s' "${key//./_}"
+}
+
+# Cursor updates one in-place status line during long reasoning turns. Generic
+# pane churn cannot defeat the completed-turn bound, but Cursor's numeric token
+# count and context percentage are direct progress: when either value changes,
+# the current poll is live even after BUSY_TURN_MAX_SECS. Keep this deliberately
+# Cursor-only and numeric rather than growing a presentation-liveness framework.
+cursor_progress_signature() {  # <tail40>
+  local tail40=$1 token context
+  token=$(printf '%s\n' "$tail40" \
+    | grep -Ei '(^|[[:space:]])(thinking|running|reading)([^[:alnum:]]|$)' \
+    | grep -Eo '[0-9]+([.][0-9]+)?[kKmM]?[[:space:]]+tokens' \
+    | tail -1 | tr -d '[:space:]' || true)
+  context=$(printf '%s\n' "$tail40" \
+    | grep -Ei 'context|^[[:space:]]*Cursor .* · ' \
+    | grep -Eo '[0-9]+([.][0-9]+)?[[:space:]]*%' \
+    | tail -1 | tr -d '[:space:]' || true)
+  [ -n "$token" ] || [ -n "$context" ] || return 1
+  printf 'token=%s context=%s' "$token" "$context"
+}
+
+# Record Cursor's current numeric progress and return success only when a prior
+# sample exists and the value changed. First sight establishes a baseline; it is
+# not itself proof of movement.
+cursor_progress_changed() {  # <window> <tail40> <window-key>
+  local win=$1 tail40=$2 key=$3 marker sig prev harness
+  marker="$STATE/.cursor-progress-$key"
+  harness=$(window_harness "$win")
+  case "$harness" in
+    cursor*) ;;
+    *) rm -f "$marker"; return 1 ;;
+  esac
+  sig=$(cursor_progress_signature "$tail40") || return 1
+  prev=$(cat "$marker" 2>/dev/null || true)
+  printf '%s' "$sig" > "$marker"
+  [ -n "$prev" ] && [ "$sig" != "$prev" ]
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
@@ -1335,10 +1374,11 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if cursor_progress_changed "$w" "$tail40" "$key"; then cursor_progress_now=0; else cursor_progress_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
-      if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
+      if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ] && [ "$cursor_progress_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -1445,7 +1485,10 @@ EOF
         # then route it through busy_turn_bound_check, which hands the crossed
         # bound to the same wedge timer unless the crew declared the wait itself.
         paused_bound=1
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+        if [ "$cursor_progress_now" -eq 0 ]; then
+          rm -f "$ssf" "$ewf"
+          clear_write_tracking "$key"
+        elif [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
         else
           rm -f "$ssf" "$ewf"
@@ -1463,7 +1506,10 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       paused_bound=1
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
+      if [ "$cursor_progress_now" -eq 0 ]; then
+        rm -f "$ssf" "$ewf"
+        clear_write_tracking "$key"
+      elif [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
       else
         rm -f "$ssf" "$ewf"
