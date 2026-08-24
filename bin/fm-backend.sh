@@ -706,6 +706,25 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+# fm_backend_capture_joined: like fm_backend_capture, but soft-wrapped rows
+# come back joined into one logical line where the backend supports it (tmux
+# `-J`), instead of split across several physical rows. For a caller that
+# must prove something about one FULL logical line - e.g. --close-pane's
+# trailing-shell-glyph-only proof (fm-teardown.sh) - inspecting only the last
+# physical row of a wrapped line can find a lone trailing prompt glyph and
+# wrongly treat unsubmitted typed text as an empty prompt (Greptile P1: task
+# fm-close-exited-panes review). Backends without a documented join primitive
+# fall back to fm_backend_capture unchanged.
+fm_backend_capture_joined() {  # <backend> <target> <lines> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_capture_joined "$@" ;;
+    *) fm_backend_capture "$backend" "$@" ;;
+  esac
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1

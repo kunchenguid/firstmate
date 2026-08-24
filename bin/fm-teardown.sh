@@ -2464,7 +2464,12 @@ teardown_composer_blocks_pane_close() {
   # capture whose bottom-most non-blank row ends in a bare prompt glyph, with
   # nothing after it, is safe. A capture failure or any other trailing
   # content blocks.
-  cap=$(fm_backend_capture "$BACKEND" "$T" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null) || return 0
+  # A joined capture, not the plain capture, so a long unsubmitted command
+  # that soft-wrapped across the terminal width is inspected as ONE logical
+  # line rather than just its last physical fragment - a lone trailing
+  # prompt glyph on that fragment alone is not proof the composer is empty
+  # (Greptile P1: task fm-close-exited-panes review).
+  cap=$(fm_backend_capture_joined "$BACKEND" "$T" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null) || return 0
   while IFS= read -r line; do
     fm_composer_normalize_trim_var line
     [ -n "$line" ] && last=$line

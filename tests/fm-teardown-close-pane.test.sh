@@ -219,6 +219,50 @@ test_unsubmitted_typed_text_keeps_pane() {
   pass "unsubmitted typed text in the shell: pane kept"
 }
 
+test_wrapped_unsubmitted_glyph_keeps_pane() {
+  local case_dir rc target cursor_x width remaining pad_len text
+  case_dir=$(make_case wrapped-glyph)
+  open_shell_window "$case_dir/wt"
+  wait_for_state "$SESSION:$WNAME" dead
+  target="$SESSION:$WNAME"
+
+  # Build one long unsubmitted token that soft-wraps across several
+  # terminal rows and ends in a single trailing shell-glyph character
+  # ('>'), landing that glyph on the LAST physical row together with 9
+  # other non-glyph characters - so that row alone reads as an
+  # ordinary "text then one trailing glyph" line, same as a real idle
+  # prompt, while the real prompt's own glyph lives on an earlier
+  # physical row invisible to a last-row-only check (task
+  # fm-close-exited-panes review, Greptile P1: bin/fm-composer-lib.sh:503).
+  cursor_x=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{cursor_x}')
+  width=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_width}')
+  remaining=$((width - cursor_x))
+  pad_len=$((remaining + width * 2 + 10))
+  text=$(printf 'x%.0s' $(seq 1 $((pad_len - 1))))
+  text="${text}>"
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" -l "$text"
+
+  write_ship_meta "$case_dir" \
+    'pr=https://github.com/example/repo/pull/7'
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "task work"
+  : > "$case_dir/treehouse.log"
+
+  set +e
+  run_teardown "$case_dir" --close-pane > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "close-pane closed a pane with wrapped unsubmitted text: $(cat "$case_dir/stdout")"
+  grep -q 'pending composer' "$case_dir/stderr" \
+    || fail "wrapped-text refusal did not name pending composer text: $(cat "$case_dir/stderr")"
+  window_exists || fail "pane with wrapped unsubmitted text was closed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "close-pane returned the copy for a wrapped-text refusal: $(cat "$case_dir/treehouse.log")"
+  kill_task_window
+  pass "wrapped unsubmitted text ending in a shell glyph: pane kept"
+}
+
 test_unfinished_exit_keeps_pane() {
   local case_dir rc
   case_dir=$(make_case unfinished)
@@ -294,6 +338,7 @@ test_recorded_windows_skips_closed_panes() {
 
 test_exited_pr_open_closes_pane_keeps_copy
 test_unsubmitted_typed_text_keeps_pane
+test_wrapped_unsubmitted_glyph_keeps_pane
 test_live_agent_keeps_pane
 test_unfinished_exit_keeps_pane
 test_teardown_after_close_still_returns_copy

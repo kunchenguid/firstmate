@@ -42,6 +42,21 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
+# fm_backend_tmux_capture_joined: like fm_backend_tmux_capture, but with `-J`
+# so a logical line that soft-wrapped across the terminal width comes back as
+# ONE row instead of split across several. Plain fm_backend_tmux_capture must
+# stay byte-identical to the legacy inline tmux command (callers above rely on
+# that), so this is a separate function rather than an added flag there. Used
+# by proof checks that need the FULL logical line - e.g.
+# fm-teardown.sh's --close-pane trailing-shell-glyph-only check
+# (fm_composer_trailing_shell_glyph_only in bin/fm-composer-lib.sh), where
+# inspecting only the last wrapped fragment of a long unsubmitted command can
+# read a lone trailing prompt glyph as proof of an empty prompt (Greptile P1:
+# task fm-close-exited-panes review).
+fm_backend_tmux_capture_joined() {  # <target> <lines>
+  tmux capture-pane -p -J -t "$1" -S -"$2"
+}
+
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
