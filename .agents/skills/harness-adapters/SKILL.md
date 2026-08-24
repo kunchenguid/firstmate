@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and omp (omp is crewmate/scout only).
 user-invocable: false
 metadata:
   internal: true
@@ -36,6 +36,8 @@ The per-adapter `Exit command` and `Interrupt` rows below remain the verificatio
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy state, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
+OMP 18.0.4 is a verified primary supervision surface; this does not change the existing crewmate/scout lifecycle wiring owned by `bin/fm-spawn.sh`.
+The OMP primary evidence was refreshed on 2026-08-24 with the real `omp/18.0.4` binary; the active commands and observed continuation/tool results live in [`docs/verification/supervision.md`](../../../docs/verification/supervision.md).
 Each adapter's `Busy state` row names only which semantic source that harness uses; `bin/fm-busy-lib.sh` owns the contract itself, including verdicts, source attribution, and the verification gates that keep an unverified harness at unknown.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
@@ -59,9 +61,10 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `omp` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
+OMP 18.0.4 exposes the awaited primary-only `session_stop` hook, which returns `{ continue: true, additionalContext }` when `bin/fm-turnend-guard.sh` exits 2 and caps native continuations at eight.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
@@ -75,9 +78,10 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `omp` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+OMP uses the same `tool_call` return shape for the `bin/fm-arm-pretool-check.sh` and `bin/fm-cd-pretool-check.sh` seatbelts.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 ## Primary delegation-shape guard
@@ -106,6 +110,7 @@ Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenles
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
+OMP 18.0.4 uses the tracked `.omp/extensions/fm-primary-turnend-guard.ts` plus `.omp/extensions/fm-primary-omp-watch.ts`; `session_stop` is the blocking turn-end hook, `registerTool` exposes `fm_watch_arm_omp`, and `session_start` / `session_shutdown` own watcher-generation activation and retirement.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -133,6 +138,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-24 on omp v18.0.4. Crewmate/scout only. The same flag name and accepted values as Pi's `--thinking`, though omp's own vocabulary is wider (also `off`, `minimal`, `auto`, unused by firstmate's shared axis). |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Likewise, `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor Agent CLI routing a Grok model, not the xAI Grok Build `grok` harness.
@@ -173,6 +179,7 @@ Natural language is acceptable if uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the shared structural composer classifier; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
 - cursor: `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills. Its slash popup swallows the first Enter, so a genuine second Enter submits; the shared submit retry handles it.
+- omp: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 
 ## Submission acknowledgement hazards
 
@@ -302,6 +309,46 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both the turn-end guard and watcher extensions, and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## omp / Oh My Pi (VERIFIED CREWMATE/SCOUT 2026-08-24, omp v18.0.4)
+
+`omp` (Oh My Pi, package `@oh-my-pi/pi-coding-agent`) is a divergent FORK of pi-mono, not the `pi`/`pi-signed` adapter above under a new name.
+It has its own binary name, its own credential store (`agent.db`, sqlite, multi-credential), and its own native extension-discovery root (`.omp/extensions`, not `.pi/extensions`); see `omp://porting-from-pi-mono.md` "Intentional Divergences" for the full divergence list.
+omp is CREWMATE/SCOUT ONLY: `bin/fm-spawn.sh` refuses `--secondmate` on it (`fm_control_harness_supports_kind`), because it has no primary watcher-supervision protocol under `docs/supervision-protocols/` yet - an omp-detected PRIMARY correctly falls back to `unknown.md` rather than misapplying another harness's protocol.
+`bin/fm-harness.sh` correctly detects a primary session running on omp (own-harness detection).
+
+| Fact | Value |
+|---|---|
+| Binary | `omp`, a Bun-launched script (`bun /path/to/omp`); `ps -o comm=` reports the bare name `omp`, not `bun`, so ancestry matching needs no args probe (unlike node/python bare interpreters). |
+| Env marker | `OMPCODE=1`, set on every bash-tool child process. omp ALSO sets `CLAUDECODE=1` on the same children, deliberately, for Claude-Code bash-tool compatibility - the same "both markers present, ordering decides" hazard already documented for Cursor. `bin/fm-harness.sh` tests `OMPCODE` BEFORE `CLAUDECODE` for this reason. `PI_CODING_AGENT` is NOT set (confirmed absent), so omp is never misread as `pi`. |
+| Launch | Positional prompt (`omp --approval-mode yolo "..."`), the Pi/grok shape. |
+| Model flag | `--model <value>` (fuzzy match, e.g. `opus`, `gpt-5.2`, or `openai/gpt-5.2`). |
+| Effort flag | `--thinking <off\|minimal\|low\|medium\|high\|xhigh\|max\|auto>` - the same flag name as Pi's `--thinking`, but with a wider vocabulary (`off`, `minimal`, `auto` are new); `fm-spawn` passes firstmate's shared `low\|medium\|high\|xhigh\|max` subset. |
+| Model discovery | `omp models` (subcommand, not a flag); no `--list-models` flag exists. |
+| Autonomy | `--approval-mode yolo`, verified live: no trust dialog, no approval prompt, a bash tool call ran unattended on a fresh worktree. `--auto-approve` is an equivalent flag firstmate does not use. |
+| Extension flag | `-e, --extension <path>` (repeatable) - same flag as Pi; used in the crew/scout launch template to load the per-task busy-state/turn-end extension (see below). |
+| Exit command | `/exit`, verified live (cleanly exits the TUI, prints `Resume this session with omp --resume <session-id>`, process exit 0). This DIFFERS from Pi's `/quit`. On one real crewmate teardown (Herdr backend), the exit landed and the pane genuinely returned to a shell prompt, but `bin/fm-control.sh exit`'s generic 30s postcondition wait reported `exit=unconfirmed`; treat that as ack-timing variance (the same class of gap already documented for Cursor and grok), not proof the command failed - re-check the pane before assuming a wedge. |
+| Interrupt | Single Escape, verified live: a mid-turn bash command showed `Command aborted` and the turn stopped, matching Pi/claude's single-press contract (not opencode's double-Escape or muse's restore-and-clear). No composer repollution observed. |
+| Trust dialog | None observed on first launch in a fresh, never-before-seen directory (unlike Pi's per-path `~/.pi/agent/trust.json` gate); no trust-related flag, file, or doc reference found in `omp://*.md` or `omp --help`. |
+| Busy state | The firstmate-owned per-task extension's `agent_start` (busy) and `agent_end` confirmed by BOTH the event's own `willContinue` being falsy AND `ctx.isIdle()` (idle) - verified live 2026-08-24 against omp v18.0.4: a real headless run read `busy omp-ext` mid-turn (while a `sleep 12` bash call was still executing) and `idle omp-ext` only once the run genuinely settled, with `turn_end` staying a wake-only touch across two inner turns (one bash call, one final text response) rather than ever flipping state early. `bin/fm-busy-lib.sh`'s `fm_busy_sources_for_harness` now trusts `omp-ext` for `harness=omp`. See the extension note below for the exact event-shape difference from Pi. |
+
+**Busy-state extension (verified live 2026-08-24, omp v18.0.4).**
+omp's extension API is Pi-compatible through `legacy-pi-compat.ts`, but its agent-loop settle event is `agent_end`, not Pi's `agent_settled`, and it has no `ctx.isIdle()`-only contract: `AgentEndEvent` carries its own `willContinue?: boolean` ("the session has already scheduled an automatic continuation ... subscribers must not treat this as a user-visible terminal settle"), confirmed against the installed `@oh-my-pi/pi-coding-agent` type declarations (`agent_start`/`agent_end`/`turn_start`/`turn_end`, no `agent_settled` anywhere in the union).
+`bin/fm-spawn.sh` writes `state/<id>.omp-ext.ts` (mirroring the pi-ext pattern: outside the worktree, loaded via an explicit `-e` path added to the crew/scout launch template) whose `agent_end` handler goes idle only when the event's `willContinue` is falsy AND `ctx.isIdle()` also confirms it, exactly the same double-check Pi's extension already does, kept here as defense in depth in case a future omp release schedules a continuation without setting `willContinue`.
+`bin/fm-busy-lib.sh`'s `fm_busy_sources_for_harness` trusts `omp-ext` for `harness=omp` the same way it trusts `pi-ext` for `harness=pi`.
+Test coverage: `tests/fm-busy-adapter-wiring.test.sh` drives the REAL `fm-spawn`-generated `state/<id>.omp-ext.ts` through a plain Node host and the real `bin/fm-busy-event.sh` writer, covering `agent_start` busy, a bare `agent_end` idle settle, an `agent_end` carrying `willContinue: true` staying busy, an `agent_end` where `ctx.isIdle()` is false staying busy, `turn_end` staying a notification, settle-then-start ordering, and stale-incarnation rejection. A full nested `bin/fm-spawn.sh` dispatch of a real omp crewmate was not run from inside this isolated crewmate's own worktree, because that would write into the live firstmate home's shared `state/`/`data/` outside the worktree; the live round-trip above (`omp -e <extension> --approval-mode yolo --no-session -p "..."`) against the real installed `omp` v18.0.4 binary in a disposable scratch project, plus the automated test's real-extension-file drive, are the two verifications actually performed, and neither claims to have exercised `bin/fm-crew-state.sh` end to end against a real backend pane.
+
+**Composer shape (verified live 2026-08-24, omp v18.0.4, `omp config get composer.shape` = `box`).**
+omp's composer is a two-row rounded box whose TOP row permanently embeds a status/title line (session icon, model, effort, cwd, cost, context percentage, token budget, and once a title exists, the session name) - it is NEVER a blank rule - and whose BOTTOM row is simultaneously the closing rule and the LAST content row: a fresh, never-typed-into composer is exactly `╭── <status> ──╮` / `╰─ <blank> ─╯` with zero rows in between, and typed text appears directly on that same bottom row (`╰─ hello world test ─╯`) with one decorative rule-dash flanking it on each side. Wrapped multi-line input adds genuine side-bordered `│ … │` rows above that same merged closing row. No idle placeholder or ghost text was observed in the empty composer (a bare, un-decorated blank row). `bin/fm-composer-lib.sh` gained a new fleet-wide "capped" shape for this: a bordered composer whose closing row is itself content, with no geometry match required between the top's status text and the bottom's typed content (they are unrelated by design), tolerant of a permanently-titled top the way the existing "bordered" shape already tolerates a titled bottom (grok). The actual tmux-captured idle and typed bytes from this verification session (plain, unstyled capture) were fed directly through `fm_composer_classify_screen` in both cursor-mode and cursorless and read `empty`/`pending` correctly; a synthetic matrix fixture mirroring that exact two-row structure, exercised across every backend capability profile including styled captures, is checked in as `tests/fm-composer-lib.test.sh`'s `test_matrix_omp_capped_box` for regression protection, and the existing full composer-lib, composer-ghost, herdr-backend, and tmux-submit-busy suites were re-run with zero regressions.
+The busy indicator above the composer pairs a rotating braille spinner with a DYNAMIC working-message ("Working…" for a plain turn, a tool-specific summary such as "Sleep then echo marker" while a bash call runs, live-verified) followed by a stable `⟨esc⟩` cancel-hint token present for the whole busy turn and absent the instant it settles - the verb/summary text is never stable enough to match, so only `⟨esc⟩` is registered as `FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT` in `bin/fm-composer-lib.sh`, the same "match the token, not the verb" policy already used for cursor and grok.
+
+**Model-role mapping.** The captain directed (2026-08-24) that crew dispatch on omp select its model from omp's own configured `modelRoles` (`~/.omp/agent/config.yml`) rather than a fixed claude-only list, superseding the 2026-08-21 claude-only crew-model restriction for omp dispatch specifically.
+`config/crew-dispatch.json` (local, gitignored) records the resolved concrete model string for each rule, snapshotted from the role config at that date; re-resolve from `omp config` or `~/.omp/agent/config.yml`'s `modelRoles` if the captain changes the role bindings later, since fm-spawn passes a concrete model id rather than a role name (omp's `--model` does not accept role names, only fuzzy model ids).
+
+**Remaining work before omp is a dispatchable SECONDMATE adapter:** a primary watcher-supervision protocol doc under `docs/supervision-protocols/`, and wiring the tracked `.pi/extensions/fm-primary-turnend-guard.ts` and `.pi/extensions/fm-primary-pi-watch.ts` (or omp-native equivalents) the way Pi's secondmate launch does. The per-task busy-state extension and the composer shape mapping (both previously listed here as open gaps) are now wired and verified - see the Busy state row and the two verification notes above.
+
+**End-to-end dispatch smoke test (2026-08-24, predates the busy-state extension above).** A real scout spawned via `bin/fm-spawn.sh <id> <project> --scout --harness omp --model openai-codex/gpt-5.6-luna --effort low` launched cleanly in its own isolated treehouse worktree, ran GPT-5.6-Luna at the requested low effort (confirmed from the rendered status line), executed real bash tool calls, wrote its report, and exited via `/exit` cleanly; teardown succeeded once the decision-hold completion gate was satisfied. `bin/fm-crew-state.sh` read `busy (herdr-native)` while the worker was actively streaming on the Herdr backend and fell back to `unknown missing` once idle at the time, before the busy-state extension existed; a fresh dispatch on the wired extension should now read `idle omp-ext` instead once genuinely settled, but that exact `fm-spawn` -> real pane -> `fm-crew-state.sh` round trip has not been re-run since the extension landed (see the disclosed verification boundary above).
+
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

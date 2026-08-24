@@ -1168,10 +1168,63 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# Retention (tasks-axi prune / done --keep) sweeps a closed, answered
+# captain-held task out of the active backlog into the archive. The
+# completion gate must still see the recorded answer there: an archived
+# task with a durable answer is not the same as an absent one, and refusing
+# it here reproduces the exact defect this test guards against.
+test_completion_gate_spans_archived_answer() {
+  local home id json archive
+  home=$(make_home archived-answer)
+  id=sample-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the archive path" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archive-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Archive review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-route-call \
+    --title "Choose the route" --reason "captain decision pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Go with option A.\n' > "$home/decision-a.txt"
+  run_captain "$home" answer sample-route-call --decision-file "$home/decision-a.txt" >/dev/null \
+    || fail "answer could not close the captain-held task"
+  run_captain "$home" complete "$id" sample-route-call >/dev/null \
+    || fail "completion failed before retention ever ran"
+
+  # Force retention to sweep every Done row, including sample-route-call,
+  # into the archive, mirroring what a real fleet's tasks-axi prune does.
+  tasks_in "$home" add sample-archive-filler "filler" --repo sample >/dev/null \
+    || fail "could not create the retention filler task"
+  tasks_in "$home" "done" sample-archive-filler --keep 0 >/dev/null \
+    || fail "could not force retention to archive Done rows"
+  archive="$home/data/done-archive.md"
+  [ -f "$archive" ] || fail "retention did not write an archive file"
+  grep -F 'sample-route-call' "$archive" >/dev/null \
+    || fail "setup error: retention did not archive the answered captain-held task"
+  assert_no_grep '^- \[.\] sample-route-call ' "$home/data/backlog.md" \
+    "setup error: the archived task is still in the active backlog"
+
+  # The completion gate must read the archived answer, not report the task
+  # absent: this is the reproduced defect (fm-captain-hold: ... is absent
+  # from .../backlog.md) against the pre-fix implementation.
+  run_captain "$home" complete "$id" sample-route-call >/dev/null \
+    || fail "completion refused an archived, answered captain-held task"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verify refused an archived, answered captain-held task"
+
+  json=$(run_bearings "$home") || fail "Bearings failed after archival"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "sample-route-call") | not)
+  ' >/dev/null || fail "an archived answered captain call still renders as open: $json"
+  pass "the completion gate reads an archived recorded answer instead of reporting it absent"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_completion_gate_spans_archived_answer
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

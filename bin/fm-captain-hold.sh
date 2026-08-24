@@ -228,6 +228,48 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+# The archived record retention already filed, rendered by tasks-axi itself.
+task_show_archived() {  # <id>
+  fm_tasks_axi_archive_show "$FM_HOME" "$1"
+}
+
+# The durable record wherever it now lives: the active backlog, then the
+# archive. Read-only callers use this; anything that MUTATES a task must
+# still resolve through task_show alone, never this archived view, because
+# tasks-axi cannot rewrite an archived row. Its failure statuses are
+# task_show_archived's: 1 means both files were read and the id is genuinely
+# absent from both, 2 means the archive could not be read, so absence was
+# never established.
+task_show_durable() {  # <id>
+  local show
+  if show=$(task_show "$1"); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  task_show_archived "$1"
+}
+
+# The one absence message for a durable read, distinguishing a task retention
+# already archived (whose answer the archive still carries) from one truly
+# absent from both files, from an archive this home could not read - which
+# proves nothing either way and must never be reported as absence.
+absent_task_message() {  # <task-id>
+  local id=$1 status=0
+  task_show_archived "$id" >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf 'captain-held task %s was archived by backlog retention into %s, which tasks-axi cannot rewrite' \
+      "$id" "$(fm_tasks_axi_archive_path "$FM_HOME")"
+    return 0
+  fi
+  if [ "$status" -ne 1 ]; then
+    printf 'captain-held task %s is absent from %s, and the done archive %s could not be read, so this home cannot tell whether retention already filed it' \
+      "$id" "$(fm_tasks_axi_backlog_path "$FM_HOME")" "$(fm_tasks_axi_archive_path "$FM_HOME")"
+    return 0
+  fi
+  printf 'captain-held task %s is absent from %s and its done archive' \
+    "$id" "$(fm_tasks_axi_backlog_path "$FM_HOME")"
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -260,7 +302,7 @@ show_field_value() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  task_show_durable "$1" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -343,8 +385,9 @@ resolution_block() {  # <mode>
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  local id=$1 show state hold_kind body status=0
+  show=$(task_show_durable "$id") || status=$?
+  [ "$status" -eq 0 ] || fail "$(absent_task_message "$id")"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -360,17 +403,23 @@ verify_hold_durable() {  # <task-id>
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
-  local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  local origin=$1 entry=$2 legacy status=0
+  task_show_durable "$entry" >/dev/null 2>&1
+  status=$?
+  if [ "$status" -eq 0 ]; then
     printf '%s' "$entry"
     return 0
   fi
+  [ "$status" -ne 2 ] || fail "$(absent_task_message "$entry")"
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    task_show_durable "$legacy" >/dev/null 2>&1
+    status=$?
+    if [ "$status" -eq 0 ]; then
       printf '%s' "$legacy"
       return 0
     fi
+    [ "$status" -ne 2 ] || fail "$(absent_task_message "$legacy")"
     fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
   fi
   fail "no captain-held task $entry in $FM_HOME/data/backlog.md"

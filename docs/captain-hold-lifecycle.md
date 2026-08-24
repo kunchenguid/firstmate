@@ -28,6 +28,10 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+`verify` and `complete`'s per-entry check (`verify_hold_durable`, via `resolve_entry`) reads the active backlog and, on a miss, the archive `tasks-axi` retention (`prune` or `done --keep`) sweeps closed rows into.
+`bin/fm-tasks-axi-lib.sh`'s `fm_tasks_axi_archive_show` owns that archived read; a genuine miss (both files searched) and an unreadable archive (absence never established) are kept apart so an unread archive is never reported as proof a captain call is missing.
+Without this, a task retention already archived - even one carrying a recorded captain answer - reads as absent from the backlog, and both `verify` and `complete` refuse it; `tests/fm-captain-hold-lifecycle.test.sh`'s archived-answer regression pins the fix.
+
 ## Answer-time closure
 
 "A keyed answer closes its matching captain-held task" is one capability with one owner.

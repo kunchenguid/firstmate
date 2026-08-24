@@ -376,6 +376,36 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
 }
 
+test_matrix_omp_capped_box() {
+  # omp's composer (verified live, omp v18.0.4, composer.shape=box): the top
+  # row permanently embeds a status/title line (cost, model, effort, cwd,
+  # context - never a blank rule), and the CLOSING row is itself the last
+  # content row rather than pure chrome. A fresh single-line composer is
+  # exactly two rows with zero interior content rows - the case the generic
+  # bordered shape's content_rows>0 gate always misses - and wrapped input
+  # adds a genuine side-bordered row ahead of that same merged closing row.
+  local idle typed wrapped content
+  idle=$'╭── Sonnet 5 · med · proj · 4% · 1M ──╮\n╰─                                    ─╯'
+  typed=$'╭── Sonnet 5 · med · proj · 4% · 1M ──╮\n╰─ fix the login bug                 ─╯'
+  wrapped=$'╭── Sonnet 5 · med · proj · 4% · 1M ──╮\n│  a long typed line that wraps onto  │\n╰─ a second row of real content      ─╯'
+  assert_screen "omp idle on tmux" empty "$CAPS_TMUX" "$idle" 1
+  assert_screen "omp idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "omp idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "omp idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "omp typed on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "omp typed on cmux/orca" pending "$CAPS_PLAIN" "$typed"
+  content=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$typed")
+  [ "$content" = "fix the login bug" ] \
+    || fail "omp capped extraction lost the closing row's real content, got '$content'"
+  # Two or more interior rows already satisfy the GENERIC bordered shape's
+  # content_rows>0 gate, which still treats the embedded top status as
+  # geometry ambiguity (unrelated to this fix): a proven-but-ambiguous
+  # container degrades pending to pending-unproven rather than unknown.
+  # Only the common zero-interior-row case above needed the capped shape.
+  assert_screen "omp wrapped typed on tmux" pending-unproven "$CAPS_TMUX" "$wrapped" 2
+  pass "matrix: omp's capped box (embedded top status, content on the closing row) reads empty/pending with no top/bottom geometry mismatch"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -620,6 +650,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_omp_capped_box
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

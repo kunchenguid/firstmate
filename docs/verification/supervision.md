@@ -46,6 +46,17 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 The earlier `sendUserMessage` counterfactual raced the positional prompt; the current non-triggering `pi.sendMessage` custom message did not.
 The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-27.
+
+omp command shape, verified 2026-08-24 with omp 18.0.4:
+
+```sh
+omp -p --no-session --no-tools --no-skills --no-rules \
+  --extension .omp/extensions/fm-primary-turnend-guard.ts \
+  'Reply with exactly OMP_SMOKE_DONE.'
+```
+
+Observed result: the real `session_start` event was `{ type: "session_start" }` with no reason field, its context had `ui` but no Pi-style session manager payload, and a custom message sent with `deliverAs: "nextTurn"` reached model context before `OMP_SMOKE_DONE`.
+The OMP adapter therefore uses `session_start` for `startup`, `session_switch.reason` for `clear`, `resume`, and `fork`, and `session_compact` for `compact` rather than assuming Pi's reason vocabulary on `session_start`.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
 ### Run-tier source vocabulary and context-reset injection
@@ -60,6 +71,7 @@ The third is recorded below.
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
+| omp | 18.0.4 | Real `session_start` emitted `{type:"session_start"}` with no reason; custom `sendMessage(..., {deliverAs:"nextTurn"})` reached model context | Source shape was verified on a real `omp -p` cold open; `session_switch` and `session_compact` routing follows the installed extension type contract | `session_start` source has no reason vocabulary; the adapter uses explicit lifecycle events instead |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
@@ -160,6 +172,7 @@ tests/fm-startup-network.test.sh
 FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
 
@@ -207,7 +220,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.
+The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-08-24, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's native session-stop continuation validated on 2026-08-24.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -215,8 +228,26 @@ The blocking and bounded-follow-up mechanisms were validated across six harnesse
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
+| omp | 18.0.4 | Awaited `session_stop` continuation | The real guard returned exit 2 on the first stop, omp returned `{continue:true, additionalContext}`, a second model turn ran, and the second guard pass allowed exit. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+
+### omp native session-stop and watcher bridge, 2026-08-24
+
+omp 18.0.4 was exercised with both tracked `.omp/extensions` files in an isolated temporary Firstmate-shaped home.
+The first real `session_stop` ran `bin/fm-turnend-guard.sh` with a fixture exit 2, returned `{continue:true, additionalContext}`, forced a second model turn, and the second guard pass allowed the session to settle.
+The model called `fm_watch_arm_omp`, the tool started `bin/fm-watch-arm.sh`, and `session_shutdown` retired the arm child.
+A separate real omp 18.0.4 probe registered the same `tool_call` return shape for a Bash PreToolUse block, observed `OMP_PRETOOL_BLOCK`, and left the attempted command's output file absent.
+
+```sh
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - omp omp/18.0.4: session_stop blocked and continued natively, and fm_watch_arm_omp was discoverable and callable
+```
 
 ### Cursor primary park, 2026-08-13
 
@@ -316,6 +347,7 @@ Current entry points:
 tests/fm-turnend-guard.test.sh
 tests/fm-supervision-instructions.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
 
@@ -430,6 +462,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
+| omp | `FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` | The custom tool was called, the first native `session_stop` returned a continuation, the second stop allowed exit, and `session_shutdown` retired the arm child. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.

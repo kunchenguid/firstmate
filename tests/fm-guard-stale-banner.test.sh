@@ -74,15 +74,18 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
-# The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
-# down on every actionable wake and spawns the replacement itself, so the lock is
-# legitimately unheld during a hand-off.
+# These cases stand up .pi extension evidence, so pin both the supervision model
+# and the native-extension family rather than letting the host test runner's
+# ambient harness pick them - otherwise a suite run under an omp primary (OMPCODE
+# set, detected ahead of pi) would resolve the family to omp and look for the
+# wrong .omp markers.
 run_guard_case_extension() {
   local dir=$1
   FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$(case_home "$dir")" \
     FM_GUARD_GRACE=999 \
     FM_SUPERVISION_MODEL=extension \
+    FM_NATIVE_EXTENSION_FAMILY=pi \
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
@@ -111,7 +114,7 @@ record_pi_extension_session() {
     if [ "$drift" = "${pair##*:}" ]; then
       version="sha256:0000000000000000000000000000000000000000000000000000000000000000"
     else
-      version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+      version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_native_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
     printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
@@ -666,7 +669,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
     pid=$!
     record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
     touch "$home/state/.last-watcher-beat"
-    out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+    out=$(env -u CLAUDECODE -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
       "${pi_env[@]}" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \
