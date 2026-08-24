@@ -2278,6 +2278,15 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+# Prove the complete Herdr adapter surface is available before even the
+# generic pre-teardown cleanup begins.  The later target preflight acquires
+# the presentation lock after the ordinary safety gates, but a missing adapter
+# or confirmation helper is already enough to make every later mutation
+# unsafe.
+if [ "$BACKEND" = herdr ]; then
+  teardown_herdr_require_prerequisites "$ID" || exit 1
+fi
+
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
