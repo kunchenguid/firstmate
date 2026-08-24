@@ -63,6 +63,7 @@ Before release, cleanup resolves the recorded Orca worktree id and verifies its 
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 Because Orca deletes its worktree instead of returning it to a pool, the shared committed-work guard also runs immediately before release, even under `--force`: unnamed commits are rescued under `refs/firstmate/rescue/<task-id>/<timestamp>`, and a reachability check that cannot be completed refuses the removal and preserves the worktree.
 That guard covers every Orca release path, including a descendant Orca task removed while a forced secondmate teardown sweeps its home; a refusal there preserves that child's worktree and task record and stops the sweep.
+The guard runs before the task branch is dropped, and that branch is dropped only when another durable local ref already contains its commits, so branch-named Orca work stays durable without minting a rescue ref for it.
 [`architecture.md`](architecture.md#delivery-modes-are-explicit-per-task) summarizes that guard and names its owner.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.

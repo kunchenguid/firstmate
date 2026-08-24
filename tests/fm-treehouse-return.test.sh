@@ -570,6 +570,160 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
   pass "an unusable task id still refuses to return unnamed committed work"
 }
 
+# A PATH with every directory that provides a `treehouse` executable removed, so
+# a case can exercise the no-Treehouse host fallback on a machine that does have
+# Treehouse installed.
+path_without_treehouse() {
+  local dir out= saved_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    IFS=$saved_ifs
+    [ -n "$dir" ] || { IFS=:; continue; }
+    if [ -x "$dir/treehouse" ]; then IFS=:; continue; fi
+    out="${out:+$out:}$dir"
+    IFS=:
+  done
+  IFS=$saved_ifs
+  printf '%s\n' "$out"
+}
+
+# A forced-secondmate teardown whose non-Orca child worktree cannot be returned
+# to a pool because the host has no Treehouse: that path deletes the worktree
+# outright, so it is a destructive removal the committed-work guard must cover.
+make_no_treehouse_child_case() {  # <name>
+  local name=$1 case_dir home subhome childproj childwt
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  subhome="$case_dir/subhome"
+  # Outside the secondmate home: teardown removes the home itself, so a rescue
+  # ref only proves durability in a repository that outlives it.
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-worktree"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$case_dir/fakebin"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+
+  fm_git_worktree "$childproj" "$childwt" fm/child-branch
+  git -C "$childwt" checkout -q --detach
+  git -C "$childwt" commit -q --allow-empty -m unnamed-child-work
+
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' \
+    "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    'window=firstmate:fm-child' \
+    'endpoint_task_id=child' \
+    "worktree=$childwt" \
+    "project=$childproj" \
+    'harness=echo' \
+    'kind=ship' \
+    'mode=no-mistakes' \
+    'yolo=off'
+  printf '%s\n' "$case_dir"
+}
+
+run_no_treehouse_teardown() {  # <case-dir>
+  local case_dir=$1
+  FM_HOME="$case_dir/home" \
+  PATH="$case_dir/fakebin:$(path_without_treehouse)" \
+    "$TEARDOWN" domain --force 2>&1
+}
+
+test_child_worktree_without_treehouse_rescues_committed_work() {
+  local case_dir childproj childwt head out rescue_refs
+  case_dir=$(make_no_treehouse_child_case no-treehouse-child-rescue)
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-worktree"
+  head=$(git -C "$childwt" rev-parse HEAD)
+
+  errexit_off
+  out=$(run_no_treehouse_teardown "$case_dir")
+  errexit_restore
+  [ ! -d "$childwt" ] \
+    || fail "the no-Treehouse fallback never deleted the child worktree: $out"
+  rescue_refs=$(git -C "$childproj" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue/child)
+  [ -n "$rescue_refs" ] \
+    || fail "child worktree deletion without Treehouse dropped an unreferenced commit: $out"
+  assert_contains "$out" 'RESCUED: committed work' \
+    "child worktree deletion without Treehouse did not report its rescue"
+  pass "deleting a child worktree without Treehouse rescues its unreferenced commit first"
+}
+
+test_child_worktree_without_treehouse_refuses_unrescuable_work() {
+  local case_dir childproj childwt head out rc
+  case_dir=$(make_no_treehouse_child_case no-treehouse-child-refusal)
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-worktree"
+  head=$(git -C "$childwt" rev-parse HEAD)
+  # A file at refs/firstmate/rescue/<child-id> blocks the <id>/<timestamp> ref
+  # below it, so this detached commit can be neither certified nor rescued. It
+  # points at the baseline, so it never makes HEAD durable by itself.
+  mkdir -p "$childproj/.git/refs/firstmate/rescue"
+  git -C "$childproj" rev-parse refs/heads/fm/child-branch \
+    > "$childproj/.git/refs/firstmate/rescue/child"
+
+  errexit_off
+  out=$(run_no_treehouse_teardown "$case_dir")
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] || fail "forced teardown ignored an unrescuable child commit: $out"
+  [ -d "$childwt" ] \
+    || fail "the no-Treehouse fallback deleted a child worktree holding unreferenced commits: $out"
+  [ "$(git -C "$childwt" rev-parse HEAD)" = "$head" ] \
+    || fail "preserved child worktree no longer holds its unreferenced commit"
+  assert_present "$case_dir/subhome/state/child.meta" \
+    "guard refusal removed the child task record"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "guard refusal did not report why the committed work could not be rescued"
+  pass "a child worktree deletion without Treehouse refuses unrescuable committed work"
+}
+
+test_orca_branch_work_is_kept_without_rescue_litter() {
+  local case_dir proj wt head out rescue_refs
+  case_dir=$(make_guard_case orca-attached)
+  fake_orca_bin "$case_dir/fakebin"
+  proj="$case_dir/project"
+  wt="$case_dir/orca-worktree"
+  fm_git_worktree "$proj" "$wt" fm/orca-branch
+  # Committed on the task branch and never merged locally: the branch is the one
+  # durable local ref naming this work.
+  git -C "$wt" commit -q --allow-empty -m branch-orca-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  write_orca_meta "$case_dir" orca-attached "$wt" "$proj"
+
+  out=$(run_orca_teardown "$case_dir" orca-attached "$wt" 2>&1) \
+    || fail "Orca teardown over branch work failed: $out"
+  assert_present "$case_dir/orca-worktree-removed" "Orca teardown never removed its worktree"
+  rescue_refs=$(git -C "$proj" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue)
+  [ -z "$rescue_refs" ] \
+    || fail "Orca teardown minted a rescue ref for already-durable branch work: $rescue_refs"
+  [ "$(git -C "$proj" rev-parse --verify --quiet refs/heads/fm/orca-branch)" = "$head" ] \
+    || fail "Orca teardown dropped the only durable ref naming its committed work: $out"
+  pass "Orca teardown keeps branch-named work durable with no rescue litter"
+}
+
+test_orca_drops_a_task_branch_whose_work_is_already_contained() {
+  local case_dir proj wt out
+  case_dir=$(make_guard_case orca-contained)
+  fake_orca_bin "$case_dir/fakebin"
+  proj="$case_dir/project"
+  wt="$case_dir/orca-worktree"
+  # No commits of its own, so the project's own branch already contains this
+  # HEAD and the task branch names nothing that would otherwise be lost.
+  fm_git_worktree "$proj" "$wt" fm/orca-branch
+  write_orca_meta "$case_dir" orca-contained "$wt" "$proj"
+
+  out=$(run_orca_teardown "$case_dir" orca-contained "$wt" 2>&1) \
+    || fail "Orca teardown over contained branch work failed: $out"
+  assert_present "$case_dir/orca-worktree-removed" "Orca teardown never removed its worktree"
+  git -C "$proj" rev-parse --verify --quiet refs/heads/fm/orca-branch >/dev/null \
+    && fail "Orca teardown kept a redundant task branch: $out"
+  pass "Orca teardown still drops a task branch whose commits another ref already holds"
+}
+
 test_broken_ref_store_still_rescues_detached_commit
 test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo
 test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree
@@ -579,8 +733,12 @@ test_durable_branch_returns_even_with_an_unusable_task_id
 test_unusable_task_id_refuses_unrescuable_committed_work
 test_orca_detached_commit_is_rescued_before_worktree_removal
 test_orca_guard_refusal_preserves_the_worktree
+test_orca_branch_work_is_kept_without_rescue_litter
+test_orca_drops_a_task_branch_whose_work_is_already_contained
 test_child_orca_detached_commit_is_rescued_before_removal
 test_child_orca_guard_refusal_preserves_the_worktree
+test_child_worktree_without_treehouse_rescues_committed_work
+test_child_worktree_without_treehouse_refuses_unrescuable_work
 
 if [ -z "$TREEHOUSE" ]; then
   printf '%s\n' 'skip: treehouse not found'

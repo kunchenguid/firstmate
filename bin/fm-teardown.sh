@@ -1950,6 +1950,23 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+# Deleting a child worktree destroys the only handle on any commit it holds, so
+# every deletion path runs the committed-work guard first, exactly as a pooled
+# return does: an unreferenced HEAD is rescued into refs/firstmate/rescue, and a
+# reachability check that cannot be completed refuses while the worktree and the
+# child's durable records are still intact. A stranded worktree is recoverable;
+# commits force-deleted with it are not.
+guard_child_worktree_removal() {  # <child-id> <worktree> <label>
+  local child_id=$1 child_wt=$2 label=$3 guard_out
+  if guard_out=$(fm_treehouse_return_guard "$child_id" "$child_wt" 2>&1); then
+    [ -z "$guard_out" ] || printf '%s\n' "$guard_out"
+    return 0
+  fi
+  [ -z "$guard_out" ] || printf '%s\n' "$guard_out" >&2
+  echo "REFUSED: committed work in $label $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+  return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+}
+
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
@@ -2448,7 +2465,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_guard_out
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2501,19 +2518,8 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         # Orca deletes this child worktree instead of returning it to a pool, so
-        # the same committed-work guard the top-level Orca path runs must run
-        # here too: an unreferenced detached HEAD is rescued into
-        # refs/firstmate/rescue first, and a reachability check that cannot be
-        # completed refuses while the worktree and this child's durable records
-        # are all still intact. A stranded child worktree is recoverable;
-        # commits force-deleted with it are not.
-        if child_guard_out=$(fm_treehouse_return_guard "$child_id" "$child_wt" 2>&1); then
-          [ -z "$child_guard_out" ] || printf '%s\n' "$child_guard_out"
-        else
-          [ -z "$child_guard_out" ] || printf '%s\n' "$child_guard_out" >&2
-          echo "REFUSED: committed work in child Orca worktree $child_wt for $child_id could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
-          return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
-        fi
+        # the shared removal guard runs here before anything is destroyed.
+        guard_child_worktree_removal "$child_id" "$child_wt" "child Orca worktree" || return $?
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -2538,6 +2544,9 @@ cleanup_firstmate_home_children() {
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
         fi
       else
+        # No pooled return is possible here, so this branch deletes the child
+        # worktree outright and must certify its committed work first.
+        guard_child_worktree_removal "$child_id" "$child_wt" "child worktree" || return $?
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
@@ -2728,28 +2737,39 @@ fi
 # task branch here. Treehouse returns preserve an attached local branch as a durable
 # ref; removing it before the return would recreate the detached-HEAD loss this
 # teardown guard prevents.
+#
+# True when some durable local ref other than the task branch already names this
+# worktree's HEAD, so dropping that branch cannot orphan committed work. A failed
+# probe answers "not droppable": the branch is then kept, which is always safe.
+orca_task_branch_is_droppable() {  # <worktree> <branch>
+  local wt=$1 branch=$2 head ref
+  fm_treehouse_return_git "$wt" rev-parse --verify 'HEAD^{commit}' || return 1
+  head=$FM_TREEHOUSE_RETURN_GIT_OUT
+  fm_treehouse_return_git "$wt" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/heads refs/tags refs/firstmate/rescue || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" = "refs/heads/$branch" ] || return 0
+  done <<EOF
+$FM_TREEHOUSE_RETURN_GIT_OUT
+EOF
+  return 1
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-      "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-
-    # Orca deletes this worktree instead of returning it, and the branch drop
-    # above can leave the task's commits named by nothing, so the same
-    # committed-work guard runs here before the deletion: an unreferenced HEAD
-    # is rescued into refs/firstmate/rescue, and a reachability check that
-    # cannot be completed refuses the deletion outright. A stranded worktree is
-    # recoverable; commits deleted with it are not.
+    # Orca deletes this worktree instead of returning it, so the committed-work
+    # guard runs before anything durable is touched - and specifically before
+    # the task branch drop below, so an attached branch still counts as the
+    # durable ref it is instead of forcing a rescue ref on every Orca teardown.
+    # An unreferenced HEAD is rescued into refs/firstmate/rescue, and a
+    # reachability check that cannot be completed refuses the deletion outright
+    # with the branch intact. A stranded worktree is recoverable; commits
+    # deleted with it are not.
     if ORCA_GUARD_OUT=$(fm_treehouse_return_guard "$ID" "$WT" 2>&1); then
       [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT"
     else
@@ -2757,6 +2777,16 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       echo "REFUSED: the committed-work guard blocked Orca worktree removal for $ID; preserving $WT and every commit it still holds." >&2
       exit 1
     fi
+
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ] && orca_task_branch_is_droppable "$WT" "$branch"; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.opencode/plugins/fm-busy-state.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
