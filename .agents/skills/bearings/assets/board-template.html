@@ -744,7 +744,7 @@ __FM_BEARINGS_BOARD_DATA__
   /* Underway */
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
-  data.underway.forEach(function (t) {
+  data.underway.forEach(function (t, index) {
     var runtimeParts = [t.harness, t.model, t.effort].filter(function (part) { return typeof part === "string" && part.length > 0; });
     var crewParts = [t.kind, t.harness, t.model, t.effort, t.repo || t.id].filter(function (part) { return typeof part === "string" && part.length > 0; });
     var row = el("div", "bb-underway-row");
@@ -752,7 +752,7 @@ __FM_BEARINGS_BOARD_DATA__
     button.type = "button";
     button.className = "bb-underway-row__button";
     button.setAttribute("aria-expanded", "false");
-    var detailId = "bb-underway-detail-" + t.id.replace(/[^A-Za-z0-9_-]/g, "-");
+    var detailId = "bb-underway-detail-" + index;
     button.setAttribute("aria-controls", detailId);
     var state = el("span", "bb-underway-row__state" + (t.state === "unknown" ? " bb-underway-row__state--unknown" : ""), t.state_detail);
     button.appendChild(state);

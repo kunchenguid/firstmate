@@ -381,6 +381,17 @@ test_v2_renders_in_browser() {
   state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'JSON.stringify({defaults:document.querySelector("#bb-underway").textContent.includes("default"),report_links:document.querySelectorAll("#bb-underway .bb-underway-detail__links a").length})' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
   assert_contains "$state" '"defaults":false' "browser invented model or effort defaults: $state"
   assert_contains "$state" '"report_links":2' "browser did not render report_path as a link: $state"
+
+  write_valid_payload "$data"
+  jq '.underway += [
+    {"id":"a/b","repo":"sample","kind":"ship","owner":"crewmate","state":"working","state_detail":"working","doing":"Slash task","next":"Review slash task"},
+    {"id":"a:b","repo":"sample","kind":"ship","owner":"scout","state":"working","state_detail":"working","doing":"Colon task","next":"Review colon task"}
+  ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "could not build colliding task-id fixture"
+  CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi open "file://$board" >/dev/null 2>&1 || fail "browser could not reload colliding task-id fixture"
+  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval '(()=>{const b=[...document.querySelectorAll("#bb-underway .bb-underway-row__button")],d=[...document.querySelectorAll("#bb-underway .bb-underway-detail")],ids=d.map(x=>x.id),controls=b.map(x=>x.getAttribute("aria-controls")); return JSON.stringify({unique:new Set(ids).size===ids.length,paired:controls.every((id,i)=>id===ids[i])})})()' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
+  assert_contains "$state" '"unique":true' "browser emitted duplicate Underway detail IDs: $state"
+  assert_contains "$state" '"paired":true' "browser emitted ambiguous Underway aria-controls: $state"
   pass "v2 renders usage and accessible Underway detail in browser"
 }
 
