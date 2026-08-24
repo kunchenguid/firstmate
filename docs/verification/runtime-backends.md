@@ -958,3 +958,26 @@ Evidence produced 2026-08-24 on macOS 26.5.2 arm64, Node v24.13.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+### Calm branch-outcome row
+
+Whether Calm's collapsed `fm_branch_outcomes` row disappears, and what is left on screen when it does not, is Pi's own rendering verdict, so it is proven against the real `pi` binary in a real terminal rather than against the importable SDK.
+
+Evidence produced 2026-08-24 on macOS 15.7.3 arm64, Node v26.5.0, tmux on a private socket:
+
+```sh
+FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-branch-outcomes-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi 0.84.3 keeps the whole stock branch-outcome row, raw records and clip-and-expand shape included, while Calm is off
+ok - real Pi 0.84.3 collapses a branch-outcome read under Calm to one dim line per outcome that still needs the captain, and nothing else
+ok - real Pi 0.84.3 keeps a failed branch-outcome read visible under Calm instead of collapsing it to nothing
+```
+
+The guard reads no credentials and makes no provider call: a local fixture provider answers the fixture model, and `PI_OFFLINE` is set.
+It refuses to pass having checked nothing, failing by name when `pi` or `tmux` is absent or when `pi` reports no version.
+Every assertion is anchored to a Calm-collapsed built-in row in the same transcript, so a session where Calm was not actually collapsing anything fails rather than reporting a false pass.
+Re-run it after every Pi upgrade; the collapse decision itself is separately pinned with real store records and no harness by `tests/fm-calm-branch-outcomes.test.sh`.
