@@ -197,9 +197,7 @@ function wakeContextPresentation(): string {
     cwd: fmRoot,
     env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
     encoding: "utf8",
-    maxBuffer: 128 * 1024,
   });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOBUFS") return fallback;
   const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
   return output || fallback;
 }
