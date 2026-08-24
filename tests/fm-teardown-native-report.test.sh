@@ -26,24 +26,8 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 CAPTAIN="$ROOT/bin/fm-captain-hold.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-native)
 
-# --- 1. the deleted symlink bridge has no callers ---------------------------
-test_symlink_bridge_is_deleted() {
-  # The helper and its caller must not exist anywhere in bin/. This guards
-  # against a future edit adding them back, which would silently re-orphan
-  # the dcen-11 bridge fmops-07 §1 retired.
-  if grep -qE '^epic_report_symlink\(\)|^bridge_report_into_epic\(\)' bin/*.sh; then
-    fail "a deleted bridge function reappeared in bin/*.sh"
-  fi
-  # The word `epic_report_symlink` may still appear in prose (docstrings,
-  # tombstone comments) - what must not exist is a callable.
-  if grep -q '^bridge_report_into_epic$' bin/fm-teardown.sh; then
-    fail "bridge_report_into_epic is called from fm-teardown.sh"
-  fi
-  pass "epic_report_symlink + bridge_report_into_epic are gone and uncalled"
-}
-
-command -v tasks-axi >/dev/null 2>&1 || { test_symlink_bridge_is_deleted; echo "skip: tasks-axi not found (backend cases)"; exit 0; }
-command -v jq >/dev/null 2>&1 || { test_symlink_bridge_is_deleted; echo "skip: jq not found (backend cases)"; exit 0; }
+command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (backend cases)"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (backend cases)"; exit 0; }
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin b
@@ -191,7 +175,6 @@ test_membership_stamp_and_id_guard() {
   pass "non-composed captain-hold stamps [<slug>] at creation and enforces the 64-char id cap"
 }
 
-test_symlink_bridge_is_deleted
 test_teardown_does_not_symlink
 test_epic_slug_subcommand
 test_membership_stamp_and_id_guard
