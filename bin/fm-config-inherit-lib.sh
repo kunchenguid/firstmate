@@ -199,11 +199,25 @@ fm_config_deviation_value_rejection() {  # <path>
 # The bounded value a config item currently presents, quoted, or the word
 # "absence" when it holds none.
 fm_config_deviation_display() {  # <path>
-  local value
+  local value bytes
   if [ -f "$1" ] && value=$(fm_config_deviation_line "$1"); then
     printf '"%s"' "$value"
+  elif [ -f "$1" ]; then
+    bytes=$(head -c "$((FM_CONFIG_DEVIATION_MAX_BYTES + 1))" "$1" 2>/dev/null \
+      | LC_ALL=C wc -c | tr -d ' ')
+    if [ "$bytes" -gt "$FM_CONFIG_DEVIATION_MAX_BYTES" ]; then
+      printf '"[value unresolved beyond %s-byte preview]"' "$FM_CONFIG_DEVIATION_MAX_BYTES"
+    else
+      printf 'absence'
+    fi
   else
     printf 'absence'
+  fi
+}
+
+fm_config_prepare_rejected_deviation_destination() {  # <path>
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    rmdir -- "$1" 2>/dev/null || true
   fi
 }
 
@@ -681,6 +695,9 @@ propagate_inheritable_config() {
         if fm_config_deviation_holds "$dest_config" "$item" "$src" "$dest"; then
           continue
         fi
+        if [ "$deviation_value_rejected" -eq 1 ]; then
+          fm_config_prepare_rejected_deviation_destination "$dest"
+        fi
         if copy_inheritable_file "$src" "$dest"; then
           record_inheritable_config_result "$item" pushed ""
         else
@@ -702,6 +719,9 @@ propagate_inheritable_config() {
       # Primary has no value for this item: mirror the absence downstream.
       if fm_config_deviation_holds "$dest_config" "$item" "$src" "$dest"; then
         continue
+      fi
+      if [ "$deviation_value_rejected" -eq 1 ]; then
+        fm_config_prepare_rejected_deviation_destination "$dest"
       fi
       if rm -f "$dest" 2>/dev/null; then
         record_inheritable_config_result "$item" pushed "mirrored primary absence"

@@ -153,7 +153,7 @@ test_record_for_a_non_deviable_item_is_refused() {
 }
 
 test_unsafe_held_values_are_refused() {
-  local rec primary second report out status linked
+  local rec primary second report out linked
 
   rec=$(new_home_pair symlink-value)
   primary=${rec%%|*}
@@ -186,15 +186,32 @@ test_unsafe_held_values_are_refused() {
   printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
   report="$TMP_ROOT/directory-value.report"
 
-  status=0
-  out=$(converge "$primary" "$second" "$report" 2>&1) || status=$?
-  expect_code 1 "$status" "normal convergence over a directory-valued item"
+  out=$(converge "$primary" "$second" "$report") \
+    || fail "empty directory held value did not follow normal convergence"
   assert_contains "$out" "deviation record rejected" \
     "a non-ordinary held value must be reported as rejected"
   assert_contains "$out" "held value is not an ordinary file" \
     "the rejection must name the non-ordinary held value"
-  assert_grep $'backend\terror\tfailed to copy' "$report" \
-    "normal convergence must retain its existing non-ordinary destination error"
+  [ -f "$second/config/backend" ] && [ "$(cat "$second/config/backend")" = herdr ] \
+    || fail "normal convergence did not replace the empty directory"
+  assert_grep $'backend\tpushed\t' "$report" \
+    "an empty directory held value must converge to the primary value"
+
+  rec=$(new_home_pair directory-value-primary-absence)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  mkdir "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/directory-value-primary-absence.report"
+
+  out=$(converge "$primary" "$second" "$report") \
+    || fail "empty directory held value did not mirror primary absence"
+  assert_contains "$out" "held value is not an ordinary file" \
+    "absence mirroring must report the rejected non-ordinary held value"
+  [ ! -e "$second/config/backend" ] \
+    || fail "normal convergence did not remove the empty directory"
+  assert_grep $'backend\tpushed\tmirrored primary absence' "$report" \
+    "an empty directory held value must converge to primary absence"
 
   rec=$(new_home_pair hardlinked-value)
   primary=${rec%%|*}
@@ -215,6 +232,31 @@ test_unsafe_held_values_are_refused() {
   [ "$(cat "$linked")" = tmux ] \
     || fail "normal convergence changed the other hardlink"
   pass "unsafe held values are rejected before normal convergence"
+}
+
+test_bounded_display_does_not_mislabel_present_value() {
+  local rec primary second report out backend
+  rec=$(new_home_pair bounded-display)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  head -c "$FM_CONFIG_DEVIATION_MAX_BYTES" /dev/zero \
+    | tr '\0' '\n' > "$second/config/backend"
+  printf 'tmux\n' >> "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/bounded-display.report"
+
+  backend=$(FM_BACKEND_CONFIG_DIR="$second/config" \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_name' _ "$ROOT")
+  [ "$backend" = tmux ] || fail "setup: backend consumer did not resolve the held value"
+
+  out=$(converge "$primary" "$second" "$report")
+
+  assert_contains "$out" 'held locally at "[value unresolved beyond 4096-byte preview]"' \
+    "a present value beyond the preview must use the bounded unresolved label"
+  assert_not_contains "$out" "held locally at absence" \
+    "a present effective value must not be reported as absent"
+  pass "bounded divergence display distinguishes unresolved present values"
 }
 
 test_equal_hardlinked_held_value_is_refused() {
@@ -521,6 +563,7 @@ test_primary_revokes_by_removing_the_record
 test_record_without_evidence_is_refused
 test_record_for_a_non_deviable_item_is_refused
 test_unsafe_held_values_are_refused
+test_bounded_display_does_not_mislabel_present_value
 test_equal_hardlinked_held_value_is_refused
 test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
