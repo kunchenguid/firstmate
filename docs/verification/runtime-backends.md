@@ -601,6 +601,16 @@ ok - real herdr: the watcher fast-path enqueues a stale wake naming the task win
 ```
 
 Polling remained active and is covered as the fallback for capability, connect, subscribe, and repeated reader failure.
+The portable capability regression in `tests/fm-backend-herdr.test.sh` was run on 2026-08-23 under Bash `pipefail` with Herdr schema fixtures larger than 200KB.
+It proved that schemas containing both event markers remain capable, schemas missing the markers fail closed, and a small schema with both markers remains capable.
+
+Observed output:
+
+```text
+ok - fm_backend_herdr_events_capable: a 200KB+ schema with markers succeeds under pipefail
+ok - fm_backend_herdr_events_capable: a large schema without markers is not capable
+ok - fm_backend_herdr_events_capable: a small schema with both markers is capable
+```
 
 ### Agent lifecycle control
 
