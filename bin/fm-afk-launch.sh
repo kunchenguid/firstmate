@@ -164,7 +164,9 @@ fm_afk_launch_verify() {
   local record="$FM_AFK_LAUNCH_STATE/.subsuper-delivery-selftest" \
         timeout=${FM_AFK_VERIFY_TIMEOUT_SECS:-90} waited=0 verdict
   case "$timeout" in ''|*[!0-9]*) timeout=90 ;; esac
-  while [ "$waited" -lt "$timeout" ]; do
+  # Read the record before honoring the timeout so a zero timeout still
+  # accepts an already-present verdict instead of rejecting a verified entry.
+  while :; do
     if [ -s "$record" ]; then
       read -r verdict _ detail < "$record" || verdict=
       case "$verdict" in
@@ -179,6 +181,7 @@ fm_afk_launch_verify() {
           return 1 ;;
       esac
     fi
+    [ "$waited" -lt "$timeout" ] || break
     sleep 1
     waited=$((waited + 1))
   done

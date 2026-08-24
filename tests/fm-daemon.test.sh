@@ -1378,6 +1378,9 @@ test_afk_launch_verify_reads_the_durable_verdict() {
   FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=2 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1 \
     || fail "verify should succeed on a recorded ok verdict"
 
+  FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=0 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1 \
+    || fail "verify with a zero timeout must still accept an already-present ok verdict"
+
   printf 'failed 1756000000\n' > "$state/.subsuper-delivery-selftest"
   if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=2 "$ROOT/bin/fm-afk-launch.sh" verify 2>&1); then
     fail "verify must exit non-zero on a recorded failure"
