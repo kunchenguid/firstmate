@@ -285,7 +285,12 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  # `--` ends tmux's option parsing BEFORE the payload: steer text is arbitrary
+  # crew-facing content and a message beginning with `-` (observed live: a
+  # literal "--file <path>" that leaked through as message text) is otherwise
+  # consumed as send-keys flags - tmux exits 1 ("invalid flag") without typing
+  # anything, and the submit reads send-failed.
+  tmux send-keys -t "$target" -l -- "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
