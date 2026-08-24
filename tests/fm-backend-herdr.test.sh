@@ -4187,6 +4187,83 @@ SH
   printf '%s\n' "$path"
 }
 
+# make_herdr_schema_capable_fake: herdr stub for fm_backend_herdr_events_capable
+# tests. Answers `status --json` (protocol 16) and `api schema --json` (body from
+# $FM_FAKE_SCHEMA_FILE).
+make_herdr_schema_capable_fake() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = schema ] && [ "${3:-}" = --json ]; then
+  cat "${FM_FAKE_SCHEMA_FILE:?}"
+  exit 0
+fi
+printf 'unexpected herdr call: %s\n' "$*" >&2
+exit 1
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# make_large_herdr_schema: write a 200KB+ fake api schema. include_markers=1
+# places the event marker strings at the front so a grep pipe short-circuits
+# immediately (the pre-fix SIGPIPE failure mode).
+make_large_herdr_schema() {  # <path> <include_markers:0|1>
+  local path=$1 include=$2 pad
+  pad=$(head -c 210000 < /dev/zero | tr '\0' 'x')
+  if [ "$include" = 1 ]; then
+    printf '%s\n%s\n%s\n' 'events.subscribe' "$pad" 'pane.agent_status_changed' > "$path"
+  else
+    printf '%s\n' "$pad" > "$path"
+  fi
+}
+
+events_capable_rc_under_pipefail() {  # <fakebin> <schema-file> -> prints rc
+  local fb=$1 schema=$2
+  PATH="$fb:$PATH" FM_FAKE_SCHEMA_FILE="$schema" \
+    /bin/bash -c 'set -o pipefail; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable default; echo $?' "$ROOT" | tail -1
+}
+
+test_events_capable_large_schema_under_pipefail() {
+  local dir fb schema rc
+  dir="$TMP_ROOT/events-capable-large"; mkdir -p "$dir"
+  schema="$dir/schema.json"
+  make_large_herdr_schema "$schema" 1
+  [ "$(wc -c < "$schema")" -ge 200000 ] || fail "fixture schema must be at least 200KB"
+  fb=$(make_herdr_schema_capable_fake "$dir")
+  rc=$(events_capable_rc_under_pipefail "$fb" "$schema")
+  [ "$rc" = 0 ] || fail "events_capable must return 0 on a 200KB+ schema with event markers under pipefail, got $rc"
+  pass "fm_backend_herdr_events_capable: a 200KB+ schema with markers succeeds under pipefail"
+}
+
+test_events_capable_rejects_schema_without_markers() {
+  local dir fb schema rc
+  dir="$TMP_ROOT/events-capable-nomarkers"; mkdir -p "$dir"
+  schema="$dir/schema.json"
+  make_large_herdr_schema "$schema" 0
+  fb=$(make_herdr_schema_capable_fake "$dir")
+  rc=$(events_capable_rc_under_pipefail "$fb" "$schema")
+  [ "$rc" = 1 ] || fail "events_capable must return 1 when event markers are absent, got $rc"
+  pass "fm_backend_herdr_events_capable: a large schema without markers is not capable"
+}
+
+test_events_capable_accepts_small_schema_with_markers() {
+  local dir fb schema rc
+  dir="$TMP_ROOT/events-capable-small"; mkdir -p "$dir"
+  schema="$dir/schema.json"
+  printf '%s\n' '{"methods":["events.subscribe","pane.agent_status_changed"]}' > "$schema"
+  fb=$(make_herdr_schema_capable_fake "$dir")
+  rc=$(events_capable_rc_under_pipefail "$fb" "$schema")
+  [ "$rc" = 0 ] || fail "events_capable must return 0 when both markers are present, got $rc"
+  pass "fm_backend_herdr_events_capable: a small schema with both markers is capable"
+}
+
 set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   local dir=$1 target=$2 status=$3 key
   key=$(printf '%s' "$target" | tr ':/.' '___')
@@ -4594,6 +4671,9 @@ test_apply_transition_blocked_requires_commit_to_dedupe
 test_apply_transition_working_clears_marker
 test_clear_transition_removes_task_marker
 test_apply_transition_defer_and_fallback_are_noops
+test_events_capable_large_schema_under_pipefail
+test_events_capable_rejects_schema_without_markers
+test_events_capable_accepts_small_schema_with_markers
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
 test_wait_transition_reconcile_blocked_returns_record

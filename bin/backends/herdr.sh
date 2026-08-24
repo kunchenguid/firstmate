@@ -3177,8 +3177,12 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  # Match in-process with bash globbing. A `printf "%s" "$schema" | grep -Fq`
+  # pipe here SIGPIPEs printf when grep short-circuits on the first match of
+  # this ~220KB schema, and under pipefail that non-zero return wrongly trips
+  # the `|| return 1` (or aborts the watcher). Native matching has no pipe.
+  case "$schema" in *events.subscribe*) : ;; *) return 1 ;; esac
+  case "$schema" in *pane.agent_status_changed*) : ;; *) return 1 ;; esac
   return 0
 }
 
