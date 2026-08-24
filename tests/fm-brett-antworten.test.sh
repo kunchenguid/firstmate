@@ -49,7 +49,10 @@ install_quittung_stub() {  # <home>
 set -eu
 id=
 for a in "$@"; do
-  case $a in --*) ;; *) id=$a ;; esac
+  case $a in
+    --*) ;;
+    *) [ -n "$id" ] || id=$a ;;
+  esac
 done
 [ -n "$id" ] || { echo "stub: no answer id given" >&2; exit 1; }
 d="$CAPTAIN_BRETT_ANTWORTEN/quittungen"
@@ -330,6 +333,9 @@ out=$(FM_HOME="$H8" "$CHECK" disarm)
 
 if [ -n "${BRETT_CHECKOUT:-}" ] && [ -x "$BRETT_CHECKOUT/bin/brett-quittung" ]; then
   H9=$(make_home h9)
+  # make_home pre-created the project dir; the checkout link must replace it,
+  # not nest inside it.
+  rmdir "$H9/projects/captain-brett/bin" "$H9/projects/captain-brett"
   ln -s "$BRETT_CHECKOUT" "$H9/projects/captain-brett"
   hold_task "$H9" echt-quittung-posten
   ID9=20260824T114000-echt-quittung-posten-lmmm22

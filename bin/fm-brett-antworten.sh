@@ -232,7 +232,7 @@ card_wort() {  # <file> -> body of "## Wort des Captains" until the next heading
       if ($0 ~ /^## Wort des Captains/) { inw = 1 }
       next
     }
-    inw { sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "" && buf != "") buf = buf " "; buf = buf $0 }
+    inw { sub(/\r$/, ""); gsub(/\t/, " "); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "" && buf != "") buf = buf " "; buf = buf $0 }
     END { gsub(/ +/, " ", buf); print buf }
   ' "$1"
 }
@@ -279,7 +279,9 @@ parse_card() {  # <file>
     '' | -) C_REPL= ;;
     *)
       case $C_REPL in
-        *[!a-z0-9-]*) C_ERR="ersetz-verweis-unlesbar"; return 1 ;;
+        # Real antwort-id values carry the uppercase T of their ISO time
+        # prefix, so the reference accepts exactly that alphabet.
+        *[!A-Za-z0-9-]*) C_ERR="ersetz-verweis-unlesbar"; return 1 ;;
       esac
       ;;
   esac
@@ -298,7 +300,7 @@ receipt_card() {  # <antwort-id> <vermerk> -> nonzero leaves the card nagging
     fehler_add "brett-quittung-fehlt"
     return 1
   }
-  if ! CAPTAIN_BRETT_ANTWORTEN="$ANTWORTEN" python3 "$bin" \
+  if ! CAPTAIN_BRETT_ANTWORTEN="$ANTWORTEN" "$bin" \
     "$id" --von firstmate --vermerk "$vermerk" >/dev/null 2>&1; then
     fehler_add "quittung-scheitert-$id"
     return 1
@@ -344,7 +346,9 @@ action_check() {
       good+=("$f")
     fi
   done
-  [ "${#good[@]}" -gt 0 ] || return 0
+  # Nothing feedable must not swallow loud findings from pass 1: a sweep whose
+  # only card is malformed still has to print its FEHLER line.
+  [ "${#good[@]}" -gt 0 ] || { summary_line; return 0; }
 
   # Pass 2: validate replacement edges among parseable cards.
   for id in "${!valid_seen[@]}"; do
@@ -400,7 +404,7 @@ action_check() {
         break
       fi
       walked[$id]=1
-      id=${replaced_by[$id]}
+      id=${replaced_by[$id]:-}
       [ -n "$id" ] || break
       [ -z "${hold_back[$id]:-}" ] || break
     done
