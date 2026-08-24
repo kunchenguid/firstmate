@@ -192,6 +192,33 @@ SH
   pass "live agent: pane kept"
 }
 
+test_unsubmitted_typed_text_keeps_pane() {
+  local case_dir rc
+  case_dir=$(make_case unsubmitted-text)
+  open_shell_window "$case_dir/wt"
+  wait_for_state "$SESSION:$WNAME" dead
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:$WNAME" -l 'rm -rf /tmp/not-yet-submitted'
+  write_ship_meta "$case_dir" \
+    'pr=https://github.com/example/repo/pull/7'
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "task work"
+  : > "$case_dir/treehouse.log"
+
+  set +e
+  run_teardown "$case_dir" --close-pane > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "close-pane closed a pane with unsubmitted typed text: $(cat "$case_dir/stdout")"
+  grep -q 'pending composer' "$case_dir/stderr" \
+    || fail "unsubmitted-text refusal did not name pending composer text: $(cat "$case_dir/stderr")"
+  window_exists || fail "pane with unsubmitted typed text was closed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "close-pane returned the copy for an unsubmitted-text refusal: $(cat "$case_dir/treehouse.log")"
+  kill_task_window
+  pass "unsubmitted typed text in the shell: pane kept"
+}
+
 test_unfinished_exit_keeps_pane() {
   local case_dir rc
   case_dir=$(make_case unfinished)
@@ -266,6 +293,7 @@ test_recorded_windows_skips_closed_panes() {
 }
 
 test_exited_pr_open_closes_pane_keeps_copy
+test_unsubmitted_typed_text_keeps_pane
 test_live_agent_keeps_pane
 test_unfinished_exit_keeps_pane
 test_teardown_after_close_still_returns_copy

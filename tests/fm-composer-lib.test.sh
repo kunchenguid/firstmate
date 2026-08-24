@@ -62,6 +62,39 @@ test_bare_shell_prompt_with_command_is_not_empty() {
   pass "fm_composer_classify_content: a bare shell prompt carrying a command is not empty"
 }
 
+# --- fm_composer_trailing_shell_glyph_only: a caller's narrower positive proof
+# that the generic `unknown` verdict for a bare dead-shell prompt (see above -
+# a real PS1's user/host/cwd prefix never matches this library's
+# glyph-ANCHORED shapes, so it always reads `unknown`, typed content or not)
+# holds no unsubmitted typed text. Task fm-close-exited-panes review.
+
+test_trailing_shell_glyph_only_matches_a_real_ps1_prompt() {
+  local prompt
+  for prompt in 'user@host:~$' 'user@host:~ %' 'root@host:/etc #' 'C:\Users\me>'; do
+    fm_composer_trailing_shell_glyph_only "$prompt" \
+      || fail "a real PS1 prompt '$prompt' ending in a bare glyph must read true, did not"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: a real PS1 prompt ending bare is true"
+}
+
+test_trailing_shell_glyph_only_rejects_typed_content() {
+  local line
+  for line in 'user@host:~$ rm -rf /tmp/x' 'user@host:~$ ls -la' '  $ echo hi  '; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a prompt with typed content after it '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: typed content after the prompt is false"
+}
+
+test_trailing_shell_glyph_only_rejects_blank_or_glyphless() {
+  local line
+  for line in '' '   ' 'no glyph here'; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a blank or glyph-less line '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: blank or glyph-less input is false"
+}
+
 # --- Preserved: shell glyph inside a composer box is the harness prompt ------
 
 test_bordered_shell_glyph_is_empty() {
@@ -606,6 +639,9 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
+test_trailing_shell_glyph_only_matches_a_real_ps1_prompt
+test_trailing_shell_glyph_only_rejects_typed_content
+test_trailing_shell_glyph_only_rejects_blank_or_glyphless
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty

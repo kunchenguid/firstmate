@@ -2443,19 +2443,35 @@ teardown_task_finished_for_pane_close() {
 }
 
 teardown_composer_blocks_pane_close() {
-  local verdict
+  local verdict cap line last=''
   # A dead agent's shell prompt reads `unknown` by the fleet-wide dead-shell
   # safety rule (bin/fm-composer-lib.sh) even with no typed content, so
   # requiring the proven `empty` verdict here would refuse every ordinary
   # exit. Real unsent input is positively detected as pending/pending-unproven
-  # and still blocks. Only a composer-inspection FAILURE (the classifier
-  # itself erroring, distinct from it successfully reading `unknown`) is
-  # unproven in a way this gate cannot tell apart from unsent input, so that
-  # failure - and it alone - blocks the close instead of defaulting to safe.
+  # and still blocks. A composer-inspection FAILURE (the classifier itself
+  # erroring) blocks too, defaulting to safe.
   verdict=$(fm_backend_composer_state "$BACKEND" "$T" "fm-$ID" 2>/dev/null) || return 0
   case "$verdict" in
+    empty) return 1 ;;
     pending|pending-unproven) return 0 ;;
   esac
+  # verdict is `unknown`. A real shell PS1 (user/host/cwd/branch drawn before
+  # the prompt glyph) never matches fm-composer-lib.sh's glyph-anchored
+  # composer shapes, so an ordinary dead-shell exit always reads `unknown`
+  # here regardless of whether something was typed after the prompt -
+  # trusting `unknown` alone would not establish that pending text is absent
+  # (task fm-close-exited-panes review). Prove it directly instead: only a
+  # capture whose bottom-most non-blank row ends in a bare prompt glyph, with
+  # nothing after it, is safe. A capture failure or any other trailing
+  # content blocks.
+  cap=$(fm_backend_capture "$BACKEND" "$T" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    fm_composer_normalize_trim_var line
+    [ -n "$line" ] && last=$line
+  done <<EOF
+$cap
+EOF
+  fm_composer_trailing_shell_glyph_only "$last" || return 0
   return 1
 }
 

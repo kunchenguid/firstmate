@@ -454,6 +454,33 @@ EOF
   return 1
 }
 
+# fm_composer_trailing_shell_glyph_only: true when <line>, trimmed, ENDS in
+# one of the shell prompt glyphs (FM_COMPOSER_SHELL_PROMPT_GLYPHS) with
+# nothing after it. A real interactive shell's PS1 draws arbitrary text
+# BEFORE the glyph (user, host, cwd, git branch, ...), unlike an agent CLI's
+# minimal glyph-anchored composer, so a live PS1 never matches this library's
+# glyph-ANCHORED shapes above and the screen classifier always reads
+# `unknown` for it - whether or not anything was typed after the prompt. A
+# caller that must positively rule out unsubmitted typed text before trusting
+# that `unknown` (e.g. pane-close cleanup, task fm-close-exited-panes) uses
+# this instead: unlike fm_composer_leading_shell_glyph_var, the glyph need not
+# lead the row, only trail it, so `user@host:~$` reads true and
+# `user@host:~$ rm -rf` reads false.
+fm_composer_trailing_shell_glyph_only() {  # <line>
+  local __fmtg_trimmed=$1 __fmtg_glyph
+  fm_composer_normalize_trim_var __fmtg_trimmed
+  [ -n "$__fmtg_trimmed" ] || return 1
+  while IFS= read -r __fmtg_glyph; do
+    [ -n "$__fmtg_glyph" ] || continue
+    case "$__fmtg_trimmed" in
+      *"$__fmtg_glyph") return 0 ;;
+    esac
+  done <<EOF
+$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+EOF
+  return 1
+}
+
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
