@@ -55,6 +55,52 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
+fm_nm_sql_literal() {  # <value>
+  local value=${1-}
+  value=${value//\'/\'\'}
+  printf "'%s'" "$value"
+}
+
+# Resolve the private no-mistakes state database without changing it.
+# FM_NM_STATE_DB gives hermetic callers an explicit path.
+# Production uses the same NM_HOME location the no-mistakes CLI owns.
+fm_nm_state_db() {
+  local db=${FM_NM_STATE_DB:-}
+  if [ -z "$db" ]; then
+    db="${NM_HOME:-${HOME}/.no-mistakes}/state.sqlite"
+  fi
+  [ -f "$db" ] || return 1
+  printf '%s\n' "$db"
+}
+
+# Print the exact no-mistakes run id this worktree owns, or nothing when no matching run can be proved.
+# The CLI's bare `axi status` resolver is process-ambient and may name another concurrent branch, so it is never an attribution source.
+# The durable registry includes ids, branch, repo, head, status, and creation order; active rows win over terminal siblings, then newest starts win.
+# The caller must read the returned id with `axi status --run <id>`.
+fm_nm_run_id_for_worktree() {  # <worktree> <branch>
+  local wt=$1 branch=$2 db upstream query rows id run_head _status
+  [ -d "$wt" ] && [ -n "$branch" ] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  db=$(fm_nm_state_db) || return 0
+  upstream=$(git -C "$wt" config --get remote.origin.url 2>/dev/null || true)
+  [ -n "$upstream" ] || return 0
+  query="SELECT r.id, r.head_sha, r.status
+FROM runs r
+JOIN repos p ON p.id = r.repo_id
+WHERE r.branch = $(fm_nm_sql_literal "$branch")
+  AND p.upstream_url = $(fm_nm_sql_literal "$upstream")
+ORDER BY CASE WHEN r.status IN ('pending', 'running', 'fixing', 'awaiting_approval', 'fix_review', 'ci') THEN 0 ELSE 1 END,
+         r.created_at DESC;"
+  rows=$(sqlite3 -noheader -separator $'\t' "$db" "$query" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r id run_head _status; do
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    fm_nm_head_matches_worktree "$wt" "$run_head" || continue
+    printf '%s\n' "$id"
+    return 0
+  done <<< "$rows"
+  return 0
+}
+
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject

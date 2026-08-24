@@ -2301,6 +2301,20 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+clear_recycled_worktree_harness_wiring() {  # <worktree>
+  local wt=$1 path
+  # A pooled worktree can outlive its previous task.
+  # These exact paths are Firstmate-owned bindings, so a new occupant must never inherit their task id even when it uses a harness with no replacement hook of its own.
+  for path in \
+    "$wt/.claude/settings.local.json" \
+    "$wt/.opencode/plugins/fm-turn-end.js" \
+    "$wt/.opencode/plugins/fm-busy-state.js" \
+    "$wt/.fm-grok-turnend" \
+    "$wt/.fm-kimi-turnend"; do
+    rm -f "$path" || return 1
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -2315,6 +2329,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
+else
+  clear_recycled_worktree_harness_wiring "$WT" || {
+    echo "error: could not clear retired harness wiring from recycled worktree $WT" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every

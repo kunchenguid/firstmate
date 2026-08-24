@@ -598,6 +598,7 @@ fm_backend_source() {  # <name>
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
+        [ -f "$FM_BACKEND_LIB_DIR/backends/tmux.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
@@ -605,6 +606,7 @@ fm_backend_source() {  # <name>
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
+        [ -f "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
@@ -612,6 +614,7 @@ fm_backend_source() {  # <name>
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
+        [ -f "$FM_BACKEND_LIB_DIR/backends/zellij.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
@@ -619,6 +622,7 @@ fm_backend_source() {  # <name>
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
+        [ -f "$FM_BACKEND_LIB_DIR/backends/orca.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
@@ -626,6 +630,7 @@ fm_backend_source() {  # <name>
       ;;
     cmux)
       if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
+        [ -f "$FM_BACKEND_LIB_DIR/backends/cmux.sh" ] || return 1
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1

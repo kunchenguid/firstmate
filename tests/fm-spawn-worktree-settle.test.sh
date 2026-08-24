@@ -141,7 +141,27 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# Regression for fm-stale-hook-binding-on-worktree-reuse: treehouse can hand a worktree that was previously occupied by a Claude task to a Codex task.
+# The new task has no Claude hook of its own, so an inherited binding would still write lifecycle transitions under the retired task id.
+test_recycled_worktree_does_not_inherit_retired_hook_binding() {
+  local rec id out status stale_hook
+  id=recycled-hook-z3
+  rec=$(make_settle_case recycled-hook "$id" 0)
+  read_settle_record "$rec"
+  stale_hook="$WT_DIR/.claude/settings.local.json"
+  mkdir -p "${stale_hook%/*}"
+  printf '{"hooks":{"Stop":[{"hooks":[{"command":"busy --task retired-task"}]}]}}\n' > "$stale_hook"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should replace a recycled worktree's retired wiring"
+  [ ! -e "$stale_hook" ] \
+    || fail "a recycled Codex worktree inherited the retired Claude hook binding"
+  pass "a recycled worktree does not inherit the previous task's hook binding"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_recycled_worktree_does_not_inherit_retired_hook_binding
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -521,7 +521,7 @@ SH
 }
 
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
-  local dir state out i raw_count expected
+  local dir state out i raw_count expected line huge_found
   dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -548,7 +548,14 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
   expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  huge_found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$line" = "$expected" ]; then
+      huge_found=1
+      break
+    fi
+  done < "$out"
+  [ "$huge_found" -eq 1 ] \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
@@ -795,6 +802,45 @@ SH
   pass "wake drain: recovery acknowledgement failures are explicit and retryable"
 }
 
+# Regression for acknowledgement-must-not-fail-silently: a failed atomic consumption of handled queue rows used to leave only a generic diagnostic, which callers could confuse with a successful acknowledgement.
+# The command must emit its own unambiguous failure marker and a non-zero exit status.
+test_queue_ack_failure_is_never_reported_as_success() {
+  local dir state fakebin real_mv sequence generation rc
+  dir=$(make_case queue-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  real_mv=$(command -v mv) || fail "could not locate mv for queue acknowledgement fixture"
+  append_wake "$state" check queue-ack-failure 'check: queue acknowledgement failure' \
+    || fail "queue acknowledgement fixture could not append a wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/initial.out" 2> "$dir/initial.err" \
+    || fail "queue acknowledgement fixture could not present its wake"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/initial.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/initial.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "queue acknowledgement fixture did not receive its acknowledgement boundary"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "${FM_TEST_ACK_QUEUE:-}" ]; then
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_ACK_QUEUE="$state/.wake-queue" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+      > "$dir/ack.out" 2> "$dir/ack.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed queue acknowledgement reported success"
+  grep -F 'WAKE_ACK_FAILED:' "$dir/ack.err" >/dev/null \
+    || fail "a failed queue acknowledgement omitted its own failure marker: $(cat "$dir/ack.err")"
+  ! grep -F 'WAKE_ACKNOWLEDGED:' "$dir/ack.out" "$dir/ack.err" >/dev/null \
+    || fail "a failed queue acknowledgement also claimed success"
+  [ -s "$state/.wake-queue" ] || fail "a failed queue acknowledgement consumed durable wakes"
+  pass "wake drain: a failed queue acknowledgement is explicit and non-successful"
+}
+
 test_interruption_before_and_after_raw_commit() {
   local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
   dir=$(make_case interruption)
@@ -994,6 +1040,7 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_queue_ack_failure_is_never_reported_as_success
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink

@@ -1438,21 +1438,19 @@ validate_worktree_teardown_safety() {
   fi
 }
 
-# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
-# worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
-# that is about to be removed? Prints nothing; returns 0 only on a genuine
-# match so the caller knows it is safe to abort - never a guess.
+# Fix 1 (see script header): resolve THIS task's no-mistakes run id from the branch-bound registry, then read only that id before deciding whether its gate must be aborted.
+# Prints nothing; returns 0 only on a genuine match so the caller knows it is safe to abort - never a guess.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
 TASK_RUN_ID=
-task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate
+task_status_is_own_parked_run() {  # <worktree> <axi-status-output> <expected-run-id>
+  local wt=$1 out=$2 expected_run_id=$3 branch run_id run_branch run_head status outcome awaiting has_gate
   TASK_RUN_ID=
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
   [ -n "$out" ] || return 1
   run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  [ -n "$run_id" ] || return 1
+  [ "$run_id" = "$expected_run_id" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
@@ -1473,11 +1471,14 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
 }
 
 task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 out
+  local wt=$1 branch run_id out
   # Accepted best-effort residual: query failures stay fail-open because making
   # no-mistakes availability a prerequisite would block ship tasks with no run.
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
-  task_status_is_own_parked_run "$wt" "$out"
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  run_id=$(fm_nm_run_id_for_worktree "$wt" "$branch")
+  [ -n "$run_id" ] || return 1
+  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id")
+  task_status_is_own_parked_run "$wt" "$out" "$run_id"
 }
 
 task_status_is_terminal_run() {  # <axi-status-output> <run-id>
@@ -2698,6 +2699,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    "$WT/.opencode/plugins/fm-busy-state.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from

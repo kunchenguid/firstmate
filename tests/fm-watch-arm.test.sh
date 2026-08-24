@@ -601,6 +601,8 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   printf '%s\n' "$WATCH" > "$owner/watcher-path"
   printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
   ln -s "$owner" "$state/.watch.lock"
+  printf 'pending:downtime:fixture\n' > "$state/.watcher-down"
+  printf '1700000000\t1\tcheck\tstale-lock\tcheck: stale lock recovery\n' > "$state/.wake-queue"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
   wait_for_exit "$ARM_PID" 80 || fail "restart did not surface recovery after clearing a reused-pid lock"
@@ -610,6 +612,46 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   kill "$unrelated" 2>/dev/null || true
   wait "$unrelated" 2>/dev/null || true
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
+}
+
+# Regression for fm-watcher-churn-replays-queue: a stale watcher lock is only transport evidence.
+# When the durable recovery episode was already acknowledged, re-arming must resume supervision instead of manufacturing a new rearm-resurface wake and immediately exiting.
+test_rearm_does_not_replay_an_acknowledged_recovery_after_stale_lock() {
+  local dir home state fakebin armout owner unrelated
+  dir=$(make_case stale-lock-after-acknowledgement)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  mkdir -p "$home/data" "$owner"
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'dead-watcher-lock' > "$owner/pid-identity"
+  printf 'acked:handling:fixture\n' > "$state/.watcher-down"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  sleep 0.3
+  if ! is_live_non_zombie "$ARM_PID"; then
+    kill "$unrelated" 2>/dev/null || true
+    wait "$unrelated" 2>/dev/null || true
+    fail "an acknowledged recovery was replayed instead of returning to supervision: $(cat "$armout")"
+  fi
+  printf 'blocked: later real wake\n' > "$state/later.status"
+  wait_for_exit "$ARM_PID" 120 || fail "the recovered watcher did not supervise later work"
+  ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "re-arm resurfaced an already-acknowledged recovery: $(cat "$armout")"
+  grep -q '^signal:' "$armout" \
+    || fail "the re-armed watcher never reached ordinary supervision: $(cat "$armout")"
+  is_live_non_zombie "$unrelated" \
+    || fail "stale lock recovery signalled an unrelated process"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: stale lock recovery does not replay an acknowledged episode"
 }
 
 test_markerless_legacy_queue_is_recovered_on_arm() {
@@ -804,6 +846,7 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+test_rearm_does_not_replay_an_acknowledged_recovery_after_stale_lock
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver

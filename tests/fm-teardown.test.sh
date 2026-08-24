@@ -152,7 +152,12 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  cat > "$fakebin/sqlite3" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_NM_DB_ROWS:-}"
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/sqlite3"
+  : > "$case_dir/no-mistakes-state.sqlite"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -541,10 +546,19 @@ SH
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
-  local case_dir=$1; shift
+  local case_dir=$1 branch head rows
+  shift
+  branch=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  head=$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null || true)
+  rows=${FM_FAKE_NM_DB_ROWS:-}
+  if [ -z "$rows" ] && [ -n "$branch" ] && [ -n "$head" ]; then
+    printf -v rows '01RUN\t%s\trunning\n' "$head"
+  fi
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_NM_STATE_DB="$case_dir/no-mistakes-state.sqlite" \
+  FM_FAKE_NM_DB_ROWS="$rows" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }

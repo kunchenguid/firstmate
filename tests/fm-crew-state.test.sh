@@ -13,15 +13,15 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
+#   (e) concurrent branch attribution uses the lane-bound run id
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
 #   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
-#       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
-#       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
+#       fake fm-crew-state.sh verdict): lane-bound attribution -> absorbed;
+#       genuinely no run anywhere + idle pane -> surfaced.
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
@@ -44,18 +44,17 @@ make_repo_on_branch() {  # <dir> <branch>
   git -C "$dir" init -q
   git -C "$dir" commit -q --allow-empty -m init
   git -C "$dir" checkout -q -b "$branch"
+  git -C "$dir" remote add origin https://example.invalid/fm-crew-state.git
   # Real worktree HEAD for run head-binding (fixtures read FM_FAKE_RUN_HEAD).
   FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
-  export FM_FAKE_RUN_HEAD
+  printf -v FM_FAKE_NM_DB_ROWS '01RUN\t%s\trunning\n' "$FM_FAKE_RUN_HEAD"
+  export FM_FAKE_RUN_HEAD FM_FAKE_NM_DB_ROWS
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
-# `axi` surface - no runs-listing subcommand exists under it, verified against
-# the real CLI), and the actual top-level run-listing command, `no-mistakes
-# runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# command surface the helper uses: `axi status --run <id>` and the read-only
+# no-mistakes run registry used to bind the id to this lane.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -68,8 +67,17 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+        if [ "${1:-}" = --run ]; then
+          run_id=${2:-}
+          [ -z "${FM_FAKE_NM_CALLS:-}" ] || printf 'axi status --run %s\n' "$run_id" >> "$FM_FAKE_NM_CALLS"
+          if [ -n "${FM_FAKE_NM_LIVE_RUN_ID:-}" ] && [ "$run_id" = "$FM_FAKE_NM_LIVE_RUN_ID" ]; then
+            printf '%s\n' "${FM_FAKE_AXI_STATUS_LIVE:-}"
+          else
+            printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-${FM_FAKE_AXI_STATUS:-}}"
+          fi
+        else
+          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+        fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
@@ -78,6 +86,11 @@ case "${1:-}" in
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
+SH
+  cat > "$fb/sqlite3" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${FM_FAKE_NM_DB_ROWS:-}"
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -122,7 +135,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/sqlite3" "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -140,12 +153,14 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_NM_STATE_DB="$1/no-mistakes-state.sqlite" \
+    FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
+  : > "$d/no-mistakes-state.sqlite"
   printf '%s\n' "$d"
 }
 
@@ -162,6 +177,9 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_STATUS_LIVE=""
+  FM_FAKE_NM_LIVE_RUN_ID=""
+  FM_FAKE_NM_CALLS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -170,7 +188,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_STATUS_LIVE FM_FAKE_NM_LIVE_RUN_ID FM_FAKE_NM_CALLS
+  export FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -684,83 +703,107 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
-# concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
-test_cross_branch_attribution_via_runs_list() {
+run_with_id() {  # <run-id> <run-fixture>
+  local run_id=$1 fixture=$2
+  printf '%s\n' "$fixture" | sed "s/id: \"01RUN\"/id: \"$run_id\"/"
+}
+
+# Regression for fm-crew-state-stale-run-match: a later cancelled run on this branch used to win because bare `axi status` returned it, even though the registry still had this lane's older live run at the same code identity.
+test_cancelled_run_never_outranks_live_lane_run() {
   reset_fakes
-  local d short; d=$(new_case crossbranch)
+  local d head out
+  d=$(new_case cancelled-before-live)
+  make_repo_on_branch "$d/wt" fm/feat-live
+  make_fakebin "$d" >/dev/null
+  head=$FM_FAKE_RUN_HEAD
+  fm_write_meta "$d/state/feat-live.meta" "window=fm:fm-feat-live" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_NM_DB_ROWS=$(printf '01LIVE\t%s\trunning\n01CANCEL\t%s\tcancelled\n' "$head" "$head")
+  FM_FAKE_AXI_STATUS="$(run_with_id 01CANCEL "$(run_failed fm/feat-live)" | sed 's/outcome: failed/outcome: cancelled/')"
+  FM_FAKE_NM_LIVE_RUN_ID=01LIVE
+  FM_FAKE_AXI_STATUS_LIVE="$(run_with_id 01LIVE "$(run_running fm/feat-live)")"
+  export FM_FAKE_NM_DB_ROWS FM_FAKE_AXI_STATUS FM_FAKE_NM_LIVE_RUN_ID FM_FAKE_AXI_STATUS_LIVE
+  out=$(run_crew_state "$d" feat-live)
+  assert_contains "$out" "state: working" "a live run must outrank a cancelled sibling"
+  assert_contains "$out" "source: run-step" "the live run must remain authoritative"
+  assert_not_contains "$out" "state: failed" "a cancelled sibling must not fail a healthy lane"
+  pass "a cancelled run cannot outrank this lane's live run"
+}
+
+# Regression for fm-axi-status-misattributes-concurrent-lanes: the ambient status response has lane B's real-looking run, while the registry binds lane A to a different id that must be read with `--run`.
+test_concurrent_lane_status_uses_this_lanes_bound_run_id() {
+  reset_fakes
+  local d head out
+  d=$(new_case concurrent-lane-binding)
+  make_repo_on_branch "$d/wt" fm/lane-a
+  make_fakebin "$d" >/dev/null
+  head=$FM_FAKE_RUN_HEAD
+  fm_write_meta "$d/state/lane-a.meta" "window=fm:fm-lane-a" "worktree=$d/wt" "kind=ship"
+  printf 'done: stale lane A status event\n' > "$d/state/lane-a.status"
+  FM_FAKE_NM_DB_ROWS=$(printf '01LANEA\t%s\trunning\n' "$head")
+  FM_FAKE_AXI_STATUS="$(run_with_id 01LANEB "$(run_running fm/lane-b)")"
+  FM_FAKE_AXI_STATUS_RUN="$(run_with_id 01LANEA "$(run_parked fm/lane-a)")"
+  FM_FAKE_NM_CALLS="$d/no-mistakes.calls"
+  export FM_FAKE_NM_DB_ROWS FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_NM_CALLS
+  out=$(run_crew_state "$d" lane-a)
+  assert_contains "$out" "state: parked" "lane A must read its own parked run, not lane B's ambient run"
+  assert_contains "$out" "parked at review" "lane A's gate detail must survive concurrent lane activity"
+  assert_grep 'axi status --run 01LANEA' "$FM_FAKE_NM_CALLS" \
+    "lane A must query the registry-bound run id explicitly"
+  pass "concurrent lane status reads use the lane-bound run id"
+}
+
+# (e) cross-branch attribution: `axi status` can return ANOTHER branch's run
+# once more than one crew validates the shared repository. The registry binds
+# this worktree to its own id before the detailed status read.
+test_cross_branch_attribution_via_bound_run_id() {
+  reset_fakes
+  local d; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
-  # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-f ${short}  2026-07-02 22:05
-EOF
-)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-f)"
   local out; out=$(run_crew_state "$d" feat-f)
-  assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
-  assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
-  pass "cross-branch run is attributed via the real runs list"
+  assert_contains "$out" "state: working" "this branch's own bound run is attributed"
+  assert_contains "$out" "source: run-step" "bound run -> run-step source"
+  pass "cross-branch run is attributed through its bound id"
 }
 
-# The runs list is newest-first; a branch with an OLDER completed run must not
-# shadow its own newer active one - the first (topmost) matching row wins.
-test_cross_branch_attribution_picks_most_recent_row() {
+# The registry's active-row ordering means an older completed sibling cannot
+# shadow this branch's bound live run.
+test_cross_branch_attribution_prefers_live_bound_run() {
   reset_fakes
-  local d short; d=$(new_case crossbranch-mostrecent)
+  local d; d=$(new_case crossbranch-mostrecent)
   make_repo_on_branch "$d/wt" fm/feat-fq
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-fq ${short}  2026-07-02 21:50
-  completed  fm/feat-fq bbbbbbb  2026-07-02 20:00  https://github.com/o/r/pull/1
-EOF
-)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-fq)"
   local out; out=$(run_crew_state "$d" feat-fq)
-  assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
-  assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
-  pass "cross-branch attribution picks the branch's most recent row"
+  assert_contains "$out" "state: working" "bound running row wins over an older completed row"
+  assert_contains "$out" "source: run-step" "bound-run resolution -> run-step source"
+  pass "cross-branch attribution prefers this branch's live bound run"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_bound_run_ci_log_prevents_stale_ready_status() {
   reset_fakes
-  local d short; d=$(new_case coarse-ready-other-log)
+  local d; d=$(new_case bound-ci-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-coarseready.meta" "window=fm:fm-feat-coarseready" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/4 checks green\n' > "$d/state/feat-coarseready.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-coarseready ${short}  2026-07-02 22:05
-EOF
-)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-coarseready)"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "this lane's non-ready CI run remains working"
+  assert_contains "$out" "source: run-step" "bound run detail remains authoritative"
+  assert_not_contains "$out" "state: done" "a stale ready status must not outrank this lane's CI log"
+  pass "bound run CI detail prevents a stale ready status from reading done"
 }
 
-# A different-branch run with NO matching runs-list row must NOT be
+# A different-branch run with no matching registry row must NOT be
 # misattributed, and must not be treated as a false "working" verdict either.
 test_other_branch_run_ignored() {
   reset_fakes
@@ -881,8 +924,8 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  # No run attributable (mirrors a no-mistakes run-step lookup that found no
-  # matching row within the configured runs-list window): the crew's semantic
+  # No run attributable (mirrors a no-mistakes run-identity lookup that found
+  # no matching registry row): the crew's semantic
   # busy state is the only remaining signal.
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
@@ -1263,27 +1306,21 @@ test_missing_meta() {
 
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
-# coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
+# coverage). A validating crew whose ambient status belongs to another branch
+# remains provably working through its bound id, while a crew with genuinely no
+# run anywhere and an idle pane must still surface.
+test_provably_working_via_bound_run_id() {
   reset_fakes
-  local d short; d=$(new_case provably-working-crossbranch)
+  local d; d=$(new_case provably-working-crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-provable ${short}  2026-07-02 22:05
-EOF
-)"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
+  FM_FAKE_AXI_STATUS_RUN="$(run_running fm/feat-provable)"
+  PATH="$d/fakebin:$PATH" FM_NM_STATE_DB="$d/no-mistakes-state.sqlite" \
+    FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
+    || fail "cross-branch bound attribution was not treated as provably working"
+  pass "crew_is_provably_working absorbs a validating crew through its bound run id"
 }
 
 test_not_provably_working_when_stopped() {
@@ -1292,16 +1329,16 @@ test_not_provably_working_when_stopped() {
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
-  # Repo-wide run belongs to someone else, and this branch has no row in the
-  # runs list either (it never validated, or genuinely finished/stopped) - the
-  # only remaining signal is the pane, which is idle.
+  # Repo-wide run belongs to someone else and this branch has no bound run, so
+  # the only remaining signal is the pane, which is idle.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<'EOF'
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
 EOF
 )"
   FM_FAKE_BUSY=0
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
+  PATH="$d/fakebin:$PATH" FM_NM_STATE_DB="$d/no-mistakes-state.sqlite" \
+    FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
     && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
@@ -1428,9 +1465,11 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_cross_branch_attribution_via_runs_list
-test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_concurrent_lane_status_uses_this_lanes_bound_run_id
+test_cancelled_run_never_outranks_live_lane_run
+test_cross_branch_attribution_via_bound_run_id
+test_cross_branch_attribution_prefers_live_bound_run
+test_bound_run_ci_log_prevents_stale_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
@@ -1454,7 +1493,7 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
-test_provably_working_via_runs_list_fallback
+test_provably_working_via_bound_run_id
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
