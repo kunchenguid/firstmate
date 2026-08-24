@@ -228,30 +228,31 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
-# The real reconcile-github-delivery-state scout passed the bare project name
-# `analytics`, while earlier successful analytics spawns passed projects/analytics.
-# Pin the complete corrected path: a bare name resolves through FM_HOME/projects,
-# treehouse reports a distinct linked worktree, and only that isolated root is
-# published in task metadata.
-test_spawn_bare_project_name_reaches_isolated_worktree() {
+# Initiating trigger: the reconcile-github-delivery-state scout passed the bare
+# project name `analytics`, while earlier successful spawns passed
+# projects/analytics. Without a caller cwd shadow, the old resolver stopped
+# before metadata, which was the visible symptom.
+test_spawn_bare_project_name_reproduces_no_shadow_sequence() {
   local home project wt caller fakebin out status meta
-  home="$TMP_ROOT/reconcile-home"
+  home="$TMP_ROOT/reconcile-no-shadow-home"
   project="$home/projects/analytics"
-  wt="$TMP_ROOT/reconcile-analytics-wt"
-  caller="$TMP_ROOT/reconcile-caller"
-  mkdir -p "$home/projects" "$caller/analytics"
+  wt="$TMP_ROOT/reconcile-no-shadow-wt"
+  caller="$TMP_ROOT/reconcile-no-shadow-caller"
+  mkdir -p "$home/projects" "$caller"
   make_repo "$project" >/dev/null
   git -C "$project" worktree add -q --detach "$wt" >/dev/null 2>&1
-  fakebin=$(make_spawn_fakebin "$TMP_ROOT/reconcile-fake")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/reconcile-no-shadow-fake")
 
+  assert_absent "$caller/analytics" "no-shadow regression setup unexpectedly contains an analytics shadow"
   out=$(cd "$caller" && run_scout_spawn "$home" reconcile-github-delivery-state analytics "$wt" "$fakebin")
   status=$?
+  meta="$home/state/reconcile-github-delivery-state.meta"
+  assert_present "$meta" "original visible symptom recurred: no task metadata was created"
   expect_code 0 "$status" "bare-name scout spawn should reach an isolated worktree"
   assert_contains "$out" "spawned reconcile-github-delivery-state harness=codex kind=scout" \
     "bare-name scout spawn did not report success"
   assert_contains "$out" "worktree=$wt" \
     "bare-name scout spawn did not report the isolated treehouse worktree"
-  meta="$home/state/reconcile-github-delivery-state.meta"
   assert_grep "project=$project" "$meta" \
     "bare project name did not resolve against the firstmate home's projects dir"
   assert_grep "worktree=$wt" "$meta" \
@@ -259,7 +260,73 @@ test_spawn_bare_project_name_reaches_isolated_worktree() {
   [ "$(git -C "$wt" rev-parse --show-toplevel)" = "$wt" ] \
     || fail "resolved target is not the linked-worktree root"
   [ "$wt" != "$project" ] || fail "resolved worktree equals the primary project checkout"
-  pass "fm-spawn: a bare project name reaches a genuine isolated worktree"
+  pass "fm-spawn: the no-shadow bare-name scout reaches a genuine isolated worktree"
+}
+
+# Masking condition: a caller cwd directory named `analytics` let the old
+# resolver proceed while silently selecting that shadow instead of the active
+# Firstmate home's registered project.
+test_spawn_bare_project_name_ignores_cwd_shadow() {
+  local home project wt caller fakebin out status meta
+  home="$TMP_ROOT/reconcile-shadow-home"
+  project="$home/projects/analytics"
+  wt="$TMP_ROOT/reconcile-shadow-wt"
+  caller="$TMP_ROOT/reconcile-shadow-caller"
+  mkdir -p "$home/projects" "$caller/analytics"
+  make_repo "$project" >/dev/null
+  git -C "$project" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/reconcile-shadow-fake")
+
+  out=$(cd "$caller" && run_scout_spawn "$home" reconcile-github-delivery-state-shadow analytics "$wt" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "cwd-shadow bare-name scout spawn should reach an isolated worktree"
+  assert_contains "$out" "spawned reconcile-github-delivery-state-shadow harness=codex kind=scout" \
+    "cwd-shadow bare-name scout spawn did not report success"
+  assert_contains "$out" "worktree=$wt" \
+    "cwd-shadow bare-name scout spawn did not report the isolated treehouse worktree"
+  meta="$home/state/reconcile-github-delivery-state-shadow.meta"
+  assert_grep "project=$project" "$meta" \
+    "cwd shadow captured the bare project name instead of the home registry project"
+  assert_no_grep "project=$caller/analytics" "$meta" \
+    "spawn metadata published the caller cwd shadow"
+  assert_grep "worktree=$wt" "$meta" \
+    "cwd-shadow spawn metadata did not publish the isolated worktree"
+  [ "$(git -C "$wt" rev-parse --show-toplevel)" = "$wt" ] \
+    || fail "cwd-shadow target is not the linked-worktree root"
+  [ "$wt" != "$project" ] || fail "cwd-shadow worktree equals the primary project checkout"
+  pass "fm-spawn: the home registry project wins over a caller cwd shadow"
+}
+
+test_spawn_dot_project_args_remain_caller_relative() {
+  local home project subdir dot_wt dotdot_wt fakebin out status meta
+  home="$TMP_ROOT/relative-home"
+  project=$(make_repo "$TMP_ROOT/relative-project")
+  subdir="$project/subdir"
+  dot_wt="$TMP_ROOT/relative-dot-wt"
+  dotdot_wt="$TMP_ROOT/relative-dotdot-wt"
+  mkdir -p "$home/projects" "$subdir"
+  git -C "$project" worktree add -q --detach "$dot_wt" >/dev/null 2>&1
+  git -C "$project" worktree add -q --detach "$dotdot_wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/relative-fake")
+
+  out=$(cd "$project" && run_scout_spawn "$home" relative-dot-project . "$dot_wt" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "dot project argument should remain caller-relative"
+  assert_contains "$out" "spawned relative-dot-project harness=codex kind=scout" \
+    "dot project argument spawn did not report success"
+  meta="$home/state/relative-dot-project.meta"
+  assert_grep "project=$project" "$meta" \
+    "dot project argument did not resolve to the caller's project"
+
+  out=$(cd "$subdir" && run_scout_spawn "$home" relative-dotdot-project .. "$dotdot_wt" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "dotdot project argument should remain caller-relative"
+  assert_contains "$out" "spawned relative-dotdot-project harness=codex kind=scout" \
+    "dotdot project argument spawn did not report success"
+  meta="$home/state/relative-dotdot-project.meta"
+  assert_grep "project=$project" "$meta" \
+    "dotdot project argument did not resolve to the caller's project"
+  pass "fm-spawn: dot and dotdot project arguments stay caller-relative"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -354,5 +421,7 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
-test_spawn_bare_project_name_reaches_isolated_worktree
+test_spawn_bare_project_name_reproduces_no_shadow_sequence
+test_spawn_bare_project_name_ignores_cwd_shadow
+test_spawn_dot_project_args_remain_caller_relative
 test_spawn_tmux_window_construction

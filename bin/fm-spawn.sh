@@ -1487,6 +1487,7 @@ resolved_existing_dir() {
 resolve_project_dir_arg() {
   local path=$1 candidate
   case "$path" in
+    .|..) printf '%s\n' "$path" ;;
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     */*) printf '%s\n' "$path" ;;
     *)
