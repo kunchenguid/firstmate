@@ -37,6 +37,7 @@ printf '%s' "$snapshot" | jq -e '
       source:"task-body"
     }
     and (.body_lines | index("Preserve this original task context.") != null)
+    and .body_excerpt == "Preserve this original task context."
 ' >/dev/null || fail "snapshot did not project the explicit risk and preserved body"
 pass "explicit risk is projected without replacing task context"
 

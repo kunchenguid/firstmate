@@ -49,6 +49,13 @@ LANE_PRIORITY = {
 SLUG = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 MAX_ACTION_BYTES = 8_192
 MAX_REQUEST_BYTES = 12_000
+STATIC_ASSETS = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+}
 
 
 class BoardError(RuntimeError):
@@ -292,9 +299,11 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             task_id = str(item.get("id") or item.get("key") or "")
             record = dict(item)
             if lane == "needs_you":
-                record["hold_reason"] = item.get("reason") or item.get("summary")
+                record["hold_reason"] = (
+                    item.get("reason") or item.get("summary") or record.get("hold_reason")
+                )
             elif lane == "waiting":
-                record["hold_reason"] = item.get("reason")
+                record["hold_reason"] = item.get("reason") or record.get("hold_reason")
             task = {
                 "id": task_id,
                 "kind": item.get("kind"),
@@ -465,6 +474,16 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         )
         super().end_headers()
 
+    def allowed_hosts(self) -> set[str]:
+        port = self.server.server_port
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def reject_foreign_host(self) -> bool:
+        if self.headers.get("Host") in self.allowed_hosts():
+            return False
+        self.send_error(HTTPStatus.FORBIDDEN, "Host header does not name this loopback board")
+        return True
+
     def json_response(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
@@ -475,15 +494,10 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_HEAD(self) -> None:  # noqa: N802
+        if self.reject_foreign_host():
+            return
         path = self.path.split("?", 1)[0]
-        assets = {
-            "/": ("index.html", "text/html; charset=utf-8"),
-            "/index.html": ("index.html", "text/html; charset=utf-8"),
-            "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-            "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-            "/favicon.svg": ("favicon.svg", "image/svg+xml"),
-        }
-        asset = assets.get(path)
+        asset = STATIC_ASSETS.get(path)
         if not asset:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -500,6 +514,8 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.reject_foreign_host():
+            return
         path = self.path.split("?", 1)[0]
         if path == "/healthz":
             self.json_response(
@@ -515,14 +531,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             except BoardError as error:
                 self.json_response(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
             return
-        assets = {
-            "/": ("index.html", "text/html; charset=utf-8"),
-            "/index.html": ("index.html", "text/html; charset=utf-8"),
-            "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-            "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-            "/favicon.svg": ("favicon.svg", "image/svg+xml"),
-        }
-        asset = assets.get(path)
+        asset = STATIC_ASSETS.get(path)
         if not asset:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -540,14 +549,13 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.reject_foreign_host():
+            return
         if self.path != "/api/v1/actions":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         origin = self.headers.get("Origin")
-        expected_origins = {
-            f"http://127.0.0.1:{self.server.server_port}",
-            f"http://localhost:{self.server.server_port}",
-        }
+        expected_origins = {f"http://{host}" for host in self.allowed_hosts()}
         if origin and origin not in expected_origins:
             self.json_response(HTTPStatus.FORBIDDEN, {"error": "Cross-origin action refused"})
             return

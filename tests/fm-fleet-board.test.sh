@@ -44,7 +44,7 @@ cat <<'JSON'
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
-    "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]}],
+    "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
     "decisions_open":[{"id":"mate-choice","key":"mate-choice","verb":"needs-decision","summary":"Approve the contrast direction","reason":"Choose navy or rust","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"}}],
     "holds":[],"landed":[],"omitted":[]
@@ -95,13 +95,17 @@ printf '%s' "$health" | jq -e --argjson pid "$SERVER_PID" '.ok == true and .pid 
 headers=$(curl -fsSI "$url") || fail "application shell was unavailable"
 assert_contains "$headers" "Content-Security-Policy:" "application omitted its content security policy"
 assert_contains "$headers" "X-Frame-Options: DENY" "application omitted frame protection"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "${url}api/v1/board")
+[ "$code" = 403 ] || fail "board with a foreign Host header returned $code"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "$url")
+[ "$code" = 403 ] || fail "application shell with a foreign Host header returned $code"
 pass "server is loopback-ready and serves a protected application shell"
 
 board=$(curl -fsS "${url}api/v1/board") || fail "board endpoint failed"
 printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
-  and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:2,done:1}
-  and .summary == {open:9,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:3,done:1}
+  and .summary == {open:10,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high")
   and ([.cards[] | select(.id == "verify-task")][0]
@@ -110,6 +114,8 @@ printf '%s' "$board" | jq -e '
        | .lane == "in_progress" and .home.id == "design-mate")
   and ([.cards[] | select(.id == "deferred-task")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
+  and ([.cards[] | select(.id == "mate-held")][0]
+       | .lane == "waiting" and .status.wait_reason == "Waiting on vendor API keys")
 ' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
 

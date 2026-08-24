@@ -360,6 +360,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               {level:$level,rationale:$rationale,source:"task-body"}
             end
         end;
+    def context_body_lines:
+      .body_lines as $lines
+      | ([range(0; ($lines | length)) as $i
+          | select($lines[$i] == "Risk assessment recorded by fm-task-risk.")
+          | $i][0] // null) as $start
+      | if $start == null then $lines
+        else
+          ($start + 1) as $next
+          | (if (($lines[$next] // "") | startswith("Risk level: ")) then $next + 1 else $next end) as $next
+          | (if (($lines[$next] // "") | startswith("Risk rationale: ")) then $next + 1 else $next end) as $next
+          | $lines[0:$start] + $lines[$next:]
+        end;
     def parse_row($line; $section; $order):
       row_match($line) as $m
       | if $m == null then
@@ -412,9 +424,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
     | .records |= map(
-        if (.body_lines | length) > 0 then
-          .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
+        context_body_lines as $context
+        | if ($context | length) > 0 then
+            .body_excerpt = (($context | join(" "))[:240])
+          else . end)
     | .records |= map(if .structured then .risk = task_risk else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
