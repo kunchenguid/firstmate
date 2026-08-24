@@ -78,7 +78,7 @@ projects/<project>/docs/features/<feature-slug>/
     ...
 ```
 
-These documents live with their project so the captain can browse every planned or running feature per project in one place, and firstmate reads them back at intake and at dispatch. Writing them is hard rule 1's enumerated `task-planning` exception; nothing else under `projects/` is authorized. Leave them uncommitted working documents by default - versioning them into the repository happens only through the project's normal delivery path when the captain asks.
+These documents live with their project so the captain can browse every planned or running feature per project in one place, and firstmate reads them back at intake and at dispatch. Writing the planning documents and design prototypes described here is hard rule 1's enumerated `task-planning` exception; nothing else under `projects/` is authorized. Leave them uncommitted working documents by default - versioning them into the repository happens only through the project's normal delivery path when the captain asks.
 
 Record the `<project>:<feature-slug>` pair in the parent task's backlog note so runtime state stays linked to the documents.
 

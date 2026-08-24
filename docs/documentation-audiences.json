@@ -189,6 +189,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/task-design/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/task-grill/SKILL.md",
       "audience": "agent-runtime"
     },
