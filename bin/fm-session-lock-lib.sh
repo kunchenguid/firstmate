@@ -398,7 +398,7 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_process_matches "$comm" "$args" >/dev/null; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -902,12 +902,13 @@ fm_harness_pid_suspended() {  # <pid>
 #
 # Only the GONE case leaves it EMPTY, because reclaiming a holder that no longer
 # exists has always been silent and is the ordinary path every session start
-# takes. The other three reclaim a process an operator can still see, so each
-# says so. The verdict and the reason both come from ONE classification of the
-# recorded pid, so a caller cannot ask the liveness question again and disagree
-# with this one about a holder that died in between, and a holder that exits
-# between the probe and the command read is classified gone rather than
-# reported as a live process nobody could identify.
+# takes. The other three reclaim a process that was still present when the
+# classification read it, so each says so. The verdict and the reason both come
+# from ONE classification of the recorded pid, so a caller cannot ask the
+# liveness question again and disagree with this one about a holder that died in
+# between. That classification's own gone-versus-unidentified limit is open
+# rather than closed, and fm_harness_pid_state's header above is the single
+# owner of the statement of it rather than this one repeating it.
 # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
 FM_SESSION_HOLDER_YIELD_REASON=
 fm_session_lock_holder_competes() {  # <pid>
