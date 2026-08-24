@@ -380,6 +380,37 @@ test_remote_receiver_rejects_unsafe_held_values() {
   pass "remote unsafe held values are rejected, reported, and converged"
 }
 
+test_remote_rejected_deviation_failure_does_not_commit_generation() {
+  local command home payload payload_bytes payload_hash out status
+  payload="$TMP_ROOT/remote-rejected-failure-payload"
+  printf 'herdr\n' > "$payload"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  payload_hash=$(fm_inherit_sha256 "$payload")
+
+  for command in put absent; do
+    home="$TMP_ROOT/remote-rejected-failure-$command/home"
+    mkdir -p "$home/config/backend"
+    printf '%s\n' blocker > "$home/config/backend/blocker"
+    printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+
+    status=0
+    if [ "$command" = put ]; then
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+        "$payload_bytes" "$payload_hash" 1 < "$payload" 2>&1) || status=$?
+    else
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" absent config/backend \
+        0 "$(fm_inherit_sha256 /dev/null)" 1 < /dev/null 2>&1) || status=$?
+    fi
+
+    expect_code 1 "$status" "failed remote $command over a rejected deviation"
+    assert_contains "$out" "deviation-rejected: config/backend" \
+      "a failed remote $command must still report the rejected deviation"
+    [ ! -e "$home/config/.fm-inherit-backend.generation" ] \
+      || fail "a failed remote $command committed its generation before convergence"
+  done
+  pass "failed remote rejected-deviation convergence remains uncommitted"
+}
+
 test_remote_deviation_relay_survives_later_failure() {
   local out
   out=$(printf '%s\n' \
@@ -439,5 +470,6 @@ test_remote_receiver_honors_the_record
 test_remote_receiver_agreement_stays_quiet
 test_remote_receiver_reports_primary_absence
 test_remote_receiver_rejects_unsafe_held_values
+test_remote_rejected_deviation_failure_does_not_commit_generation
 test_remote_deviation_relay_survives_later_failure
 test_remote_receiver_commits_honored_generation

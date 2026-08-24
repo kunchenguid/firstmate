@@ -72,6 +72,7 @@ GENERATION_FILE="$PARENT_REAL/.fm-inherit-$BASE.generation"
 fm_lock_acquire_wait "$LOCK" || die "cannot lock inherited destination"
 TMP=
 GENERATION_TMP=
+GENERATION_ALREADY_COMMITTED=0
 cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
   [ -z "$GENERATION_TMP" ] || rm -f -- "$GENERATION_TMP"
@@ -79,7 +80,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-commit_generation() {
+validate_generation() {
   local existing_generation existing_bytes existing_hash existing_command
   if [ -e "$GENERATION_FILE" ] || [ -L "$GENERATION_FILE" ]; then
     [ -f "$GENERATION_FILE" ] && [ ! -L "$GENERATION_FILE" ] || die "inheritance generation record is unsafe"
@@ -104,9 +105,14 @@ commit_generation() {
         && [ "$existing_hash" = "$EXPECTED_HASH" ] \
         && [ "$existing_command" = "$COMMAND" ] \
         || die "inheritance generation conflicts with its committed payload"
+      GENERATION_ALREADY_COMMITTED=1
       return 0
     fi
   fi
+}
+
+commit_generation() {
+  [ "$GENERATION_ALREADY_COMMITTED" -eq 0 ] || return 0
   GENERATION_TMP=$(umask 077; mktemp "$PARENT_REAL/.inherit-generation.XXXXXX") \
     || die "cannot stage inheritance generation"
   printf '%s\n%s\n%s\n%s\n' "$GENERATION" "$EXPECTED_BYTES" "$EXPECTED_HASH" "$COMMAND" > "$GENERATION_TMP" \
@@ -193,22 +199,24 @@ case "$COMMAND" in
     [ "$BYTES" -eq "$EXPECTED_BYTES" ] || die "inherited material length does not match its commitment"
     ACTUAL_HASH=$(sha256_file "$TMP") || die "cannot hash inherited material"
     [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || die "inherited material digest does not match its commitment"
+    validate_generation
     DESTINATION_UNSAFE=0
     if fm_config_deviation_value_rejection "$DEST" >/dev/null; then
       DESTINATION_UNSAFE=1
       deviation_holds "$TMP" && exit 0
       [ "$DEVIATION_REJECTED" -eq 1 ] || refuse_unsafe_destination
     fi
-    commit_generation
     if [ "$DESTINATION_UNSAFE" -eq 1 ]; then
       prepare_rejected_deviation_destination
     fi
     if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
+      commit_generation
       printf 'unchanged: %s\n' "$REL"
       exit 0
     fi
     if [ "$DEVIATION_REJECTED" -eq 0 ] && deviation_holds "$TMP"; then
+      commit_generation
       exit 0
     fi
     quarantine_shared replaced
@@ -216,6 +224,7 @@ case "$COMMAND" in
     mv -f -- "$TMP" "$DEST" || die "cannot publish inherited material"
     TMP=
     [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
+    commit_generation
     printf 'pushed: %s\n' "$REL"
     ;;
   absent)
@@ -225,25 +234,28 @@ case "$COMMAND" in
     EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
+    validate_generation
     DESTINATION_UNSAFE=0
     if fm_config_deviation_value_rejection "$DEST" >/dev/null; then
       DESTINATION_UNSAFE=1
       deviation_holds "$EMPTY" && exit 0
       [ "$DEVIATION_REJECTED" -eq 1 ] || refuse_unsafe_destination
     fi
-    commit_generation
     if [ "$DESTINATION_UNSAFE" -eq 1 ]; then
       prepare_rejected_deviation_destination
     fi
     if [ "$DESTINATION_UNSAFE" -eq 0 ] && [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
+      commit_generation
       printf 'unchanged: %s\n' "$REL"
       exit 0
     fi
     if [ "$DEVIATION_REJECTED" -eq 0 ] && deviation_holds "$EMPTY"; then
+      commit_generation
       exit 0
     fi
     quarantine_shared removed
     rm -f -- "$DEST" || die "cannot remove absent inherited material"
+    commit_generation
     printf 'removed: %s\n' "$REL"
     ;;
   *) usage ;;
