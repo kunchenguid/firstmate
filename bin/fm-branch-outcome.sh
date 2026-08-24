@@ -6,14 +6,16 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false}.
-#     Existing lines are never
-#     rewritten, reordered, or deleted by any subcommand; the read state lives
+#     Legacy rows without `silent` remain valid and are treated as visible.
+#     Existing lines are never rewritten, reordered, or deleted by any
+#     subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as an append-only merge note, or emitted by the locked session-start
-#     replay. Records above the cursor are "unread": the branch stored them but
+#     Pi as an append-only merge note, emitted by the locked session-start
+#     replay, or silently consumed there because `silent` is true. Records
+#     above the cursor are "unread": the branch stored them but
 #     did not reach either handoff. A crash inside Pi's delivery window after
 #     cursor advancement does not auto-replay the row; it remains durable and
 #     available through the main session's fm_branch_outcomes tool.
@@ -34,8 +36,9 @@
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
-#     Session-start recovery: print unread records under a labeled header into
-#     the locked startup digest and mark them read. Prints nothing when nothing
+#     Session-start recovery: print visible unread records under a labeled
+#     header into the locked startup digest, skip rows whose `silent` field is
+#     true, and mark every unread row read. Prints nothing when nothing visible
 #     is unread, so a home that never ran the branch stays silent. Run it only
 #     when the session holds the lock (fm-session-start.sh owns the call site).
 set -eu

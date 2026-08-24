@@ -16,7 +16,7 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake.
   An accepted offer transfers wake ownership to the branch; no acceptor (extension absent, away mode, branch broken, or any drain containing a fleet-wide or unresolvable row other than heartbeat) keeps today's wake-to-main path, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
 - The branch itself: `.pi/extensions/fm-branch-supervision.ts` creates and reopens the persistent branch session, serializes wakes, mirrors dialog, and merges outcomes.
-  It acts only for the current extension generation while that Pi session owns `state/.lock`, rechecking both immediately before branch side effects so replacement or lock loss cannot let an old continuation mutate the new session.
+  It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect so replacement or lock loss cannot let an old continuation mutate the new session.
   Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
 - Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format and the read cursor.
@@ -24,7 +24,9 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
-  A fleet-wide heartbeat is separately eligible only when its complete unread drain contains heartbeat rows and resolvable task-local rows (see "Heartbeat routing" below); every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
+  A fleet-wide heartbeat is separately eligible only when the unread queue contains heartbeat rows and resolvable task-local rows (see "Heartbeat routing" below); every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
+  The branch repeats that full-queue eligibility check immediately before prompting the branch to drain, and a newly observed main-owned row defers the whole queue to main.
+  A producer can still append a row in the instant between that final check and drain startup; this accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
   Away mode and a broken branch keep today's wake-to-main behavior.
 
 ## How the branch knows what the captain said
@@ -45,7 +47,7 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 ## Heartbeat routing
 
 The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
-Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every unread queue row is either heartbeat-kind or a resolvable task-local signal or stale event.
+Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.
 A review that found literally nothing worth reporting uses verdict `routine`, `task=fleet`, and `silent=true` so it has no rendered note, while a fleet-wide routine action omits `silent` and keeps its rendered sailboat note.
 Only a captain-worthy finding reports verdict `captain` and opens a main turn.
