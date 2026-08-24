@@ -1,7 +1,7 @@
 # Firstmate task planning
 
-Firstmate's planning layer is `.agents/skills/task-planning/SKILL.md`.
-For non-Simple requests, `.agents/skills/task-grill/SKILL.md` runs requirements interrogation ahead of it; its `grill.md` artifact lives in the same feature directory.
+Firstmate's planning family is three agent-only skills under `.agents/skills/`, orchestrated by `task-planning/SKILL.md`.
+`task-grill/SKILL.md` runs requirements interrogation ahead of every non-Simple request, `task-design/SKILL.md` builds throwaway prototypes, and `task-planning` owns classification, the wayfinder/spec/ticket artifacts, and dispatch.
 
 It is a Firstmate-native adaptation of three ideas from Matt Pocock's engineering skills:
 
@@ -21,28 +21,36 @@ It intentionally does **not** import Wayfinder's implementation workflow. Firstm
 
 The gate is deliberately not mandatory for every task. This keeps small fixes from paying the token and latency cost of full planning.
 
+Every non-Simple level passes through `task-grill` first, which owns the hard gate of frontier exhaustion plus captain confirmation, and may run `task-design` prototypes before any spec exists.
+The proposed ticket breakdown goes through an iterative ticket quiz with the captain before approval, and every approved graph ends with a terminal captain-review ticket blocked by all other tickets.
+The complexity gate is re-judged at every dispatch: a ticket that has grown multiple meaningful changes or unresolved decisions becomes its own parent feature running the same family pipeline.
+
 ## Artifact flow
 
 ```text
 captain request
       |
       v
-planning level
+task-planning classifies
   /    |     \
 Simple Planned Wayfinder-planned
+ |       |          |
+ |    task-grill <----+   (every non-Simple path)
+ |       |
+ |    task-design (optional)
  |       |          |
  |    spec.md   wayfinder.md
  |       |          |
  |   tickets/  <----+
  |       |
  +-------+---------->
-         |
-   captain review
-         |
-         v
+          |
+ ticket quiz + captain review
+          |
+          v
  Firstmate brief/spawn
-         |
-       crews
+          |
+        crews
 ```
 
 Planning documents live inside the target project's clone at `projects/<project>/docs/features/<feature-slug>/`, so every planned or running feature is browsable per project instead of mixed into the Firstmate home's `data/`. Firstmate writes them under hard rule 1's enumerated `task-planning` exception and reads them back at intake and dispatch; they stay uncommitted working documents by default, and versioning them happens only through the project's normal delivery path when the captain asks. Runtime state (briefs, metadata, backlog) remains in the Firstmate home.
@@ -78,5 +86,3 @@ Source-audited against this repository:
 - **Parent/child identity.** The parent request is one ordinary task whose backlog note records the `<project>:<feature-slug>` pair. Each ready ticket becomes its own Firstmate task with id `<parent-id>-t<TNN>` (valid per `fm_task_id_creation_valid`: `[A-Za-z0-9._-]`, at most 64 chars); its brief embeds the ticket content and points at `projects/<project>/docs/features/<feature-slug>/spec.md`.
 - **Dependency-aware dispatch.** Each ready ticket is filed as its own Queued backlog item with an explicit blocked-by note; the ordinary backlog re-evaluation after each teardown and heartbeat unlocks dependents. No new dispatch machinery is introduced.
 - **Risk-based verification.** A ticket's routine/elevated/critical level shapes evidence expectations inside the selected delivery path but never lowers a project's standing delivery posture; `no-mistakes-prod-only` classification still wins for product-facing work.
-
-Live intake tests (simple / planned / wayfinder-planned) against a real firstmate session remain the outstanding validation step before this PR leaves draft.
