@@ -671,7 +671,7 @@ setup_remote_handoff() {  # <name> -> echoes "<here> <peer>"
   # enough to run these cases at all.
   local f
   # shellcheck disable=SC2016 # $SCRIPT_DIR is matched literally in the script's source lines, not expanded.
-  for f in fm-backlog-handoff.sh $(sed -n 's|^\. "\$SCRIPT_DIR/\([^"]*\)".*|\1|p' "$ROOT/bin/fm-backlog-handoff.sh"); do
+  for f in fm-backlog-handoff.sh fm-x-lib.sh $(sed -n 's|^\. "\$SCRIPT_DIR/\([^"]*\)".*|\1|p' "$ROOT/bin/fm-backlog-handoff.sh"); do
     [ -f "$ROOT/bin/$f" ] || fail "peer fixture: bin/$f is sourced by fm-backlog-handoff.sh but does not exist"
     cp "$ROOT/bin/$f" "$peer/fmroot/bin/$f"
   done

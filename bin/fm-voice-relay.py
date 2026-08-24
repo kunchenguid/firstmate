@@ -80,7 +80,9 @@ Options:
 import argparse
 import asyncio
 import base64
+import contextvars
 import datetime
+import functools
 import json
 import os
 import queue
@@ -176,6 +178,14 @@ def log(enabled, message):
     if enabled:
         sys.stderr.write("relay: {}\n".format(message))
         sys.stderr.flush()
+
+
+async def run_in_thread(function, *args, **kwargs):
+    """Run blocking work off-loop, including on Python 3.7 and 3.8."""
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, function, *args, **kwargs)
+    return await loop.run_in_executor(None, call)
 
 
 def widen_path():
@@ -396,7 +406,7 @@ class Credentials:
         self._source = None
         self._resolved = None
         self._ambient_spent = False
-        self._lock = asyncio.Lock()
+        self._lock = None
 
     def _usable(self):
         if self._creds is None:
@@ -408,10 +418,12 @@ class Credentials:
         return time.time() + self.REFRESH_MARGIN < self._expires
 
     async def get(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
         async with self._lock:
             if not self._usable():
                 spend = self._source == FROM_ENVIRONMENT and bool(self.profile)
-                creds, expires, source = await asyncio.to_thread(
+                creds, expires, source = await run_in_thread(
                     resolve_credentials, self.profile, self.verbose,
                     self.REFRESH_MARGIN, not (self._ambient_spent or spend))
                 # Latched only now, and only if the profile is what answered. A
@@ -839,11 +851,11 @@ class Session:
                 # Off the loop like the handover below it: the model is told to
                 # call this on every question, and its directory and file reads
                 # would otherwise stop the relay reading the captain's audio.
-                result = await asyncio.to_thread(
+                result = await run_in_thread(
                     records.fleet_status, self.home, self.scope)
             elif name == "hand_over_to_firstmate":
                 request = (arguments.get("request") or "").strip()
-                result = await asyncio.to_thread(
+                result = await run_in_thread(
                     records.queue_request, request, self.home, self.root)
                 self.down.send_json(frame.NOTICE, {
                     "event": "queued", "request": request,
