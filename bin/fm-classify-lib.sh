@@ -151,6 +151,15 @@ status_is_validation_handoff() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_NEEDS_VALIDATION_VERB:-$FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT}" ]
 }
 
+status_is_actionable_now() {  # <task> <status-line>
+  local task=$1 line=$2
+  status_is_captain_relevant "$line" || return 1
+  if status_is_validation_handoff "$line" && crew_is_in_active_run "$task"; then
+    return 1
+  fi
+  return 0
+}
+
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
 # it already read without a fm-crew-state.sh call. Matches only the verb before the
@@ -1228,6 +1237,17 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+crew_is_in_active_run() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ]
+}
+
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
@@ -1380,8 +1400,9 @@ signal_crew_provably_working() {  # <file> ...
 # applying its persistence recheck.
 stale_has_actionable_status() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
+  local task; task=$(window_to_task "$win" "$state")
+  last=$(last_status_line "$state/$task.status")
+  [ -n "$last" ] && status_is_actionable_now "$task" "$last"
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is
@@ -1394,8 +1415,8 @@ scan_captain_relevant_statuses() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
-    status_is_captain_relevant "$last" || continue
     task=$(basename "$f"); task="${task%.status}"
+    status_is_actionable_now "$task" "$last" || continue
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0

@@ -726,6 +726,36 @@ test_heartbeat_scan_dedup() {
   pass "catch-all scan escalates a missed terminal once, not twice"
 }
 
+test_validation_handoff_current_state_guard() {
+  local dir state fakebin out
+  dir=$(make_case validation-handoff-current-state)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  printf 'needs-validation: implementation committed\n' > "$state/validation.status"
+  (
+    export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+    export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+    out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-validation" "$state")
+    case "$out" in
+      self\|*) ;;
+      *) fail "active validation run escalated stale handoff: $out" ;;
+    esac
+    rm -f "$state/.subsuper-last-scan"
+    FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "active validation run was escalated by heartbeat scan"
+    export FM_FAKE_CREW_STATE='state: unknown · source: none · inactive handoff'
+    out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-validation" "$state")
+    case "$out" in
+      escalate\|*) ;;
+      *) fail "inactive validation handoff was not actionable: $out" ;;
+    esac
+    rm -f "$state/.subsuper-last-scan"
+    FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+    [ -s "$state/.subsuper-escalations" ] || fail "inactive validation handoff was missed by heartbeat scan"
+  ) || return 1
+  pass "active validation suppresses stale handoff paths while inactive handoff remains actionable"
+}
+
 test_handle_wake_routes_self_and_escalate() {
   local dir state
   dir=$(make_supercase handle)
@@ -1958,6 +1988,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_validation_handoff_current_state_guard
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
