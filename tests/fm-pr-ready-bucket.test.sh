@@ -13,7 +13,8 @@
 #       require --required-check and use that list, not MemberOS defaults
 #   (h) the helper is read-only (no merge/comment/review) and does not
 #       scrape the Bors host
-#   (i) truncated labels, checks, or comments never classify as ready
+#   (i) truncated labels, checks, or comments are paged to completion
+#       before classification
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -49,6 +50,32 @@ case " $* " in
 esac
 case "${1:-} ${2:-}" in
   "api POST")
+    case " $* " in
+      *ReadyBucketLabels*)
+        if [ ! -f "${FM_TEST_CASE_DIR:-}/labels.toon" ]; then
+          echo "error: unexpected labels follow-up: $*" >&2
+          exit 1
+        fi
+        cat "${FM_TEST_CASE_DIR}/labels.toon"
+        exit 0
+        ;;
+      *ReadyBucketChecks*)
+        if [ ! -f "${FM_TEST_CASE_DIR:-}/checks.toon" ]; then
+          echo "error: unexpected checks follow-up: $*" >&2
+          exit 1
+        fi
+        cat "${FM_TEST_CASE_DIR}/checks.toon"
+        exit 0
+        ;;
+      *ReadyBucketComments*)
+        if [ ! -f "${FM_TEST_CASE_DIR:-}/comments.toon" ]; then
+          echo "error: unexpected comments follow-up: $*" >&2
+          exit 1
+        fi
+        cat "${FM_TEST_CASE_DIR}/comments.toon"
+        exit 0
+        ;;
+    esac
     cat "$FM_TEST_TOON_FILE"
     exit 0
     ;;
@@ -65,6 +92,7 @@ run_bucket() {
   shift
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_TOON_FILE="$case_dir/page.toon" \
+  FM_TEST_CASE_DIR="$case_dir" \
   PATH="$case_dir/fakebin:$BASE_PATH" \
     "$BUCKET" "$@"
 }
@@ -87,9 +115,10 @@ import csv, json, sys
 path, has_next, cursor = sys.argv[1], sys.argv[2], sys.argv[3]
 prs = [json.loads(arg) for arg in sys.argv[4:]]
 keys = [
-    "author", "base", "bors_author", "bors_last", "checks", "checks_truncated",
-    "comments_truncated", "draft", "head", "labels", "labels_truncated",
-    "mergeable", "number", "review", "title", "url",
+    "author", "base", "bors_author", "bors_last", "checks", "checks_cursor",
+    "checks_truncated", "comments_cursor", "comments_truncated", "draft",
+    "head", "labels", "labels_cursor", "labels_truncated", "mergeable",
+    "number", "review", "title", "url",
 ]
 with open(path, "w", encoding="utf-8") as fh:
     fh.write(f"hasNextPage: {has_next}\n")
@@ -104,11 +133,14 @@ with open(path, "w", encoding="utf-8") as fh:
             "true" if pr.get("bors_author") else "false",
             pr.get("bors_last", ""),
             pr.get("checks", ""),
+            pr.get("checks_cursor", ""),
             "true" if pr.get("checks_truncated") else "false",
+            pr.get("comments_cursor", ""),
             "true" if pr.get("comments_truncated") else "false",
             "true" if pr.get("draft") else "false",
             pr.get("head", "feat/x"),
             pr.get("labels", ""),
+            pr.get("labels_cursor", ""),
             "true" if pr.get("labels_truncated") else "false",
             pr.get("mergeable", "MERGEABLE"),
             pr.get("number", 1),
@@ -137,12 +169,17 @@ pr_json() {
     --argjson labels_truncated "${13:-false}" \
     --argjson checks_truncated "${14:-false}" \
     --argjson comments_truncated "${15:-false}" \
+    --arg labels_cursor "${16:-}" \
+    --arg checks_cursor "${17:-}" \
+    --arg comments_cursor "${18:-}" \
     '{
       number:$number, title:$title, mergeable:$mergeable, base:$base,
       checks:$checks, labels:$labels, review:$review, draft:$draft,
       author:$author, head:$head, bors_author:$bors_author, bors_last:$bors_last,
       labels_truncated:$labels_truncated, checks_truncated:$checks_truncated,
       comments_truncated:$comments_truncated,
+      labels_cursor:$labels_cursor, checks_cursor:$checks_cursor,
+      comments_cursor:$comments_cursor,
       url:("https://github.com/Chamber-Hero/memberos/pull/" + ($number|tostring))
     }'
 }
@@ -326,30 +363,110 @@ test_required_check_override_replaces_memberos_list() {
   pass "fm-pr-ready-bucket uses --required-check instead of the MemberOS list"
 }
 
-test_truncated_nested_state_is_not_ready() {
+test_truncated_labels_are_paged() {
   local case_dir out
-  case_dir=$(make_case truncated)
+  case_dir=$(make_case truncated-labels)
   write_page "$case_dir/page.toon" false "" \
-    "$(pr_json 701 "feat: labels truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/x false "" true false false)" \
-    "$(pr_json 702 "feat: checks truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/y false "" false true false)" \
-    "$(pr_json 703 "feat: comments truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/z false "" false false true)" \
-    "$(pr_json 704 "feat: blocker still blocks" MERGEABLE main "$GREEN_CHECKS" "review-blocker" APPROVED false alice feat/b false "" true false false)" \
-    "$(pr_json 705 "feat: queued despite truncation" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/q false "Rollup created" false false true)"
+    "$(pr_json 701 "feat: labels truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/x false "" true false false lab1)"
+  cat > "$case_dir/labels.toon" <<'EOF'
+hasNextPage: false
+endCursor: ""
+names: "review-blocker"
+EOF
   out=$(run_bucket "$case_dir" --json)
   [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
-    || fail "truncated: no truncated PR should be ready, got: $out"
-  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.blocked | length')" = 4 ] \
-    || fail "truncated: expected four blocked PRs, got: $out"
-  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 1 ] \
-    || fail "truncated: latest Bors comment should still be in-Bors, got: $out"
+    || fail "truncated-labels: later review-blocker must not be ready, got: $out"
   printf '%s\n' "$out" | "$REAL_JQ" -e '
-    (.blocked[] | select(.number==701) | .reasons | index("incomplete GitHub state")) != null
-    and (.blocked[] | select(.number==702) | .reasons | index("incomplete GitHub state")) != null
-    and (.blocked[] | select(.number==703) | .reasons | index("incomplete GitHub state")) != null
-    and (.blocked[] | select(.number==704) | .reasons | index("review-blocker")) != null
-    and (.in_bors[] | select(.number==705))
-  ' >/dev/null || fail "truncated: missing expected buckets/reasons, got: $out"
-  pass "fm-pr-ready-bucket refuses to mark truncated nested GitHub state ready"
+    .blocked[] | select(.number==701) | .reasons | index("review-blocker")
+  ' >/dev/null || fail "truncated-labels: paged label should block, got: $out"
+  grep -F "ReadyBucketLabels" "$case_dir/gh-axi.log" >/dev/null \
+    || fail "truncated-labels: should page remaining labels through GraphQL"
+  pass "fm-pr-ready-bucket pages truncated labels before classifying"
+}
+
+test_truncated_checks_are_paged() {
+  local case_dir out missing_edge
+  case_dir=$(make_case truncated-checks)
+  missing_edge="CI (Depot) / lint=success;CI (Depot) / typecheck=success;CI (Depot) / build=success;CI (Depot) / guardrails=success;CI (Depot) / test=success;CI (Depot) / cli-test=success;CI (Depot) / quality=success;PR Title Lint (Depot) / pr-title-lint=success;PR Body Lint (Depot) / pr-body-lint=success"
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 702 "feat: checks truncated" MERGEABLE main "$missing_edge" "" APPROVED false alice feat/y false "" false true false "" chk1)"
+  cat > "$case_dir/checks.toon" <<'EOF'
+hasNextPage: false
+endCursor: ""
+checks: CI (Depot) / edge-test=success
+EOF
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 1 ] \
+    || fail "truncated-checks: completed green required checks should be ready, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready[0].number')" = 702 ] \
+    || fail "truncated-checks: expected PR 702 ready, got: $out"
+  grep -F "ReadyBucketChecks" "$case_dir/gh-axi.log" >/dev/null \
+    || fail "truncated-checks: should page remaining checks through GraphQL"
+
+  cat > "$case_dir/checks.toon" <<'EOF'
+hasNextPage: false
+endCursor: ""
+checks: CI (Depot) / edge-test=failure
+EOF
+  : > "$case_dir/gh-axi.log"
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "truncated-checks: later red required check must not be ready, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '
+    .blocked[] | select(.number==702) | .reasons[] | test("red required CI.*edge-test")
+  ' >/dev/null || fail "truncated-checks: paged red check should block, got: $out"
+  pass "fm-pr-ready-bucket pages truncated checks before classifying"
+}
+
+test_truncated_comments_are_paged() {
+  local case_dir out
+  case_dir=$(make_case truncated-comments)
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 703 "feat: comments truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/z false "" false false true "" "" cmt1)"
+  cat > "$case_dir/comments.toon" <<'EOF'
+hasPreviousPage: false
+startCursor: ""
+bors_last: ":tada: Rollup created"
+EOF
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 1 ] \
+    || fail "truncated-comments: older Rollup created should be in-Bors, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "truncated-comments: queued PR must not also be ready, got: $out"
+  grep -F "ReadyBucketComments" "$case_dir/gh-axi.log" >/dev/null \
+    || fail "truncated-comments: should page older comments through GraphQL"
+
+  cat > "$case_dir/comments.toon" <<'EOF'
+hasPreviousPage: false
+startCursor: ""
+bors_last: ""
+EOF
+  : > "$case_dir/gh-axi.log"
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 1 ] \
+    || fail "truncated-comments: completed comments with no Bors should be ready, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 0 ] \
+    || fail "truncated-comments: no Bors comment should not be in-Bors, got: $out"
+  pass "fm-pr-ready-bucket pages truncated comments before classifying"
+}
+
+test_truncated_state_stays_blocked_when_still_incomplete() {
+  local case_dir out
+  case_dir=$(make_case still-truncated)
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 706 "feat: still truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/t false "" false true false "" chk1)"
+  cat > "$case_dir/checks.toon" <<'EOF'
+hasNextPage: true
+endCursor: chk2
+checks: extra=success
+EOF
+  out=$(FM_PR_READY_BUCKET_MAX_NESTED_PAGES=1 run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "still-truncated: incomplete checks must not be ready, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '
+    .blocked[] | select(.number==706) | .reasons | index("incomplete GitHub state")
+  ' >/dev/null || fail "still-truncated: should stay blocked, got: $out"
+  pass "fm-pr-ready-bucket keeps still-truncated nested state out of ready"
 }
 
 test_does_not_fetch_bors_host() {
@@ -400,6 +517,9 @@ test_stale_bors_comment_is_not_in_bors
 test_omits_draft_release_and_pending
 test_repo_override_and_read_only
 test_required_check_override_replaces_memberos_list
-test_truncated_nested_state_is_not_ready
+test_truncated_labels_are_paged
+test_truncated_checks_are_paged
+test_truncated_comments_are_paged
+test_truncated_state_stays_blocked_when_still_incomplete
 test_does_not_fetch_bors_host
 test_empty_listing_prints_four_groups
