@@ -111,11 +111,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
       exit 1
     fi
     # Reclaiming an owner that is gone has always been silent and stays that
-    # way. The three holders that are alive and still yield are the surprising
-    # ones - this session's own holder in another tree, a durably suspended
+    # way. The three holders that are alive and still yield are the ones worth
+    # naming - this session's own holder in another tree, a durably suspended
     # session, and a live process the identity rules cannot type as a harness -
     # so name them rather than moving the lock out from under a visible process
-    # quietly.
+    # quietly. None of the three is exceptional; the last is the ordinary
+    # reading of a stale lock whose pid an unrelated process now occupies.
     # The predicate supplies the whole clause and leaves it empty for the silent
     # case, so this is one assignment rather than a second liveness question that
     # could disagree with the classification that just ran.

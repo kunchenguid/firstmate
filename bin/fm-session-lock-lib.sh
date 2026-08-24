@@ -258,8 +258,15 @@ fm_harness_process_matches() {  # <comm> <args>
   # now reads as not-a-harness and is reclaimed while that session is still
   # running. It is bounded to that adoption window rather than being a standing
   # hole, because this rule refuses to record such a holder in the first place,
-  # and it is not closed. The mitigation is that fm_session_lock_holder_competes
-  # below classifies a live-but-unidentified holder apart from a gone one, so the
+  # and it is not closed.
+  #
+  # That shape is one INSTANCE of a wider condition rather than its cause. Any
+  # live process occupying the recorded pid that these rules cannot type reads
+  # the same way, and the ordinary trigger is an unrelated process that inherited
+  # a recycled pid from a lock nobody released. fm_harness_pid_state's header
+  # below is the single owner of that condition rather than this block restating
+  # it. The mitigation covers all of it: fm_session_lock_holder_competes
+  # classifies a live-but-unidentified holder apart from a gone one, so the
   # reclaim announces itself rather than moving the lock out from under a visible
   # process in silence.
   case "$comm" in
