@@ -57,6 +57,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Every crewmate ship and scout scaffold carries the home's standing tooling
+# directive when data/learnings.md holds a level-2 section whose heading starts
+# with "## Standing tooling". That section body is copied verbatim into the
+# brief as "# Standing tooling (home-local, from data/learnings.md)", placed
+# right after "# Task", so a standing directive reaches the worker mechanically
+# instead of depending on firstmate remembering it while writing the brief.
+# An absent file or absent section emits nothing: absence is the normal case.
+# Secondmate charters never carry it; a secondmate home has its own learnings.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -179,6 +187,17 @@ shell_quote() {
   printf "'"
 }
 
+# Body of the first level-2 "## Standing tooling..." section of the home's
+# learnings file, up to the next "## " heading or EOF, with surrounding blank
+# lines dropped. Empty when the file or the section is absent.
+standing_tooling_body() {
+  [ -f "$DATA/learnings.md" ] || return 0
+  awk '
+    /^## / { inside = ($0 ~ /^## Standing tooling/); next }
+    inside { print }
+  ' "$DATA/learnings.md" | sed '/./,$!d'
+}
+
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
@@ -286,6 +305,12 @@ fi
 
 REPO=${POS[1]}
 
+STANDING_BODY=$(standing_tooling_body)
+STANDING_SECTION=""
+if [ -n "$STANDING_BODY" ]; then
+  STANDING_SECTION=$'\n# Standing tooling (home-local, from data/learnings.md)\n'"$STANDING_BODY"$'\n'
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -324,7 +349,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$STANDING_SECTION
 $HERDR_SECTION
 
 # Setup
@@ -437,7 +462,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$STANDING_SECTION
 $HERDR_SECTION
 
 # Setup

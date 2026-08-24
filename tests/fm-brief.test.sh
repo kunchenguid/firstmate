@@ -747,6 +747,83 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Change: a home-local standing tooling directive must reach every crewmate
+# mechanically. The real 2026-08-24 failure was a directive that lived in
+# data/learnings.md, was printed once at session start, and was still absent
+# from the brief firstmate wrote minutes later.
+test_standing_tooling_section_is_copied_into_crewmate_briefs() {
+  local home ship scout charter
+  home="$TMP_ROOT/standing-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/learnings.md" <<'LEARN'
+# Learnings
+
+## Backend notes
+- irrelevant-marker one
+
+## Standing tooling (2026-08-20)
+- Datadog: use the pup CLI, never a browser.
+- Browsing: use ego-browser.
+
+## Later notes
+- irrelevant-marker two
+LEARN
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" standing-ship repo --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero with a standing tooling section"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" standing-scout repo --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero with a standing tooling section"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" standing-sm --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero with a standing tooling section"
+  ship="$home/data/standing-ship/brief.md"
+  scout="$home/data/standing-scout/brief.md"
+  charter="$home/data/standing-sm/brief.md"
+  for brief in "$ship" "$scout"; do
+    assert_grep "# Standing tooling (home-local, from data/learnings.md)" "$brief" \
+      "brief did not carry the standing tooling heading"
+    assert_grep "- Datadog: use the pup CLI, never a browser." "$brief" \
+      "brief did not copy the standing tooling body verbatim"
+    assert_grep "- Browsing: use ego-browser." "$brief" \
+      "brief dropped part of the standing tooling body"
+    if grep -F 'irrelevant-marker' "$brief" >/dev/null; then
+      fail "brief copied a learnings section other than standing tooling"
+    fi
+    # The section must sit between the task and the Herdr declaration.
+    awk '/^# Task$/ { seen = 1 } /^# Standing tooling/ { if (!seen) exit 1; found = 1 } /^# Herdr/ { exit found ? 0 : 1 }' "$brief" \
+      || fail "standing tooling section was not placed right after # Task"
+  done
+  if grep -F 'Standing tooling' "$charter" >/dev/null; then
+    fail "secondmate charter carried the main home's standing tooling section"
+  fi
+  pass "fm-brief: the standing tooling section reaches ship and scout briefs, not charters"
+}
+
+# Absence is the normal case and must cost nothing: a home with no learnings
+# file, and a home whose learnings file has no standing tooling section, both
+# produce exactly today's bytes.
+test_absent_standing_tooling_leaves_briefs_unchanged() {
+  local home a b
+  home="$TMP_ROOT/standing-absent-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nofile-ship repo --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero without a learnings file"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nofile-scout repo --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero without a learnings file"
+  printf '# Learnings\n\n## Backend notes\n- nothing standing here\n' > "$home/data/learnings.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nosect-ship repo --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero with a section-less learnings file"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nosect-scout repo --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero with a section-less learnings file"
+  a="$TMP_ROOT/standing-absent-a"
+  b="$TMP_ROOT/standing-absent-b"
+  sed 's/nofile-ship/TASKID/g' "$home/data/nofile-ship/brief.md" > "$a"
+  sed 's/nosect-ship/TASKID/g' "$home/data/nosect-ship/brief.md" > "$b"
+  cmp -s "$a" "$b" || fail "a learnings file with no standing tooling section changed the ship brief"
+  sed 's/nofile-scout/TASKID/g' "$home/data/nofile-scout/brief.md" > "$a"
+  sed 's/nosect-scout/TASKID/g' "$home/data/nosect-scout/brief.md" > "$b"
+  cmp -s "$a" "$b" || fail "a learnings file with no standing tooling section changed the scout brief"
+  pass "fm-brief: an absent standing tooling section emits nothing at all"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -768,3 +845,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_standing_tooling_section_is_copied_into_crewmate_briefs
+test_absent_standing_tooling_leaves_briefs_unchanged
