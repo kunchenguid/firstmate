@@ -334,7 +334,7 @@ cursor_progress_changed() {  # <window> <tail40> <window-key>
   esac
   sig=$(cursor_progress_signature "$tail40") || return 1
   prev=$(cat "$marker" 2>/dev/null || true)
-  printf '%s' "$sig" > "$marker"
+  printf '%s' "$sig" > "$marker" || return 1
   [ -n "$prev" ] && [ "$sig" != "$prev" ]
 }
 
