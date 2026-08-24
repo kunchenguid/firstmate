@@ -2,9 +2,10 @@
 # fm-startup-network.sh - the deferred startup stage of a session start.
 #
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
-# BEFORE the digest printed, on a hook that blocks session initialization: `gh
-# auth status`, the secondmate liveness and convergence sweeps (per-secondmate
-# remote probes, which bootstrap runs concurrently), pending remote
+# BEFORE the digest printed, on a hook that blocks session initialization:
+# registered-forge authentication, the secondmate liveness and convergence
+# sweeps (per-secondmate remote probes, which bootstrap runs concurrently),
+# pending remote
 # handoff delivery, and the fleet-sync fetch of every project clone. None of
 # those calls is individually bounded, so one unreachable host could consume the
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
@@ -94,7 +95,8 @@
 #                             wake.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
-#                             stage total, one record per network phase (gh auth,
+#                             stage total, one record per network phase
+#                             (registered-forge auth,
 #                             secondmate liveness, secondmate convergence, handoff
 #                             delivery, fleet sync), one per secondmate for the
 #                             remote-touching steps (id and host), and one per

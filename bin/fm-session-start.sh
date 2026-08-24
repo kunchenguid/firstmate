@@ -921,7 +921,7 @@ fi
 
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
-# secondmate that could not be relaunched, broken GitHub auth), and the section
+# secondmate that could not be relaunched, broken registered-forge auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
 # Deliberately here and not earlier: this is the last point in the digest, so the
 # worker started at step 1 has had the whole composition above to finish in. It
