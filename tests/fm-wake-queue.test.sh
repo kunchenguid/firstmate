@@ -1001,6 +1001,55 @@ test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
+# A supervisor-actionable wake must carry the home's own recorded knowledge.
+# The 2026-08-24 failure: a worker reported "blocked: login wall", the drain
+# annotated it, and the recorded workaround in data/learnings.md was never
+# consulted. The hint is read-only and additive: nothing else about the drain
+# may change.
+test_blocked_annotation_carries_a_learnings_hint() {
+  local dir state home out rows_before rows_after
+  dir=$(make_case learnings-hint)
+  state="$dir/state"
+  home="$dir/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/learnings.md" <<'LEARN'
+# Learnings
+- 2026-08-20 Datadog sits behind a login wall: query it with the pup CLI, never a browser.
+- 2026-08-01 Backlog retention keeps only the configured recent Done entries.
+LEARN
+  printf 'blocked: datadog login wall reached in the browser\n' > "$state/hint.status"
+  printf 'working: implementing the datadog login wall workaround\n' > "$state/quiet.status"
+  printf 'blocked: quantum flux calibration refused\n' > "$state/nomatch.status"
+  append_wake "$state" signal hint.status "signal: $state/hint.status" || fail "hint wake append failed"
+  append_wake "$state" signal quiet.status "signal: $state/quiet.status" || fail "working wake append failed"
+  append_wake "$state" signal nomatch.status "signal: $state/nomatch.status" || fail "no-match wake append failed"
+
+  out="$dir/drain.out"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2>/dev/null \
+    || fail "drain with a learnings hint failed"
+  rows_after=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$rows_after" -eq 3 ] || fail "the learnings hint changed the durable rows presented (got $rows_after)"
+  grep -F 'learnings hint (' "$out" >/dev/null || fail "a blocked annotation printed no learnings hint"
+  grep -E '^learnings hint \([0-9]+ match\): - 2026-08-20 Datadog sits behind a login wall' "$out" >/dev/null \
+    || fail "the learnings hint did not name the matching recorded line"
+  [ "$(grep -c '^learnings hint (' "$out")" -eq 1 ] \
+    || fail "expected exactly one hint: the working and unmatched blocked events must stay silent"
+  if grep -F 'Backlog retention' "$out" >/dev/null; then
+    fail "a learnings line sharing fewer than two words was hinted"
+  fi
+
+  rm -f "$home/data/learnings.md"
+  append_wake "$state" signal hint.status "signal: $state/hint.status" || fail "second hint wake append failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-nofile.out" 2>/dev/null \
+    || fail "drain without a learnings file failed"
+  if grep -F 'learnings hint (' "$dir/drain-nofile.out" >/dev/null; then
+    fail "an absent learnings file still produced a hint"
+  fi
+  rows_before=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$dir/drain-nofile.out")
+  [ "$rows_before" -ge 1 ] || fail "the no-learnings drain lost its durable rows"
+  pass "blocked wake annotations carry a bounded learnings hint and nothing else changes"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -1017,3 +1066,4 @@ test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
+test_blocked_annotation_carries_a_learnings_hint

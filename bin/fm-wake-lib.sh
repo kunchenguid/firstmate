@@ -1450,8 +1450,47 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
   fm_wake_unread_events "$1" "$2" 0
 }
 
+# Read-only supplemental hint for a supervisor-actionable wake: up to three
+# lines of the home's learnings file that share at least two distinct
+# significant words with the event text. It exists because a standing directive
+# recorded in learnings was repeatedly not consulted at the moment a worker
+# reported a blocker. Emits nothing when the file is absent, when the event
+# yields fewer than two significant words, or when no line matches; its failure
+# never changes drain output, semantics, or exit status.
+fm_wake_learnings_hint() {  # <event-line>
+  local file="${FM_DATA_OVERRIDE:-$FM_HOME/data}/learnings.md"
+  [ -f "$file" ] || return 0
+  FM_WAKE_HINT_EVENT=$1 awk '
+    BEGIN {
+      split("with that this from have need needs when then than into only also been does what which while after before", drop, " ")
+      for (i in drop) stop[drop[i]] = 1
+      text = tolower(ENVIRON["FM_WAKE_HINT_EVENT"])
+      gsub(/[^a-z0-9]+/, " ", text)
+      words = split(text, word, " ")
+      for (i = 1; i <= words && tokens < 40; i++) {
+        w = word[i]
+        if (length(w) < 4 || (w in stop) || (w in seen)) continue
+        seen[w] = 1
+        token[++tokens] = w
+      }
+      if (tokens < 2) exit
+    }
+    {
+      line = tolower($0)
+      hits = 0
+      for (i = 1; i <= tokens; i++) if (index(line, token[i])) hits++
+      if (hits < 2) next
+      out = $0
+      if (length(out) > 200) out = substr(out, 1, 200)
+      printf "learnings hint (%d match): %s\n", hits, out
+      if (++printed == 3) exit
+    }
+  ' "$file"
+}
+
 # Print supplemental drain-time context only after the caller has committed the
-# raw queue consumption and released the append lock.
+# raw queue consumption and released the append lock. Requires the caller to
+# have sourced fm-classify-lib.sh, which owns status-line verb parsing.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
   local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
@@ -1529,6 +1568,11 @@ EOF
       fi
       line="$prefix: $status_key: $event_line"
       printf '%s\n' "$line" || return 1
+      if [ "$event_line" = "$last_event" ]; then
+        case "$(status_line_verb "$event_line")" in
+          blocked|needs-decision) fm_wake_learnings_hint "$event_line" || true ;;
+        esac
+      fi
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF

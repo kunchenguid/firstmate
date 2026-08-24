@@ -4,6 +4,12 @@
 # informational status lines, OPEN DECISIONS, and captain-call record
 # divergence, then assert liveness.
 #
+# A blocked or needs-decision annotation also carries up to three lines of this
+# home's data/learnings.md that share at least two significant words with the
+# event, so a recorded directive is applied at the moment it matters rather than
+# only printed at session start. fm-wake-lib.sh's fm_wake_learnings_hint owns the
+# matching rules; the hint is read-only and changes no drain semantics.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 set -u
