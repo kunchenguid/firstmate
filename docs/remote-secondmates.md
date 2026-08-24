@@ -233,7 +233,7 @@ bin/fm-teardown.sh <id>
 ```
 
 Retirement is executed on the configured host and refuses while the remote home has child work, while the primary has an unfinished backlog outbox, or while a routed reply remains unresolved.
-It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`; it never stops the shared session or removes a sibling secondmate's workspace or panes.
+It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote` and clears only that secondmate's own pending-reply records; it never stops the shared session, removes a sibling secondmate's workspace or panes, or disturbs another task's pending-reply record.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 A retry after the remote side already completed reports `already-retired` and finishes primary-side unregistration without touching the remote, which covers both an absent remote home and one that inheritance propagation recreated holding nothing but inheritance-owned residue: propagated material bound to its generation record, generation records whose commit the receiver never applied, the receiver's own lock and staging artifacts, shared-preference quarantine siblings, and contentless operational directories.
 Every one of those artifacts is primary-authoritative and reproducible from the primary home, so nothing home-unique can hide behind them.
@@ -259,6 +259,7 @@ bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
+bin/fm-test-run.sh tests/fm-teardown-remote-pending-replies.test.sh
 ```
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.

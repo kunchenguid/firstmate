@@ -545,7 +545,12 @@ remote_pending_replies_cleanup() {
     for rec in ./*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+      # Another task's record is a successful no-op, never a refusal: under
+      # set -eu an `&& rm` AND-list would make the last non-matching record
+      # the subshell's status and abort retirement (tests/fm-teardown-remote-pending-replies.test.sh).
+      if [ "$(fm_meta_get "$rec" task_id)" = "$ID" ]; then
+        rm -f -- "$rec" || exit 1
+      fi
     done
   )
 }
