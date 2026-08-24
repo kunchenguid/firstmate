@@ -117,7 +117,7 @@ Current active evidence, including the pinned CLI version and the non-mutating v
 ### iDA (config/ida-remote-agent)
 
 iDA uses the official SG-capable iDA Deep Research and session lifecycle exposed by installed `bytedcli`.
-An absent, malformed, version-mismatched, or explicitly disabled config refuses new iDA dispatch before any provider write and leaves local-agent and AIME routing unchanged.
+An absent, malformed, or explicitly disabled config refuses new iDA dispatch before any provider write and leaves local-agent and AIME routing unchanged.
 The config is a current-user-owned, single-link regular file at mode `0600` with this schema:
 
 ```text
@@ -127,23 +127,26 @@ region=sg
 identity=user
 agent_id=default
 model=default
-bytedcli_version=<exact installed version>
 ```
 
-Obtain the version from the official structured `bytedcli --json --version` surface.
 Use `default` to let iDA select its established Deep Research agent/model, or record an explicit numeric agent id and supported model name when the task requires them.
 The adapter preserves the recorded agent and model identity when the official response provides them.
+An existing config may retain one legacy `bytedcli_version` field, but it is informational only: absence, staleness, or mismatch never blocks probe, dispatch, adoption, reconciliation, process-event handling, cancellation, or retirement.
+New setup must omit it and does not pin or refresh a bytedcli version.
 The config contains no credential, token, OECID, or prompt; authentication remains in bytedcli-managed `user` identity state.
-Set `enabled=true` only after a read-only `bin/fm-remote-agent-ida.sh probe` succeeds against the exact config and installed version.
-The probe uses only an SG session list read and creates no session.
+Set `enabled=true` only after a read-only `bin/fm-remote-agent-ida.sh probe` succeeds against the config.
+The probe verifies the executable, SG Deep Research agent and raw-session-list reads with `identity=user`, and the domain-restricted MCP command listing for the required create, raw-list, get, and close commands and options; it creates no session.
 
 Before dispatch, create the ordinary private task directory and `brief.md`, then put the instruction in a non-symlinked `0600` or `0400` file below `data/<id>/`.
 The default instruction bound is 262144 bytes (`FM_REMOTE_MAX_INSTRUCTION_BYTES`).
-Submission uses the official `bytedcli --as user mcp --allow-domains ida --all-tools` server and `ida_deep_research_create`; `bin/fm-bytedcli-mcp-call.sh` passes the private tool arguments through a mode-`0600` stdin request so prompt bytes do not enter argv.
-Session list/get and cancellation use official `bytedcli --json ida --region sg ...` commands.
+Submission uses the official domain-restricted `bytedcli --as user mcp --allow-domains ida` server and its `run_command` tool to invoke `ida --region sg deep-research create`.
+`bin/fm-bytedcli-mcp-call.sh` constructs that command inside a mode-`0600` stdin request so prompt bytes do not enter operating-system argv.
+Raw session list, session get, and cancellation use official `bytedcli --json --as user ida --region sg ...` commands.
+Every iDA-owned bytedcli child unsets conventional upper- and lower-case proxy variables because ambient proxies can divert the SG identity endpoint through an incompatible route; this sanitation is child-local and preserves all unrelated operator environment.
 Firstmate stores only normalized bounded observations, not the MCP exchange, raw messages, SSE/event bodies, credentials, or private request payload.
 
-Before the sole allowed create, the adapter records a unique marker derived from the Firstmate task id and instruction digest and exact-matches it through session list.
+Before the sole allowed create, the adapter records a unique marker derived from the Firstmate task id and instruction digest.
+It places that marker in the private first message because SG may automatically rename a session despite the create command's `--name`, then exact-matches either the legacy session name or that bounded first-message marker through raw session list plus session get.
 It repeats that reconciliation after a timeout or ambiguous submission before deciding state.
 A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
 Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
@@ -152,6 +155,7 @@ Restart adoption and startup recovery use the durable marker and session id and 
 Provider-running or idle-but-processing state is healthy.
 Terminal success, failure, and provider-confirmed cancellation produce a mode-`0600` `data/<id>/report.md` bound by task state.
 The report preserves `available`, exact `zero`, `unavailable`, and `error` distinctions and includes normalized session, remote-task, agent, model, outcome, and error-class fields when available.
+If an existing durable iDA task contains `bytedcli_version`, a report may label it as legacy informational metadata; the value never participates in state validity or a lifecycle decision.
 It never embeds the prompt, credentials, raw provider streams, or private payloads.
 iDA document mode does not imply AIME's Feishu creation contract; the durable return remains the self-contained report or its authoritative provider identity.
 
@@ -688,7 +692,7 @@ FM_AIME_RETIRE_MAX_GENERATIONS=256       # maximum queued AIME generations scann
 FM_AIME_RETIRE_MAX_CAPTURE_BYTES=1048576 # maximum bytes of one quarantined captured AIME generation during that retirement seal
 FM_REMOTE_MAX_INSTRUCTION_BYTES=262144    # maximum private instruction-file size for native remote-agent providers
 FM_REMOTE_RESULT_MAX_CHARS=131072         # maximum redacted iDA final-answer characters captured into normalized state/report artifacts
-FM_IDA_SESSION_PAGE_SIZE=100             # bounded SG session list used for exact marker reconciliation
+FM_IDA_SESSION_PAGE_SIZE=100             # bounded SG raw session list used for exact marker reconciliation
 FM_IDA_DEEP_RESEARCH_TIMEOUT_MS=900000   # official iDA Deep Research MCP timeout passed to the provider tool
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
