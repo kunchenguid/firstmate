@@ -280,6 +280,15 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         warnings.append(compact(inventory.get("reason"), 240) or "Primary task inventory is incomplete")
 
     secondmates = snapshot.get("secondmate_current") or {}
+    registry = secondmates.get("registry") or {}
+    if registry.get("complete") is False:
+        registry_reason = compact(registry.get("reason"), 180)
+        if not registry_reason:
+            registry_reason = compact(", ".join(map(str, registry.get("reasons") or [])), 180)
+        warnings.append(
+            "Secondmate registry is incomplete"
+            + (f": {registry_reason}" if registry_reason else "")
+        )
     if secondmates.get("truncated"):
         warnings.append(f"{secondmates['truncated']} secondmate homes are omitted by the snapshot bound")
     for mate in secondmates.get("records") or []:
@@ -290,7 +299,33 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             warnings.append(
                 f"{mate_label}: {compact((mate.get('current') or {}).get('reason'), 180) or 'state unavailable'}"
             )
+        counted_omissions: set[str] = set()
+        for surface in (
+            "active_children",
+            "decisions_open",
+            "holds",
+            "queued",
+            "landed",
+            "endpoints",
+        ):
+            total = (mate.get("counts") or {}).get(surface)
+            records = mate.get(surface)
+            if not isinstance(total, int) or isinstance(total, bool) or not isinstance(records, list):
+                continue
+            shown = len(records)
+            if total > shown:
+                counted_omissions.add(surface)
+                warnings.append(
+                    f"{mate_label}: {total - shown} {surface.replace('_', ' ')} omitted by the snapshot bound"
+                )
+            elif total < shown:
+                counted_omissions.add(surface)
+                warnings.append(
+                    f"{mate_label}: {surface.replace('_', ' ')} count reports {total}, but {shown} records were shown"
+                )
         for omitted in mate.get("omitted") or []:
+            if omitted.get("surface") in counted_omissions:
+                continue
             warnings.append(
                 f"{mate_label}: {omitted.get('count', 0)} {omitted.get('surface', 'records')} omitted by the snapshot bound"
             )
@@ -383,15 +418,16 @@ class SnapshotCache:
         self.lock = threading.Lock()
         self.board: dict[str, Any] | None = None
         self.loaded_at = 0.0
+        self.attempted_at = 0.0
         self.last_error: str | None = None
         self.ttl = max(1.0, float(os.environ.get("FM_FLEET_BOARD_CACHE_SECONDS", "3")))
         self.timeout = max(3.0, float(os.environ.get("FM_FLEET_BOARD_SNAPSHOT_TIMEOUT", "18")))
 
     def get(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
-            age = time.monotonic() - self.loaded_at
-            if self.board is not None and not force and age < self.ttl:
-                return self._response(stale=False)
+            attempt_age = time.monotonic() - self.attempted_at
+            if self.board is not None and not force and attempt_age < self.ttl:
+                return self._response()
             try:
                 env = os.environ.copy()
                 env["FM_HOME"] = str(self.home)
@@ -414,17 +450,19 @@ class SnapshotCache:
                     raise BoardError(f"Fleet snapshot failed: {detail}")
                 snapshot = json.loads(completed.stdout)
                 self.board = board_from_snapshot(snapshot)
-                self.loaded_at = time.monotonic()
+                self.loaded_at = self.attempted_at = time.monotonic()
                 self.last_error = None
-                return self._response(stale=False)
+                return self._response()
             except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, BoardError) as error:
+                self.attempted_at = time.monotonic()
                 self.last_error = compact(str(error), 320) or "Fleet snapshot failed"
                 if self.board is None:
                     raise BoardError(self.last_error) from error
-                return self._response(stale=True)
+                return self._response()
 
-    def _response(self, *, stale: bool) -> dict[str, Any]:
+    def _response(self) -> dict[str, Any]:
         assert self.board is not None
+        stale = self.last_error is not None
         result = copy.deepcopy(self.board)
         result["health"] = {
             "stale": stale,
@@ -684,7 +722,9 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
             value = json.loads(response.read())
-    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
         return None
     if value.get("instance") != runtime.get("instance"):
         return None
@@ -703,7 +743,7 @@ def process_exists(pid: Any) -> bool:
     return True
 
 
-def process_matches_runtime(runtime: dict[str, Any]) -> bool:
+def process_matches_runtime(runtime: dict[str, Any]) -> bool | None:
     """Distinguish this server from an unrelated process that reused its PID."""
     pid = runtime.get("pid")
     instance = runtime.get("instance")
@@ -717,9 +757,11 @@ def process_matches_runtime(runtime: dict[str, Any]) -> bool:
             timeout=1,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    command = completed.stdout.strip() if completed.returncode == 0 else ""
+    except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    command = completed.stdout.strip()
     server_path = str(pathlib.Path(__file__).resolve())
     instance_argument = re.compile(
         rf"(?:^|\s)--instance\s+{re.escape(instance)}(?:\s|$)"
@@ -752,31 +794,41 @@ def atomic_runtime(path: pathlib.Path, payload: dict[str, Any]) -> None:
 def serve(root: pathlib.Path, home: pathlib.Path, port: int, instance: str) -> int:
     directory, runtime_path, _ = runtime_paths(home)
     directory.mkdir(parents=True, exist_ok=True)
-    server = FleetBoardServer(
-        ("127.0.0.1", port), FleetBoardHandler, root=root, home=home, instance=instance
-    )
-    payload = {
-        "schema": "fm-fleet-board-runtime.v1",
-        "instance": instance,
-        "pid": os.getpid(),
-        "port": server.server_port,
-        "url": f"http://127.0.0.1:{server.server_port}/",
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    atomic_runtime(runtime_path, payload)
-
-    def stop_server(_signum: int, _frame: Any) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, stop_server)
-    signal.signal(signal.SIGINT, stop_server)
+    ownership_path = directory / "server.lock"
+    ownership = ownership_path.open("a+", encoding="utf-8")
     try:
-        server.serve_forever(poll_interval=0.25)
+        fcntl.flock(ownership.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        ownership.close()
+        raise BoardError("Fleet board is already serving this Firstmate home") from error
+    try:
+        server = FleetBoardServer(
+            ("127.0.0.1", port), FleetBoardHandler, root=root, home=home, instance=instance
+        )
+        payload = {
+            "schema": "fm-fleet-board-runtime.v1",
+            "instance": instance,
+            "pid": os.getpid(),
+            "port": server.server_port,
+            "url": f"http://127.0.0.1:{server.server_port}/",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        atomic_runtime(runtime_path, payload)
+
+        def stop_server(_signum: int, _frame: Any) -> None:
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, stop_server)
+        signal.signal(signal.SIGINT, stop_server)
+        try:
+            server.serve_forever(poll_interval=0.25)
+        finally:
+            server.server_close()
+            current = read_runtime(runtime_path)
+            if current and current.get("instance") == instance:
+                runtime_path.unlink(missing_ok=True)
     finally:
-        server.server_close()
-        current = read_runtime(runtime_path)
-        if current and current.get("instance") == instance:
-            runtime_path.unlink(missing_ok=True)
+        ownership.close()
     return 0
 
 
@@ -794,11 +846,14 @@ def start(root: pathlib.Path, home: pathlib.Path, port: int) -> dict[str, Any]:
         current = read_runtime(runtime_path)
         if current and health(current):
             return current
-        if current and process_matches_runtime(current):
-            raise BoardError(
-                "The recorded fleet-board process is still alive but unhealthy; "
-                f"refusing to replace it. Inspect {runtime_path}"
-            )
+        if current:
+            identity = process_matches_runtime(current)
+            if identity is not False:
+                state = "is still alive but unhealthy" if identity else "could not be verified"
+                raise BoardError(
+                    f"The recorded fleet-board process {state}; refusing to replace it. "
+                    f"Inspect {runtime_path}"
+                )
         runtime_path.unlink(missing_ok=True)
         log_path = directory / "server.log"
         if log_path.exists() and log_path.stat().st_size > 1_048_576:
@@ -846,12 +901,14 @@ def stop(home: pathlib.Path) -> bool:
             if not process_exists(current.get("pid")):
                 runtime_path.unlink(missing_ok=True)
                 return False
-            if not process_matches_runtime(current):
+            identity = process_matches_runtime(current)
+            if identity is False:
                 runtime_path.unlink(missing_ok=True)
                 return False
+            state = "is still alive but unhealthy" if identity else "could not be verified"
             raise BoardError(
-                "The recorded fleet-board process is still alive but unhealthy; "
-                f"refusing to signal it. Inspect {runtime_path}"
+                f"The recorded fleet-board process {state}; refusing to signal it. "
+                f"Inspect {runtime_path}"
             )
         pid = current.get("pid")
         os.kill(pid, signal.SIGTERM)

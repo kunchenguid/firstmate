@@ -725,8 +725,13 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             deferred_marker:(.deferred_marker // false),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            kind:((.kind // null) | if . == null then null else trunc(40) end),
+            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
+            context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
+            links:((.links // []) | map(trunc(500))),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
@@ -788,7 +793,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
-           | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
+           | {id,title:(($work.title // .id) | trunc(90)),blocked_by:null,
               risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
               context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
               blocked_by_ids:[],unresolved_blocker_ids:[],
@@ -852,6 +857,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
+          (if ($holds_all | length) > $queued_n then {surface:"holds",count:(($holds_all | length) - $queued_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)

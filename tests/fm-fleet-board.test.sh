@@ -18,6 +18,7 @@ mkdir -p "$FAKE_ROOT/bin" "$HOME_ROOT/state" "$HOME_ROOT/data"
 
 cat > "$FAKE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
 #!/usr/bin/env bash
+printf '.\n' >> "${FM_HOME:?}/snapshot.calls"
 if [ -f "${FM_HOME:?}/snapshot.fail" ]; then
   printf 'fixture snapshot failure\n' >&2
   exit 1
@@ -42,12 +43,13 @@ cat <<'JSON'
     {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"}]},"pr":{"url":null},"paths":{"report":{"present":false}}}
   ],
   "main_inventory":{"valid":true,"reason":null},
-  "secondmate_current":{"records":[{
+  "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
     "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
     "decisions_open":[{"id":"mate-choice","key":"mate-choice","verb":"needs-decision","summary":"Approve the contrast direction","reason":"Choose navy or rust","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"}}],
-    "holds":[],"landed":[],"omitted":[]
+    "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
+    "counts":{"active_children":1,"decisions_open":1,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
   }],"truncated":0},
   "secondmate_landed":{"records":[]}
 }
@@ -67,7 +69,9 @@ SH
 chmod +x "$FAKE_ROOT/bin/fm-fleet-snapshot.sh" "$FAKE_ROOT/bin/fm-inbox.sh"
 
 SERVER_PID=''
+SECOND_PID=''
 RECYCLED_PID=''
+HEALTH_PID=''
 LIFE_HOME=''
 cleanup_server() {
   if [ -n "$LIFE_HOME" ]; then
@@ -77,6 +81,14 @@ cleanup_server() {
   if [ -n "$RECYCLED_PID" ] && kill -0 "$RECYCLED_PID" 2>/dev/null; then
     kill "$RECYCLED_PID" 2>/dev/null || true
     wait "$RECYCLED_PID" 2>/dev/null || true
+  fi
+  if [ -n "$HEALTH_PID" ] && kill -0 "$HEALTH_PID" 2>/dev/null; then
+    kill "$HEALTH_PID" 2>/dev/null || true
+    wait "$HEALTH_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SECOND_PID" ] && kill -0 "$SECOND_PID" 2>/dev/null; then
+    kill "$SECOND_PID" 2>/dev/null || true
+    wait "$SECOND_PID" 2>/dev/null || true
   fi
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -98,6 +110,7 @@ for _ in $(seq 1 100); do
 done
 [ -s "$runtime" ] || fail "fleet board did not publish its runtime record"
 url=$(jq -r '.url' "$runtime")
+instance=$(jq -r '.instance' "$runtime")
 
 health=$(curl -fsS "${url}healthz") || fail "health endpoint was unavailable"
 printf '%s' "$health" | jq -e --argjson pid "$SERVER_PID" '.ok == true and .pid == $pid' >/dev/null \
@@ -111,10 +124,32 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "$url"
 [ "$code" = 403 ] || fail "application shell with a foreign Host header returned $code"
 pass "server is loopback-ready and serves a protected application shell"
 
+FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
+  python3 "$SERVER" --serve --port 0 >"$HOME_ROOT/second.out" 2>"$HOME_ROOT/second.err" &
+SECOND_PID=$!
+for _ in $(seq 1 40); do
+  kill -0 "$SECOND_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$SECOND_PID" 2>/dev/null; then
+  kill "$SECOND_PID" 2>/dev/null || true
+  wait "$SECOND_PID" 2>/dev/null || true
+  SECOND_PID=''
+  fail "a second foreground server remained alive for the same Firstmate home"
+fi
+wait "$SECOND_PID" 2>/dev/null
+second_rc=$?
+SECOND_PID=''
+[ "$second_rc" -ne 0 ] || fail "a second foreground server was accepted"
+[ "$(jq -r '.instance' "$runtime")" = "$instance" ] \
+  || fail "a refused second server replaced the live runtime identity"
+curl -fsS "${url}healthz" >/dev/null || fail "a refused second server disrupted the owner"
+pass "one serving process owns the home for its full lifetime"
+
 board=$(curl -fsS "${url}api/v1/board") || fail "board endpoint failed"
 printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
-  and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:3,done:1}
+  and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:3,done:2}
   and .summary == {open:10,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high")
@@ -126,6 +161,15 @@ printf '%s' "$board" | jq -e '
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "mate-held")][0]
        | .lane == "waiting" and .status.wait_reason == "Waiting on vendor API keys")
+  and ([.cards[] | select(.id == "mate-done")][0]
+       | .lane == "done"
+         and .repo == "firstmate"
+         and .kind == "ship"
+         and .risk.level == "medium"
+         and .context == "Completion context."
+         and ([.evidence[].kind] | sort) == ["pull_request", "report"])
+  and (.warnings | index("Secondmate registry is incomplete: record_limit") != null)
+  and (.warnings | index("design-mate: 2 holds omitted by the snapshot bound") != null)
 ' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
 
@@ -169,6 +213,16 @@ printf '%s' "$stale" | jq -e '
 ' >/dev/null || fail "snapshot failure did not retain and disclose the last-good board"
 pass "snapshot failures retain a visibly stale last-good board"
 
+failed_call_count=$(wc -l < "$HOME_ROOT/snapshot.calls" | tr -d ' ')
+for _ in 1 2 3; do
+  repeated=$(curl -fsS "${url}api/v1/board") || fail "last-good board failed during retry suppression"
+  printf '%s' "$repeated" | jq -e '.health.stale == true' >/dev/null \
+    || fail "a failed refresh became healthy without a successful snapshot"
+done
+[ "$(wc -l < "$HOME_ROOT/snapshot.calls" | tr -d ' ')" = "$failed_call_count" ] \
+  || fail "ordinary readers reran the same failed snapshot inside the cache window"
+pass "failed refreshes remain stale without repeated snapshot work"
+
 stale_csrf=$(printf '%s' "$stale" | jq -r '.actions.csrf_token')
 stale_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
 response=$(curl -fsS -H "X-Firstmate-CSRF: $stale_csrf" -H "Origin: ${url%/}" \
@@ -185,6 +239,22 @@ action_count=$(grep -o -- '--- action ---' "$HOME_ROOT/inbox.log" | wc -l | tr -
 [ "$action_count" -eq 2 ] \
   || fail "stale action did not reach the inbox exactly once (total actions: $action_count)"
 pass "stale last-good cards keep guarded actions available with revalidation provenance"
+
+rm "$HOME_ROOT/snapshot.fail"
+sleep 1.1
+fresh=$(curl -fsS "${url}api/v1/board") || fail "board did not recover after snapshot restoration"
+printf '%s' "$fresh" | jq -e '.health.stale == false' >/dev/null \
+  || fail "a successful refresh did not clear stale health"
+touch "$HOME_ROOT/snapshot.fail"
+fresh_csrf=$(printf '%s' "$fresh" | jq -r '.actions.csrf_token')
+forced_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
+curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$forced_payload" "${url}api/v1/actions" >/dev/null \
+  || fail "forced stale revalidation refused the guarded action"
+forced_stale=$(curl -fsS "${url}api/v1/board") || fail "board disappeared after forced refresh failure"
+printf '%s' "$forced_stale" | jq -e '.health.stale == true' >/dev/null \
+  || fail "an ordinary cache hit hid the latest forced refresh failure"
+pass "the latest failed refresh stays visible inside the cache window"
 
 kill "$SERVER_PID" 2>/dev/null || fail "could not stop the foreground fixture server"
 wait "$SERVER_PID" 2>/dev/null || true
@@ -208,6 +278,98 @@ if FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   fail "stopped application still reported healthy"
 fi
 pass "background lifecycle reuses verified identity and stops only that instance"
+
+HEALTH_FIXTURE="$TMP_ROOT/health-fixture.py"
+cat > "$HEALTH_FIXTURE" <<'PY'
+import http.server
+import pathlib
+import sys
+
+mode = sys.argv[1]
+port_file = pathlib.Path(sys.argv[2])
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"[]" if mode == "array" else b"\xff"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        pass
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_file.write_text(str(server.server_port), encoding="utf-8")
+server.serve_forever()
+PY
+for health_mode in array invalid_utf8; do
+  health_port_file="$LIFE_HOME/$health_mode.port"
+  python3 "$HEALTH_FIXTURE" "$health_mode" "$health_port_file" &
+  HEALTH_PID=$!
+  for _ in $(seq 1 100); do
+    [ -s "$health_port_file" ] && break
+    sleep 0.05
+  done
+  [ -s "$health_port_file" ] || fail "$health_mode health fixture did not start"
+  health_port=$(cat "$health_port_file")
+  jq -n --argjson pid "$HEALTH_PID" --argjson port "$health_port" '{
+    schema:"fm-fleet-board-runtime.v1",
+    instance:"malformed-health-instance",
+    pid:$pid,
+    port:$port,
+    url:("http://127.0.0.1:" + ($port | tostring) + "/")
+  }' > "$LIFE_HOME/state/fleet-board/runtime.json"
+  status_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+    FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status 2>"$LIFE_HOME/$health_mode.status.err")
+  status_rc=$?
+  [ "$status_rc" -eq 1 ] && [ "$status_out" = "not running" ] \
+    || fail "$health_mode health response escaped the failed-identity boundary"
+  recovered_url=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+    FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --start) \
+    || fail "background lifecycle did not recover from $health_mode health data"
+  kill -0 "$HEALTH_PID" 2>/dev/null \
+    || fail "health recovery signaled the unrelated $health_mode service"
+  stop_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+    FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --stop) \
+    || fail "recovered $health_mode lifecycle stop failed"
+  [ "$stop_out" = stopped ] || fail "recovered $health_mode stop returned $stop_out"
+  kill "$HEALTH_PID" 2>/dev/null || true
+  wait "$HEALTH_PID" 2>/dev/null || true
+  HEALTH_PID=''
+  assert_contains "$recovered_url" "http://127.0.0.1:" \
+    "$health_mode recovery did not return the replacement URL"
+done
+pass "malformed health responses cannot wedge lifecycle recovery"
+
+sleep 30 &
+RECYCLED_PID=$!
+jq -n --argjson pid "$RECYCLED_PID" '{
+  schema:"fm-fleet-board-runtime.v1",
+  instance:"unknown-process-instance",
+  pid:$pid,
+  port:1,
+  url:"http://127.0.0.1:1/"
+}' > "$LIFE_HOME/state/fleet-board/runtime.json"
+PS_UNKNOWN_BIN="$TMP_ROOT/ps-unknown-bin"
+mkdir -p "$PS_UNKNOWN_BIN"
+cat > "$PS_UNKNOWN_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$PS_UNKNOWN_BIN/ps"
+if PATH="$PS_UNKNOWN_BIN:$PATH" FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+  FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --start \
+  >"$LIFE_HOME/unknown-start.out" 2>"$LIFE_HOME/unknown-start.err"; then
+  fail "an unavailable process identity probe replaced a possibly live server"
+fi
+[ "$(jq -r '.instance' "$LIFE_HOME/state/fleet-board/runtime.json")" = unknown-process-instance ] \
+  || fail "an unavailable process probe discarded the only runtime identity"
+kill "$RECYCLED_PID" 2>/dev/null || true
+wait "$RECYCLED_PID" 2>/dev/null || true
+RECYCLED_PID=''
+rm -f "$LIFE_HOME/state/fleet-board/runtime.json"
+pass "unknown process identity fails closed without orphaning runtime state"
 
 sleep 30 &
 RECYCLED_PID=$!
@@ -233,3 +395,22 @@ RECYCLED_PID=''
 assert_contains "$recovered_url" "http://127.0.0.1:" \
   "lifecycle recovery did not return the replacement board URL"
 pass "stale runtime records recover safely when their PID belongs to another process"
+
+OPEN_FAKEBIN="$TMP_ROOT/open-fakebin"
+mkdir -p "$OPEN_FAKEBIN"
+cat > "$OPEN_FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'http://127.0.0.1:43210/\n'
+SH
+cat > "$OPEN_FAKEBIN/open" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$OPEN_FAKEBIN/python3" "$OPEN_FAKEBIN/open"
+open_out=$(PATH="$OPEN_FAKEBIN:$PATH" "$ROOT/bin/fm-fleet-board.sh" open 2>"$TMP_ROOT/open.err")
+open_rc=$?
+[ "$open_rc" -eq 0 ] || fail "a failed browser opener made the open command fail"
+[ "$open_out" = "http://127.0.0.1:43210/" ] || fail "open did not print the usable board URL"
+assert_contains "$(cat "$TMP_ROOT/open.err")" "browser opener failed" \
+  "open did not disclose the browser launch failure"
+pass "browser launch failure still returns the usable board URL"

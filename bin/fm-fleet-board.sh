@@ -43,12 +43,9 @@ case "${1:-}" in
   open)
     url=$(python3 "$SERVER" --start)
     if command -v open >/dev/null 2>&1; then
-      open "$url"
+      open "$url" || printf 'fm-fleet-board: browser opener failed; use %s\n' "$url" >&2
     elif command -v xdg-open >/dev/null 2>&1; then
-      xdg-open "$url"
-    else
-      printf '%s\n' "$url"
-      exit 0
+      xdg-open "$url" || printf 'fm-fleet-board: browser opener failed; use %s\n' "$url" >&2
     fi
     printf '%s\n' "$url"
     ;;

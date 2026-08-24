@@ -172,6 +172,10 @@ EOF
 
 ## Done
 - [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
+  Risk assessment recorded by fm-task-risk.
+  Risk level: medium
+  Risk rationale: Visible completion behavior changed.
+  Preserve the completed rollout context.
 EOF
   mkdir -p "$mate/projects/mate"
   fm_write_meta "$mate/state/mate.meta" \
@@ -554,17 +558,29 @@ test_secondmate_and_child_bounds_are_disclosed() {
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
   done
-  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  printf '\n## Queued\n' >> "$mate/data/backlog.md"
+  i=1
+  while [ "$i" -le 3 ]; do
+    printf -- '- [ ] hold-%s - Held %s (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
+      "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    i=$((i + 1))
+  done
+  printf '\n## Done\n' >> "$mate/data/backlog.md"
   fakebin=$(make_fakebin "$home")
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
-    FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+    FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    FM_SNAPSHOT_SECONDMATE_QUEUED=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.total_registered == 3
       and .secondmate_current.shown == 2
       and .secondmate_current.truncated == 1
       and (.secondmate_current.records[] | select(.id == "a")
         | .counts.active_children == 3 and (.active_children | length) == 2
-          and (.omitted | any(.surface == "active_children" and .count == 1)))
+          and (.omitted | any(.surface == "active_children" and .count == 1))
+          and .counts.holds == 3 and (.holds | length) == 2
+          and (.omitted | any(.surface == "holds" and .count == 1))
+          and .counts.queued == 3 and (.queued | length) == 2
+          and (.omitted | any(.surface == "queued" and .count == 1)))
       and (.secondmate_current.records | any(.id == "b" and .current.state == "no_active_work"))
   ' >/dev/null || fail "canonical secondmate or child bounds were not enforced: $canonical"
   json=$(FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
@@ -722,7 +738,7 @@ EOF
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "captain_decision"
       and .active_children == []
-      and (.holds | any(.id == "parked" and .source == "child-state"))
+      and (.holds | any(.id == "parked" and .title == "Parked child" and .source == "child-state"))
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
@@ -1214,9 +1230,20 @@ test_completed_scout_report_not_pending() {
 # live in the secondmate home's OWN backlog, not the main one, so the projection must
 # roll them up. Local, deterministic, no GitHub call.
 test_landed_includes_secondmate_home_merges() {
-  local home fakebin json
+  local home fakebin json canonical
   home=$(make_home mate-landed); write_fixture "$home"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "mate")
+    | .landed[] | select(.id == "mate-landed")
+    | .repo == "firstmate"
+      and .kind == "ship"
+      and .risk == {level:"medium",rationale:"Visible completion behavior changed.",source:"task-body"}
+      and .context == "Preserve the completed rollout context."
+      and .pr_url == "https://github.com/kunchenguid/firstmate/pull/50"
+  ' >/dev/null || fail "secondmate completion lost canonical card fields: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.landed | any(.[]; .id == "mate-landed" and (.artifact | test("/pull/50"))))
