@@ -757,7 +757,22 @@ while :; do
       wait_owned_child
       exit $?
     fi
-    # Another watcher won the singleton; our child stood down.
+    # Another watcher won the singleton; our child stood down. Give it a
+    # bounded chance to exit so a live-but-stalled child can never block the
+    # arm in wait forever, mirroring the won-race retirement above.
+    if watch_child_running; then
+      retire_deadline=$(( $(date +%s) + STALL_RETIRE_TIMEOUT + CONFIRM_TIMEOUT ))
+      while watch_child_running && [ "$(date +%s)" -lt "$retire_deadline" ]; do
+        sleep "$ATTACH_POLL"
+      done
+    fi
+    if watch_child_running; then
+      stalled_pid=$child
+      cleanup_child
+      cycle_log_append "$WATCH_CHILD_RC" "$(cycle_signal_name "$WATCH_CHILD_RC")" child-stand-down-stalled none
+      echo "watcher: FAILED - our child pid=$stalled_pid stalled before standing down; retired the stalled child"
+      exit 1
+    fi
     wait "$child"
     rc=$?
     owned_child_finished "$rc"
