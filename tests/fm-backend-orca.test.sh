@@ -1034,7 +1034,6 @@ test_teardown_removes_the_orca_omp_endpoint() {
   # The per-task extension fm-spawn writes for an omp worker. Teardown must
   # remove it: a surviving file would leave live pilot state behind.
   printf '// omp extension\n' > "$state/$id.omp-ext.ts"
-  printf '{"retry":{}}\n' > "$state/$id.omp-config.json"
   # Seeded alongside it so the shared cleanup list is proven to still remove
   # Pi's own per-task extension rather than having been narrowed to omp.
   printf '// pi extension\n' > "$state/$id.pi-ext.ts"
@@ -1081,7 +1080,6 @@ SH
     "teardown did not remove the exact Orca worktree for an omp task"
   assert_absent "$state/$id.meta" "teardown should remove the omp task metadata"
   assert_absent "$state/$id.omp-ext.ts" "teardown must remove the omp per-task extension, leaving zero task state"
-  assert_absent "$state/$id.omp-config.json" "teardown must remove the omp per-launch config, leaving zero task state"
   assert_absent "$state/$id.pi-ext.ts" "teardown must still remove Pi's per-task extension"
   pass "fm-teardown.sh backend=orca: removes the exact endpoint and per-task extensions for an omp task"
 }
@@ -1346,6 +1344,55 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
   assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
   pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
+}
+
+test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
+  local proj wt data state config id out rc neutral log_text
+  id="orcarecoveryretryz5"
+  proj="$TMP_ROOT/recovery-retry-project"
+  wt="$TMP_ROOT/recovery-retry-wt"
+  data="$TMP_ROOT/recovery-retry-data"
+  state="$TMP_ROOT/recovery-retry-state"
+  config="$TMP_ROOT/recovery-retry-config"
+  mkdir -p "$proj" "$data/$id" "$state" "$config"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-recovery-retry" \
+    "worktree=$wt" "project=$proj" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "yolo=off" "backend=orca" \
+    "orca_worktree_id=wt-recovery-retry" "orca_allocation=worktree-only"
+
+  orca_case recovery-retry-remove-fails
+  printf '{"ok":true}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery teardown should fail when worktree removal fails"
+  assert_contains "$out" "worktree not removed" "recovery teardown did not surface worktree removal failure"
+  assert_present "$state/$id.meta" "failed recovery worktree removal retired metadata"
+  assert_no_grep 'terminal=' "$state/$id.meta" "successful terminal cleanup was not retired before worktree failure"
+  assert_grep 'orca_allocation=worktree-only' "$state/$id.meta" "recovery metadata lost its remaining worktree cleanup state"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-recovery-retry'$'\x1f''--json' \
+    "recovery teardown did not close the retained terminal"
+
+  orca_case recovery-retry-remove-succeeds
+  printf '{"ok":true}\n' > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  expect_code 0 $? "recovery teardown retry should remove the remaining worktree"$'\n'"$out"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "recovery retry repeated an already completed terminal close"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-recovery-retry'$'\x1f''--force'$'\x1f''--json' \
+    "recovery retry did not remove the remaining worktree"
+  assert_absent "$state/$id.meta" "successful recovery retry retained task metadata"
+  pass "Orca recovery advances metadata before retrying worktree cleanup"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
@@ -1765,6 +1812,7 @@ test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
+test_recovery_teardown_retires_closed_terminal_before_worktree_retry
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches

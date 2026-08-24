@@ -355,6 +355,7 @@ const expectedUnset = [
 const expectedArgv = [
   "/opt/omp", "--cwd", "/isolated/cwd", "--add-dir", "/task/worktree",
   "--approval-mode", "yolo", "--no-title", "--no-extensions", "--no-skills",
+  "--no-lsp",
   "--tools", "read,write,edit,glob,grep", "--model", "anthropic/claude-sonnet-4-5",
   "-e", "/state/task.omp-ext.ts",
 ];
@@ -371,7 +372,7 @@ const templateManifest = {
   environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
   argv: [
     "__OMPBIN__", "--cwd", "__OMPCWD__", "--add-dir", "__WORKTREE__",
-    ...manifest.argv.slice(5, 13), "__OMPMODEL__", "-e", "__OMPEXT__",
+    ...manifest.argv.slice(5, 14), "__OMPMODEL__", "-e", "__OMPEXT__",
   ],
 };
 const words = ["env"];
@@ -566,34 +567,23 @@ test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
   manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
     "$agent_dir" "$isolated_cwd" /task/worktree /opt/omp "$OMP_MODEL" "$ext") \
     || fail "could not render the candidate OMP manifest"
-  MANIFEST=$manifest AMBIENT_AGENT=$ambient_agent AMBIENT_PROJECT=$ambient_project \
+  MANIFEST=$manifest AGENT_DIR=$agent_dir ISOLATED_CWD=$isolated_cwd \
+    AMBIENT_AGENT=$ambient_agent AMBIENT_PROJECT=$ambient_project \
     PI_CONFIG_FILES=$ambient_overlay node <<'NODE' \
-    || fail "ambient OMP fallback settings survived the isolated launch boundary"
+    || fail "candidate OMP settings artifacts did not preserve their isolated boundary"
 const fs = require("node:fs");
 const path = require("node:path");
 const manifest = JSON.parse(process.env.MANIFEST);
 if (!manifest.unsetEnvironment.includes("PI_CONFIG_FILES")) process.exit(1);
 if (manifest.environment.PI_CODING_AGENT_DIR === process.env.AMBIENT_AGENT) process.exit(1);
+if (manifest.environment.PI_CODING_AGENT_DIR !== process.env.AGENT_DIR) process.exit(1);
 const cwdIndex = manifest.argv.indexOf("--cwd");
 const cwd = manifest.argv[cwdIndex + 1];
 if (cwd === process.env.AMBIENT_PROJECT) process.exit(1);
-const merge = (base, overlay) => {
-  const result = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    if (value && typeof value === "object" && !Array.isArray(value)
-      && result[key] && typeof result[key] === "object" && !Array.isArray(result[key])) {
-      result[key] = merge(result[key], value);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-};
-const global = JSON.parse(fs.readFileSync(path.join(manifest.environment.PI_CODING_AGENT_DIR, "config.yml"), "utf8"));
-const projectPath = path.join(cwd, ".omp", "config.yml");
-const project = fs.existsSync(projectPath) ? JSON.parse(fs.readFileSync(projectPath, "utf8")) : {};
-const effective = merge(global, project);
-const retry = effective.retry;
+if (cwd !== process.env.ISOLATED_CWD) process.exit(1);
+if (!manifest.argv.includes("--no-lsp")) process.exit(1);
+const config = JSON.parse(fs.readFileSync(path.join(manifest.environment.PI_CODING_AGENT_DIR, "config.yml"), "utf8"));
+const retry = config.retry;
 if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
 if (!retry.fallbackChains || Array.isArray(retry.fallbackChains) || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
 if (JSON.stringify(retry) !== JSON.stringify(manifest.effectiveRetry)) process.exit(1);
@@ -624,7 +614,7 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 NODE
   assert_grep 'state=idle source=omp-ext event=agent-end' "$record" \
     "the final OMP settle event did not record idle"
-  pass "OMP candidate isolation clears effective fallbacks and preserves busy across willContinue"
+  pass "OMP candidate renders isolated fallbacks and preserves busy across willContinue"
 }
 
 # --- refusal ordering probes ------------------------------------------------

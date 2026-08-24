@@ -34,9 +34,13 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# Normal Orca tasks use the same safety checks, then close the recorded terminal
+# and remove the recorded worktree through `orca worktree rm`; teardown never
+# guesses an Orca target from ambient CLI state. Cleanup-only recovery metadata
+# can instead describe terminal-only, worktree-only, or worktree-ID-only state.
+# A retained terminal in worktree recovery is a cleanup target, not a live
+# endpoint. Once it closes, teardown atomically retires that handle before the
+# fallible worktree removal so a retry skips the completed close.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -854,6 +858,19 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+retire_orca_recovery_terminal() {
+  local meta=$1 temporary
+  temporary=$(mktemp "${meta}.tmp.XXXXXX") || return 1
+  if ! awk -F= '$1 != "terminal"' "$meta" > "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$meta"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 require_orca_worktree_id() {
@@ -2467,6 +2484,13 @@ cleanup_firstmate_home_children() {
           echo "error: could not close recovery Orca terminal $child_t; retaining child task metadata" >&2
           return 1
         fi
+        if [ "$child_orca_allocation" != terminal-only ]; then
+          retire_orca_recovery_terminal "$child_meta" || {
+            echo "error: could not retire closed recovery Orca terminal $child_t; retaining child task metadata" >&2
+            return 1
+          }
+          child_t=
+        fi
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
@@ -2517,7 +2541,7 @@ cleanup_firstmate_home_children() {
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.omp-ext.ts" "$sub_state/$child_id.omp-config.json" \
+      "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
@@ -2718,6 +2742,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         echo "error: could not close recovery Orca terminal $T; retaining task metadata" >&2
         exit 1
       fi
+      if [ "$ORCA_ALLOCATION" != terminal-only ]; then
+        retire_orca_recovery_terminal "$META" || {
+          echo "error: could not retire closed recovery Orca terminal $T; retaining task metadata" >&2
+          exit 1
+        }
+        T_ORCA=
+      fi
     else
       fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
     fi
@@ -2849,7 +2880,7 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-config.json" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \

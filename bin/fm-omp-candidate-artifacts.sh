@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Render the dormant OMP candidate's isolated settings and launch artifacts.
+# Usage:
+#   fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd>
+#   fm-omp-candidate-artifacts.sh manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension>
+#   fm-omp-candidate-artifacts.sh launch-template
+#   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
+# `prepare` creates a new agent directory containing config.yml and a new,
+# empty launch cwd. `manifest` emits the environment boundary and argv as JSON;
+# `launch-template` emits the same boundary with spawn-time placeholders.
+# `extension` writes the First Mate busy-state adapter to <output>. Persistent
+# config and extension files are rendered beside their destinations and renamed
+# atomically. No mode starts OMP, opens a session, or calls a provider.
 set -eu
 
 OMP_TOOLS=read,write,edit,glob,grep
@@ -63,6 +75,7 @@ const manifest = {
     "--no-title",
     "--no-extensions",
     "--no-skills",
+    "--no-lsp",
     "--tools", process.env.OMP_TOOLS,
     "--model", process.env.OMP_MODEL,
     "-e", process.env.OMP_EXTENSION,
