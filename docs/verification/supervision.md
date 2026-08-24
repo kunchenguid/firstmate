@@ -507,3 +507,31 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+### Linux `auto` channel, 2026-08-24
+
+`auto` resolves to `herdr` off macOS when the CLI is installed, so a Linux host is no longer alarm-silent.
+Verified on Ubuntu (Linux 7.0.0-1010-aws) with Herdr 0.7.5 installed at `/home/ubuntu/.local/bin/herdr`:
+
+```sh
+$ uname
+Linux
+$ command -v herdr
+/home/ubuntu/.local/bin/herdr
+```
+
+`tests/fm-daemon.test.sh` asserts the resolution both ways without posting a notification: `auto` selects the installed `herdr` notifier off macOS, and selects nothing when neither notifier binary exists.
+
+## Away-mode entry delivery self-test
+
+Verified 2026-08-24 on Ubuntu (Linux 7.0.0-1010-aws) with tmux as the supervisor backend.
+The daemon injects one marked no-op into the captain pane at startup and records the verdict in `state/.subsuper-delivery-selftest`; `bin/fm-afk-launch.sh verify` gates away-mode entry on it.
+
+`tests/fm-afk-inject-e2e.test.sh` Scenario D proves both directions end to end against a real tmux pane and a real daemon in an isolated state directory:
+
+```
+ok - Scenario D: away-mode entry proves one delivery and refuses when it cannot
+```
+
+The proven case records `ok`, the payload appears in the pane's submitted log, and `verify` exits 0.
+With the recorded captain pane absent, the verdict is `failed`, nothing is submitted, and `verify` exits non-zero naming the rollback command.

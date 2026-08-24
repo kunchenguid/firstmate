@@ -12,14 +12,21 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with one directive for focused testing.
 
 - `off` disables every active alert while retaining the durable marker and tmux flash.
-- `auto` or `default` resolves to `osascript` on macOS.
-  Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
+- `auto` or `default` resolves to `osascript` on macOS, and to `herdr` on every other platform when the `herdr` CLI is installed.
+  A Linux host without the `herdr` CLI has no built-in OS channel, so configure `command:` there when a durable marker alone is insufficient.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
-An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
+An absent `config/wedge-alarm` behaves as `auto`, which is default-on wherever `auto` resolves to an installed binary.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
+When `auto` resolves to nothing, the daemon logs that the durable marker is the only signal; on a Linux host with no `herdr` CLI, write a `command:` directive into `config/wedge-alarm` so the wedge reaches someone off-host.
+
+## Entry verification
+
+An alarm only helps once away mode is already running.
+`bin/fm-afk-launch.sh verify` closes the gap at entry: the daemon proves one injection reaches the captain pane and records the verdict in `state/.subsuper-delivery-selftest`, and `verify` fails away-mode entry when that proof is absent.
+Away mode must not be reported active before that verdict is `ok`.
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.

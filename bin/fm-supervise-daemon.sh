@@ -108,6 +108,16 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_INJECT_IGNORE_BUSY    when 1, the busy guard cannot veto this
+#                                   injection (the max-defer escape and the
+#                                   startup delivery self-test); the composer
+#                                   guard and submit confirmation still apply
+#          FM_DELIVERY_SELFTEST_SECS window the startup delivery self-test keeps
+#                                   retrying before recording failure (default
+#                                   45), and FM_DELIVERY_SELFTEST_SLEEP the gap
+#                                   between attempts (default 3). The verdict
+#                                   lands in state/.subsuper-delivery-selftest,
+#                                   which bin/fm-afk-launch.sh verify reads.
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -588,16 +598,56 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} native tail40 harness
+# pane_busy_verdict: "<busy|idle> <source>" from BOTH available signals, never
+# from one uncorroborated source that the other legible source contradicts.
+#
+# Incident (2026-08-24, upstream #2917): a claude-on-herdr primary pane sat
+# verifiably idle for 7h16m - zero turns in the session record - while this guard
+# deferred 1836 consecutive times with one reason and delivered nothing. A single
+# source is enough to veto delivery forever, and both sources can over-report:
+# native agent-state is derived per-backend and can stay submit-active after a
+# turn ends, and the rendered signature scans a 12-row tail that can still hold a
+# previous turn's elapsed-duration row. Requiring corroboration removes both
+# false positives without weakening a real mid-turn verdict, which shows busy on
+# both signals. A legible idle on either signal wins because the composer guard
+# below and the submit confirmation in step (4) are the checks that actually
+# protect the pane's contents; this one only picks the moment.
+#
+# tmux is unaffected: it exposes no native agent-state, so its verdict still
+# comes from the rendered signature alone.
+pane_busy_verdict() {  # <target> [backend] -> "<busy|idle> <source>"
+  local target=$1 backend=${2:-tmux} native rendered tail40 harness
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  case "$native" in
-    busy) return 0 ;;
+  case "$native" in busy|idle) ;; *) native=unknown ;; esac
+  if tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null); then
+    if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+         | fm_busy_lines_match "$harness"; then
+      rendered=busy
+    else
+      rendered=idle
+    fi
+  else
+    rendered=unknown
+  fi
+  case "$native/$rendered" in
+    busy/busy)    printf 'busy native+rendered' ;;
+    busy/unknown) printf 'busy native-only (pane unreadable)' ;;
+    unknown/busy) printf 'busy rendered-only (no native agent-state)' ;;
+    busy/idle)    printf 'idle native-busy contradicted by rendered idle' ;;
+    idle/busy)    printf 'idle rendered-busy contradicted by native idle' ;;
+    *)            printf 'idle native=%s rendered=%s' "$native" "$rendered" ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+}
+
+# pane_is_busy stays the single predicate every caller uses; PANE_BUSY_SOURCE
+# carries the signal behind the last verdict so a deferral can name its cause.
+PANE_BUSY_SOURCE=''
+pane_is_busy() {  # <target> [backend]
+  local verdict
+  verdict=$(pane_busy_verdict "$@")
+  PANE_BUSY_SOURCE=${verdict#* }
+  [ "${verdict%% *}" = busy ]
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -712,13 +762,16 @@ wedge_alarm_configured_channels() {
 }
 
 # Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
-# nothing and wedge_alarm_notify logs that the marker is the only signal.
+# captain via an osascript Notification Center banner. Everywhere else the only
+# already-supported channel outside the pane is herdr's own notification surface,
+# so `auto` uses it when the herdr CLI is installed; upstream #2917 spent 86
+# alarms logging that Linux had no channel at all while herdr was right there.
+# With neither binary present this prints nothing and wedge_alarm_notify logs
+# that the durable marker is the only signal.
 wedge_alarm_platform_default() {
   case "$(uname)" in
     Darwin) command -v osascript >/dev/null 2>&1 && printf 'osascript' ;;
-    *) : ;;
+    *) command -v herdr >/dev/null 2>&1 && printf 'herdr' ;;
   esac
 }
 
@@ -939,6 +992,49 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   fi
 }
 
+# --- startup delivery self-test ---------------------------------------------
+# Prove ONE injection round-trips into the supervisor pane before away mode is
+# reported active. Away mode's whole promise is that escalations reach the
+# captain's session; upstream #2917 kept that promise for five days while
+# delivering zero of 39 escalations, because nothing ever exercised the delivery
+# path at entry. The payload is a marked no-op the captain's session recognises
+# as operational input and can discard.
+#
+# The busy guard is bypassed deliberately: the daemon is started from inside the
+# launching turn, so the pane is legitimately mid-turn at this exact moment and
+# the harness queues the text until that turn ends. The composer guard still
+# runs, so nothing merges with unsent text.
+#
+# The result is durable, not a log line: bin/fm-afk-launch.sh's `verify` reads it
+# and fails away-mode entry loudly when delivery could not be proven.
+delivery_selftest() {  # <state>
+  local state=$1 record="$1/.subsuper-delivery-selftest" target backend
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  local deadline attempt=0
+  rm -f "$record" 2>/dev/null || true
+  afk_active "$state" || { printf 'skipped afk-inactive\n' > "$record"; return 0; }
+  # Bounded retry, not one shot: at entry the captain's own composer can still
+  # hold an unsent line, which the composer guard correctly defers on. Retrying
+  # for a short window distinguishes "not this instant" from "cannot deliver".
+  deadline=$(( $(date +%s) + ${FM_DELIVERY_SELFTEST_SECS:-45} ))
+  while :; do
+    attempt=$((attempt + 1))
+    if FM_INJECT_IGNORE_BUSY=1 inject_msg \
+         'away-mode delivery self-test - no action needed, discard this line' "$state"; then
+      printf 'ok %s\n' "$(_now)" > "$record"
+      log "delivery self-test passed: one injection confirmed into $target (attempt $attempt)"
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep "${FM_DELIVERY_SELFTEST_SLEEP:-3}"
+  done
+  printf 'failed %s\n' "$(_now)" > "$record"
+  log "ERROR: delivery self-test FAILED: could not confirm an injection into $target (backend=$backend); away mode cannot deliver escalations"
+  wedge_alarm_notify "away-mode entry FAILED its delivery self-test - escalations cannot reach $target" "$record"
+  return 1
+}
+
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
   [ -s "$f" ] || { echo 999999; return; }
@@ -991,7 +1087,10 @@ housekeeping() {  # <state>
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
+      # The escape must not re-run the guard that caused the deferral: past
+      # max-defer the busy verdict loses its veto (upstream #2917 - the escape
+      # re-ran the same false-positive guard 223 times and delivered nothing).
+      if FM_INJECT_IGNORE_BUSY=1 escalate_flush "$state"; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
@@ -1148,10 +1247,21 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
+  # (3) Busy-guard: never inject into an in-use supervisor pane. The verdict's
+  # source is logged so a repeat wedge names the signal that vetoed delivery
+  # instead of leaving one indistinguishable reason in the log (upstream #2917).
+  # FM_INJECT_IGNORE_BUSY is the bounded max-defer escape and the startup
+  # delivery self-test: past FM_MAX_DEFER_SECS a busy verdict is no longer
+  # allowed to veto delivery, because an unbounded silent no-op is strictly worse
+  # than a digest queued behind the current turn. The composer guard below still
+  # runs, so the pane's own text is never merged with.
   if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
+    if [ "${FM_INJECT_IGNORE_BUSY:-0}" = 1 ]; then
+      log "inject proceeding past busy guard (bounded escape): ${PANE_BUSY_SOURCE:-unspecified}"
+    else
+      log "inject deferred: supervisor pane busy (agent mid-turn; source=${PANE_BUSY_SOURCE:-unspecified})"
+      return 1
+    fi
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
@@ -1458,6 +1568,9 @@ fm_super_main() {
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
+  # A failed self-test records durably and alarms; the daemon stays up so
+  # bin/fm-afk-launch.sh's `verify` can read the verdict and roll entry back.
+  delivery_selftest "$STATE" || true
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""

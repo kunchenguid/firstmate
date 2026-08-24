@@ -165,7 +165,7 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
-  FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
+  FM_SUPERVISOR_TARGET="${SUPERVISOR_TARGET_OVERRIDE:-$SUPERVISOR_PANE}" \
   FM_SUPERVISOR_BACKEND=tmux \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
@@ -189,6 +189,31 @@ start_daemon() {
     echo "daemon stderr:" >&2; cat "$STATE_DIR/daemon.err" >&2
     fail "daemon did not start (no pid file after 6s)"
   }
+  # The daemon proves delivery once at startup before away mode may be reported
+  # active. That is a real injection into this pane, so wait for its verdict and
+  # then clear the submitted log, leaving each scenario the clean slate it
+  # asserts on. Scenarios that need the self-test itself assert before this.
+  [ "${SKIP_SELFTEST_WAIT:-0}" = 1 ] && return 0
+  wait_for_selftest_verdict ok || {
+    echo "daemon stderr:" >&2; cat "$STATE_DIR/daemon.err" >&2
+    fail "startup delivery self-test did not confirm an injection into the supervisor pane"
+  }
+  : > "$LOG_FILE"
+}
+
+# wait_for_selftest_verdict: poll the daemon's durable delivery verdict.
+wait_for_selftest_verdict() {  # <expected-verdict>
+  local want=$1 i=0 got
+  while [ "$i" -lt 60 ]; do
+    if [ -s "$STATE_DIR/.subsuper-delivery-selftest" ]; then
+      read -r got _ < "$STATE_DIR/.subsuper-delivery-selftest" || got=
+      [ "$got" = "$want" ] && return 0
+      [ -n "$got" ] && [ "$got" != ok ] && [ "$want" = ok ] && return 1
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
 }
 
 stop_daemon() {
@@ -337,10 +362,12 @@ test_scenario_b() {
   reset_state
   afk_enter "$STATE_DIR"
 
-  # Arm the swallow: the daemon's first Enter will be dropped by the shim.
-  touch "$STATE_DIR/.swallow-enter"
-
   start_daemon
+
+  # Arm the swallow AFTER startup so it drops the DIGEST's Enter: the daemon's
+  # startup delivery self-test is an earlier real injection and would otherwise
+  # absorb the swallow.
+  touch "$STATE_DIR/.swallow-enter"
 
   # Write a captain-relevant status to trigger a real escalation.
   echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
@@ -421,8 +448,45 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: away-mode entry delivery self-test -------------------------
+# Away mode must prove one injection reaches the captain pane BEFORE it is
+# reported active, and abort loudly when it cannot (upstream #2917: five days of
+# away mode, 39 escalations raised, none delivered). This owns the end-to-end
+# contract across the daemon's durable verdict and the launcher's verify gate.
+
+test_scenario_d() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  SKIP_SELFTEST_WAIT=1 start_daemon
+
+  wait_for_selftest_verdict ok \
+    || fail "Scenario D: the startup self-test did not record a proven delivery"
+  grep -q 'delivery self-test' "$LOG_FILE" \
+    || fail "Scenario D: the self-test payload never reached the supervisor pane"
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_AFK_VERIFY_TIMEOUT_SECS=10 "$ROOT/bin/fm-afk-launch.sh" verify \
+    || fail "Scenario D: verify rejected a proven delivery"
+  : > "$LOG_FILE"
+  stop_daemon
+
+  # Now the undeliverable case: the recorded captain pane no longer exists, so
+  # nothing can land and entry must refuse rather than report away mode active.
+  reset_state
+  afk_enter "$STATE_DIR"
+  SUPERVISOR_TARGET_OVERRIDE='%99999' SKIP_SELFTEST_WAIT=1 \
+    FM_DELIVERY_SELFTEST_SECS=2 FM_DELIVERY_SELFTEST_SLEEP=1 start_daemon
+  wait_for_selftest_verdict failed \
+    || fail "Scenario D: an unreachable captain pane did not record a failed verdict"
+  [ ! -s "$LOG_FILE" ] || fail "Scenario D: something was submitted to an unreachable pane"
+  if FM_STATE_OVERRIDE="$STATE_DIR" FM_AFK_VERIFY_TIMEOUT_SECS=5 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1; then
+    fail "Scenario D: verify accepted an entry whose delivery could not be proven"
+  fi
+  stop_daemon
+  pass "Scenario D: away-mode entry proves one delivery and refuses when it cannot"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

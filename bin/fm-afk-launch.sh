@@ -29,6 +29,12 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#   fm-afk-launch.sh verify    Wait (FM_AFK_VERIFY_TIMEOUT_SECS, default 90) for
+#                              the daemon's durable delivery self-test verdict and
+#                              exit non-zero when one injection could not be
+#                              proven to reach the captain pane. Run this after
+#                              either start path and BEFORE reporting away mode
+#                              active; on failure run `stop` to roll entry back.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -146,7 +152,38 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# fm_afk_launch_verify: away-mode entry is only real once ONE escalation has been
+# proven to land in the captain pane. The daemon writes that verdict durably
+# (delivery_selftest in bin/fm-supervise-daemon.sh); this waits for it and fails
+# loudly rather than letting away mode be reported active on an untested delivery
+# path (upstream #2917: five days of away mode, 39 escalations, 0 delivered).
+fm_afk_launch_verify() {
+  local record="$FM_AFK_LAUNCH_STATE/.subsuper-delivery-selftest" \
+        timeout=${FM_AFK_VERIFY_TIMEOUT_SECS:-90} waited=0 verdict
+  case "$timeout" in ''|*[!0-9]*) timeout=90 ;; esac
+  while [ "$waited" -lt "$timeout" ]; do
+    if [ -s "$record" ]; then
+      read -r verdict _ < "$record" || verdict=
+      case "$verdict" in
+        ok)
+          fm_afk_launch_log "away-mode delivery verified: one escalation confirmed into the captain pane"
+          return 0 ;;
+        skipped)
+          echo "afk: delivery self-test was skipped (away-mode flag absent when the daemon started); away mode is NOT verified" >&2
+          return 1 ;;
+        failed)
+          echo "afk: away-mode delivery self-test FAILED - escalations cannot reach the captain pane. Run 'bin/fm-afk-launch.sh stop' to roll entry back, then see state/.supervise-daemon.log." >&2
+          return 1 ;;
+      esac
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "afk: away-mode delivery self-test did not report within ${timeout}s; away mode is NOT verified. Run 'bin/fm-afk-launch.sh stop' to roll entry back." >&2
+  return 1
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -626,6 +663,13 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
+  # `verify` only polls a durable record, so it deliberately skips the launcher
+  # lock: holding it for the whole verify timeout would block the very `stop`
+  # rollback a failed verdict tells the caller to run.
+  if [ "${1:-start}" = verify ]; then
+    fm_afk_launch_verify
+    return
+  fi
   # Traps first, lock second. Acquiring before the handlers exist leaves a
   # window where a signal terminates this process by default action and leaks
   # the lock directory, which then blocks the next away-mode launch until the

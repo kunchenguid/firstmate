@@ -1266,6 +1266,130 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+# Upstream #2917: past max-defer the escape re-ran the SAME busy guard that had
+# been deferring, so a false-positive busy verdict suppressed delivery for hours
+# while the alarm dutifully fired. Past max-defer the busy verdict must lose its
+# veto; the composer guard must not.
+test_max_defer_delivers_past_a_busy_pane() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case maxdefer-busy-pane)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  # A rendered busy footer under an empty composer: the pane reads busy, yet
+  # its composer holds no text, exactly the shape the incident wedged on.
+  printf '╭─────╮\n│ >   │\n╰─────╯\nesc to interrupt\n' > "$dir/composer"
+  escalate_add "$state" "needs-decision: pick A"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+  grep -F 'Supervisor escalate' "$sent" >/dev/null \
+    || fail "max-defer did not deliver past a busy pane: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after the max-defer escape delivered"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired even though the escape delivered"
+  pass "max-defer escape delivers past a busy verdict instead of re-running the guard that deferred"
+}
+
+test_busy_guard_veto_is_bounded_not_permanent() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case busy-guard-bounded)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  printf '╭─────╮\n│ >   │\n╰─────╯\nesc to interrupt\n' > "$dir/composer"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_INJECT_CONFIRM_SLEEP=0.05 \
+    inject_msg "routine digest" "$state"; then
+    fail "an ordinary injection must still defer while the pane reads busy"
+  fi
+  [ ! -s "$sent" ] || fail "ordinary injection typed into a busy pane"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_INJECT_IGNORE_BUSY=1 inject_msg "escape digest" "$state" \
+    || fail "the bounded escape must deliver into the same busy-but-empty pane"
+  grep -F 'escape digest' "$sent" >/dev/null || fail "escape digest never reached the pane: $(cat "$sent")"
+  pass "busy guard vetoes an ordinary injection but yields to the bounded escape on the same pane"
+}
+
+# The escape must not weaken the guard that protects the pane's CONTENTS: a
+# busy pane whose composer holds human text is still never typed into.
+test_busy_guard_escape_still_respects_a_pending_composer() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case busy-escape-pending)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\nesc to interrupt\n' > "$dir/composer"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_INJECT_IGNORE_BUSY=1 inject_msg "escape digest" "$state"; then
+    fail "the bounded escape must not inject into a pending composer"
+  fi
+  [ ! -s "$sent" ] || fail "the bounded escape typed into a pending composer"
+  grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
+  pass "bounded busy-guard escape still defers on a pending composer"
+}
+
+# Layer 3: away mode must prove one injection round-trips before it is reported
+# active. Upstream #2917 kept away mode "on" for five days while delivering none
+# of 39 escalations, because nothing ever exercised the delivery path at entry.
+test_delivery_selftest_records_a_durable_ok() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case selftest-ok)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_INJECT_CONFIRM_SLEEP=0.05 \
+    delivery_selftest "$state" || fail "delivery_selftest failed on a deliverable pane"
+  grep -q '^ok ' "$state/.subsuper-delivery-selftest" \
+    || fail "delivery_selftest did not record a durable ok verdict: $(cat "$state/.subsuper-delivery-selftest" 2>/dev/null)"
+  [ -s "$sent" ] || fail "delivery_selftest recorded ok without sending anything"
+  pass "delivery_selftest proves one injection and records a durable ok"
+}
+
+test_delivery_selftest_records_failure_and_alarms() {
+  local dir state fakebin sent log
+  dir=$(make_supercase selftest-undeliverable)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"; log="$dir/alert.log"
+  afk_enter "$state"
+  WEDGE_ALARM_LAST_EPOCH=0
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_FAKE_TMUX_SENT="$sent" \
+    FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_DAEMON_PRIMARY_HARNESS=claude delivery_selftest "$state"; then
+    fail "delivery_selftest must fail when the captain pane cannot be reached"
+  fi
+  grep -q '^failed ' "$state/.subsuper-delivery-selftest" \
+    || fail "delivery_selftest did not record a durable failure verdict"
+  [ ! -s "$sent" ] || fail "delivery_selftest typed into an unreachable pane"
+  grep -F 'self-test' "$log" >/dev/null \
+    || fail "a failed delivery self-test did not raise the active alert: $(cat "$log" 2>/dev/null)"
+  pass "delivery_selftest records a durable failure and alarms when delivery cannot be proven"
+}
+
+test_afk_launch_verify_reads_the_durable_verdict() {
+  local dir state out
+  dir=$(make_supercase afk-launch-verify); state="$dir/state"
+
+  printf 'ok 1756000000\n' > "$state/.subsuper-delivery-selftest"
+  FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=2 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1 \
+    || fail "verify should succeed on a recorded ok verdict"
+
+  printf 'failed 1756000000\n' > "$state/.subsuper-delivery-selftest"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=2 "$ROOT/bin/fm-afk-launch.sh" verify 2>&1); then
+    fail "verify must exit non-zero on a recorded failure"
+  fi
+  case "$out" in *stop*) : ;; *) fail "a failed verify must name the rollback command: $out" ;; esac
+
+  rm -f "$state/.subsuper-delivery-selftest"
+  if FM_STATE_OVERRIDE="$state" FM_AFK_VERIFY_TIMEOUT_SECS=1 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1; then
+    fail "verify must exit non-zero when no verdict is ever recorded"
+  fi
+  pass "fm-afk-launch verify passes on a proven delivery and fails loudly otherwise"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -1500,13 +1624,27 @@ test_wedge_alarm_auto_darwin_selects_osascript() {
   pass "auto resolves to the macOS osascript notifier on Darwin (default-on)"
 }
 
-test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
-  local dir log
-  dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"
-  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
+# Upstream #2917 spent 86 alarms logging that Linux had no channel at all while
+# the herdr CLI was installed the whole time, so `auto` now uses herdr's own
+# notification surface off macOS and only reports "no channel" when neither
+# notifier binary exists.
+test_wedge_alarm_auto_non_darwin_uses_herdr_when_installed() {
+  local dir log fakebin
+  dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"; fakebin="$dir/fakebin"
+  printf '#!/bin/sh\nexit 0\n' > "$fakebin/herdr"; chmod +x "$fakebin/herdr"
+  PATH="$fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
     wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
-  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
-  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+  grep -F 'herdr' "$log" >/dev/null \
+    || fail "auto did not resolve to the installed herdr notifier off macOS: $(cat "$log")"
+
+  # With neither notifier binary present, auto selects nothing and the daemon
+  # says so rather than pretending an alert went out.
+  rm -f "$fakebin/herdr"
+  : > "$log"
+  PATH="$fakebin:/usr/bin:/bin" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  [ ! -s "$log" ] || fail "auto emitted an alert with no notifier binary installed: $(cat "$log")"
+  pass "auto off macOS uses an installed herdr notifier and selects nothing when none exists"
 }
 
 test_wedge_alarm_config_file_multi_channel() {
@@ -1760,16 +1898,71 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
-test_pane_is_busy_herdr_native_busy_state() {
+# Upstream #2917: a single uncorroborated busy signal vetoed delivery for 7h16m
+# against a pane that was verifiably idle. Both signals can over-report, so a
+# busy verdict now needs corroboration and a legible idle on either signal wins.
+# Each case drives the two signals apart deliberately and asserts the verdict
+# names the signal it came from, so no case can go quietly vacuous.
+test_pane_busy_verdict_requires_corroboration() {
+  local dir busy_row idle_row
+  dir=$(make_supercase primary-busy-corroboration)
+  busy_row='esc to interrupt'
+  idle_row='> ready'
+
+  # want_native/want_row are deliberately named so they cannot be shadowed by
+  # pane_busy_verdict's own locals when bash resolves them inside these stubs.
+  _verdict() {  # <native-signal> <rendered-row>
+    local want_native=$1 want_row=$2
+    (
+      fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf '%s' "$want_native"; }
+      fm_backend_capture() { [ -n "$want_row" ] || return 1; printf '%s\n' "$want_row"; }
+      FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_busy_verdict "default:w1:p2" herdr
+    )
+  }
+
+  local out
+  out=$(_verdict busy "$busy_row")
+  case "$out" in busy*native*rendered*) : ;; *) fail "both signals busy should read busy from both: $out" ;; esac
+
+  out=$(_verdict busy "$idle_row")
+  case "$out" in idle*native-busy*rendered*idle*) : ;; *) fail "a native busy contradicted by a rendered idle must read idle: $out" ;; esac
+
+  out=$(_verdict idle "$busy_row")
+  case "$out" in idle*rendered-busy*native*idle*) : ;; *) fail "a rendered busy contradicted by a native idle must read idle: $out" ;; esac
+
+  out=$(_verdict busy '')
+  case "$out" in busy*native-only*) : ;; *) fail "an unreadable pane must not cancel a native busy: $out" ;; esac
+
+  out=$(_verdict unknown "$busy_row")
+  case "$out" in busy*rendered-only*) : ;; *) fail "a rendered busy with no native agent-state must read busy (the tmux path): $out" ;; esac
+
+  out=$(_verdict unknown "$idle_row")
+  case "$out" in idle*) : ;; *) fail "no busy signal at all must read idle: $out" ;; esac
+
+  unset -f _verdict
+  pass "pane_busy_verdict: busy needs corroboration, a legible idle on either signal wins, and each verdict names its signal"
+}
+
+# pane_is_busy is the predicate every caller uses; it must agree with the verdict
+# and publish the signal so a deferral log can name what vetoed delivery.
+test_pane_is_busy_publishes_verdict_source() {
   local dir
-  dir=$(make_supercase primary-herdr-busy)
+  dir=$(make_supercase primary-busy-source)
   (
-    fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
-    fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf 'esc to interrupt\n'; }
     FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
-      || fail "pane_is_busy should report busy from herdr's native busy_state"
-  ) || fail "herdr native-busy pane_is_busy subshell failed"
-  pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
+      || fail "pane_is_busy should report busy when both signals agree"
+    [ -n "$PANE_BUSY_SOURCE" ] || fail "pane_is_busy did not publish the verdict source"
+
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf '> ready\n'; }
+    if FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "pane_is_busy must report idle when a native busy is contradicted by a rendered idle"
+    fi
+    case "$PANE_BUSY_SOURCE" in *contradicted*) : ;; *) fail "verdict source should name the contradiction: $PANE_BUSY_SOURCE" ;; esac
+  ) || fail "pane_is_busy verdict-source subshell failed"
+  pass "pane_is_busy: agrees with pane_busy_verdict and publishes its signal for the deferral log"
 }
 
 test_primary_busy_guard_is_harness_scoped() {
@@ -1987,6 +2180,12 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
+test_max_defer_delivers_past_a_busy_pane
+test_busy_guard_veto_is_bounded_not_permanent
+test_busy_guard_escape_still_respects_a_pending_composer
+test_delivery_selftest_records_a_durable_ok
+test_delivery_selftest_records_failure_and_alarms
+test_afk_launch_verify_reads_the_durable_verdict
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
@@ -2002,7 +2201,7 @@ test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position
 test_wedge_alarm_auto_darwin_selects_osascript
-test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_auto_non_darwin_uses_herdr_when_installed
 test_wedge_alarm_config_file_multi_channel
 test_wedge_alarm_failing_channel_degrades_gracefully
 test_wedge_alarm_hung_channel_times_out_and_falls_through
@@ -2016,7 +2215,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
-test_pane_is_busy_herdr_native_busy_state
+test_pane_busy_verdict_requires_corroboration
+test_pane_is_busy_publishes_verdict_source
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
