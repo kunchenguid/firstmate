@@ -118,7 +118,7 @@ Crosscheck runs eligible entries in configured order, advancing to the next only
 List more than one entry per supported client so a single unavailable account cannot block the gate.
 Codex binds both `CODEX_HOME` and `HOME` to the selected reviewer path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.
 Pi creates a disposable private `HOME` whose `.pi/agent` resolves to the selected reviewer path, binds `PI_CODING_AGENT_DIR` to it, requires the credential its lane calls for before launch (an `openai-codex` OAuth entry in `auth.json` for the codex-family fallback, or an api-key `models.json` declaring exactly that lane's provider slot for a cross-family lane), resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
-The verdict and its Bash-created receipt must report the executing reviewer selector and private `HOME`.
+The verdict must report the executing reviewer selector and private `HOME`; [`crosscheck.md`](crosscheck.md) owns the local-receipt requirement and the credentialless Azure receipt boundary.
 An absent or invalid reviewer file blocks Crosscheck and merge.
 See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.
 

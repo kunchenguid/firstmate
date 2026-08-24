@@ -1961,7 +1961,8 @@ Do not include `receipt_path` as a pre-staged file; its helper must create that 
 The controller will execute each accepted reproduction in a fresh networkless credentialless Azure tool VM and replay it in another fresh verifier VM.
 Every helper must be self-contained, must create any declared receipt itself, and must use no network or reviewer-only environment.
 Its command must be exactly `bash --noprofile --norc <test_path> {snapshot_value['base_sha']} {snapshot_value['head_sha']}`, and the helper must use those two positional SHA arguments for its exact diff.
-For the verdict receipt, record the schema's fixed model execution-home and account-home constants as literal reviewed identity values; do not substitute the later tool VM's HOME.
+For the verdict receipt, record its distinctive marker and both exact SHAs.
+The controller binds the model compartment's execution-home and account-home separately, so the later credentialless tool VM's HOME and account selector are not model-identity evidence.
 If the packet is insufficient for a trustworthy conclusion, return a suspicion instead of inventing evidence.
 
 <AZURE_EXACT_HEAD_REVIEW_PACKET_UNTRUSTED>

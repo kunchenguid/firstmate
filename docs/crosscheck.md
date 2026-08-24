@@ -70,7 +70,8 @@ It is not compared with task metadata and does not establish an author-account i
 Missing or failed Pi author-account capture therefore has no effect on reviewer selection, review admissibility, the durable verdict, or merge verification.
 The former `config/crosscheck-legacy-author-admissions.json` path existed only to work around the removed author-identity refusal and is no longer read.
 
-Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
+Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a local reviewer's Bash-created receipt to report the selector and actual private `HOME`.
+For Azure reviews, the controller binds the model compartment identity independently, while the later credentialless tool and verifier receipts bind only their distinctive marker and the exact base and head SHAs.
 For Pi, the terminal event must also report the exact provider slot and model selector that the roster requested.
 A run that reports the historical Fast selector, another provider, or no model identity is a tool failure rather than a regular-lane verdict.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
@@ -254,11 +255,12 @@ Only `blocking` is a review verdict about code.
 New findings must supply a helper under `.crosscheck/reproductions/`, a command naming that helper, an expected exit code, and a distinctive output marker.
 Crosscheck executes the command itself and stores its actual exit and bounded output in the ledger.
 Every verdict artifact must also carry one verdict-level reproduction whose command names the exact base and head SHAs.
-The reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
+The local reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
+In Azure static-packet mode, the model proposes the helper and the controller runs it in separate credentialless tool and verifier VMs, so that remote receipt proves its marker and both exact SHAs without pretending to observe the model compartment's private paths.
 Crosscheck inspects that receipt before independently re-executing the helper, then stores the receipt digest and bounded content with the verdict.
 A missing or failed verdict-level reproduction is a `tool-failure`, so a reading-only concern from a reviewer with a dead command tool can never become a blocking code verdict.
 The gate's re-execution is deliberately independent: it re-runs the helper itself in the review checkout with no network and none of the reviewer's provider credentials or account environment.
-Reviewer helpers must therefore be self-contained and must not require reviewer-only variables to be set, even though the receipt they write records `HOME` and the provider account selector.
+Reviewer helpers must therefore be self-contained and must not require reviewer-only variables to be set, even when a local receipt records `HOME` and the provider account selector.
 That asymmetry is the trap this contract exists to name: a helper that reads those variables unguarded under `set -u` succeeds for the reviewer and fails for the gate.
 Every evidence-execution refusal carries the command's own bounded output, because a bare unexpected exit reads as a substantive verdict about the code when it is often a failure to execute at all.
 The post-review integrity check reads `git status --porcelain --untracked-files=normal`, not `--untracked-files=all`.

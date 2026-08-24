@@ -4429,6 +4429,78 @@ PY
   pass "all reviewer evidence shares one bounded execution deadline"
 }
 
+test_remote_receipt_does_not_impersonate_model_environment() {
+  local case_dir
+  case_dir="$TMP_ROOT/remote-receipt-identity"
+  mkdir -p "$case_dir/proofs"
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$case_dir" <<'PY' \
+    || fail "remote receipt inherited the credentialed model environment"
+import importlib.util
+from pathlib import Path
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+receipts = []
+
+
+class RemoteEvidence:
+    batch_deadline = time.monotonic() + 60
+
+    def __call__(self, _value, _review_dir, _label, _deadline, *, receipt=None):
+        receipts.append(receipt)
+        return {"actual_exit": 0, "output": "remote-ok"}
+
+
+base_sha = "b" * 40
+head_sha = "a" * 40
+review = {
+    "executed_reproduction": {
+        "receipt_path": ".crosscheck/reproductions/receipt.txt",
+        "receipt_contains": "receipt-marker",
+        "test_path": ".crosscheck/reproductions/repro.sh",
+        "command": f"bash .crosscheck/reproductions/repro.sh {base_sha} {head_sha}",
+        "expected_exit": 0,
+        "output_contains": "remote-ok",
+    },
+    "finding_updates": [],
+    "new_findings": [],
+    "suspicions": [],
+    "summary": "remote receipt identity test",
+    "citations": [],
+}
+snapshot = {
+    "base_sha": base_sha,
+    "head_sha": head_sha,
+    "base_branch_sha": head_sha,
+    "claims_sha256": "c" * 64,
+}
+config = {
+    "execution_home": "/var/lib/fm-crosscheck-model/home",
+    "executing_account_home": "/var/lib/fm-crosscheck-model/account",
+}
+_ledger, run = module.apply_review(
+    {"findings": [], "runs": []},
+    review,
+    Path(sys.argv[2]),
+    Path(sys.argv[2]) / "proofs",
+    snapshot,
+    config,
+    evidence_executor=RemoteEvidence(),
+)
+assert run["state"] == "clear", run
+assert receipts == [{
+    "path": ".crosscheck/reproductions/receipt.txt",
+    "contains": ["receipt-marker", base_sha, head_sha],
+}], receipts
+PY
+  pass "remote receipts bind exact evidence without impersonating the model VM"
+}
+
 test_artifacts_cannot_escape_designated_subtrees() {
   local record case_dir base head rc
   record=$(make_case escaped-reproduction)
@@ -5981,6 +6053,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
   test_symlinked_named_test_cannot_hide_test_mutation
   test_evidence_batch_item_limit_precedes_execution
   test_evidence_batch_has_aggregate_deadline
+  test_remote_receipt_does_not_impersonate_model_environment
   exit 0
 fi
 
@@ -6051,6 +6124,7 @@ test_installed_sandbox_denies_shared_private_tmp
 test_symlinked_named_test_cannot_hide_test_mutation
 test_evidence_batch_item_limit_precedes_execution
 test_evidence_batch_has_aggregate_deadline
+test_remote_receipt_does_not_impersonate_model_environment
 test_artifacts_cannot_escape_designated_subtrees
 test_reviewer_output_uses_separate_capture_limit
 test_reviewer_capture_override_is_validated

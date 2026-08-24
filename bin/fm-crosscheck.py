@@ -5148,9 +5148,17 @@ def apply_review(
             receipt_contains,
             snapshot_value["base_sha"],
             snapshot_value["head_sha"],
-            config["execution_home"],
-            config["executing_account_home"],
         ]
+        # A local receipt observes the credentialed reviewer's real HOME and
+        # account selector. An Azure evidence VM is intentionally
+        # credentialless and has a different HOME, while the controller binds
+        # the model compartment's identity independently. Requiring the tool
+        # VM to echo model-only paths would prove only a copied literal and
+        # makes a correct isolated replay impossible.
+        if evidence_executor is None:
+            receipt_markers.extend(
+                [config["execution_home"], config["executing_account_home"]]
+            )
         if evidence_executor is not None:
             execution_proof = execute_bound_reproduction(
                 {

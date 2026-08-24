@@ -299,6 +299,8 @@ for malformed in (
         raise AssertionError(f"Pi evidence normalization admitted {malformed!r}")
 assert "Your final response must satisfy the supplied JSON schema" in host_prompt
 assert "The constrained verdict submitter is the only enabled tool." in prompt
+assert "credentialless tool VM's HOME and account selector are not model-identity evidence" in prompt
+assert "record the schema's fixed model execution-home" not in prompt
 assert commands[0][0] == [
     "git", "-C", "/unused-review-checkout", "diff", "--no-ext-diff",
     "--no-renames", snapshot["base_sha"], snapshot["head_sha"], "--",
