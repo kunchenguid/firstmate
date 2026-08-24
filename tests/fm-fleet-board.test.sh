@@ -67,7 +67,17 @@ SH
 chmod +x "$FAKE_ROOT/bin/fm-fleet-snapshot.sh" "$FAKE_ROOT/bin/fm-inbox.sh"
 
 SERVER_PID=''
+RECYCLED_PID=''
+LIFE_HOME=''
 cleanup_server() {
+  if [ -n "$LIFE_HOME" ]; then
+    FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+      FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --stop >/dev/null 2>&1 || true
+  fi
+  if [ -n "$RECYCLED_PID" ] && kill -0 "$RECYCLED_PID" 2>/dev/null; then
+    kill "$RECYCLED_PID" 2>/dev/null || true
+    wait "$RECYCLED_PID" 2>/dev/null || true
+  fi
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
@@ -198,3 +208,28 @@ if FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   fail "stopped application still reported healthy"
 fi
 pass "background lifecycle reuses verified identity and stops only that instance"
+
+sleep 30 &
+RECYCLED_PID=$!
+jq -n --argjson pid "$RECYCLED_PID" '{
+  schema:"fm-fleet-board-runtime.v1",
+  instance:"stale-runtime-instance",
+  pid:$pid,
+  port:1,
+  url:"http://127.0.0.1:1/"
+}' > "$LIFE_HOME/state/fleet-board/runtime.json"
+recovered_url=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+  FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --start) \
+  || fail "background lifecycle did not recover from a reused stale PID"
+kill -0 "$RECYCLED_PID" 2>/dev/null \
+  || fail "lifecycle recovery signaled the unrelated process that reused a stale PID"
+stop_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+  FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --stop) \
+  || fail "recovered background lifecycle stop failed"
+[ "$stop_out" = stopped ] || fail "recovered stop returned an unexpected result: $stop_out"
+kill "$RECYCLED_PID" 2>/dev/null || true
+wait "$RECYCLED_PID" 2>/dev/null || true
+RECYCLED_PID=''
+assert_contains "$recovered_url" "http://127.0.0.1:" \
+  "lifecycle recovery did not return the replacement board URL"
+pass "stale runtime records recover safely when their PID belongs to another process"

@@ -342,11 +342,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def structured_row($line):
       ($line | test("^[-*][[:space:]]+\\[[ xX]\\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+"))
       or ($line | test("^[-*][[:space:]]+\\*\\*[^*]+\\*\\*[[:space:]]+-[[:space:]]+"));
+    def risk_marker_index($lines):
+      ([range(0; ($lines | length)) as $i
+        | select($lines[$i] == "Risk assessment recorded by fm-task-risk.")
+        | $i][0] // null);
     def task_risk:
       .body_lines as $lines
-      | ([range(0; ($lines | length)) as $i
-          | select($lines[$i] == "Risk assessment recorded by fm-task-risk.")
-          | $i][0] // null) as $i
+      | risk_marker_index($lines) as $i
       | if $i == null then
           {level:"unknown",rationale:null,source:"absent"}
         else
@@ -362,9 +364,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         end;
     def context_body_lines:
       .body_lines as $lines
-      | ([range(0; ($lines | length)) as $i
-          | select($lines[$i] == "Risk assessment recorded by fm-task-risk.")
-          | $i][0] // null) as $start
+      | risk_marker_index($lines) as $start
       | if $start == null then $lines
         else
           ($start + 1) as $next

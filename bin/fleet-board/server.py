@@ -703,6 +703,34 @@ def process_exists(pid: Any) -> bool:
     return True
 
 
+def process_matches_runtime(runtime: dict[str, Any]) -> bool:
+    """Distinguish this server from an unrelated process that reused its PID."""
+    pid = runtime.get("pid")
+    instance = runtime.get("instance")
+    if not process_exists(pid) or not isinstance(instance, str) or not instance:
+        return False
+    try:
+        completed = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            text=True,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    command = completed.stdout.strip() if completed.returncode == 0 else ""
+    server_path = str(pathlib.Path(__file__).resolve())
+    instance_argument = re.compile(
+        rf"(?:^|\s)--instance\s+{re.escape(instance)}(?:\s|$)"
+    )
+    return (
+        server_path in command
+        and re.search(r"(?:^|\s)--serve(?:\s|$)", command) is not None
+        and instance_argument.search(command) is not None
+    )
+
+
 def atomic_runtime(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
@@ -766,8 +794,11 @@ def start(root: pathlib.Path, home: pathlib.Path, port: int) -> dict[str, Any]:
         current = read_runtime(runtime_path)
         if current and health(current):
             return current
-        if current and process_exists(current.get("pid")):
-            raise BoardError("A fleet-board process exists but did not prove its identity; refusing to replace it")
+        if current and process_matches_runtime(current):
+            raise BoardError(
+                "The recorded fleet-board process is still alive but unhealthy; "
+                f"refusing to replace it. Inspect {runtime_path}"
+            )
         runtime_path.unlink(missing_ok=True)
         log_path = directory / "server.log"
         if log_path.exists() and log_path.stat().st_size > 1_048_576:
@@ -815,7 +846,13 @@ def stop(home: pathlib.Path) -> bool:
             if not process_exists(current.get("pid")):
                 runtime_path.unlink(missing_ok=True)
                 return False
-            raise BoardError("Fleet-board identity could not be verified; refusing to signal the recorded PID")
+            if not process_matches_runtime(current):
+                runtime_path.unlink(missing_ok=True)
+                return False
+            raise BoardError(
+                "The recorded fleet-board process is still alive but unhealthy; "
+                f"refusing to signal it. Inspect {runtime_path}"
+            )
         pid = current.get("pid")
         os.kill(pid, signal.SIGTERM)
         deadline = time.monotonic() + 8
