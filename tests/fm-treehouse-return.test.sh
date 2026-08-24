@@ -156,6 +156,111 @@ make_guard_case() {  # <name>
   printf '%s\n' "$case_dir"
 }
 
+fake_orca_bin() {  # <fakebin-dir>
+  cat > "$1/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  'status '*) printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  'worktree show') printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_ORCA_WT_PATH:?}" ;;
+  'worktree rm')
+    : > "${FM_ORCA_RM_MARKER:?}"
+    rm -rf "${FM_ORCA_WT_PATH:?}"
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/orca"
+}
+
+# An Orca task record: Orca owns the worktree and deletes it at teardown instead
+# of returning it to a Treehouse pool.
+write_orca_meta() {  # <case-dir> <task-id> <worktree> <project>
+  local case_dir=$1 task_id=$2 worktree=$3 project=$4
+  fm_write_meta "$case_dir/home/state/$task_id.meta" \
+    "window=fm-$task_id" \
+    "endpoint_task_id=$task_id" \
+    'terminal=term-7' \
+    "worktree=$worktree" \
+    "project=$project" \
+    'backend=orca' \
+    'orca_worktree_id=wt-1' \
+    'kind=ship' \
+    'mode=local-only'
+}
+
+run_orca_teardown() {  # <case-dir> <task-id> <worktree>
+  local case_dir=$1 task_id=$2 worktree=$3
+  FM_HOME="$case_dir/home" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/home/state" \
+  FM_DATA_OVERRIDE="$case_dir/home/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+  FM_ORCA_WT_PATH="$worktree" \
+  FM_ORCA_RM_MARKER="$case_dir/orca-worktree-removed" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" "$task_id" --force
+}
+
+test_orca_detached_commit_is_rescued_before_worktree_removal() {
+  local case_dir proj wt head out rescue_refs
+  case_dir=$(make_guard_case orca-detached)
+  fake_orca_bin "$case_dir/fakebin"
+  proj="$case_dir/project"
+  wt="$case_dir/orca-worktree"
+  fm_git_worktree "$proj" "$wt" fm/orca-branch
+  git -C "$wt" checkout -q --detach
+  git -C "$wt" commit -q --allow-empty -m unnamed-orca-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  write_orca_meta "$case_dir" orca-detached "$wt" "$proj"
+
+  out=$(run_orca_teardown "$case_dir" orca-detached "$wt" 2>&1) \
+    || fail "Orca teardown over a detached committed worktree failed: $out"
+  assert_present "$case_dir/orca-worktree-removed" "Orca teardown never removed its worktree"
+  rescue_refs=$(git -C "$proj" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue/orca-detached)
+  [ -n "$rescue_refs" ] || fail "Orca worktree deletion dropped an unreferenced commit: $out"
+  assert_contains "$out" 'RESCUED: committed work' \
+    "Orca deletion did not report its rescue"
+  pass "Orca worktree deletion rescues an unreferenced detached-head commit first"
+}
+
+test_orca_guard_refusal_preserves_the_worktree() {
+  local case_dir proj wt head out rc
+  case_dir=$(make_guard_case orca-refusal)
+  fake_orca_bin "$case_dir/fakebin"
+  proj="$case_dir/project"
+  wt="$case_dir/orca-worktree"
+  fm_git_worktree "$proj" "$wt" fm/orca-branch
+  git -C "$wt" checkout -q --detach
+  git -C "$wt" commit -q --allow-empty -m unnamed-orca-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  # A file at refs/firstmate/rescue/<id> blocks the <id>/<timestamp> ref below
+  # it, so this commit can be neither certified nor rescued. It points at the
+  # baseline, so it never makes HEAD durable by itself.
+  mkdir -p "$proj/.git/refs/firstmate/rescue"
+  git -C "$proj" rev-parse refs/heads/fm/orca-branch \
+    > "$proj/.git/refs/firstmate/rescue/orca-refusal"
+  write_orca_meta "$case_dir" orca-refusal "$wt" "$proj"
+
+  set +e
+  out=$(run_orca_teardown "$case_dir" orca-refusal "$wt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca teardown ignored an unrescuable commit: $out"
+  [ ! -e "$case_dir/orca-worktree-removed" ] \
+    || fail "guard refusal still let Orca delete the worktree: $out"
+  [ -d "$wt" ] || fail "guard refusal deleted the Orca worktree holding unreferenced commits: $out"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] \
+    || fail "preserved Orca worktree no longer holds its unreferenced commit"
+  assert_contains "$out" "$wt" "Orca guard refusal did not name the preserved worktree"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "Orca guard refusal did not report why the committed work could not be rescued"
+  pass "an Orca committed-work guard refusal preserves the worktree instead of deleting it"
+}
+
 test_broken_ref_store_still_rescues_detached_commit() {
   local case_dir repo wt head marker out rescue_refs
   case_dir=$(make_guard_case broken-ref-store)
@@ -356,6 +461,8 @@ test_guard_refusal_preserves_child_worktree_commits
 test_unrescuable_commit_reports_the_concrete_git_reason
 test_durable_branch_returns_even_with_an_unusable_task_id
 test_unusable_task_id_refuses_unrescuable_committed_work
+test_orca_detached_commit_is_rescued_before_worktree_removal
+test_orca_guard_refusal_preserves_the_worktree
 
 if [ -z "$TREEHOUSE" ]; then
   printf '%s\n' 'skip: treehouse not found'

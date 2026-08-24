@@ -2723,6 +2723,20 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+
+    # Orca deletes this worktree instead of returning it, and the branch drop
+    # above can leave the task's commits named by nothing, so the same
+    # committed-work guard runs here before the deletion: an unreferenced HEAD
+    # is rescued into refs/firstmate/rescue, and a reachability check that
+    # cannot be completed refuses the deletion outright. A stranded worktree is
+    # recoverable; commits deleted with it are not.
+    if ORCA_GUARD_OUT=$(fm_treehouse_return_guard "$ID" "$WT" 2>&1); then
+      [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT"
+    else
+      [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT" >&2
+      echo "REFUSED: the committed-work guard blocked Orca worktree removal for $ID; preserving $WT and every commit it still holds." >&2
+      exit 1
+    fi
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
