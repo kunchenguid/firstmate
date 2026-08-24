@@ -57,6 +57,7 @@ Repeated action request ids are deduplicated before reaching the Firstmate inbox
 
 The board keeps a short in-memory snapshot cache so multiple browser requests do not fan out into duplicate fleet reads.
 If a refresh fails after a successful read, it keeps the last good board visible and marks it stale with the failure reason.
+Actions remain available on those stale cards because they only queue an instruction, and the instruction records its stale provenance and requires Firstmate to revalidate canonical task state before acting.
 Registered-home bounds and omissions remain visible as warnings rather than silently hiding work.
 
 Runtime identity and logs live under `state/fleet-board` in the selected Firstmate home.

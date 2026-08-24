@@ -159,6 +159,23 @@ printf '%s' "$stale" | jq -e '
 ' >/dev/null || fail "snapshot failure did not retain and disclose the last-good board"
 pass "snapshot failures retain a visibly stale last-good board"
 
+stale_csrf=$(printf '%s' "$stale" | jq -r '.actions.csrf_token')
+stale_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
+response=$(curl -fsS -H "X-Firstmate-CSRF: $stale_csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$stale_payload" "${url}api/v1/actions") \
+  || fail "captain action on a stale last-good card was refused"
+printf '%s' "$response" | jq -e '
+  .queued == true and .duplicate == false and .observation == "stale-last-good"
+' >/dev/null || fail "stale action did not report its observation provenance"
+assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Board observation: stale-last-good" \
+  "stale action omitted its provenance from the Firstmate instruction"
+assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Revalidate the canonical task" \
+  "stale action did not require canonical revalidation"
+action_count=$(grep -o -- '--- action ---' "$HOME_ROOT/inbox.log" | wc -l | tr -d ' ')
+[ "$action_count" -eq 2 ] \
+  || fail "stale action did not reach the inbox exactly once (total actions: $action_count)"
+pass "stale last-good cards keep guarded actions available with revalidation provenance"
+
 kill "$SERVER_PID" 2>/dev/null || fail "could not stop the foreground fixture server"
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=''

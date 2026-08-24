@@ -604,8 +604,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         if len(text.encode("utf-8")) > MAX_ACTION_BYTES:
             raise BoardError("Action text is too long")
         board = self.server.cache.get(force=True)
-        if (board.get("health") or {}).get("stale"):
-            raise BoardError("Fleet state is stale; refresh recovery is required before sending an action")
+        observation = "stale-last-good" if (board.get("health") or {}).get("stale") else "fresh"
         card = next(
             (
                 item
@@ -633,8 +632,9 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 f"Home: {home_id}\n"
                 f"Task: {task_id}\n"
                 f"Action: {action}\n"
+                f"Board observation: {observation}\n"
                 f"{label}:\n{text}\n"
-                "Route this through the task's recorded authority, then update the canonical task state."
+                "Revalidate the canonical task and its authority before acting, then update canonical state."
             )
             env = os.environ.copy()
             env["FM_HOME"] = str(self.server.home)
@@ -655,7 +655,12 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 self.server.recent_actions.pop(request_id, None)
                 detail = compact(completed.stderr, 240) or f"exit {completed.returncode}"
                 raise BoardError(f"Firstmate did not accept the action: {detail}")
-            return {"queued": True, "duplicate": False, "request_id": request_id}
+            return {
+                "queued": True,
+                "duplicate": False,
+                "request_id": request_id,
+                "observation": observation,
+            }
 
 
 def runtime_paths(home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
