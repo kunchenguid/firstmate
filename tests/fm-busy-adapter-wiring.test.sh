@@ -279,6 +279,21 @@ test_omp_extension_stale_incarnation_rejected() {
   pass "omp extension events from a superseded incarnation are rejected as stale"
 }
 
+test_omp_remains_untrusted_until_lifecycle_proof() {
+  local state id=busy-omp-untrusted gen out
+  state="$TMP_ROOT/omp-untrusted/state"
+  mkdir -p "$state"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") \
+    || fail "could not arm the OMP untrusted-source fixture"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle \
+    --gen "$gen" --source omp-ext --event agent-end \
+    || fail "could not seed the OMP untrusted-source fixture"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "unknown omp-unverified" ] \
+    || fail "OMP must ignore an unverified semantic idle verdict, got '$out'"
+  pass "OMP operational verdicts remain unknown until live lifecycle proof"
+}
+
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
 # OpenCode plugin in a plain Node host and feed it one event per argument, in
 # order, through the same hooks.event entry OpenCode calls.
@@ -447,8 +462,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
-test_omp_extension_semantic_lifecycle
-test_omp_extension_stale_incarnation_rejected
+test_omp_remains_untrusted_until_lifecycle_proof
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

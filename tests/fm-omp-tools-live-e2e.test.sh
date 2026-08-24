@@ -19,7 +19,9 @@ pass() { printf 'ok - %s\n' "$1"; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/bin/fm-timeout-lib.sh"
 OMP_BIN=$(command -v omp) || fail "FM_OMP_TOOLS_LIVE_E2E=1 but omp is not installed"
-VERSION=$("$OMP_BIN" --version 2>/dev/null | tr -d '[:space:]')
+VERSION=$(fm_run_timed 5 "$OMP_BIN" --version 2>/dev/null) \
+  || fail "omp --version did not complete successfully within five seconds"
+VERSION=$(printf '%s\n' "$VERSION" | tr -d '[:space:]')
 PINNED_VERSION=omp/17.2.9
 [ "$VERSION" = "$PINNED_VERSION" ] \
   || fail "installed omp is '$VERSION', expected '$PINNED_VERSION'"

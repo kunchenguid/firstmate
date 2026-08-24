@@ -797,6 +797,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
   printf '1\n' > "$RESP/6.exit"
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ORCA_COLLISION_META="$state/$id.meta" FM_ORCA_COLLISION_ON='worktree create' \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
@@ -839,6 +840,7 @@ test_spawn_recovers_from_partial_orca_metadata_render() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-meta","path":"%s"},"terminal":{"handle":"term-partial-meta"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -874,6 +876,7 @@ test_spawn_recovers_from_partial_orca_metadata_render() {
   assert_present "$state/$id.meta" "failed Orca cleanup should publish a recovery record"
   assert_grep 'orca_allocation=worktree-only' "$state/$id.meta" \
     "partial metadata recovery must be marked cleanup-only"
+  set +e
   endpoint_out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
     "$ROOT" "$state/$id.meta" "$id" 2>&1)
   endpoint_status=$?
@@ -887,8 +890,8 @@ test_spawn_recovers_from_partial_orca_metadata_render() {
   pass "fm-spawn.sh --backend orca: partial metadata failure preserves cleanup-only recovery"
 }
 
-test_spawn_launches_omp_through_the_orca_backend() {
-  local proj wt data state config id out log fakebin
+test_spawn_refuses_dormant_omp_before_orca_allocation() {
+  local proj wt data state config id out log fakebin rc
   id="orcaompz1"
   proj="$TMP_ROOT/omp-project"
   wt="$TMP_ROOT/omp-wt"
@@ -902,33 +905,20 @@ test_spawn_launches_omp_through_the_orca_backend() {
   orca_case omp-spawn
   log="$LOG"
   fakebin="$FB"
-  # A stub omp answering only the pinned identity probe. The installed Oh My Pi
-  # asset is never executed and no omp session is ever started. The spawn also
-  # carries the explicit --model every omp launch requires; it is a structural
-  # fixture string, so no provider is contacted and no catalog is queried.
   fm_fake_version_tool "$fakebin" omp FM_FAKE_OMP_VERSION omp/17.2.9
-  printf '1\n' > "$RESP/1.exit"
-  printf '{"ok":true,"result":{"repo":{"id":"repo-omp"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-omp","path":"%s"},"terminal":{"handle":"term-omp"}}}\n' "$wt" > "$RESP/3.out"
+  set +e
   out=$( PATH="$fakebin:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-omp-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness omp --model anthropic/claude-sonnet-4-5 \
       --mode no-mistakes --yolo off --backend orca 2>&1 )
-  expect_code 0 $? "omp spawn on the Orca backend should succeed"$'\n'"$out"
-  assert_contains "$out" "spawned $id harness=omp kind=ship" "omp spawn did not report harness=omp"
-  # Orca stays the backend and the sole execution cockpit for omp.
-  assert_grep "harness=omp" "$state/$id.meta" "meta missing harness=omp"
-  assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
-  assert_grep "terminal=term-omp" "$state/$id.meta" "meta missing Orca terminal handle"
-  assert_grep "orca_worktree_id=wt-omp" "$state/$id.meta" "meta missing Orca worktree id"
-  assert_no_grep "traceparent=" "$state/$id.meta" "omp must not enable trace propagation"
-  assert_contains "$(cat "$log")" "FM_OMP_HARNESS=1" \
-    "omp launch did not reach the Orca terminal with the firstmate-owned marker"
-  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep" \
-    "omp launch did not carry the reduced approved tool surface through Orca"
-  rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh --backend orca: launches the omp candidate harness with Orca as the backend"
+  rc=$?
+  expect_code 1 "$rc" "dormant omp spawn should be refused"$'\n'"$out"
+  assert_contains "$out" "omp is dormant until ATX-2170" \
+    "dormant omp refusal did not identify the lifecycle verification gate"
+  [ ! -s "$log" ] || fail "dormant omp refusal allocated or dispatched through Orca"
+  assert_absent "$state/$id.meta" "dormant omp refusal wrote task metadata"
+  pass "fm-spawn.sh --backend orca: refuses dormant omp before allocation"
 }
 
 test_teardown_removes_the_orca_omp_endpoint() {
@@ -950,6 +940,7 @@ test_teardown_removes_the_orca_omp_endpoint() {
   # The per-task extension fm-spawn writes for an omp worker. Teardown must
   # remove it: a surviving file would leave live pilot state behind.
   printf '// omp extension\n' > "$state/$id.omp-ext.ts"
+  printf '{"retry":{}}\n' > "$state/$id.omp-config.json"
   # Seeded alongside it so the shared cleanup list is proven to still remove
   # Pi's own per-task extension rather than having been narrowed to omp.
   printf '// pi extension\n' > "$state/$id.pi-ext.ts"
@@ -996,6 +987,7 @@ SH
     "teardown did not remove the exact Orca worktree for an omp task"
   assert_absent "$state/$id.meta" "teardown should remove the omp task metadata"
   assert_absent "$state/$id.omp-ext.ts" "teardown must remove the omp per-task extension, leaving zero task state"
+  assert_absent "$state/$id.omp-config.json" "teardown must remove the omp per-launch config, leaving zero task state"
   assert_absent "$state/$id.pi-ext.ts" "teardown must still remove Pi's per-task extension"
   pass "fm-teardown.sh backend=orca: removes the exact endpoint and per-task extensions for an omp task"
 }
@@ -1665,7 +1657,7 @@ test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_recovery_publication_never_replaces_a_racing_task_record
-test_spawn_launches_omp_through_the_orca_backend
+test_spawn_refuses_dormant_omp_before_orca_allocation
 test_teardown_removes_the_orca_omp_endpoint
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_spawn_recovers_from_partial_orca_metadata_render

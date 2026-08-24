@@ -537,44 +537,16 @@ Its plugin/hook engine reports `plugins are not available in this build` unless 
 
 ## omp (CANDIDATE, NOT LIVE-VERIFIED - Oh My Pi v17.2.9)
 
-Oh My Pi is a CANDIDATE CREWMATE and SCOUT adapter.
-The adapter is wired and deterministically proven by `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh` against a stub executable, but no live omp session has ever run under firstmate.
-Do not describe omp as live-verified, and do not dispatch real work on it, until the separately approved first live pilot passes.
-Until then it is dormant and reachable only through an explicit `--harness omp`; positional, configured, and raw omp launch forms are refused before mutation.
-omp is never a coordinator, a backend, or an implicit default; Orca stays the execution backend and firstmate stays the sole coding supervisor.
-`bin/fm-spawn.sh` refuses `--secondmate` on omp on adapter identity alone, whatever its model, before the watcher guard runs and before any lock, endpoint, worktree, state, or config mutation, and omp has no supervision protocol under `docs/supervision-protocols/`.
-The same early gate refuses any resolved backend other than `orca`, retaining that read-only resolution so the refusal and endpoint creation cannot drift.
-A `--relaunch` acquires the task lifecycle and metadata locks, binds one stable regular-file metadata snapshot, and applies those same model and backend gates plus final endpoint validation before watcher, endpoint, worktree, task-state, or config mutation.
-omp also forces effective trace propagation off and strips `TRACEPARENT` from the child; it does not inherit the home's frozen trace-context decision.
+Oh My Pi is a candidate crewmate/scout adapter, not a live-verified worker.
+It remains dormant: every runnable selection is refused until separately gated ATX-2170 empirically proves First Mate interrupt, exit, and relaunch control.
+Until that proof exists, OMP operational verdicts are untrusted and classify unknown; do not dispatch work or describe the adapter as supervised or live-ready.
 
-The facts below come from deterministic adapter proof plus a no-session installed-binary argument guard, NOT from a live agent session, which is exactly why the pilot is still required.
+The candidate is designed to preserve Orca as the only execution backend and First Mate as the only supervisor.
+Its capability boundary requires an explicit qualified provider/model, disables model and usage-aware fallback and clears fallback chains, forces trace propagation off, and excludes command execution, delegation, network, MCP, browser, and desktop tools.
+It is never a secondmate, coordinator, backend, implicit default, or live pilot.
 
-| Fact | Value |
-|---|---|
-| Binary | Executable `omp` from `PATH`, resolved to an absolute path. The launch refuses if it is absent, and refuses again unless `omp --version` reports exactly `omp/17.2.9`, so a drifted or substituted build never runs. That `--version` probe is the only invocation of the installed asset on the spawn path. |
-| Launch | Positional prompt, the Pi/grok/muse shape, so the brief rides the launch command. |
-| Autonomy | `--approval-mode yolo`, the targeted equivalent of claude's `--dangerously-skip-permissions`. |
-| Presentation | `--no-title` leaves the pane title firstmate's to own. |
-| Tools | A narrow allowlist of file read, file write, file edit, path matching, and content search. It deliberately excludes command execution, omp's `task` delegation, browser, computer, `web_search`, and MCP. `bin/fm-spawn.sh` owns the exact launch string; `tests/fm-omp-tools-live-e2e.test.sh` checks those names against the pinned installed binary without starting a session. |
-| Extensions | `--no-extensions` plus `--no-skills` drop every auto-discovered user/project extension and the ambient skill surface, so the single `-e state/<id>.omp-ext.ts` file firstmate writes is the ONLY extension loaded. |
-| Busy state | `omp-ext`, the per-task extension above. `agent_start` opens busy; the settle event closes to idle only when `ctx.isIdle()` confirms omp is no longer streaming; `turn_end` stays a wake notification touch. |
-| Environment marker | None of its own. `bin/fm-spawn.sh` clears every foreign marker `bin/fm-harness.sh` tests ahead of omp - `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `CURSOR_AGENT`, and `CURSOR_INVOKED_AS` - whose detection precedence would otherwise mask omp, and sets the firstmate-owned `FM_OMP_HARNESS=1` that `bin/fm-harness.sh` reads. The same `env -u` prefix also strips `TRACEPARENT`. Adding a marker ahead of omp in that resolver means adding it here too; cursor is the worked example, because cursor-agent does not clear its own markers. |
-| Liveness | `bin/backends/tmux.sh` classifies the exact process name `omp` as an agent. Never widen that to `*omp*`: `omp` is a substring of ordinary shell machinery such as `compinit`, `compdef`, and `composer`. |
-| Backend | `orca` only. The spawn resolves the backend read-only before any mutation, retains that value, and refuses any other resolved backend at the same early gate as the model pin. |
-| Model | A REQUIRED launch pin. Every explicit omp spawn must carry `--model <provider>/<model>`, validated structurally and passed through unchanged. No default, provider cycling, fallback, or model-catalog lookup occurs on the spawn path. A relaunch must supply the model again. `bin/fm-spawn.sh` owns the exact validation and ordering. |
-| Trace | Forced off. Spawn sets the effective decision to off, records no `traceparent=`, and strips `TRACEPARENT` from the child even when the home session froze trace on. |
-| Effort | Not wired. The effort axis stays outside this adapter until the live pilot pins it under its own approval, so no effort flag reaches the launch command. |
-
-### The settle event is named `agent_end` on this build
-
-The frozen adapter contract names Pi's `agent_settled` as the settle event.
-The pinned `omp/17.2.9` asset does not contain that string at all; it emits `agent_end`, carries a `willContinue` field, and exposes `ctx.isIdle()` as `() => !isStreaming` (verified by static inspection of the installed executable).
-`agent_settled` is the upstream Pi lineage's name for the same edge, which this fork renamed.
-The generated extension therefore registers ONE settle handler under BOTH names, each registration guarded, so whichever name the running build emits drives the same `ctx.isIdle()`-gated transition and a build that rejects an unknown event name cannot strand a task busy.
-The live pilot is what confirms which name actually fires; treat that as an open question until then.
-
-### Teardown removes the extension
-
-`bin/fm-teardown.sh` removes `state/<id>.omp-ext.ts` in both its top-level and its secondmate-child cleanup lists, alongside `state/<id>.pi-ext.ts` and the other per-task artifacts.
-An omp task therefore leaves no state behind, which is what the live pilot's zero-remaining-state proof depends on.
-`tests/fm-backend-orca.test.sh` seeds both extensions and asserts both are gone after a guarded teardown, so narrowing that list to one harness would fail.
+`bin/fm-spawn.sh --help` owns selection, ordering, exact launch flags, model/backend validation, version pinning, environment handling, and state paths.
+`bin/fm-omp-candidate-artifacts.sh` owns the per-launch fallback overlay and candidate lifecycle extension.
+`bin/fm-busy-lib.sh` owns the untrusted operational verdict.
+`bin/fm-teardown.sh` owns artifact cleanup.
+The deterministic behavior contract lives in `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh`; the no-session installed-binary argument guard lives in `tests/fm-omp-tools-live-e2e.test.sh`.

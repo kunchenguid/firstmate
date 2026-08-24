@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# tests/fm-omp-harness.test.sh - adapter tests for the CANDIDATE omp (Oh My Pi)
-# crewmate/scout harness wired by bin/fm-spawn.sh, bin/fm-harness.sh,
+# tests/fm-omp-harness.test.sh - policy and artifact tests for the dormant
+# CANDIDATE omp (Oh My Pi) crewmate/scout harness owned by bin/fm-spawn.sh, bin/fm-harness.sh,
 # bin/fm-busy-lib.sh, and bin/backends/tmux.sh.
 #
-# Every case here runs the REAL fm-spawn against a fake tmux pane and a STUB
+# Spawn cases run the REAL fm-spawn against a fake tmux pane and a STUB
 # `omp` executable on PATH. The installed Oh My Pi asset is never executed, no
 # provider call, model discovery, prompt, or TUI/RPC session happens, and no
-# live omp process is ever created. The stub answers `--version` only, which is
-# the single identity probe the adapter performs.
+# live omp process is ever created. The stub answers `--version` only, and the
+# runnable boundary remains closed pending ATX-2170 lifecycle proof.
 #
 # Two of the cases are POLICY MATRICES that report their own row counts rather
 # than a bare pass, so a silently shrinking matrix cannot read as green:
@@ -267,13 +267,13 @@ test_omp_accepts_only_the_exact_pinned_version() {
   : > "$stub_log"
   out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "omp spawn on the pinned version should succeed: $out"
-  assert_contains "$out" "spawned $id harness=omp kind=ship" "omp spawn did not report harness=omp"
-  # The ONLY invocation of the executable is the identity probe. Anything else
-  # would mean the adapter opened a session during deterministic verification.
+  [ "$?" -ne 0 ] || fail "the pinned OMP build must remain dormant: $out"
+  assert_contains "$out" "dormant until ATX-2170" "the pinned build did not reach the lifecycle gate: $out"
   [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
     || fail "adapter must invoke omp exactly once, with --version only, got: $(cat "$stub_log")"
-  pass "omp launches on the exact pinned version and probes the binary only with --version"
+  assert_absent "$HOME_DIR/state/$id.meta" "the dormant OMP selection published metadata"
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "the dormant OMP selection rendered an extension"
+  pass "the exact pinned OMP build is identity-probed but remains dormant"
 }
 
 test_omp_refuses_a_missing_binary() {
@@ -545,6 +545,54 @@ test_omp_forces_trace_off_and_clears_ambient_carrier() {
   pass "OMP forces effective trace propagation off and clears an ambient TRACEPARENT carrier"
 }
 
+test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
+  local state id gen config ext record turnend
+  state="$TMP_ROOT/candidate-artifacts/state"
+  id=omp-candidate-artifacts
+  config="$state/$id.omp-config.json"
+  ext="$state/$id.omp-ext.ts"
+  record="$state/$id.busy-state"
+  turnend="$state/$id.turn-ended"
+  mkdir -p "$state"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") || fail "could not arm the candidate artifact fixture"
+  "$ROOT/bin/fm-omp-candidate-artifacts.sh" config "$config" \
+    || fail "could not render the candidate OMP config"
+  node - "$config" <<'NODE' || fail "the candidate OMP config does not disable every fallback"
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const retry = value.retry;
+if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
+if (!retry.fallbackChains || Array.isArray(retry.fallbackChains) || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
+NODE
+  "$ROOT/bin/fm-omp-candidate-artifacts.sh" extension "$ext" \
+    "$ROOT/bin/fm-busy-event.sh" "$state" "$id" "$gen" "$turnend" \
+    || fail "could not render the candidate OMP extension"
+  EXT_PATH="$ext" node --experimental-strip-types --input-type=module <<'NODE' \
+    || fail "the candidate OMP continuation event did not execute"
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const module = await import(pathToFileURL(process.env.EXT_PATH).href);
+module.default({ on(name, handler) { handlers.set(name, handler); } });
+await handlers.get("agent_start")();
+await handlers.get("agent_end")({ willContinue: true }, { isIdle: () => true });
+await new Promise((resolve) => setTimeout(resolve, 150));
+NODE
+  assert_grep 'state=busy source=omp-ext event=agent-start' "$record" \
+    "willContinue=true incorrectly settled the candidate extension"
+  EXT_PATH="$ext" node --experimental-strip-types --input-type=module <<'NODE' \
+    || fail "the final OMP settle event did not execute"
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const module = await import(pathToFileURL(process.env.EXT_PATH).href);
+module.default({ on(name, handler) { handlers.set(name, handler); } });
+await handlers.get("agent_end")({ willContinue: false }, { isIdle: () => true });
+await new Promise((resolve) => setTimeout(resolve, 150));
+NODE
+  assert_grep 'state=idle source=omp-ext event=agent-end' "$record" \
+    "the final OMP settle event did not record idle"
+  pass "OMP candidate artifacts disable fallbacks and preserve busy across willContinue"
+}
+
 # --- refusal ordering probes ------------------------------------------------
 
 # Arms the two ordering probes in the current case home, and re-arms them between
@@ -573,7 +621,7 @@ test_ordering_probes_are_live() {
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   arm_ordering_probes "$id"
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+    "$id" "$PROJ_DIR" --harness claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "the held per-task spawn lock must refuse this spawn: $out"
   assert_contains "$out" "another spawn is already creating task $id" \
@@ -1180,11 +1228,8 @@ test_omp_relaunch_still_requires_the_model() {
   assert_absent "$guard_marker" "the relaunch backend refusal ran after the watcher guard"
   rm -rf "$HOME_DIR/state/.spawn-$id.lock"
 
-  # A complete Orca record passes both new relaunch preflight checks and OMP's
-  # adapter checks, then retains the existing recovery boundary: Orca still has
-  # no recovery-grade agent-state classifier, so the replacement is refused
-  # rather than risking a duplicate agent. That downstream verdict is the
-  # current valid-OMP relaunch behavior and must not be shadowed by this patch.
+  # A complete Orca record passes the metadata and adapter-shape checks but may
+  # not proceed past the lifecycle-verification gate.
   fm_write_meta "$meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
     "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
@@ -1193,29 +1238,28 @@ test_omp_relaunch_still_requires_the_model() {
     "$id" --relaunch --model "$OMP_MODEL")
   status=$?
   [ "$status" -ne 0 ] || fail "an OMP relaunch must retain its recovery-grade endpoint gate: $out"
-  assert_contains "$out" "has no recovery-grade agent-state classifier" \
-    "a valid OMP record did not pass both early preflights to the existing recovery gate: $out"
+  assert_contains "$out" "dormant until ATX-2170" \
+    "a valid OMP record did not stop at the lifecycle-verification gate: $out"
   assert_not_contains "$out" "regular, non-symlink metadata" \
     "a valid OMP record was incorrectly rejected by the new metadata preflight: $out"
-  pass "an OMP relaunch still requires a qualified model and Orca record, and valid metadata reaches the existing recovery gate"
+  pass "an OMP relaunch requires qualified metadata and remains dormant"
 }
 
 # --- busy-state trust table ------------------------------------------------
 
-test_omp_trusts_only_its_own_semantic_source() {
-  local trusted
+test_omp_semantic_source_remains_untrusted() {
+  local trusted out state id=omp-untrusted
   trusted=$(fm_busy_sources_for_harness omp)
-  case " $trusted " in
-    *" omp-ext "*) : ;;
-    *) fail "omp must trust its own omp-ext source, got '$trusted'" ;;
-  esac
-  case " $trusted " in
-    *" pi-ext "*) fail "omp must not inherit the Pi extension source" ;;
-  esac
-  fm_busy_source_trusted omp omp-ext || fail "omp-ext must be trusted for omp"
+  [ -z "$trusted" ] || fail "omp must trust no semantic source before ATX-2170, got '$trusted'"
+  ! fm_busy_source_trusted omp omp-ext || fail "omp-ext must remain untrusted before lifecycle proof"
   ! fm_busy_source_trusted omp pi-ext || fail "pi-ext must not be trusted for omp"
   ! fm_busy_source_trusted pi omp-ext || fail "omp-ext must not be trusted for pi"
-  pass "omp trusts exactly its own omp-ext semantic source"
+  state="$TMP_ROOT/omp-untrusted-state"
+  mkdir -p "$state"
+  out=$(fm_busy_classify tmux fake:w omp "$id" "$state" 'idle')
+  [ "$out" = "unknown omp-unverified" ] \
+    || fail "unverified OMP must classify unknown, got '$out'"
+  pass "OMP semantic events remain untrusted and classify unknown pending ATX-2170"
 }
 
 
@@ -1226,13 +1270,7 @@ test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_version_probe_is_hard_bounded
-test_omp_launch_argv_is_contained
-test_omp_extension_executes_with_encoded_supported_paths
-test_omp_records_exact_task_metadata
-test_omp_accepts_a_scout_launch
-test_omp_launch_carries_exactly_one_qualified_model_flag
-test_omp_requires_orca_before_any_mutation
-test_omp_forces_trace_off_and_clears_ambient_carrier
+test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix
 test_omp_selection_policy_matrix
@@ -1241,6 +1279,6 @@ test_relaunch_detects_a_path_swap_while_binding_the_snapshot
 test_relaunch_lifecycle_lock_precedes_watcher_guard
 test_valid_nonomp_relaunch_passes_the_preflight
 test_omp_relaunch_still_requires_the_model
-test_omp_trusts_only_its_own_semantic_source
+test_omp_semantic_source_remains_untrusted
 
 echo "all fm-omp-harness tests passed"

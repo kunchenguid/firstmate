@@ -162,8 +162,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
-#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state extension,
-#                  written by this script; outside the worktree like the pi one)
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts
+#     __OMPCONFIG__ absolute path to state/<task-id>.omp-config.json
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -182,8 +182,9 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
-# semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
+# omp (Oh My Pi) is dormant. Every runnable selection is refused until ATX-2170
+# records live proof that firstmate can interrupt, exit, and relaunch it.
+# bin/fm-omp-candidate-artifacts.sh owns the candidate-only config and extension.
 # Its executable must report exactly omp/17.2.9 through one portable,
 # hard-bounded five-second --version probe before launch preparation continues.
 # omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
@@ -191,8 +192,9 @@
 # segments of letters, digits, dot, underscore, or dash), passed through
 # byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
 # --provider flag. This script does not inspect where a caller obtained that
-# value and claims nothing about it; it reads no omp default and writes no
-# configuration. On a fresh spawn, an absent, unqualified, or malformed value
+# value and claims nothing about it; it reads no ambient omp default. Its
+# isolated per-launch overlay disables model fallback, usage-aware fallback,
+# and every fallback chain. On a fresh spawn, an absent, unqualified, or malformed value
 # refuses before the watcher guard and before any lock, endpoint, worktree,
 # state, config, registry, metadata, or extension mutation. On a relaunch, the
 # task lifecycle and metadata locks first bind one stable record; the same gate
@@ -464,6 +466,39 @@ require_omp_launch_model() {
 # delegation shape a firstmate primary must not stand up.
 refuse_omp_secondmate() {
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+}
+
+FM_OMP_REQUIRED_VERSION='omp/17.2.9'
+FM_OMP_VERSION_PROBE_SECONDS=5
+OMP_BIN=
+
+resolve_omp_binary() {
+  local candidate dir reported
+  candidate=$(command -v omp 2>/dev/null || true)
+  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
+    return 1
+  fi
+  case "$candidate" in
+    /*) ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
+      candidate="$dir/$(basename "$candidate")"
+      ;;
+  esac
+  reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
+  reported=$(printf '%s\n' "$reported" | head -n 1 | tr -d '[:space:]')
+  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
+    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+refuse_omp_unverified_lifecycle() {
+  echo "error: omp is dormant until ATX-2170 empirically verifies First Mate interrupt, exit, and relaunch control; refusing every runnable OMP launch" >&2
+  return 1
 }
 
 # omp is an Orca-only worker adapter. Resolve the same backend precedence used
@@ -789,6 +824,8 @@ if spawn_selection_is_omp; then
   fi
   require_omp_launch_model || exit 1
   require_omp_orca_backend || exit 1
+  OMP_BIN=$(resolve_omp_binary) || exit 1
+  refuse_omp_unverified_lifecycle || exit 1
 fi
 
 # Now the fresh-spawn watcher guard, which writes home state. Relaunch runs it
@@ -1447,6 +1484,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
     require_omp_launch_model || exit 1
     require_omp_orca_backend "$BACKEND" || exit 1
+    refuse_omp_unverified_lifecycle || exit 1
   fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
@@ -1601,10 +1639,8 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # omp (Oh My Pi): a positional prompt starts the supervised interactive session,
-    # the Pi/grok/muse shape this fork inherits. omp is a CANDIDATE crewmate/scout
-    # adapter pending its separately approved first live pilot, so every axis below
-    # is deliberately narrow.
+    # omp (Oh My Pi): this dormant candidate template cannot reach an endpoint
+    # until ATX-2170 verifies First Mate lifecycle control.
     # --approval-mode yolo is the autonomy flag an unattended crewmate needs, the
     # targeted equivalent of claude's --dangerously-skip-permissions.
     # --no-title leaves the pane title firstmate's to own, --no-extensions drops
@@ -1632,7 +1668,7 @@ launch_template() {
     # whole launch rather than narrowing silently. The portable suite pins this
     # exact string; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check
     # against the installed pinned binary.
-    # __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
+    # __OMPCONFIG__ is the isolated fallback-disabling overlay. __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
     # above refuses the spawn unless this exact launch was given a fully qualified
     # provider/model, so omp never selects a provider for itself. No
     # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
@@ -1646,7 +1682,7 @@ launch_template() {
     # pair is here: cursor-agent does not clear its own markers, so an omp
     # worker launched from a cursor primary would otherwise inherit them and
     # self-report cursor.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --config __OMPCONFIG__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1796,45 +1832,6 @@ resolve_kimi_binary() {
   return 1
 }
 
-# The one Oh My Pi release this adapter is pinned to. omp is a candidate adapter
-# whose first live pilot is still separately approval-gated, so the launch takes
-# the EXACT reported version and refuses anything else: an absent, drifted, or
-# substituted binary must fail loudly instead of silently running an unproven
-# build under a firstmate contract written against 17.2.9.
-# Deliberately a literal with NO environment override: a pin that any caller
-# could relax is not a pin. Moving to another release is a code change that
-# comes with fresh verification.
-FM_OMP_REQUIRED_VERSION='omp/17.2.9'
-FM_OMP_VERSION_PROBE_SECONDS=5
-
-# resolve_omp_binary: absolute path to the pinned `omp` on PATH, or a refusal.
-# The `--version` identity probe is the ONLY invocation of the installed asset
-# on this path - no provider call, model discovery, prompt, or session - and it
-# runs after the executable itself has been resolved.
-resolve_omp_binary() {
-  local candidate dir reported
-  candidate=$(command -v omp 2>/dev/null || true)
-  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
-    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
-    return 1
-  fi
-  case "$candidate" in
-    /*) ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
-      candidate="$dir/$(basename "$candidate")"
-      ;;
-  esac
-  reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
-  reported=$(printf '%s\n' "$reported" | head -n 1 | tr -d '[:space:]')
-  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
-    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
-    return 1
-  fi
-  printf '%s\n' "$candidate"
-}
-
 resolve_muse_binary() {
   local candidate dir
   candidate=$(command -v muse 2>/dev/null || true)
@@ -1978,7 +1975,7 @@ esac
 
 case "$LAUNCH" in
   *__OMPBIN__*)
-    OMP_BIN=$(resolve_omp_binary) || exit 1
+    [ -n "$OMP_BIN" ] || OMP_BIN=$(resolve_omp_binary) || exit 1
     LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
     ;;
 esac
@@ -2862,7 +2859,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|omp)
+    claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2990,54 +2987,10 @@ export default function (pi: any) {
 EOF
       ;;
     omp)
-      # Written OUTSIDE the worktree for the same reason as the pi extension: an
-      # explicit -e path outside the project loads without the fork's
-      # project-trust gate. Lives in state/, and --no-extensions on the launch
-      # command means this is the ONLY extension omp loads.
-      OMP_BUSY_EVENT_JS=$(javascript_string_literal "$FM_ROOT/bin/fm-busy-event.sh") || exit 1
-      OMP_STATE_JS=$(javascript_string_literal "$STATE_REAL") || exit 1
-      OMP_ID_JS=$(javascript_string_literal "$ID") || exit 1
-      OMP_BUSY_GEN_JS=$(javascript_string_literal "$BUSY_GEN") || exit 1
-      OMP_TURNEND_JS=$(javascript_string_literal "$TURNEND") || exit 1
-      cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state: "agent_start" -> busy when an agent run begins; the SETTLE
-// event -> idle only when ctx.isIdle() confirms omp is no longer streaming, so
-// auto-retries, tool loops, and queued continuations all keep the run
-// un-settled. "turn_end" fires at every inner turn boundary and stays a wake
-// NOTIFICATION touch for the watcher, never current-state truth.
-// The settle event is registered under BOTH names on purpose. The pinned
-// omp/17.2.9 asset emits "agent_end" (verified by static inspection of the
-// installed executable); "agent_settled" is the name the upstream Pi lineage
-// this fork came from uses. Registering both means whichever name the running
-// build actually emits drives the same handler, and each registration is
-// guarded so a build that rejects an unknown event name cannot break the
-// extension - and therefore cannot strand a task busy.
-import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
-  new Promise<void>((resolve) => {
-    execFile($OMP_BUSY_EVENT_JS, [
-      "apply", $OMP_STATE_JS, $OMP_ID_JS, state,
-      "--gen", $OMP_BUSY_GEN_JS, "--source", "omp-ext", "--event", event,
-    ], () => resolve());
-  });
-export default function (omp: any) {
-  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
-  const settled = (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
-    return busyEvent("idle", "agent-end");
-  };
-  for (const name of ["agent_end", "agent_settled"]) {
-    try {
-      omp.on(name, settled);
-    } catch (_err) {
-      // This build does not know that settle-event name; the other one covers it.
-    }
-  }
-  omp.on("turn_end", () => execFile("touch", [$OMP_TURNEND_JS]));
-}
-EOF
+      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" config "$STATE/$ID.omp-config.json" || exit 1
+      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" extension \
+        "$STATE/$ID.omp-ext.ts" "$FM_ROOT/bin/fm-busy-event.sh" \
+        "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" || exit 1
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
@@ -3327,6 +3280,7 @@ sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
+sq_ompconfig=$(shell_quote "$STATE/$ID.omp-config.json")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -3339,6 +3293,7 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
+LAUNCH=${LAUNCH//__OMPCONFIG__/$sq_ompconfig}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
