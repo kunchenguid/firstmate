@@ -269,6 +269,16 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Stow pass horizon (config/stow-pass-horizon)
+
+`config/stow-pass-horizon` is an optional local, gitignored presence flag that opts this home in to the pass-count decay horizon in the internal [`/stow` skill](../.agents/skills/stow/SKILL.md).
+Without it a `/stow` pass decays memory entries on their wall-clock horizons alone - 30 days for `aging`, 7 days for `perishable` - which is the default and unchanged behavior.
+With it, an entry is also stale after 10 passes (`aging`) or 3 passes (`perishable`) that evaluated it without reinforcing it, whichever horizon it reaches first.
+Opt in for a home that stows often enough that entries never sit unreinforced for a wall-clock horizon, so memory only grows against the startup-memory budget above; a home that stows rarely already exceeds its date horizon on a single pass and gains nothing.
+The flag is per home and is not inherited by secondmate homes, because stow cadence is a property of the home doing the stowing.
+Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
+The skill text owns the marker spelling, the tick order, and the reinforcement rule.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -737,6 +747,9 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract; `bin/fm-procevent-lavish.sh` is the first adapter and wraps only the currently published `lavish-axi poll` interface.
+That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times at 5 second intervals, so an internal retry never reaches the runner as a captured result.
+Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 0 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
+An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
