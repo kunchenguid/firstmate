@@ -65,52 +65,71 @@ Run these phases in order for every new analysis run.
 
 Reduce the number of separate queries before adding concurrency.
 Combine compatible metrics over the same scan with shared CTEs, conditional aggregation, or one persisted base DataFrame when doing so preserves semantics.
-For the remaining independent query Cells, set an explicit concurrency bound to the highest parallelism authorized for the queue and submit up to that bound rather than leaving capacity idle.
-Keep Spark initialization single-flight and terminally reconciled before any query fan-out.
+Parallelism is optional and is only safe for genuinely independent reads or aggregations.
+Keep queries sequential when they depend on ordering, shared mutable temp views, cache creation or eviction, or conflicting writes.
+Concurrent jobs share the same Spark and YARN resources, may contend with each other, and are not automatically faster.
+Do not claim a speedup without comparative timing evidence.
 
-Use one `magibook cell run` subprocess per query Cell so every submission retains a distinct Cell identity and returned task identity.
-Build argv arrays, keep `shell=False`, capture the JSON response, and never interpolate a shell command string.
-This reusable submission frame contains only placeholders:
+Keep Spark initialization single-flight and terminally reconciled before calling the parallel helper.
+The helper never initializes Spark, creates a SparkContext, or cancels remote work.
+Give every query a stable distinct key and a distinct pre-existing persistent Python Cell.
+Keep the protected registry path across retries because it binds each query key and content digest to its exact Cell and returned task id.
+The helper holds a non-blocking process lock beside that registry so two local orchestrators cannot submit from the same ownership record at once.
+If a prior submission is still pending or running, the helper polls that exact task instead of submitting another copy.
+If a submission may have reached MagiBook but returned no task id, ownership is ambiguous and the helper refuses to retry it automatically.
+
+Set `max_parallel` to the highest concurrency authorized for the queue.
+The helper probes overlap with no more than two tasks, expands only after it observes simultaneous running states, and falls back to sequential submission when overlap stays queued.
+An overlap rejection or ambiguous task state stops further submission and returns a clear capability result.
+The aggregate always retains individual success, failure, cancellation, timeout, and interruption outcomes, and any partial failure makes the overall result non-success.
+On failure or interruption the helper does not kill unrelated Spark work, and `remoteWorkRemaining` identifies every exact task that was not proven terminal.
+
+The CLI adapter launches argv arrays with `shell=False`, clears conventional proxy variables only in each child, and caps stdout and stderr retained from every process.
+Query source reaches `cell edit` only through mode-`0600` temporary files in a mode-`0700` temporary directory, and that directory is removed on every exit path.
+Pass known secrets through `sensitive_values` so CLI diagnostics are redacted, while query results remain in the persistent Cell output rather than entering the aggregate summary.
+The rendered Python Cell uses `spark.sql("""...""")`, bounds displayed rows, and prints the application id used for terminal reuse verification.
+
+Copy [`templates/parallel_queries.py`](templates/parallel_queries.py) beside the run driver and use its public interface with values from the captain-preference owner:
 
 ```python
-import concurrent.futures
 import json
-import subprocess
+from pathlib import Path
 
-REGION = "<REGION>"
-BOOK_UUID = "<BOOK_UUID>"
-QUERY_CELL_IDS = ["<QUERY_CELL_ID_1>", "<QUERY_CELL_ID_2>"]
-MAX_PARALLEL = int("<MAX_PARALLEL>")
+from parallel_queries import MagiBookCLI, QuerySpec, run_parallel_queries
 
 
-def magibook(*args):
-    return subprocess.run(
-        ["magibook", "--region", REGION, *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        shell=False,
-    )
+queries = [
+    QuerySpec(
+        key="<STABLE_QUERY_KEY_1>",
+        cell_id="<PERSISTENT_QUERY_CELL_ID_1>",
+        sql="SELECT 1 AS metric",
+    ),
+    QuerySpec(
+        key="<STABLE_QUERY_KEY_2>",
+        cell_id="<PERSISTENT_QUERY_CELL_ID_2>",
+        sql="SELECT 2 AS metric",
+    ),
+]
 
+aggregate = run_parallel_queries(
+    queries,
+    initialization=<TERMINAL_LIVE_INIT_RESULT>,
+    cli=MagiBookCLI(
+        "<EXPLICIT_REGION>",
+        sensitive_values=("<SENSITIVE_VALUE_IF_ANY>",),
+    ),
+    book_uuid="<BOOK_UUID>",
+    state_path=Path("<PRIVATE_PERSISTENT_QUERY_STATE_FILE>"),
+    max_parallel=int("<MAX_PARALLEL>"),
+    query_timeout=float("<QUERY_TIMEOUT_SECONDS>"),
+    overall_timeout=float("<OVERALL_TIMEOUT_SECONDS>"),
+)
 
-def submit(cell_id):
-    payload = json.loads(
-        magibook("cell", "run", BOOK_UUID, str(cell_id)).stdout
-    )
-    return {"cellId": str(cell_id), "taskId": str(payload["batch_task_id"])}
-
-
-worker_count = max(1, min(MAX_PARALLEL, len(QUERY_CELL_IDS)))
-with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-    submissions = list(pool.map(submit, QUERY_CELL_IDS))
-
-print(json.dumps({"submissions": submissions}, sort_keys=True))
+print(json.dumps(aggregate, ensure_ascii=False, sort_keys=True))
 ```
 
-Poll every returned task id with a separate argv call equivalent to `magibook("cell", "task-status", task_id)` until that exact task is terminal.
-Aggregate terminal status and bounded Cell output per `{cellId, taskId}` pair so a failure or slow query cannot be mistaken for another submission.
-Never duplicate a query submission merely because its task is pending or executing.
-If observation shows the shared Book or kernel serializes Cell execution, set the bound to one and continue sequentially instead of opening another SparkContext or creating duplicate tasks.
+Use a new stable query key when the intended SQL changes or when an explicitly authorized rerun should create a new remote task.
+Keep the same key and registry for process retries and observation retries.
 
 ## Four-state Spark model
 
@@ -129,6 +148,7 @@ It returns and prints a bounded machine-readable status carrying the application
 Fill every `<...>` placeholder from the captain-preference owner before running, and keep the captain's validated defaults; the init template preserves caller-supplied configuration and never silently rewrites it.
 
 - Init: [`templates/ensure_spark.py`](templates/ensure_spark.py) is the idempotent liveness check plus single initialization.
+- Parallel queries: [`templates/parallel_queries.py`](templates/parallel_queries.py) is the bounded subprocess runner plus persistent exact-task reconciliation.
 
 ## Evidence
 
@@ -139,4 +159,4 @@ View the recorded init Cell read-only if needed, but do not modify or run it as 
 
 Keep region defaults and cluster identifiers in the captain-preference owner, not here.
 When the CLI changes, prefer `magibook --help` over pinning flags in this skill.
-Change the templates through their files and let the colocated behavior test (`tests/fm-magibook-pyspark.test.sh`) keep the four-state logic honest.
+Change the templates through their files and let the colocated behavior test (`tests/fm-magibook-pyspark.test.sh`) keep the four-state and parallel orchestration logic honest.
