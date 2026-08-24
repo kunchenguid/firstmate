@@ -163,6 +163,151 @@ test_exited_pr_open_closes_pane_keeps_copy() {
   pass "exited worker with PR still open: pane closed, copy retained"
 }
 
+# make_herdr_case: a project/worktree fixture like make_case, but with no
+# tmux window - the herdr wrapped-input coverage below drives backend=herdr
+# through a canned fake `herdr` CLI instead of a real tmux pane.
+make_herdr_case() {  # <name> -> echoes case dir
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$case_dir/fakebin" "$case_dir/responses"
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b "fm/$name" "$case_dir/wt" main
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+# make_herdr_fakebin: a `herdr` stub that logs every call (unit-separated, to
+# $FM_HERDR_LOG) and answers `status --json` unconditionally, but otherwise
+# returns the canned response read from <case_dir>/responses/<n>.out (or
+# non-zero from <n>.exit), consumed IN CALL ORDER - same convention as
+# tests/fm-backend-herdr.test.sh's make_herdr_fakebin, duplicated here rather
+# than shared so this file's tmux-only cases stay untouched by herdr-only
+# fixture code.
+make_herdr_fakebin() {  # <case_dir>
+  cat > "$1/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+RESP="${FM_HERDR_RESPONSES:?}"
+COUNT_FILE="$RESP/.count"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+n=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$COUNT_FILE"
+if [ -f "$RESP/$n.exit" ]; then
+  exit "$(cat "$RESP/$n.exit")"
+fi
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+exit 0
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+run_herdr_teardown() {  # <case_dir> [args...]
+  local case_dir=$1
+  shift
+  FM_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_HERDR_LOG="$case_dir/herdr.log" \
+  FM_HERDR_RESPONSES="$case_dir/responses" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 "$@"
+}
+
+# The Herdr adapter has no logical-line-join primitive (unlike tmux's
+# `capture-pane -J`), so fm_backend_capture_joined falls back to its
+# row-oriented plain capture for it. A long unsubmitted command that
+# soft-wraps still splits across physical rows there, and a check that only
+# proves the LAST physical row is a bare trailing prompt glyph would wrongly
+# call that an empty composer - the same class of bug already fixed for tmux,
+# left open on Herdr (Greptile P1: task fm-close-exited-panes review, PR
+# #2970 - "Herdr reaches the same close logic through an unchanged
+# row-oriented capture"). fm_backend_capture_joined_reliable (bin/fm-backend.sh)
+# closes this by refusing to trust that fallback proof at all on Herdr: an
+# `unknown` composer verdict blocks the close outright, the same as a
+# genuine capture failure.
+test_herdr_unknown_composer_keeps_pane() {
+  local case_dir rc pane=w1:p2 target
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; return; }
+  case_dir=$(make_herdr_case herdr-wrapped-glyph)
+  make_herdr_fakebin "$case_dir"
+  target="default:$pane"
+
+  # Call 1: fm_backend_herdr_pane_agent_state's presence probe ("pane get").
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane" > "$case_dir/responses/1.out"
+  # Call 2: the agent probe on that pane - no registered agent, so the
+  # worker reads confirmed-exited (agent_state "dead"), same as a real
+  # crewmate process that already quit.
+  printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane" \
+    > "$case_dir/responses/2.out"
+  # Call 3: the composer's ANSI pane read. A bare trailing prompt glyph with
+  # nothing else in view is exactly the shape a real idle shell PS1 draws
+  # AND the shape the last physical row of a wrapped unsubmitted command
+  # ending in that glyph would also show - fm-composer-lib.sh cannot tell
+  # them apart from one physical row alone, which is why this must read
+  # `unknown` rather than `empty` (mirrors
+  # tests/fm-backend-herdr.test.sh:test_composer_state_unknown_when_no_composer_row_found).
+  printf '> \n' > "$case_dir/responses/3.out"
+  # Call 4: the fallback trailing-glyph-only proof's plain (row-oriented)
+  # capture - only reached, and only trusted, pre-fix. It models a real
+  # prompt row followed by a long unsubmitted command that soft-wrapped onto
+  # a second physical row ending in a lone '>' - without the reliable-join
+  # gate, inspecting just that last physical row would wrongly read as a
+  # bare trailing glyph with nothing after it and "prove" the composer
+  # empty, discarding the pending command on close.
+  printf 'user@host:~$ echo hello world\nxxxxxxxxxxxxxxxxxxxx>\n' > "$case_dir/responses/4.out"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=$target" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "backend=herdr" \
+    "herdr_session=default" \
+    "herdr_workspace_id=ws1" \
+    "herdr_tab_id=t1" \
+    "herdr_pane_id=$pane" \
+    'pr=https://github.com/example/repo/pull/7'
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "task work"
+  : > "$case_dir/treehouse.log"
+
+  set +e
+  run_herdr_teardown "$case_dir" --close-pane > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "close-pane closed a herdr pane whose composer could not be proven empty: $(cat "$case_dir/stdout")"
+  grep -q 'pending composer' "$case_dir/stderr" \
+    || fail "herdr unknown-composer refusal did not name pending composer text: $(cat "$case_dir/stderr")"
+  grep -q 'pane_closed=1' "$case_dir/state/task-x1.meta" \
+    && fail "herdr unknown-composer close-pane recorded pane_closed"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "close-pane returned the copy for a herdr unknown-composer refusal: $(cat "$case_dir/treehouse.log")"
+  pass "herdr backend, composer state unprovable: pane kept"
+}
+
 test_live_agent_keeps_pane() {
   local case_dir rc
   case_dir=$(make_case live-agent)
@@ -339,6 +484,7 @@ test_recorded_windows_skips_closed_panes() {
 test_exited_pr_open_closes_pane_keeps_copy
 test_unsubmitted_typed_text_keeps_pane
 test_wrapped_unsubmitted_glyph_keeps_pane
+test_herdr_unknown_composer_keeps_pane
 test_live_agent_keeps_pane
 test_unfinished_exit_keeps_pane
 test_teardown_after_close_still_returns_copy

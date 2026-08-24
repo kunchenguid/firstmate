@@ -2468,7 +2468,14 @@ teardown_composer_blocks_pane_close() {
   # that soft-wrapped across the terminal width is inspected as ONE logical
   # line rather than just its last physical fragment - a lone trailing
   # prompt glyph on that fragment alone is not proof the composer is empty
-  # (Greptile P1: task fm-close-exited-panes review).
+  # (Greptile P1: task fm-close-exited-panes review). Only trust this on a
+  # backend where fm_backend_capture_joined actually performs that join
+  # (fm_backend_capture_joined_reliable): every other backend's "joined"
+  # capture silently falls back to the row-oriented plain capture, so a
+  # wrapped command would still reach this proof one physical fragment at a
+  # time and could pass it wrongly (Greptile P1: task fm-close-exited-panes
+  # review - Herdr reaches this same fallback through an unjoined capture).
+  fm_backend_capture_joined_reliable "$BACKEND" || return 0
   cap=$(fm_backend_capture_joined "$BACKEND" "$T" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null) || return 0
   while IFS= read -r line; do
     fm_composer_normalize_trim_var line
