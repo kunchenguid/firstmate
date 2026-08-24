@@ -526,7 +526,7 @@ clear_write_tracking() {  # <window-key>
 # escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
 # state (the costly check already ran once, at classification time). Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
+# and the stale-actionable-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
@@ -1353,14 +1353,14 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
-        elif stale_is_terminal "$w" "$STATE"; then
+        elif stale_has_actionable_status "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
-          # proof the crew is actually done: a crew's own status log gets no
+          # proof the crew is actually done or awaiting action: a crew's own status log gets no
           # new entry once firstmate hands it to a no-mistakes validation
           # (AGENTS.md's sparse status-reporting contract), so the log can
-          # keep showing a "done:"/needs-decision/blocked leftover from
+          # keep showing a needs-validation:/done:/needs-decision:/blocked: leftover from
           # BEFORE that validation started for the run's entire (possibly
-          # many-minutes) duration, while stale_is_terminal - which has no
+          # many-minutes) duration, while stale_has_actionable_status - which has no
           # run-step awareness - keeps reporting it as still-current on every
           # poll. Root cause of the 2026-07 herdr false-surface incidents: a
           # validating crew was surfaced as stale every few minutes despite an
@@ -1387,11 +1387,11 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            wedge_timer_check "$w" "$ssf" "stale (overridden actionable status)" "$ewf" "$task"
           fi
-          # else: already surfaced as genuinely terminal on a prior poll of
+          # else: already surfaced as genuinely actionable on a prior poll of
           # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
+          # unmodified actionable-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only

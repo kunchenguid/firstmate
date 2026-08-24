@@ -102,11 +102,11 @@ test_classify_routine_signal_self() {
   case "$out" in self\|*) pass "routine signal self-handles" ;; *) fail "routine signal did not self-handle: $out" ;; esac
 }
 
-test_classify_terminal_signal_escalates() {
+test_classify_actionable_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
-  for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
+  for kw in "done: PR https://x/y/pull/1" "needs-validation: implementation committed" "needs-decision: pick A" "blocked: no perms" \
             "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
             "ready in branch fm/t1" "merged"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"
@@ -1928,7 +1928,7 @@ test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
-test_classify_terminal_signal_escalates
+test_classify_actionable_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping

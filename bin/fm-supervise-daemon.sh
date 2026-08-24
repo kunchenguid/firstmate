@@ -387,10 +387,11 @@ classify_stale() {  # <window> <state>
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
-    # verb (working:) must never take the terminal stale path. Seen-status dedupe
+    # verb (working:) must never take the actionable stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
-    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
-    # captain lines without those verbs keep the terminal escalate/dedupe path.
+    # prose once looked captain-relevant. The non-terminal needs-validation handoff,
+    # real terminal verbs, and legacy free-text captain lines keep the immediate
+    # actionable escalate/dedupe path.
     if ! status_is_terminal_verb "$last"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
@@ -403,10 +404,10 @@ classify_stale() {  # <window> <state>
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+      printf 'self|stale + actionable status (already escalated by signal): %s' "$last"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'escalate|stale + actionable status: %s' "$last"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -1267,9 +1268,9 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
-        # Clear wedge aging only for terminal (or legacy free-text) captain lines.
-        # Nonterminal progress verbs keep possible-wedge markers even if free text
-        # once looked captain-relevant or was written into a seen marker.
+        # Clear wedge aging for actionable handoffs, terminal results, and legacy
+        # free-text captain lines. Nonterminal progress verbs keep possible-wedge
+        # markers even if their prose once looked captain-relevant or was seen.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then
