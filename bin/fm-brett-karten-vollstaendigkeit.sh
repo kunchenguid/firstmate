@@ -135,7 +135,11 @@ die_usage() {
 # sweep is rendered into the printed line. Counters plus capped id lists keep
 # that line bounded.
 
-CUR_FEHLT= CUR_GEFR= CUR_WAISE= CUR_WEG= CUR_FEHLER=
+CUR_FEHLT=''
+CUR_GEFR=''
+CUR_WAISE=''
+CUR_WEG=''
+CUR_FEHLER=''
 
 N_FEHLT=0 L_FEHLT=
 N_GEFR=0 L_GEFR=
