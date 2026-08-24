@@ -616,6 +616,36 @@ test_direct_pr_dod_requires_review_ready_pr() {
   pass "fm-brief.sh: direct-PR completion requires a review-ready PR"
 }
 
+test_direct_pr_template_inspection_fails_closed() {
+  local home id outside out status
+  home="$TMP_ROOT/direct-pr-template-inspection-home"
+  id="brief-direct-template-inspection-b4"
+  outside="$home/outside-template.md"
+  mkdir -p "$home/data" "$home/projects/some-proj/.github"
+  printf 'Escaped template.\n' > "$outside"
+  ln -s "$outside" "$home/projects/some-proj/.github/PULL_REQUEST_TEMPLATE.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unsafe direct-PR template inspection must refuse brief scaffolding"
+  assert_contains "$out" "PR template inspection failed" \
+    "unsafe direct-PR template inspection did not fail closed"
+  assert_absent "$home/data/$id/brief.md" \
+    "unsafe direct-PR template inspection silently scaffolded a brief without its rendering guard"
+
+  rm "$home/projects/some-proj/.github/PULL_REQUEST_TEMPLATE.md"
+  chmod 000 "$home/projects/some-proj/.github"
+  id="brief-direct-template-root-b4"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR 2>&1)
+  status=$?
+  chmod 700 "$home/projects/some-proj/.github"
+  [ "$status" -ne 0 ] || fail "unsearchable direct-PR template roots must refuse brief scaffolding"
+  assert_contains "$out" "PR template inspection failed" \
+    "unsearchable direct-PR template roots did not fail closed"
+  assert_absent "$home/data/$id/brief.md" \
+    "unsearchable direct-PR template roots silently omitted the rendering guard"
+  pass "fm-brief.sh: direct-PR template inspection failures refuse scaffolding"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -1526,6 +1556,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_direct_pr_dod_requires_review_ready_pr
+test_direct_pr_template_inspection_fails_closed
 test_ship_project_memory_wording
 test_pr_requirements_section_is_scoped_to_pr_modes
 test_publish_rule_covers_crewmate_briefs

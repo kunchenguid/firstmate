@@ -50,7 +50,209 @@ test_missing_template_steps_aside() {
   FM_HOME="$dir/home" "$TOOL" render --project demo --repo-dir "$dir/repo" --set SUMMARY=x >/dev/null 2>/dev/null
   rc=$?
   expect_code 3 "$rc" "render must exit 3 (step-aside signal) when neither template exists"
+  FM_HOME="$dir/home" "$TOOL" has-template --project demo --repo-dir "$dir/repo" >/dev/null 2>/dev/null
+  rc=$?
+  expect_code 1 "$rc" "has-template must reserve exit 1 for true template absence"
   pass "fm-pr-body.sh: render steps aside with a distinct exit code when no template exists (missing-template compatibility)"
+}
+
+test_unreadable_template_fails_inspection() {
+  local dir rc
+  dir=$(mkhome "$TMP_ROOT/unreadable-template")
+  printf 'Repo: {{SUMMARY}}\n' > "$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  chmod 000 "$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  FM_HOME="$dir/home" "$TOOL" has-template --project demo --repo-dir "$dir/repo" >/dev/null 2>/dev/null
+  rc=$?
+  chmod 600 "$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  expect_code 4 "$rc" "has-template must distinguish unreadable templates from true absence"
+
+  dir=$(mkhome "$TMP_ROOT/unsearchable-private-root")
+  chmod 000 "$dir/home/data/pr-templates"
+  FM_HOME="$dir/home" "$TOOL" has-template --project demo --repo-dir "$dir/repo" >/dev/null 2>/dev/null
+  rc=$?
+  chmod 700 "$dir/home/data/pr-templates"
+  expect_code 4 "$rc" "has-template must distinguish an unsearchable private template root from true absence"
+
+  dir=$(mkhome "$TMP_ROOT/unsearchable-repository-root")
+  chmod 000 "$dir/repo/.github"
+  FM_HOME="$dir/home" "$TOOL" has-template --project demo --repo-dir "$dir/repo" >/dev/null 2>/dev/null
+  rc=$?
+  chmod 700 "$dir/repo/.github"
+  expect_code 4 "$rc" "has-template must distinguish an unsearchable repository template root from true absence"
+  pass "fm-pr-body.sh: inaccessible templates and roots fail inspection instead of appearing absent"
+}
+
+test_known_template_under_searchable_nonlistable_root() {
+  local dir out rc
+  dir=$(mkhome "$TMP_ROOT/nonlistable-root")
+  printf 'Repo: {{SUMMARY}}\n' > "$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  chmod 0111 "$dir/repo/.github"
+  out=$(FM_HOME="$dir/home" "$TOOL" render --project demo --repo-dir "$dir/repo" \
+    --set SUMMARY=x 2>/dev/null) && rc=0 || rc=$?
+  chmod 0700 "$dir/repo/.github"
+  expect_code 0 "$rc" "a known template must remain usable when its searchable parent cannot be listed"
+  assert_contains "$out" "Repo: x" "known template probing incorrectly required directory enumeration"
+  pass "fm-pr-body.sh: known templates need search permission without directory listing permission"
+}
+
+test_enumeration_uses_validated_directory_descriptor() {
+  local dir perl_bin template_dir marker out rc
+  dir=$(mkhome "$TMP_ROOT/enumeration-race")
+  perl_bin=$(command -v perl) || fail "perl is required for bound template-directory enumeration"
+  template_dir="$dir/repo/.github/PULL_REQUEST_TEMPLATE"
+  marker="$dir/swapped"
+  mkdir -p "$template_dir" "$dir/bin"
+  printf 'Repo: safe\n' > "$template_dir/default.md"
+  cat > "$dir/bin/perl" <<'SH'
+#!/usr/bin/env bash
+"${FM_TEST_PERL:?}" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "${FM_RACE_MARKER:?}" ]; then
+  : > "$FM_RACE_MARKER"
+  mv "${FM_RACE_DIR:?}" "$FM_RACE_DIR.bound"
+  mkdir "$FM_RACE_DIR"
+  printf 'Repo: replacement\n' > "$FM_RACE_DIR/default.md"
+fi
+exit "$rc"
+SH
+  chmod +x "$dir/bin/perl"
+  out=$(FM_TEST_PERL="$perl_bin" FM_RACE_DIR="$template_dir" FM_RACE_MARKER="$marker" \
+    PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$TOOL" has-template --project demo --repo-dir "$dir/repo" 2>&1) && rc=0 || rc=$?
+  expect_code 4 "$rc" "replacing an enumerated template directory with the same selected filename must fail closed"
+  assert_present "$marker" "the post-validation directory race fixture did not run"
+  case "$out" in
+    *'no-template'*) fail "a replaced template directory was reported as truly empty" ;;
+  esac
+  pass "fm-pr-body.sh: directory enumeration stays bound to its validated descriptor"
+}
+
+test_darwin_realpath_and_option_like_repo_path() {
+  local dir realpath_bin out
+  dir="$TMP_ROOT/darwin-realpath"
+  realpath_bin=$(command -v realpath) || fail "realpath is required for template containment"
+  mkdir -p "$dir/home/data/pr-templates" "$dir/-repo/.github" "$dir/bin"
+  printf 'Repo: {{SUMMARY}}\n' > "$dir/-repo/.github/PULL_REQUEST_TEMPLATE.md"
+  cat > "$dir/bin/realpath" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -e|--) exit 64 ;;
+esac
+[ -e "${1:-}" ] || [ -L "${1:-}" ] || exit 1
+exec "${FM_TEST_REALPATH:?}" "$@"
+SH
+  chmod +x "$dir/bin/realpath"
+  (
+    cd "$dir" || exit 1
+    FM_TEST_REALPATH="$realpath_bin" PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+      "$TOOL" has-template --project demo --repo-dir=-repo
+  ) || fail "Darwin-compatible template discovery rejected an option-like relative repository path"
+  out=$(
+    cd "$dir" || exit 1
+    FM_TEST_REALPATH="$realpath_bin" PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+      "$TOOL" render --project demo --repo-dir=-repo --set SUMMARY=x 2>/dev/null
+  ) || fail "Darwin-compatible canonicalization failed to render the discovered template"
+  assert_contains "$out" "Repo: x" "Darwin-compatible canonicalization must preserve repository template rendering"
+  pass "fm-pr-body.sh: Darwin-compatible canonicalization safely handles option-like repository paths"
+}
+
+test_missing_candidate_during_canonicalization_is_refused() {
+  local dir realpath_bin target escape out rc
+  dir=$(mkhome "$TMP_ROOT/canonicalization-race")
+  realpath_bin=$(command -v realpath) || fail "realpath is required for template containment"
+  target="$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  escape="$dir/escaped-template.md"
+  printf 'Repo: safe\n' > "$target"
+  printf 'Repo: escaped\n' > "$escape"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/realpath" <<'SH'
+#!/usr/bin/env bash
+target=${!#}
+if [ "$target" = "${FM_RACE_TARGET:?}" ]; then
+  rm -f "$target"
+  resolved=$("${FM_TEST_REALPATH:?}" "$@") || exit $?
+  ln -s "${FM_RACE_ESCAPE:?}" "$target"
+  printf '%s\n' "$resolved"
+  exit 0
+fi
+exec "${FM_TEST_REALPATH:?}" "$@"
+SH
+  chmod +x "$dir/bin/realpath"
+  out=$(FM_RACE_TARGET="$target" FM_RACE_ESCAPE="$escape" FM_TEST_REALPATH="$realpath_bin" \
+    PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$TOOL" render --project demo --repo-dir "$dir/repo" 2>/dev/null) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a template removed during canonicalization must be refused"
+  case "$out" in
+    *escaped*) fail "canonicalization race escaped the template root" ;;
+  esac
+  pass "fm-pr-body.sh: missing canonicalization targets fail closed"
+}
+
+test_post_resolution_symlink_swap_is_refused() {
+  local dir realpath_bin target escape out rc
+  dir=$(mkhome "$TMP_ROOT/post-resolution-race")
+  realpath_bin=$(command -v realpath) || fail "realpath is required for template containment"
+  target="$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  escape="$dir/escaped-template.md"
+  printf 'Repo: safe\n' > "$target"
+  printf 'Repo: escaped\n' > "$escape"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/realpath" <<'SH'
+#!/usr/bin/env bash
+target=${!#}
+if [ "$target" = "${FM_RACE_TARGET:?}" ]; then
+  resolved=$("${FM_TEST_REALPATH:?}" "$@") || exit $?
+  rm -f "$target"
+  ln -s "${FM_RACE_ESCAPE:?}" "$target"
+  printf '%s\n' "$resolved"
+  exit 0
+fi
+exec "${FM_TEST_REALPATH:?}" "$@"
+SH
+  chmod +x "$dir/bin/realpath"
+  out=$(FM_RACE_TARGET="$target" FM_RACE_ESCAPE="$escape" FM_TEST_REALPATH="$realpath_bin" \
+    PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$TOOL" render --project demo --repo-dir "$dir/repo" 2>/dev/null) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a template replaced after canonicalization must be refused"
+  case "$out" in
+    *escaped*) fail "post-resolution symlink swap escaped the template root" ;;
+  esac
+  pass "fm-pr-body.sh: template identity changes after resolution are refused"
+}
+
+test_post_identity_symlink_swap_reads_bound_descriptor() {
+  local dir perl_bin target escape marker out rc
+  dir=$(mkhome "$TMP_ROOT/post-identity-race")
+  perl_bin=$(command -v perl) || fail "perl is required for template identity checks"
+  target="$dir/repo/.github/PULL_REQUEST_TEMPLATE.md"
+  escape="$dir/escaped-template.md"
+  marker="$dir/swapped"
+  printf 'Repo: safe\n' > "$target"
+  printf 'Repo: escaped\n' > "$escape"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/perl" <<'SH'
+#!/usr/bin/env bash
+"${FM_TEST_PERL:?}" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "${FM_RACE_MARKER:?}" ]; then
+  : > "$FM_RACE_MARKER"
+  rm -f "${FM_RACE_TARGET:?}"
+  ln -s "${FM_RACE_ESCAPE:?}" "$FM_RACE_TARGET"
+fi
+exit "$rc"
+SH
+  chmod +x "$dir/bin/perl"
+  out=$(FM_TEST_PERL="$perl_bin" FM_RACE_TARGET="$target" FM_RACE_ESCAPE="$escape" \
+    FM_RACE_MARKER="$marker" PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$TOOL" render --project demo --repo-dir "$dir/repo" 2>/dev/null) && rc=0 || rc=$?
+  expect_code 0 "$rc" "render must keep reading the descriptor after the validated path is replaced"
+  assert_present "$marker" "the post-identity race fixture did not replace the template path"
+  [ -L "$target" ] || fail "the post-identity race fixture did not leave a replacement symlink"
+  assert_contains "$out" "Repo: safe" "render reopened the replaced template path instead of reading its bound descriptor"
+  case "$out" in
+    *escaped*) fail "post-identity symlink swap escaped the bound template descriptor" ;;
+  esac
+  pass "fm-pr-body.sh: rendering reads the bound descriptor after a post-identity path swap"
 }
 
 test_safe_named_fills_no_eval() {
@@ -341,6 +543,13 @@ test_script_parses
 test_private_template_takes_precedence
 test_repository_template_fallback
 test_missing_template_steps_aside
+test_unreadable_template_fails_inspection
+test_known_template_under_searchable_nonlistable_root
+test_enumeration_uses_validated_directory_descriptor
+test_darwin_realpath_and_option_like_repo_path
+test_missing_candidate_during_canonicalization_is_refused
+test_post_resolution_symlink_swap_is_refused
+test_post_identity_symlink_swap_reads_bound_descriptor
 test_safe_named_fills_no_eval
 test_literal_fill_is_not_reparsed_as_template
 test_set_file_reads_value_from_file

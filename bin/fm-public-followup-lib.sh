@@ -66,6 +66,7 @@ FM_PF_EVENT_SCHEMA_VERSION=1
 FM_PF_OUTCOME_TEXT_MAX=${FM_PF_OUTCOME_TEXT_MAX:-600}
 FM_PF_OUTCOME_BYTES_MAX=${FM_PF_OUTCOME_BYTES_MAX:-1200}
 FM_PF_EVENT_BYTES_MAX=${FM_PF_EVENT_BYTES_MAX:-8192}
+FM_PF_ABSENCE_QUERY_TIMEOUT=${FM_PF_ABSENCE_QUERY_TIMEOUT:-5}
 
 # --- gate 1: the authoritative relay activation contract --------------------
 
@@ -75,14 +76,7 @@ FM_PF_EVENT_BYTES_MAX=${FM_PF_EVENT_BYTES_MAX:-8192}
 # exists to drift. FMX_PAIRING_TOKEN in the environment wins, matching
 # fmx_load_config, so a direct client call and this gate agree.
 fm_pf_relay_active() {
-  local home=$1 token
-  if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
-    [ -n "${FMX_PAIRING_TOKEN-}" ]
-    return $?
-  fi
-  [ -f "$home/.env" ] || return 1
-  token=$(fmx_env_get FMX_PAIRING_TOKEN "$home/.env")
-  [ -n "$token" ]
+  fmx_relay_active "$1"
 }
 
 # --- gate 2: O(1) presence checks on relay-path-owned registrations ---------
@@ -108,6 +102,84 @@ fm_pf_dir_has_entry() {
 
 fm_pf_has_registrations() { fm_pf_dir_has_entry "$(fm_pf_registry_dir "$1")"; }
 fm_pf_has_events()        { fm_pf_dir_has_entry "$(fm_pf_events_dir "$1")"; }
+
+fm_pf_listing_valid() {
+  jq -e '
+    type == "object"
+    and (.public_followups | type == "array")
+    and all(.public_followups[];
+      type == "object"
+      and (.id | type == "string")
+      and (.public_followup | type == "object")
+      and (.state | type == "string"))
+  ' >/dev/null 2>&1
+}
+
+fm_pf_listing_transport_status() {
+  jq -er '
+    if all(.public_followups[];
+      (.public_followup.delivery | type == "object")
+      and (.public_followup.delivery.state | type == "string"))
+    then
+      if [(.public_followups // [])[]
+        | select(.state != "done")
+        | select(.public_followup.delivery.state != "posted")
+        | select(.public_followup.delivery.state != "waived")]
+        | length > 0
+      then "REQUIRED"
+      else "OPTIONAL"
+      end
+    else error("invalid public-followup delivery state")
+    end
+  ' 2>/dev/null
+}
+
+fm_pf_run_timed() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 124
+  fi
+}
+
+fm_pf_home_path_absence_status() {
+  local home=$1 path=$2 listing status activation_status timeout_seconds=$FM_PF_ABSENCE_QUERY_TIMEOUT
+  case "$path" in
+    "state/$FM_PF_DIRNAME"|"state/$FM_PF_DIRNAME/") ;;
+    *) return 1 ;;
+  esac
+  if fmx_relay_activation_status "$home"; then
+    :
+  else
+    activation_status=$?
+    if [ "$activation_status" -eq 1 ]; then
+      printf 'OPTIONAL\n'
+    else
+      printf 'UNKNOWN\n'
+    fi
+    return 0
+  fi
+  case "$timeout_seconds" in
+    ''|*[!0-9]*|0) timeout_seconds=5 ;;
+  esac
+  if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
+      || ! listing=$(cd "$home" && fm_pf_run_timed "$timeout_seconds" \
+        tasks-axi public-followup list --json </dev/null 2>/dev/null) \
+      || [ -z "$listing" ] || ! printf '%s' "$listing" | fm_pf_listing_valid; then
+    printf 'UNKNOWN\n'
+  elif ! status=$(printf '%s' "$listing" | fm_pf_listing_transport_status); then
+    printf 'UNKNOWN\n'
+  else
+    printf '%s\n' "$status"
+  fi
+  return 0
+}
 
 # fm_pf_active <home> <state>: both gates, in order. The single predicate every
 # caller outside the relay path should use before doing any public-followup work.

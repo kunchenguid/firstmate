@@ -432,6 +432,101 @@ fms_inbox_publish() {
     | fmx_private_artifact_publish_stdin "$dir" "${ts}.json" 600 >/dev/null 2>&1
 }
 
+fms_home_slack_activity_status() {
+  local state=$1 artifact dirname dir rec name
+  FMS_HOME_HAS_SLACK_ACTIVITY=0
+  FMS_HOME_REQUIRES_SLACK_INBOX=0
+  for artifact in "$state"/slack-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    FMS_HOME_HAS_SLACK_ACTIVITY=1
+    dirname=${artifact##*/}
+    case "$dirname" in
+      slack-offered|slack-ack-pending|slack-acked) ;;
+      *) continue ;;
+    esac
+    dir=$artifact
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 2
+    for rec in "$dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      name=${rec##*/}
+      fms_message_ts_valid "$name" \
+        && fmx_private_artifact_file_valid "$dir" "$name" 600 2>/dev/null \
+        || return 2
+      FMS_HOME_REQUIRES_SLACK_INBOX=1
+    done
+  done
+  return 0
+}
+
+fms_home_slack_activation_status() {
+  local home=$1 config=$2 env_file channel_file token channel
+  env_file="$home/.env"
+  channel_file="$config/slack-captain-channel"
+  if [ -n "${FM_SLACK_BOT_TOKEN+x}" ]; then
+    token=${FM_SLACK_BOT_TOKEN-}
+  else
+    if [ -e "$env_file" ] || [ -L "$env_file" ]; then
+      [ -f "$env_file" ] && [ -r "$env_file" ] || return 2
+    else
+      return 1
+    fi
+    token=$(_fmx_env_get 1 FM_SLACK_BOT_TOKEN "$env_file") || return 2
+  fi
+  [ -n "$token" ] || return 1
+  if [ -n "${FM_SLACK_CAPTAIN_CHANNEL_ID+x}" ]; then
+    channel=${FM_SLACK_CAPTAIN_CHANNEL_ID-}
+  else
+    if [ -e "$channel_file" ] || [ -L "$channel_file" ]; then
+      [ -f "$channel_file" ] && [ -r "$channel_file" ] || return 2
+    else
+      return 1
+    fi
+    channel=$(fms_config_value_read "$channel_file")
+  fi
+  fms_channel_id_valid "$channel" || return 1
+  return 0
+}
+
+fms_home_path_absence_status() {
+  local home=$1 state=$2 config=$3 path=$4 activation_status
+  case "$path" in
+    state/slack-*)
+      case "${path#state/slack-}" in
+        */?*) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  if ! fms_home_slack_activity_status "$state"; then
+    printf 'UNKNOWN\n'
+  elif [ "$path" = state/slack-inbox ] || [ "$path" = state/slack-inbox/ ]; then
+    if [ "$FMS_HOME_REQUIRES_SLACK_INBOX" -eq 1 ]; then
+      printf 'REQUIRED\n'
+    elif fms_home_slack_activation_status "$home" "$config"; then
+      printf 'UNKNOWN\n'
+    else
+      activation_status=$?
+      if [ "$activation_status" -eq 1 ]; then
+        printf 'OPTIONAL\n'
+      else
+        printf 'UNKNOWN\n'
+      fi
+    fi
+  elif [ "$FMS_HOME_HAS_SLACK_ACTIVITY" -eq 1 ]; then
+    printf 'UNKNOWN\n'
+  elif fms_home_slack_activation_status "$home" "$config"; then
+    printf 'UNKNOWN\n'
+  else
+    activation_status=$?
+    if [ "$activation_status" -eq 1 ]; then
+      printf 'OPTIONAL\n'
+    else
+      printf 'UNKNOWN\n'
+    fi
+  fi
+  return 0
+}
+
 fms_refusal_publish() {
   local state=$1 ts=$2 reason=$3 envelope_id=$4 payload_file=$5 dir key checksum
   dir="$state/slack-refused"

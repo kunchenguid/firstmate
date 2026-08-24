@@ -207,7 +207,7 @@ family_for_basename() {
     fm-remote-secondmate-trace-context.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
-    fm-startup-memory-budget.test.sh|\
+    fm-startup-memory-budget.test.sh|fm-memory-doctor.test.sh|\
     fm-model-catalog-inheritance.test.sh|fm-stow-cadence-lab.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
@@ -986,6 +986,35 @@ families_for_changed_path() {
       ;;
     bin/fm-startup-memory-budget.sh|bin/fm-startup-memory-budget-lib.sh|\
     bin/fm-model-catalog-lib.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-memory-doctor.sh|bin/fm-crew-dispatch-lib.sh|bin/fm-home-layout-lib.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-x-lib.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-public-followup-lib.sh)
+      printf '%s\n' __script__:fm-public-followup.test.sh
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-procevent-lib.sh)
+      printf '%s\n' __script__:fm-procevent.test.sh
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-slack-lib.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-pending-reply-lib.sh)
+      printf '%s\n' __script__:fm-pending-reply.test.sh
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap
       ;;

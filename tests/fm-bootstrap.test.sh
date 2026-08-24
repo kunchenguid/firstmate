@@ -1118,6 +1118,43 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_advisory_memory_doctor_does_not_wedge_bootstrap() {
+  local case_dir fakebin out rc copied_bin
+  case_dir="$TMP_ROOT/memory-doctor-advisory"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '7500\n' > "$case_dir/home/config/startup-memory-budget"
+  cat > "$case_dir/home/data/captain.md" <<'EOF'
+See `data/missing-target.md` for the standing rule.
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "advisory memory-doctor failure must not wedge bootstrap"
+  printf '%s\n' "$out" | grep -q '^MEMORY_DOCTOR:' \
+    || fail "bootstrap did not invoke the memory doctor; output: $out"
+  printf '%s\n' "$out" | grep -q 'pointers' \
+    || fail "advisory memory-doctor line did not carry the pointers threat; output: $out"
+
+  copied_bin="$case_dir/copied-bin"
+  cp -R "$ROOT/bin" "$copied_bin"
+  chmod -x "$copied_bin/fm-memory-doctor.sh"
+  set +e
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$copied_bin/fm-bootstrap.sh")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "memory-doctor execution failure must remain fail-open"
+  if printf '%s\n' "$out" | grep -q '^MEMORY_DOCTOR:'; then
+    fail "bootstrap fabricated a memory threat after doctor execution failure: $out"
+  fi
+  pass "bootstrap emits only parsed threatening memory-doctor advisories"
+}
+
 test_firstmate_fork_stalled_remote_is_bounded
 test_firstmate_fork_sync_report
 test_bootstrap_reporting
@@ -1145,3 +1182,4 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_advisory_memory_doctor_does_not_wedge_bootstrap

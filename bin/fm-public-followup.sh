@@ -434,15 +434,7 @@ cmd_pending() {
   # whole path exists to prevent, so say so rather than printing nothing.
   if ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1 \
       || ! listing=$(tx public-followup list --json 2>/dev/null) || [ -z "$listing" ] \
-      || ! printf '%s' "$listing" | jq -e '
-        type == "object"
-        and (.public_followups | type == "array")
-        and all(.public_followups[];
-          type == "object"
-          and (.id | type == "string")
-          and (.public_followup | type == "object")
-          and (.state | type == "string"))
-      ' >/dev/null 2>&1; then
+      || ! printf '%s' "$listing" | fm_pf_listing_valid; then
     if fm_pf_has_registrations "$STATE"; then
       printf 'cannot read this home'\''s public commitments through tasks-axi; %s registration(s) are still recorded under state/%s/registry\n' \
         "$(fm_pf_registry_ids "$STATE" | grep -c . || true)" "$FM_PF_DIRNAME"

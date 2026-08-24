@@ -508,9 +508,20 @@ HAS_PR_TEMPLATE=0
 case "$REPO" in
   */*|.|..) ;;  # never a safe data/pr-templates/<name>.md path segment
   *)
-    if [ "$KIND" = ship ] && [ "$MODE" = direct-PR ] \
-      && FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-pr-body.sh" has-template --project "$REPO" --repo-dir "$PROJECTS/$REPO" >/dev/null 2>&1; then
-      HAS_PR_TEMPLATE=1
+    if [ "$KIND" = ship ] && [ "$MODE" = direct-PR ]; then
+      PR_TEMPLATE_STATUS=0
+      FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-pr-body.sh" has-template \
+        --project "$REPO" --repo-dir "$PROJECTS/$REPO" >/dev/null \
+        || PR_TEMPLATE_STATUS=$?
+      case "$PR_TEMPLATE_STATUS" in
+        0) HAS_PR_TEMPLATE=1 ;;
+        1) ;;
+        *)
+          rmdir "$DATA/$ID" 2>/dev/null || true
+          echo "error: PR template inspection failed; refusing to scaffold a direct-PR brief" >&2
+          exit 1
+          ;;
+      esac
     fi
     ;;
 esac

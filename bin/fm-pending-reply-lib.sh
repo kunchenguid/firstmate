@@ -103,6 +103,49 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
+fm_pending_reply_home_state_status() {
+  local state=$1 file
+  FM_PENDING_REPLY_HOME_HAS_EVIDENCE=0
+  FM_PENDING_REPLY_HOME_HAS_SECONDMATE=0
+  if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+    return 0
+  fi
+  [ -d "$state" ] && [ ! -L "$state" ] && [ -r "$state" ] && [ -x "$state" ] || return 2
+  for file in "$state"/*.status; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+    if grep -Eq 'pending-reply-(missed|delivery-unknown|recovery-delivery-[^:]+):.*pending-reply-id=[A-Fa-f0-9]{16}' "$file"; then
+      FM_PENDING_REPLY_HOME_HAS_EVIDENCE=1
+    fi
+  done
+  for file in "$state"/*.meta; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+    if grep -qx 'kind=secondmate' "$file"; then
+      FM_PENDING_REPLY_HOME_HAS_SECONDMATE=1
+    fi
+  done
+  return 0
+}
+
+fm_pending_reply_home_path_absence_status() {
+  local state=$1 path=$2
+  case "$path" in
+    state/pending-replies|state/pending-replies/) ;;
+    *) return 1 ;;
+  esac
+  if ! fm_pending_reply_home_state_status "$state"; then
+    printf 'UNKNOWN\n'
+  elif [ "$FM_PENDING_REPLY_HOME_HAS_EVIDENCE" -eq 1 ]; then
+    printf 'REQUIRED\n'
+  elif [ "$FM_PENDING_REPLY_HOME_HAS_SECONDMATE" -eq 1 ]; then
+    printf 'UNKNOWN\n'
+  else
+    printf 'OPTIONAL\n'
+  fi
+  return 0
+}
+
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
 fm_pending_reply_new_id() {
   local raw hex

@@ -113,7 +113,14 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-backend-orca.test.sh \
-    fm-model-usage.test.sh; do
+    fm-model-usage.test.sh \
+    fm-memory-doctor.test.sh \
+    fm-pending-reply.test.sh \
+    fm-procevent.test.sh \
+    fm-public-followup.test.sh \
+    fm-slack-captain-channel.test.sh \
+    fm-slack-socket.test.sh \
+    fm-x-mode.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -134,6 +141,11 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-model-usage.mjs"
+  : >"$repo/bin/fm-x-lib.sh"
+  : >"$repo/bin/fm-public-followup-lib.sh"
+  : >"$repo/bin/fm-procevent-lib.sh"
+  : >"$repo/bin/fm-slack-lib.sh"
+  : >"$repo/bin/fm-pending-reply-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -193,6 +205,58 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-model-usage.test.sh" "usage reader changes select their own contract coverage"
   git -C "$repo" add bin/fm-model-usage.mjs
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm usage-reader-change
+
+  printf '\n' >>"$repo/bin/fm-x-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-x-mode.test.sh" "X owner changes preserve X-mode coverage"
+  assert_contains "$listed" "tests/fm-memory-doctor.test.sh" "X owner changes select memory-doctor coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" "X owner changes select bootstrap coverage"
+  git -C "$repo" add bin/fm-x-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm x-owner-change
+
+  printf '\n' >>"$repo/bin/fm-public-followup-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-public-followup.test.sh" \
+    "public-followup owner changes preserve public-followup coverage"
+  assert_contains "$listed" "tests/fm-memory-doctor.test.sh" \
+    "public-followup owner changes select memory-doctor coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "public-followup owner changes select bootstrap coverage"
+  git -C "$repo" add bin/fm-public-followup-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm public-followup-owner-change
+
+  printf '\n' >>"$repo/bin/fm-procevent-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent.test.sh" \
+    "process-event owner changes preserve process-event coverage"
+  assert_contains "$listed" "tests/fm-memory-doctor.test.sh" \
+    "process-event owner changes select memory-doctor coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "process-event owner changes select bootstrap coverage"
+  git -C "$repo" add bin/fm-procevent-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm procevent-owner-change
+
+  printf '\n' >>"$repo/bin/fm-slack-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-slack-captain-channel.test.sh" \
+    "Slack owner changes preserve Slack coverage"
+  assert_contains "$listed" "tests/fm-memory-doctor.test.sh" \
+    "Slack owner changes select memory-doctor coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "Slack owner changes select bootstrap coverage"
+  git -C "$repo" add bin/fm-slack-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm slack-owner-change
+
+  printf '\n' >>"$repo/bin/fm-pending-reply-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pending-reply.test.sh" \
+    "pending-reply owner changes preserve pending-reply coverage"
+  assert_contains "$listed" "tests/fm-memory-doctor.test.sh" \
+    "pending-reply owner changes select memory-doctor coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "pending-reply owner changes select bootstrap coverage"
+  git -C "$repo" add bin/fm-pending-reply-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm pending-reply-owner-change
 
   printf '\n' >>"$repo/bin/fm-fixture-shared.sh"
   set +e

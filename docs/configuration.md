@@ -178,6 +178,7 @@ The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative po
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
+Read-only fleet memory diagnostics are owned by `bin/fm-memory-doctor.sh`; its header owns the six checks, verdicts, exit policy, and the fail-open bootstrap invocation.
 
 ## Secondmate routes (data/secondmates.md)
 

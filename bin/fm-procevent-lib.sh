@@ -67,6 +67,113 @@ fm_procevent_any_registered() {
   return 1
 }
 
+fm_procevent_nearest_existing_ancestor_searchable() {
+  local path=$1 parent
+  case "$path" in /*) ;; *) path="$PWD/${path#./}" ;; esac
+  while :; do
+    parent=${path%/*}
+    [ -n "$parent" ] || parent=/
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+      [ -d "$parent" ] && [ ! -L "$parent" ] && [ -x "$parent" ]
+      return
+    fi
+    [ "$parent" != "$path" ] || return 1
+    path=$parent
+  done
+}
+
+fm_procevent_home_claim_status() {
+  local home=$1 root claim id
+  FM_PROCEVENT_HOME_HAS_CLAIM=0
+  root=$(fm_procevent_claim_root)
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] && [ -r "$root" ] && [ -x "$root" ] || return 2
+  else
+    fm_procevent_nearest_existing_ancestor_searchable "$root" || return 2
+    return 0
+  fi
+  for claim in "$root"/*.claim; do
+    [ -e "$claim" ] || [ -L "$claim" ] || continue
+    [ -f "$claim" ] && [ ! -L "$claim" ] && [ -r "$claim" ] || return 2
+    id=${claim##*/}
+    id=${id%.claim}
+    fm_procevent_source_id_valid "$id" || return 2
+    fm_procevent_claim_load_locked "$id" || return 2
+    if [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ]; then
+      FM_PROCEVENT_HOME_HAS_CLAIM=1
+      return 0
+    fi
+  done
+  return 0
+}
+
+fm_procevent_home_registry_status() {
+  local state=$1 reg rec
+  FM_PROCEVENT_HOME_HAS_REGISTRATION=0
+  reg=$(fm_procevent_registry_dir "$state")
+  if [ -e "$reg" ] || [ -L "$reg" ]; then
+    [ -d "$reg" ] && [ ! -L "$reg" ] && [ -r "$reg" ] && [ -x "$reg" ] || return 2
+  else
+    fm_procevent_nearest_existing_ancestor_searchable "$reg" || return 2
+    return 0
+  fi
+  for rec in "$reg"/*.source; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] && [ -r "$rec" ] || return 2
+    FM_PROCEVENT_HOME_HAS_REGISTRATION=1
+    return 0
+  done
+  return 0
+}
+
+fm_procevent_home_queue_status() {
+  local state=$1 queue
+  queue="$state/.wake-queue"
+  FM_PROCEVENT_HOME_HAS_QUEUED_RESULT=0
+  if [ -e "$queue" ] || [ -L "$queue" ]; then
+    [ -f "$queue" ] && [ ! -L "$queue" ] && [ -r "$queue" ] || return 2
+    if awk -F '\t' '$3 == "check" && index($4, "procevent:") == 1 { found=1; exit } END { exit(found ? 0 : 1) }' \
+      "$queue"; then
+      FM_PROCEVENT_HOME_HAS_QUEUED_RESULT=1
+    fi
+  else
+    fm_procevent_nearest_existing_ancestor_searchable "$queue" || return 2
+  fi
+  return 0
+}
+
+fm_procevent_home_path_absence_status() {
+  local home=$1 state=$2 path=$3
+  case "$path" in
+    state/procevent|state/procevent/)
+      if ! fm_procevent_home_claim_status "$home"; then
+        printf 'UNKNOWN\n'
+      elif [ "$FM_PROCEVENT_HOME_HAS_CLAIM" -eq 1 ]; then
+        printf 'REQUIRED\n'
+      else
+        printf 'OPTIONAL\n'
+      fi
+      return 0
+      ;;
+    state/procevent-inbox|state/procevent-inbox/)
+      if ! fm_procevent_home_queue_status "$state" \
+          || ! fm_procevent_home_registry_status "$state" \
+          || ! fm_procevent_home_claim_status "$home"; then
+        printf 'UNKNOWN\n'
+      elif [ "$FM_PROCEVENT_HOME_HAS_QUEUED_RESULT" -eq 1 ]; then
+        printf 'REQUIRED\n'
+      elif [ "$FM_PROCEVENT_HOME_HAS_REGISTRATION" -eq 1 ] \
+          || [ "$FM_PROCEVENT_HOME_HAS_CLAIM" -eq 1 ]; then
+        printf 'UNKNOWN\n'
+      else
+        printf 'OPTIONAL\n'
+      fi
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # --- ownership --------------------------------------------------------------
 # A claim is a private file recording the home, runner pid, claim generation,
 # and process identity. Registration and every ownership transition are

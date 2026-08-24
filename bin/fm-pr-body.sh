@@ -90,15 +90,16 @@
 #
 # has-template --project <name> --repo-dir <path> is a silent predicate:
 # exit 0 when render would find a private or repository template for that
-# project and repo, exit 1 when it would step aside (exit 3), and exit 2 on
-# a usage error, all with no stdout. It shares render's own template-
-# resolution so a caller (bin/fm-brief.sh's scaffold requirement) never
-# hand-rolls a second detector that can drift from render's real behavior.
+# project and repo, exit 1 when it would step aside (exit 3), exit 2 on a
+# usage error, and exit 4 when template inspection fails, all with no stdout.
+# It shares render's own template-resolution so a caller (bin/fm-brief.sh's
+# scaffold requirement) never hand-rolls a second detector that can drift
+# from render's real behavior.
 #
 # Exit codes: 0 ok (publish propagates the forge command's own exit status);
 # 1 refusal (unresolved placeholders or a local-path leak) or an I/O failure;
 # 2 usage error; 3 render found no private or repository template (step-aside
-# signal).
+# signal); 4 template inspection was unreadable or unsafe.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -293,16 +294,168 @@ require_kv() {
   esac
 }
 
-# bind_template <root> <candidate>: print the canonical candidate only when it
-# remains below the canonical allowed root. The refusal deliberately contains
-# no path, because a symlink target is untrusted local information.
+canonical_existing_path() {
+  local path=$1 probe
+  case "$path" in /*) ;; *) path="./$path" ;; esac
+  if realpath -e / >/dev/null 2>&1; then
+    realpath -e "$path" 2>/dev/null
+    return
+  fi
+  probe="/.__fm-realpath-missing-${UID:-0}-$$"
+  if [ -e "$probe" ] || [ -L "$probe" ] || realpath "$probe" >/dev/null 2>&1; then
+    return 1
+  fi
+  realpath "$path" 2>/dev/null
+}
+
+nearest_existing_ancestor_is_searchable() {
+  local path=$1 parent
+  case "$path" in /*) ;; *) path="$PWD/${path#./}" ;; esac
+  while :; do
+    parent=${path%/*}
+    [ -n "$parent" ] || parent=/
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+      [ -d "$parent" ] && [ -x "$parent" ]
+      return
+    fi
+    [ "$parent" != "$path" ] || return 1
+    path=$parent
+  done
+}
+
+template_directory_status() {
+  local dir=$1
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ -x "$dir" ] || return 2
+    canonical_existing_path "$dir" >/dev/null || return 2
+    return 0
+  fi
+  nearest_existing_ancestor_is_searchable "$dir" || return 2
+  return 1
+}
+
+opened_directory_matches_path() {
+  local path=$1
+  perl -e '
+    my @opened = stat(STDIN) or exit 1;
+    my @path = stat($ARGV[0]) or exit 1;
+    exit(($opened[0] == $path[0] && $opened[1] == $path[1]) ? 0 : 1);
+  ' "$path" <&8
+}
+
+FIRST_TEMPLATE_PATH=''
+FIRST_TEMPLATE_DIRECTORY=''
+
+first_template_in_directory() {
+  local dir=$1 allowed_root=$2 dir_real root_real name status
+  FIRST_TEMPLATE_PATH=''
+  FIRST_TEMPLATE_DIRECTORY=''
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    nearest_existing_ancestor_is_searchable "$dir" || return 2
+    return 1
+  fi
+  [ -d "$dir" ] && [ -x "$dir" ] || return 2
+  if ! { exec 8< "$dir"; } 2>/dev/null; then
+    return 2
+  fi
+  if ! dir_real=$(canonical_existing_path "$dir") \
+      || ! root_real=$(canonical_existing_path "$allowed_root") \
+      || ! opened_directory_matches_path "$dir_real"; then
+    exec 8<&-
+    return 2
+  fi
+  case "$dir_real" in
+    "$root_real"/*) ;;
+    *)
+      exec 8<&-
+      return 2
+      ;;
+  esac
+  if name=$(perl -e '
+    use Fcntl qw(S_ISREG);
+    open(my $bound, "<&=8") or exit 2;
+    chdir($bound) or exit 2;
+    opendir(my $dir, ".") or exit 2;
+    for my $name (sort grep { /[.]md\z/ } readdir($dir)) {
+      my @st = stat($name);
+      next unless @st && S_ISREG($st[2]);
+      print $name;
+      exit 0;
+    }
+    exit 3;
+  ' <&8); then
+    status=0
+  else
+    status=$?
+  fi
+  case "$status" in
+    0)
+      FIRST_TEMPLATE_PATH="$dir_real/$name"
+      FIRST_TEMPLATE_DIRECTORY=$dir_real
+      return 0
+      ;;
+    3)
+      exec 8<&-
+      return 3
+      ;;
+    *)
+      exec 8<&-
+      return 2
+      ;;
+  esac
+}
+
+opened_template_matches_path() {
+  local path=$1
+  perl -e '
+    my @opened = stat(STDIN) or exit 1;
+    my @path = stat($ARGV[0]) or exit 1;
+    exit(($opened[0] == $path[0] && $opened[1] == $path[1]) ? 0 : 1);
+  ' "$path" <&9
+}
+
+BOUND_TEMPLATE=''
+BOUND_TEMPLATE_SOURCE=''
+
+# bind_template <root> <candidate>: open candidate on descriptor 9 and retain
+# that descriptor only when the opened object remains below the canonical
+# allowed root. The refusal deliberately contains no path, because a symlink
+# target is untrusted local information.
 bind_template() {
-  local root=$1 candidate=$2 root_real candidate_real
-  root_real=$(realpath -e -- "$root" 2>/dev/null) || return 3
-  candidate_real=$(realpath -e -- "$candidate" 2>/dev/null) || return 3
+  local root=$1 candidate=$2 bound_directory=${3:-} root_real candidate_real
+  if ! root_real=$(canonical_existing_path "$root"); then
+    echo "error: PR template directory could not be inspected safely" >&2
+    return 1
+  fi
+  if ! { exec 9< "$candidate"; } 2>/dev/null; then
+    echo "error: PR template could not be opened safely" >&2
+    return 1
+  fi
+  if ! candidate_real=$(canonical_existing_path "$candidate"); then
+    exec 9<&-
+    echo "error: PR template could not be inspected safely" >&2
+    return 1
+  fi
   case "$candidate_real" in
-    "$root_real"/*) printf '%s\n' "$candidate_real" ;;
-    *) echo "error: PR template resolves outside its allowed template directory" >&2; return 1 ;;
+    "$root_real"/*)
+      if ! opened_template_matches_path "$candidate_real"; then
+        exec 9<&-
+        echo "error: PR template changed while it was being resolved" >&2
+        return 1
+      fi
+      if [ -n "$bound_directory" ] \
+          && ! opened_directory_matches_path "$bound_directory"; then
+        exec 9<&-
+        echo "error: PR template directory changed while it was being resolved" >&2
+        return 1
+      fi
+      BOUND_TEMPLATE=$candidate_real
+      ;;
+    *)
+      exec 9<&-
+      echo "error: PR template resolves outside its allowed template directory" >&2
+      return 1
+      ;;
   esac
 }
 
@@ -310,38 +463,82 @@ bind_template() {
 # resolution (private-per-project, then a repository-owned .github
 # template), shared by render and has-template so a caller never grows a
 # second detector that can drift from render's real behavior. On success,
-# prints "<canonical path>\n<source>" (source is 'private' or 'repository')
-# and returns 0; on no template found, prints nothing and returns 3.
+# leaves the selected template open on descriptor 9 and records its canonical
+# path and source; on no template found, returns 3.
 resolve_template() {
-  local project=$1 repo_dir=$2
+  local project=$1 repo_dir=$2 status
   local private_root="$DATA/pr-templates" private="$DATA/pr-templates/$project.md"
-  local repo_root="$repo_dir/.github" template='' source='' bound=''
-  if [ -f "$private" ]; then
-    template=$private
-    source=private
-    bound=$(bind_template "$private_root" "$template") || return $?
-  else
-    local cand
-    for cand in "$repo_dir/.github/PULL_REQUEST_TEMPLATE.md" "$repo_dir/.github/pull_request_template.md"; do
-      if [ -f "$cand" ]; then
-        template=$cand
-        source=repository
-        bound=$(bind_template "$repo_root" "$template") || return $?
-        break
+  local repo_root="$repo_dir/.github" template='' source=''
+  BOUND_TEMPLATE=''
+  BOUND_TEMPLATE_SOURCE=''
+  if template_directory_status "$private_root"; then
+    if [ -e "$private" ] || [ -L "$private" ]; then
+      if [ ! -f "$private" ]; then
+        echo "error: PR template could not be inspected safely" >&2
+        return 1
       fi
-    done
-    if [ -z "$template" ] && [ -d "$repo_dir/.github/PULL_REQUEST_TEMPLATE" ]; then
-      local first
-      first=$(find -L "$repo_dir/.github/PULL_REQUEST_TEMPLATE" -maxdepth 1 -type f -name '*.md' 2>/dev/null | LC_ALL=C sort | head -n 1)
-      if [ -n "$first" ]; then
-        template=$first
-        source=repository
-        bound=$(bind_template "$repo_root" "$template") || return $?
+      template=$private
+      source=private
+      bind_template "$private_root" "$template" || return $?
+    fi
+  else
+    status=$?
+    if [ "$status" -ne 1 ]; then
+      echo "error: PR template directory could not be inspected safely" >&2
+      return 1
+    fi
+  fi
+  if [ -z "$template" ]; then
+    if template_directory_status "$repo_root"; then
+      local cand
+      for cand in "$repo_dir/.github/PULL_REQUEST_TEMPLATE.md" "$repo_dir/.github/pull_request_template.md"; do
+        if [ -e "$cand" ] || [ -L "$cand" ]; then
+          if [ ! -f "$cand" ]; then
+            echo "error: PR template could not be inspected safely" >&2
+            return 1
+          fi
+          template=$cand
+          source=repository
+          bind_template "$repo_root" "$template" || return $?
+          break
+        fi
+      done
+      if [ -z "$template" ]; then
+        local template_dir="$repo_dir/.github/PULL_REQUEST_TEMPLATE"
+        if first_template_in_directory "$template_dir" "$repo_root"; then
+          status=0
+        else
+          status=$?
+        fi
+        case "$status" in
+          0)
+            template=$FIRST_TEMPLATE_PATH
+            source=repository
+            if bind_template "$repo_root" "$template" "$FIRST_TEMPLATE_DIRECTORY"; then
+              status=0
+            else
+              status=$?
+            fi
+            exec 8<&-
+            [ "$status" -eq 0 ] || return "$status"
+            ;;
+          1|3) ;;
+          *)
+            echo "error: PR template directory could not be inspected safely" >&2
+            return 1
+            ;;
+        esac
+      fi
+    else
+      status=$?
+      if [ "$status" -ne 1 ]; then
+        echo "error: PR template directory could not be inspected safely" >&2
+        return 1
       fi
     fi
   fi
   [ -n "$template" ] || return 3
-  printf '%s\n%s\n' "$bound" "$source"
+  BOUND_TEMPLATE_SOURCE=$source
 }
 
 cmd_render() {
@@ -398,20 +595,21 @@ cmd_render() {
   [ -n "$repo_dir" ] || die_usage "render requires --repo-dir <path>"
   [ -d "$repo_dir" ] || die_usage "--repo-dir is not a directory: $repo_dir"
 
-  local resolved rc=0
-  resolved=$(resolve_template "$project" "$repo_dir") || rc=$?
+  local rc=0
+  resolve_template "$project" "$repo_dir" || rc=$?
   if [ "$rc" -eq 3 ]; then
     echo "no-template: no private template at data/pr-templates/$project.md and no repository PR template found under $repo_dir/.github" >&2
     exit 3
   elif [ "$rc" -ne 0 ]; then
     exit "$rc"
   fi
-  local template source
-  template=$(printf '%s\n' "$resolved" | sed -n '1p')
-  source=$(printf '%s\n' "$resolved" | sed -n '2p')
-
-  local body
-  body=$(cat -- "$template") || { echo "error: could not read template: $template" >&2; exit 1; }
+  local template=$BOUND_TEMPLATE source=$BOUND_TEMPLATE_SOURCE body
+  if ! body=$(cat <&9); then
+    exec 9<&-
+    echo "error: could not read template: $template" >&2
+    exit 1
+  fi
+  exec 9<&-
   if [ "$source" = private ]; then
     body=$(printf '%s\n' "$body" | strip_private_template_guidance)
   fi
@@ -552,11 +750,11 @@ cmd_has_template() {
   validate_project "$project"
   [ -n "$repo_dir" ] || die_usage "has-template requires --repo-dir <path>"
   local rc=0
-  resolve_template "$project" "$repo_dir" >/dev/null || rc=$?
+  resolve_template "$project" "$repo_dir" || rc=$?
   case "$rc" in
-    0) exit 0 ;;
+    0) exec 9<&-; exit 0 ;;
     3) exit 1 ;;
-    *) exit "$rc" ;;
+    *) exit 4 ;;
   esac
 }
 
