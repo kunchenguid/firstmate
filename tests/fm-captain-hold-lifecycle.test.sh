@@ -1110,7 +1110,7 @@ EOF
 # primitive, so a valid record, a legacy hold, an orphan, and malformed input
 # must be distinguishable without making the reader fail as a whole.
 test_structured_decision_body_read_and_errors() {
-  local home json
+  local home json large_bytes
   home=$(make_home structured-decision)
   cat > "$home/structured.json" <<'EOF'
 {
@@ -1124,6 +1124,8 @@ test_structured_decision_body_read_and_errors() {
   "free_response": true
 }
 EOF
+  jq '.question = "Qual rota alternativa deve ser usada?"' \
+    "$home/structured.json" > "$home/alternate-structured.json"
   {
     cat "$home/structured.json"
     cat "$home/structured.json"
@@ -1147,10 +1149,46 @@ EOF
   fi
   assert_contains "$(tasks_in "$home" show sample-write-failure-call --full)" "held: no" \
     "structured persistence failure left the task held without a body"
+  tasks_in "$home" add sample-title-mismatch-call "Original title" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the title mismatch fixture"
+  if run_captain "$home" hold sample-title-mismatch-call \
+    --title "Different title" --reason "captain title mismatch fixture" --repo sample \
+    --structured-file "$home/structured.json" > "$home/title-mismatch.out" 2> "$home/title-mismatch.err"; then
+    fail "structured hold accepted a mismatched existing title"
+  fi
+  assert_absent "$home/data/sample-title-mismatch-call/captain-decision.json" \
+    "a rejected title mismatch persisted a structured body"
+  if run_captain "$home" hold sample-missing-title-call \
+    --reason "captain missing title fixture" --repo sample \
+    --structured-file "$home/structured.json" > "$home/missing-title.out" 2> "$home/missing-title.err"; then
+    fail "structured hold created a new task without a title"
+  fi
+  assert_absent "$home/data/sample-missing-title-call/captain-decision.json" \
+    "a rejected missing title persisted an orphaned structured body"
+  if run_captain "$home" hold sample-invalid-date-call \
+    --title "Invalid date" --reason "captain invalid date fixture" --repo sample \
+    --until tomorrow --structured-file "$home/structured.json" \
+    > "$home/invalid-date.out" 2> "$home/invalid-date.err"; then
+    fail "structured hold accepted an invalid deferral date"
+  fi
+  assert_absent "$home/data/sample-invalid-date-call/captain-decision.json" \
+    "a rejected deferral date persisted an orphaned structured body"
   run_captain "$home" hold sample-structured-call \
     --title "Escolher rota" --reason "captain route choice pending" --repo sample \
     --structured-file "$home/structured.json" >/dev/null \
     || fail "could not register a structured captain call"
+  cp "$home/data/sample-structured-call/captain-decision.json" "$home/original-decision.json"
+  tasks_in "$home" done sample-structured-call >/dev/null \
+    || fail "could not close the structured rejection fixture"
+  if run_captain "$home" hold sample-structured-call \
+    --title "Escolher rota" --reason "captain closed task fixture" --repo sample \
+    --structured-file "$home/alternate-structured.json" \
+    > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "structured hold reopened a closed task"
+  fi
+  cmp -s "$home/original-decision.json" "$home/data/sample-structured-call/captain-decision.json" \
+    || fail "a rejected closed-task hold replaced its structured decision"
   run_captain "$home" hold sample-plain-call \
     --title "Legacy captain call" --reason "captain choice pending" --repo sample >/dev/null \
     || fail "could not register a legacy captain call"
@@ -1173,7 +1211,7 @@ EOF
       and .project == "sample"
       and .recommendation.label == "Norte"
       and .options[1].consequence == "Exige revisar a integracao."
-      and .status == "active"))
+      and .status == "closed"))
     and (.records | any(.task_id == "sample-orphan-call" and .status == "orphaned"))
     and (.orphaned | index("sample-orphan-call"))
     and (.errors | any(.task_id == "sample-malformed-call"
@@ -1186,6 +1224,44 @@ EOF
     || fail "a legacy captain call without a body was treated as malformed"
   [ -f "$home/data/sample-structured-call/captain-decision.json" ] \
     || fail "structured body was not stored under the task data directory"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list|show) exit 9 ;;
+  *) exec "$REAL_TASKS_AXI" "$@" ;;
+esac
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_captain "$home" hold sample-unavailable-backlog-call \
+    --title "Unavailable backlog" --reason "captain unavailable backlog fixture" --repo sample \
+    --structured-file "$home/structured.json" \
+    > "$home/unavailable-backlog.out" 2> "$home/unavailable-backlog.err"; then
+    fail "structured hold mutated an unavailable backlog"
+  fi
+  assert_absent "$home/data/sample-unavailable-backlog-call/captain-decision.json" \
+    "an unavailable backlog left an orphaned structured body"
+  json=$(run_captain "$home" structured sample-structured-call --json) \
+    || fail "structured read failed when the task inventory was unavailable"
+  printf '%s' "$json" | jq -e '
+    (.records | any(.task_id == "sample-structured-call" and .status == "unknown"))
+    and ((.orphaned | index("sample-structured-call")) == null)
+  ' >/dev/null || fail "inventory failure was misreported as an orphan: $json"
+  rm -f "$home/fakebin/tasks-axi"
+  large_bytes=$(( $(getconf ARG_MAX) + 65536 ))
+  {
+    printf '%s' '{"project":"sample","question":"Large projection?","options":[{"label":"Keep","consequence":"'
+    head -c "$large_bytes" /dev/zero | tr '\000' x
+    printf '%s\n' '"}],"recommendation":{"label":"Keep","reason":"Preserve the record."},"free_response":true}'
+  } > "$home/large-structured.json"
+  run_captain "$home" hold sample-large-call \
+    --title "Large structured projection" --reason "captain large projection fixture" --repo sample \
+    --structured-file "$home/large-structured.json" >/dev/null \
+    || fail "could not register the large structured decision"
+  run_captain "$home" structured sample-large-call --json > "$home/large-read.json" \
+    || fail "structured read exceeded the process argument limit"
+  jq -e '.records | any(.task_id == "sample-large-call" and .status == "active")' \
+    "$home/large-read.json" >/dev/null \
+    || fail "large structured decision was not projected"
   pass "structured captain decisions are readable without breaking legacy holds, and bad or orphaned records are reported"
 }
 

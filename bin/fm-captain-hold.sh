@@ -297,6 +297,21 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+task_inventory() {
+  tasks_axi list --fields hold_kind 2>/dev/null
+}
+
+task_inventory_has_id() {  # <id>; inventory on stdin
+  awk -F, -v wanted="$1" '
+    /^  [A-Za-z0-9._-]+,/ {
+      candidate = $1
+      sub(/^ +/, "", candidate)
+      if (candidate == wanted) matched = 1
+    }
+    END { exit !matched }
+  '
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -468,7 +483,7 @@ write_structured_record() {  # <task-id> <input-path>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' structured_file='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' structured_file='' show state existing_title body='' hold_kind inventory task_exists=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -494,11 +509,6 @@ command_hold() {
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
   fi
-  if [ -n "$structured_file" ]; then
-    # Persist the body before any backlog mutation, so a destination failure
-    # cannot leave a captain-held task without the body the caller supplied.
-    write_structured_record "$id" "$structured_file"
-  fi
   if [ -n "$until" ]; then
     case "$until" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
@@ -507,6 +517,7 @@ command_hold() {
   fi
   require_tasks_axi
   if show=$(task_show "$id"); then
+    task_exists=1
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
@@ -515,6 +526,9 @@ command_hold() {
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
+    inventory=$(task_inventory) || fail "could not inspect the task inventory in $FM_HOME/data/backlog.md"
+    ! printf '%s\n' "$inventory" | task_inventory_has_id "$id" \
+      || fail "task $id exists but could not be inspected in $FM_HOME/data/backlog.md"
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -525,6 +539,11 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
+  fi
+  if [ -n "$structured_file" ]; then
+    write_structured_record "$id" "$structured_file"
+  fi
+  if [ "$task_exists" = 0 ]; then
     if [ -n "$body" ]; then
       tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"
@@ -678,11 +697,13 @@ structured_record_error_detail() {  # <task-id> <path>
   printf '%s' "$detail"
 }
 
-structured_record_json() {  # <task-id> <path>
-  local id=$1 path=$2 status=unknown task_state='' hold_kind='' show record
+structured_record_json() {  # <task-id> <path> <inventory-path> <inventory-known>
+  local id=$1 path=$2 inventory=$3 inventory_known=$4 status=unknown task_state='' hold_kind='' show record
   structured_record_valid "$id" "$path" || return 1
-  if command -v tasks-axi >/dev/null 2>&1; then
-    if show=$(task_show "$id"); then
+  if [ "$inventory_known" = 1 ]; then
+    if ! task_inventory_has_id "$id" < "$inventory"; then
+      status=orphaned
+    elif show=$(task_show "$id"); then
       task_state=$(show_field "$show" state)
       hold_kind=$(show_field_value "$show" hold_kind)
       if [ "$task_state" = "done" ]; then
@@ -692,8 +713,6 @@ structured_record_json() {  # <task-id> <path>
       else
         status=linked
       fi
-    else
-      status=orphaned
     fi
   fi
   record=$(jq -c . "$path") || return 1
@@ -701,14 +720,14 @@ structured_record_json() {  # <task-id> <path>
     '. + {status:$status,task_state:$task_state,hold_kind:$hold_kind}' <<<"$record"
 }
 
-append_structured_record() {  # <task-id> <path> <records-file> <errors-file>
-  local id=$1 path=$2 records=$3 errors=$4 detail
+append_structured_record() {  # <task-id> <path> <inventory-path> <inventory-known> <records-file> <errors-file>
+  local id=$1 path=$2 inventory=$3 inventory_known=$4 records=$5 errors=$6 detail
   if [ -L "$path" ] || [ ! -f "$path" ]; then
     jq -nc --arg id "$id" --arg error 'unsafe structured decision record' \
       '{task_id:$id,error:$error}' >> "$errors"
     return 0
   fi
-  if structured_record_json "$id" "$path" >> "$records" 2>/dev/null; then
+  if structured_record_json "$id" "$path" "$inventory" "$inventory_known" >> "$records" 2>/dev/null; then
     return 0
   fi
   detail=$(structured_record_error_detail "$id" "$path")
@@ -717,7 +736,7 @@ append_structured_record() {  # <task-id> <path> <records-file> <errors-file>
 }
 
 command_structured() {
-  local id='' path records errors record_json error_json
+  local id='' path records errors inventory inventory_known=0 projection_rc=0
   [ "$#" -le 2 ] || { usage >&2; exit 2; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -735,10 +754,15 @@ command_structured() {
     || fail "cannot stage structured decision results"
   errors=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-structured-decision-errors.XXXXXX") \
     || { rm -f -- "$records"; fail "cannot stage structured decision diagnostics"; }
+  inventory=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-structured-decision-inventory.XXXXXX") \
+    || { rm -f -- "$records" "$errors"; fail "cannot stage the task inventory"; }
+  if command -v tasks-axi >/dev/null 2>&1 && task_inventory > "$inventory"; then
+    inventory_known=1
+  fi
   if [ -n "$id" ]; then
     path=$(structured_record_path "$id")
     if [ -e "$path" ] || [ -L "$path" ]; then
-      append_structured_record "$id" "$path" "$records" "$errors"
+      append_structured_record "$id" "$path" "$inventory" "$inventory_known" "$records" "$errors"
     fi
   elif [ -d "$DATA" ]; then
     while IFS= read -r path; do
@@ -751,18 +775,17 @@ command_structured() {
           continue
           ;;
       esac
-      append_structured_record "$id" "$path" "$records" "$errors"
+      append_structured_record "$id" "$path" "$inventory" "$inventory_known" "$records" "$errors"
     done < <(find "$DATA" -mindepth 2 -maxdepth 2 -name "$STRUCTURED_FILENAME" -print 2>/dev/null | LC_ALL=C sort)
   fi
-  record_json=$(jq -s '.' "$records")
-  error_json=$(jq -s '.' "$errors")
-  rm -f -- "$records" "$errors"
   jq -n --arg schema 'fm-captain-decisions.v1' \
     --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --argjson records "$record_json" --argjson errors "$error_json" \
+    --slurpfile records "$records" --slurpfile errors "$errors" \
     '{schema:$schema,generated:$generated,records:$records,
       orphaned:[$records[] | select(.status == "orphaned") | .task_id],
-      errors:$errors}'
+      errors:$errors}' || projection_rc=$?
+  rm -f -- "$records" "$errors" "$inventory"
+  return "$projection_rc"
 }
 
 BINDING_DIR="$STATE/decision-bindings"
