@@ -18,7 +18,11 @@
 # A finished ship or scout whose recovery-grade classifier reports the agent
 # gone is closed through bin/fm-teardown.sh --close-pane instead of a stale
 # wake, so an empty pane waiting on merge does not keep alarming; the copy stays
-# until landed teardown. Live agents and unfinished exits are left alone.
+# until landed teardown. Live agents and unfinished exits are left alone. Per
+# VISION.md ("autonomy exists only as an explicit grant, never as a default"),
+# this automatic retirement is itself opt-in: it stays inert until
+# config/close-exited-panes exists (or FM_CLOSE_EXITED_PANES=1 is set), exactly
+# the config-is-the-opt-in idiom bin/fm-inbox.sh uses for `say`/`ask`.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -381,6 +385,19 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+# Explicit opt-in for automatic pane retirement (see header note above): off
+# until the captain configures it, so upgrading this watcher never starts
+# closing panes on its own. FM_CLOSE_EXITED_PANES wins when set; otherwise the
+# config file's mere existence is the grant, same idiom as fm-inbox.sh's
+# config/inbox-* opt-in for say/ask.
+close_exited_panes_enabled() {
+  case "${FM_CLOSE_EXITED_PANES:-}" in
+    1|true|yes) return 0 ;;
+    0|false|no) return 1 ;;
+  esac
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/close-exited-panes" ]
 }
 
 # Close a finished ship/scout pane whose agent has actually exited, without
@@ -1345,7 +1362,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    if [ -n "$task" ] && close_finished_exited_pane "$w" "$task"; then
+    if [ -n "$task" ] && close_exited_panes_enabled && close_finished_exited_pane "$w" "$task"; then
       key=$(window_key "$w")
       clear_pause_tracking "$key"
       triage_log "closed exited pane: $w"

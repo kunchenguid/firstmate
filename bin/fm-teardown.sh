@@ -2444,7 +2444,15 @@ teardown_task_finished_for_pane_close() {
 
 teardown_composer_blocks_pane_close() {
   local verdict
-  verdict=$(fm_backend_composer_state "$BACKEND" "$T" "fm-$ID" 2>/dev/null || printf 'unknown')
+  # A dead agent's shell prompt reads `unknown` by the fleet-wide dead-shell
+  # safety rule (bin/fm-composer-lib.sh) even with no typed content, so
+  # requiring the proven `empty` verdict here would refuse every ordinary
+  # exit. Real unsent input is positively detected as pending/pending-unproven
+  # and still blocks. Only a composer-inspection FAILURE (the classifier
+  # itself erroring, distinct from it successfully reading `unknown`) is
+  # unproven in a way this gate cannot tell apart from unsent input, so that
+  # failure - and it alone - blocks the close instead of defaulting to safe.
+  verdict=$(fm_backend_composer_state "$BACKEND" "$T" "fm-$ID" 2>/dev/null) || return 0
   case "$verdict" in
     pending|pending-unproven) return 0 ;;
   esac
