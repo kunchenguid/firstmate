@@ -166,7 +166,7 @@ fm_afk_launch_verify() {
   case "$timeout" in ''|*[!0-9]*) timeout=90 ;; esac
   while [ "$waited" -lt "$timeout" ]; do
     if [ -s "$record" ]; then
-      read -r verdict _ < "$record" || verdict=
+      read -r verdict _ detail < "$record" || verdict=
       case "$verdict" in
         ok)
           fm_afk_launch_log "away-mode delivery verified: one escalation confirmed into the captain pane"
@@ -175,7 +175,7 @@ fm_afk_launch_verify() {
           echo "afk: delivery self-test was skipped (away-mode flag absent when the daemon started); away mode is NOT verified" >&2
           return 1 ;;
         failed)
-          echo "afk: away-mode delivery self-test FAILED - escalations cannot reach the captain pane. Run 'bin/fm-afk-launch.sh stop' to roll entry back, then see state/.supervise-daemon.log." >&2
+          echo "afk: away-mode delivery self-test FAILED - ${detail:-escalations cannot reach the captain pane}. Run 'bin/fm-afk-launch.sh stop' to roll entry back, then see state/.supervise-daemon.log." >&2
           return 1 ;;
       esac
     fi

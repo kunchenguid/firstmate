@@ -1358,6 +1358,7 @@ test_delivery_selftest_records_failure_and_alarms() {
   WEDGE_ALARM_LAST_EPOCH=0
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_FAKE_TMUX_SENT="$sent" \
     FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_DELIVERY_SELFTEST_SECS=1 FM_DELIVERY_SELFTEST_SLEEP=1 \
     FM_DAEMON_PRIMARY_HARNESS=claude delivery_selftest "$state"; then
     fail "delivery_selftest must fail when the captain pane cannot be reached"
   fi

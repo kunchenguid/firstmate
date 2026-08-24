@@ -468,19 +468,45 @@ test_scenario_d() {
   : > "$LOG_FILE"
   stop_daemon
 
-  # Now the undeliverable case: the recorded captain pane no longer exists, so
-  # nothing can land and entry must refuse rather than report away mode active.
+  # Gone-pane case: the recorded captain pane does not exist on this backend, so
+  # the daemon refuses at startup target validation, records the failed verdict
+  # durably, and exits non-zero without submitting anything. Run it in the
+  # foreground: this startup failure has no daemon left to poll a pidfile for.
   reset_state
   afk_enter "$STATE_DIR"
-  SUPERVISOR_TARGET_OVERRIDE='%99999' SKIP_SELFTEST_WAIT=1 \
-    FM_DELIVERY_SELFTEST_SECS=2 FM_DELIVERY_SELFTEST_SLEEP=1 start_daemon
+  if PATH="$TMUX_SHIM_DIR:$PATH" FM_STATE_OVERRIDE="$STATE_DIR" \
+    FM_SUPERVISOR_TARGET='%99999' FM_SUPERVISOR_BACKEND=tmux \
+    "$DAEMON" >"$STATE_DIR/daemon.out" 2>"$STATE_DIR/daemon.err"; then
+    fail "Scenario D: the daemon reported success for a target the backend cannot resolve"
+  fi
+  local got
+  read -r got _ < "$STATE_DIR/.subsuper-delivery-selftest" 2>/dev/null || got=
+  [ "$got" = failed ] \
+    || fail "Scenario D: a gone captain pane did not record a failed verdict (got: '${got:-<none>}')"
+  [ ! -s "$LOG_FILE" ] || fail "Scenario D: something was submitted to a gone pane"
+  if FM_STATE_OVERRIDE="$STATE_DIR" FM_AFK_VERIFY_TIMEOUT_SECS=5 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1; then
+    fail "Scenario D: verify accepted an entry whose target the backend cannot resolve"
+  fi
+
+  # Undeliverable-injection case: the pane resolves, but its composer holds an
+  # unsent human line for the whole bounded window, so no injection can ever be
+  # confirmed and entry must refuse too.
+  reset_state
+  afk_enter "$STATE_DIR"
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "unsent human line"
+  wait_for_pane_input_pending \
+    || fail "Scenario D: pending composer text did not become detectable"
+  SKIP_SELFTEST_WAIT=1 FM_DELIVERY_SELFTEST_SECS=2 FM_DELIVERY_SELFTEST_SLEEP=1 \
+    FM_WEDGE_ALARM_CHANNEL=off start_daemon
   wait_for_selftest_verdict failed \
-    || fail "Scenario D: an unreachable captain pane did not record a failed verdict"
-  [ ! -s "$LOG_FILE" ] || fail "Scenario D: something was submitted to an unreachable pane"
+    || fail "Scenario D: an unconfirmable injection did not record a failed verdict"
+  [ ! -s "$LOG_FILE" ] || fail "Scenario D: something was submitted past a pending composer"
   if FM_STATE_OVERRIDE="$STATE_DIR" FM_AFK_VERIFY_TIMEOUT_SECS=5 "$ROOT/bin/fm-afk-launch.sh" verify >/dev/null 2>&1; then
     fail "Scenario D: verify accepted an entry whose delivery could not be proven"
   fi
   stop_daemon
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+  sleep 0.3
   pass "Scenario D: away-mode entry proves one delivery and refuses when it cannot"
 }
 

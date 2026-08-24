@@ -835,7 +835,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # Exit status alone is not a liveness read: tmux 3.4 exits 0 with EMPTY
+      # output for a target that resolves to nothing, so require the pane id.
+      [ -n "$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null)" ]
       ;;
     herdr)
       fm_backend_source herdr || return 1

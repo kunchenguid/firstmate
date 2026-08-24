@@ -1029,7 +1029,8 @@ delivery_selftest() {  # <state>
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep "${FM_DELIVERY_SELFTEST_SLEEP:-3}"
   done
-  printf 'failed %s\n' "$(_now)" > "$record"
+  printf 'failed %s could not confirm an injection into %s (backend=%s)\n' \
+    "$(_now)" "$target" "$backend" > "$record"
   log "ERROR: delivery self-test FAILED: could not confirm an injection into $target (backend=$backend); away mode cannot deliver escalations"
   wedge_alarm_notify "away-mode entry FAILED its delivery self-test - escalations cannot reach $target" "$record"
   return 1
@@ -1521,6 +1522,8 @@ fm_super_main() {
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
+    printf 'failed %s unsupported supervisor backend %s\n' "$(_now)" "$BACKEND" \
+      > "$STATE/.subsuper-delivery-selftest" 2>/dev/null || true
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
@@ -1559,6 +1562,8 @@ fm_super_main() {
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
+    printf 'failed %s supervisor target %s does not resolve to a %s pane\n' \
+      "$(_now)" "$TARGET" "$BACKEND" > "$STATE/.subsuper-delivery-selftest" 2>/dev/null || true
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
@@ -1568,9 +1573,6 @@ fm_super_main() {
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
-  # A failed self-test records durably and alarms; the daemon stays up so
-  # bin/fm-afk-launch.sh's `verify` can read the verdict and roll entry back.
-  delivery_selftest "$STATE" || true
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
@@ -1591,6 +1593,12 @@ fm_super_main() {
     exit 0
   }
   trap cleanup TERM INT
+
+  # A failed self-test records durably and alarms; the daemon stays up so
+  # bin/fm-afk-launch.sh's `verify` can read the verdict and roll entry back.
+  # Runs under the trap above: a stop rollback arriving mid-retry must release
+  # the lock and pidfile, not die by default signal action.
+  delivery_selftest "$STATE" || true
 
   # --- crash-loop guard -----------------------------------------------------
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP

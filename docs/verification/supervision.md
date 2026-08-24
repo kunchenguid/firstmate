@@ -534,4 +534,5 @@ ok - Scenario D: away-mode entry proves one delivery and refuses when it cannot
 ```
 
 The proven case records `ok`, the payload appears in the pane's submitted log, and `verify` exits 0.
-With the recorded captain pane absent, the verdict is `failed`, nothing is submitted, and `verify` exits non-zero naming the rollback command.
+With the recorded captain pane gone, the daemon records the `failed` verdict with the concrete reason at startup target validation and exits non-zero, nothing is submitted, and `verify` exits non-zero naming the rollback command.
+With the pane present but its composer holding an unsent human line for the whole bounded window, the self-test cannot confirm an injection, records `failed`, submits nothing, and `verify` exits non-zero the same way.
