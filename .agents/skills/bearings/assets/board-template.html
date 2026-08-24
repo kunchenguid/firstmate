@@ -551,10 +551,12 @@ __FM_BEARINGS_BOARD_DATA__
     var unavailable = el("div", "bb-provision bb-provision--unavailable");
     unavailable.appendChild(el("div", "bb-provision__attention", "usage unavailable: " + data.usage.reason));
     provisions.appendChild(unavailable);
+    (data.usage.attention || []).forEach(function (a) { provisionAttention(a.text); });
   } else if (!data.usage.providers.length) {
     var emptyProviders = el("div", "bb-provision bb-provision--empty");
     emptyProviders.appendChild(el("div", "bb-provision__attention", "No providers reported."));
     provisions.appendChild(emptyProviders);
+    (data.usage.attention || []).forEach(function (a) { provisionAttention(a.text); });
   } else {
     data.usage.providers.forEach(function (p) {
       var row = el("div", "bb-provision");
@@ -736,6 +738,8 @@ __FM_BEARINGS_BOARD_DATA__
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
   data.underway.forEach(function (t) {
+    var runtimeParts = [t.harness, t.model, t.effort].filter(function (part) { return typeof part === "string" && part.length > 0; });
+    var crewParts = [t.kind, t.harness, t.model, t.effort, t.repo || t.id].filter(function (part) { return typeof part === "string" && part.length > 0; });
     var row = el("div", "bb-underway-row");
     var button = document.createElement("button");
     button.type = "button";
@@ -747,7 +751,7 @@ __FM_BEARINGS_BOARD_DATA__
     button.appendChild(state);
     var main = el("span", "bb-row__main");
     main.appendChild(el("span", "bb-underway-row__title", t.doing));
-    main.appendChild(el("span", "bb-underway-row__crew", t.kind + " · " + (t.harness || "default") + " · " + (t.model || "default") + " · " + (t.effort || "default") + " · " + (t.repo || t.id)));
+    main.appendChild(el("span", "bb-underway-row__crew", crewParts.join(" · ")));
     button.appendChild(main);
     var caret = document.createElement("span");
     caret.className = "bb-underway-row__caret";
@@ -765,7 +769,7 @@ __FM_BEARINGS_BOARD_DATA__
     detailCtx.appendChild(ctxRow("context", "model window: not measured"));
     if (t.latest) detailCtx.appendChild(ctxRow("latest", t.latest));
     if (t.blockers && t.blockers.length) detailCtx.appendChild(ctxRow("blockers", t.blockers.join(" · ")));
-    detailCtx.appendChild(ctxRow("runtime", (t.harness || "default") + " · " + (t.model || "default") + " · " + (t.effort || "default")));
+    detailCtx.appendChild(ctxRow("runtime", runtimeParts.length ? runtimeParts.join(" · ") : "-"));
     detailCtx.appendChild(ctxRow("next", t.next, true));
     detail.appendChild(detailCtx);
     var links = el("div", "bb-underway-detail__links");
@@ -774,7 +778,11 @@ __FM_BEARINGS_BOARD_DATA__
       pr.href = t.pr_url; pr.target = "_blank"; pr.rel = "noopener";
       links.appendChild(pr);
     }
-    if (t.report_path) links.appendChild(el("span", "bb-meta-mono", "report " + t.report_path));
+    if (t.report_path) {
+      var report = el("a", "bb-decision__link", "report " + t.report_path);
+      report.href = t.report_path; report.target = "_blank"; report.rel = "noopener";
+      links.appendChild(report);
+    }
     if (links.children.length) detail.appendChild(links);
     button.addEventListener("click", function () {
       var expanded = button.getAttribute("aria-expanded") === "true";
