@@ -85,8 +85,9 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Add `provenance.fleet_read_at` from the fresh fleet snapshot and `provenance.usage_read_at` from the same compose-time usage read.
 - Read current usage from `quota-axi --json` at every build. Set `usage.available=false` with a bounded `reason` when that read fails, preserve zero providers as an explicit empty state, and never invent provider data.
 - For available providers, carry provider and plan, numeric weekly headroom or null with `headroom unknown`, reset time, pace, runway state, model sub-window note, attention rows, and the usage source read time. Render tight, exhausted, and unknown states explicitly.
+- Preserve usage attention rows when usage is unavailable or when zero providers report.
 - Add `supervisor` with identity `firstmate`, the supervised direct-crew count, model and effort only when known, and bounded startup-memory status when available. Firstmate supervises; crewmates and scouts own project tasks.
-- Add every Underway row's owner, reconciled state detail, required next action, and optional task metadata, links, blockers, and status. Render `model window: not measured` for every task; do not add per-harness context readers.
+- Add every Underway row's owner, reconciled state detail, required next action, optional task metadata, links, blockers, and bounded latest status. Render `report_path` as a link, accept only HTTPS PR URLs, render `model window: not measured` for every task, and do not add per-harness context readers.
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes or resumes its Lavish session with `lavish-axi`, and only then binds and arms the polling source; use the session URL it prints in the chat digest.
