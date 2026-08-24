@@ -14,7 +14,10 @@
 #      long-run deferral suppresses it (divergence asserted both ways).
 #   6. vorwarn: a same-day marker makes fm-spawn refuse with the pre-warning
 #      reason; a stale marker is cleaned and does not block.
-#   7. install writes the four systemd user units without calling systemctl;
+#   8. the morning check runs the write-free backpass analysis first; its
+#      summary line lands in morgenpruefung.md, and a failing pass is recorded
+#      without blocking the green lift.
+#   9. install writes the four systemd user units without calling systemctl;
 #      --enable calls it.
 #
 # Isolation: throwaway FM_HOME; notifier, reboot, systemctl, and the crew-state
@@ -50,6 +53,7 @@ run_ts() {
   FM_TAGESSCHLUSS_REBOOT_CMD="$TMP/shims/fake-reboot" \
   FM_TAGESSCHLUSS_UNIT_DIR="$TMP/units" FM_TAGESSCHLUSS_SYSTEMCTL="$TMP/shims/systemctl-shim" \
   FM_FORENSIK_ROOTS="$TMP/leere-wurzel" \
+  FM_TAGESSCHLUSS_BACKPASS="${FM_TAGESSCHLUSS_BACKPASS-0}" \
   "$TS" "$@"
 }
 
@@ -139,7 +143,44 @@ fi
 [ ! -f "$HOME_A/state/.tagesschluss-vorwarn" ] && ok "the stale marker is cleaned" \
   || fail "fm-spawn must clean a stale marker"
 
-# --- 7. install writes units; systemctl only with --enable -----------------
+# --- 8. the morning check runs the write-free backpass pass before lifting --
+printf '#!/usr/bin/env bash\necho "stub-run args=$* home=${FM_HOME:-unset}" >> %q/bp-stub.log\necho "backpass: STUB OK"\n' "$TMP" > "$TMP/shims/bp-ok"
+printf '#!/usr/bin/env bash\necho "stub exploded" >&2\nexit 7\n' > "$TMP/shims/bp-fail"
+chmod +x "$TMP/shims/bp-ok" "$TMP/shims/bp-fail"
+rm -f "$TMP/bp-stub.log"
+
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" set --origin tagesschluss --wortlaut test >/dev/null
+FM_TAGESSCHLUSS_BACKPASS=1 FM_TAGESSCHLUSS_BACKPASS_CMD="$TMP/shims/bp-ok" run_ts morgenpruefung >/dev/null \
+  || fail "the morning check with a passing backpass stub must exit 0"
+grep -q '^backpass: STUB OK$' "$OUT/morgenpruefung.md" \
+  && ok "the template summary line lands in morgenpruefung.md" \
+  || fail "morgenpruefung.md must carry the backpass summary line"
+grep -q 'args=run' "$TMP/bp-stub.log" && ok "the stub is invoked with the run command" \
+  || fail "backpass hook must call the analyse script with 'run'"
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" status >/dev/null 2>&1 \
+  && fail "green verdict with passing backpass must still lift the stop" \
+  || ok "green verdict lifts the stop after a passing backpass pass"
+
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" set --origin tagesschluss --wortlaut test >/dev/null
+run_ts_morgen_with_fail() {
+  FM_HOME="$HOME_A" FM_TAGESSCHLUSS_STATE_CMD="$TMP/shims/state-paused" \
+  FM_TAGESSCHLUSS_HALT_TIMEOUT=1 FM_TAGESSCHLUSS_HALT_POLL=1 \
+  FM_TAGESSCHLUSS_REBOOT_CMD="$TMP/shims/fake-reboot" \
+  FM_TAGESSCHLUSS_UNIT_DIR="$TMP/units" FM_TAGESSCHLUSS_SYSTEMCTL="$TMP/shims/systemctl-shim" \
+  FM_FORENSIK_ROOTS="$TMP/leere-wurzel" FM_TAGESSCHLUSS_BACKPASS=1 FM_TAGESSCHLUSS_BACKPASS_CMD="$TMP/shims/bp-fail" \
+  "$TS" "$@"
+}
+run_ts_morgen_with_fail morgenpruefung >/dev/null \
+  || fail "a failing backpass pass must not block the green morning check"
+grep -q '^backpass: FEHLER (rc=7)' "$OUT/morgenpruefung.md" \
+  && ok "a failing backpass is recorded as FEHLER with its code" \
+  || fail "the failure note must name the return code"
+FM_HOME="$HOME_A" "$REPO/bin/fm-fleet-stop.sh" status >/dev/null 2>&1 \
+  && fail "a backpass failure must not keep a green day-close stop" \
+  || ok "the stop still lifts on green despite the backpass failure"
+
+
+# --- 9. install writes units; systemctl only with --enable -----------------
 run_ts install >/dev/null || fail "install must write the units"
 for u in fm-tagesschluss.service fm-tagesschluss.timer fm-tagesschluss-vorwarn.service fm-tagesschluss-vorwarn.timer; do
   [ -f "$TMP/units/$u" ] || fail "install must write $u"

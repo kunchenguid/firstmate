@@ -7,7 +7,12 @@
 #   fm-tagesschluss.sh vorwarn         set the 19:30 pre-warning marker: no new
 #                                      launches tonight (bin/fm-spawn.sh enforces it)
 #   fm-tagesschluss.sh morgenpruefung  post-boot morning check; lifts ONLY a
-#                                      tagesschluss-origin stop, and only on green
+#                                      tagesschluss-origin stop, and only on green;
+#                                      runs the write-free backpass analysis pass
+#                                      FIRST (bin/fm-backpass-analyse.sh owns its
+#                                      mechanics), so accepted-proposal material is
+#                                      settled before any home wakes; a backpass
+#                                      failure is recorded, never flips the verdict
 #   fm-tagesschluss.sh defer --grund "<text>" --bis YYYY-MM-DD   defer the reboot
 #   fm-tagesschluss.sh defer --clear
 #   fm-tagesschluss.sh status
@@ -59,7 +64,7 @@ HALT_POLL="${FM_TAGESSCHLUSS_HALT_POLL:-30}"
 UNIT_DIR="${FM_TAGESSCHLUSS_UNIT_DIR:-$HOME/.config/systemd/user}"
 SYSTEMCTL="${FM_TAGESSCHLUSS_SYSTEMCTL:-systemctl}"
 
-usage() { sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 heute() { date +%F; }
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -182,6 +187,19 @@ $z3" "$([ -z "$befunde" ] && echo info || echo warn)"; then
     echo "pre-warning zone set for $(heute): no new launches tonight"
     ;;
   morgenpruefung)
+    # 0. Write-free backpass analysis pass, BEFORE anything is lifted or woken.
+    backpass_note="backpass: skipped (not executable)"
+    bp_cmd="${FM_TAGESSCHLUSS_BACKPASS_CMD:-$FM_ROOT/bin/fm-backpass-analyse.sh}"
+    if [ "${FM_TAGESSCHLUSS_BACKPASS:-1}" = "1" ] && [ -x "$bp_cmd" ]; then
+      if bp_out="$(FM_HOME="$FM_HOME" "$bp_cmd" run 2>&1)"; then
+        backpass_note="$(printf '%s\n' "$bp_out" | sed -n '1p')"
+      else
+        bp_rc=$?
+        backpass_note="backpass: FEHLER (rc=$bp_rc): $(printf '%s\n' "$bp_out" | sed -n '1p')"
+      fi
+    elif [ "${FM_TAGESSCHLUSS_BACKPASS:-1}" != "1" ]; then
+      backpass_note="backpass: ausgeschaltet (FM_TAGESSCHLUSS_BACKPASS=0)"
+    fi
     rm -f "$STATE/.tagesschluss-vorwarn"
     letzter="$(find "$OUT_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)"
     verdict=""
@@ -212,6 +230,7 @@ $z3" "$([ -z "$befunde" ] && echo info || echo warn)"; then
       echo "geprueft: $(utc_now)"
       echo "verdict: $verdict"
       echo "stop: $lift_note"
+      echo "$backpass_note"
     } > "${letzter:-$OUT_ROOT}/morgenpruefung.md" 2>/dev/null || {
       mkdir -p "$OUT_ROOT"
       printf 'verdict: %s\nstop: %s\n' "$verdict" "$lift_note" > "$OUT_ROOT/morgenpruefung-$(heute).md"
