@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which process identifies this session, which verified-harness
+# process holds this home's session lock, and does the current process descend
+# from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -125,15 +126,64 @@ fm_harness_ancestry_pids() {
   [ "$printed" -eq 1 ]
 }
 
+# The harness's own statement of which process IS this session, or return 1.
+#
+# Ancestry alone cannot answer that question under a session-hosting daemon,
+# because two different arrangements produce the identical process chain:
+#   - an async hook or tool call of session X, run for X inside a daemon-hosted
+#     worker (the pid to record is X, several hops up), and
+#   - a background session of its own, launched BY session X through that same
+#     daemon (the pid to record is the background session, several hops down).
+# In both, every hop from the caller up to X is harness-named with no gap, so no
+# process-table fact separates them. Claude Code does separate them: it exports
+# CLAUDE_PID into the processes it spawns for a session, set to that session's
+# own pid, overriding whatever value those processes inherited. A stale inherited
+# value is therefore possible only where the harness did not spawn the process at
+# all (a tmux server started from a session, say, and every pane below it), which
+# is why the value is trusted only after the checks in the caller below.
+fm_harness_declared_session_pid() {
+  local declared=${CLAUDE_PID:-}
+  case "$declared" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$declared"
+}
+
 # Print the one pid that identifies this session when the session lock is being
-# WRITTEN: the outermost pid of the contiguous run. That is the pid that lives as
-# long as the session - a Claude worker several levels in is reaped when its hook
-# returns, and a lock naming it would look stale moments later while the session
-# is still running. Every non-Claude harness reports a single pid, so this is its
-# innermost match unchanged.
+# WRITTEN.
+#
+# The harness's own declaration wins when it names a live harness process inside
+# this contiguous run. Requiring membership is what makes an untrustworthy value
+# harmless: an inherited pid from an unrelated session is not in this ancestry
+# and is ignored, and a dead one cannot be recorded as a live owner.
+#
+# Otherwise fall back to the outermost pid of the contiguous run. That is the pid
+# that lives as long as the session for every harness that declares nothing - a
+# Claude worker several levels in is reaped when its hook returns, and a lock
+# naming it would look stale moments later while the session is still running.
+# Every non-Claude harness reports a single pid, so this is its innermost match
+# unchanged.
+#
+# The fallback is also what the outermost pid costs: under a session-hosting
+# daemon it reaches past this session's own processes onto the session that
+# launched it, so the lock records a pid that is only transiently an ancestor.
+# When the daemon between them exits, that pid stops being an ancestor while
+# still naming a live harness, and fm_session_lock_owned_by_self below then
+# reads this session's own lock as a competing session's - permanently, for the
+# rest of the session. tests/fm-session-lock-ancestry.test.sh drives that shape.
 fm_harness_ancestry_pid() {
-  local pids pid outermost=''
+  local pids pid outermost='' declared
   pids=$(fm_harness_ancestry_pids) || return 1
+  if declared=$(fm_harness_declared_session_pid) && fm_harness_pid_alive "$declared"; then
+    while IFS= read -r pid; do
+      if [ "$pid" = "$declared" ]; then
+        printf '%s\n' "$declared"
+        return 0
+      fi
+    done <<EOF
+$pids
+EOF
+  fi
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
   done <<EOF
