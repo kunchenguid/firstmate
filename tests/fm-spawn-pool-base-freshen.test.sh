@@ -629,6 +629,37 @@ test_base_branch_contract_refuses_mismatch() {
   pass "ship and scout base contracts refuse conflicting spawn flags"
 }
 
+test_base_branch_contract_uses_last_line() {
+  local rec id brief out status
+  id='pool-base-branch-last-line-r8'
+  rec=$(make_case base-branch-last-line "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_ship_brief "$id" no-mistakes develop
+  brief="$HOME_DIR/data/$id/brief.md"
+  awk '
+    /^# Task$/ {
+      print
+      print "Base branch contract: base_branch=release"
+      next
+    }
+    { print }
+  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "spawn --base-branch should honor the last generated base contract"
+  assert_contains "$out" "spawned $id" "spawn did not report success after an earlier decoy base line"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "spawn treated an earlier Base branch mention as the contract"
+  pass "ship base-contract agreement uses the last Base branch line"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -647,5 +678,6 @@ test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_base_branch_contract_refuses_mismatch
+test_base_branch_contract_uses_last_line
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
