@@ -11,7 +11,13 @@
 # writing needs firstmate judgment with full context - and it never touches
 # any home's backlog. One printed line reports every gap loudly; silence
 # means the supply matched:
-#   fehlt(N:id@heim,...)  an open captain-held task with no card
+#   fehlt(N:id@heim,...)  a captain-held task whose hold-until date has come
+#                         due (today or earlier) and whose card is missing
+#   geparkt-ohne-frist(N:id@heim,...)
+#                         an open captain-held task with no hold-until date
+#                         and no card - a register finding for firstmate to
+#                         resolve (date the hold or supply the card), not a
+#                         board demand
 #   waise(N:id,...)       a card whose id is not an open captain hold
 #                         anywhere anymore (answered or stale)
 #   karte-ohne-antwortweg(N:id,...)
@@ -19,6 +25,13 @@
 #                         board recognizes, so it offers the captain no way
 #                         to answer and cannot be sent
 #   FEHLER(...)           an unreadable source, never a silent skip
+#
+# Holds deliberately parked into the future are taken OUT of the card
+# contract entirely: a row carrying "(hold-until: <date>)" with a date after
+# today demands no card and its existing card is no orphan. An unparseable
+# hold-until value is its own FEHLER. The clock comes from `date`; tests pin
+# it through FM_BRETT_KARTEN_TODAY (YYYY-MM-DD), which fails loudly when it
+# is not a date.
 #
 # Commands:
 #   fm-brett-karten-vollstaendigkeit.sh check     compare and report (default)
@@ -37,6 +50,9 @@
 #     usable home path is its own FEHLER.
 #   - An open captain-held row starts "- [ ] <id> " and carries
 #     "(hold-kind: captain)". Closed rows and other hold kinds need no card.
+#     A "(hold-until: YYYY-MM-DD)" field on the row dates a deliberate park;
+#     the selftest probes only the main home for fristlos gaps, the fleet
+#     sweep owns all homes.
 #   - A card is a regular top-level <id>.md file in data/brett-karten/.
 #   - An answer way is at least one "## " section heading whose text matches
 #     the board's OPTION pattern: one uppercase letter, optional blanks, the
@@ -102,9 +118,26 @@ die_usage() {
 # Counters plus capped id lists keep the printed line bounded.
 
 N_FEHLT=0 L_FEHLT=
+N_GEFR=0 L_GEFR=
 N_WAISE=0 L_WAISE=
 N_WEG=0 L_WEG=
 F_FEHLER=
+
+today_epoch() {
+  local t=${FM_BRETT_KARTEN_TODAY:-$(date +%F)}
+  case $t in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *)
+      printf 'fm-brett-karten-vollstaendigkeit: FM_BRETT_KARTEN_TODAY ist kein Datum (JJJJ-MM-TT): %s\n' "$t" >&2
+      return 1
+      ;;
+  esac
+  date -d "$t" +%s 2>/dev/null || {
+    printf 'fm-brett-karten-vollstaendigkeit: FM_BRETT_KARTEN_TODAY ist unlesbar: %s\n' "$t" >&2
+    return 1
+  }
+}
+TODAY_EPOCH=$(today_epoch) || exit 2
 
 list_add() {  # <L-var> <N-var> <token>
   local lv=$1 nv=$2 token=$3 cur n
@@ -132,6 +165,7 @@ fehler_add() {
 summary_line() {
   local out=brett-karten
   [ "$N_FEHLT" -gt 0 ] && out+=" $N_FEHLT fehlt(${L_FEHLT// /,});"
+  [ "$N_GEFR" -gt 0 ] && out+=" $N_GEFR geparkt-ohne-frist(${L_GEFR// /,});"
   [ "$N_WAISE" -gt 0 ] && out+=" $N_WAISE waise(${L_WAISE// /,});"
   [ "$N_WEG" -gt 0 ] && out+=" $N_WEG karte-ohne-antwortweg(${L_WEG// /,});"
   [ -n "$F_FEHLER" ] && out+=" FEHLER($F_FEHLER);"
@@ -141,13 +175,22 @@ summary_line() {
 
 # --- source readers -----------------------------------------------------------
 
-hold_ids() {  # <backlog> -> open captain-held ids, one per line, file order
+captain_rows() {  # <backlog> -> "id<TAB>until" per open captain row; until is
+  #               "" when undated and "?" when a hold-until value is unparseable
   awk '
     index($0, "- [ ] ") == 1 && index($0, "(hold-kind: captain)") > 0 {
       id = $0
       sub(/^- \[ \] /, "", id)
       sub(/[ \t].*$/, "", id)
-      if (id != "") print id
+      if (id == "") next
+      until = ""
+      i = index($0, "(hold-until: ")
+      if (i > 0) {
+        d = substr($0, i + 13, 10)
+        if (d ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) until = d
+        else until = "?"
+      }
+      print id "\t" until
     }
   ' "$1"
 }
@@ -173,15 +216,31 @@ card_has_antwortweg() {  # <card.md> -> exit 0 when a board-recognized option ex
   ' "$1"
 }
 
-scan_home() {  # <label> <backlog> : record holds and missing cards for one home
-  local label=$1 backlog=$2 id
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
+scan_home() {  # <label> <backlog> : classify one home's open captain holds
+  local label=$1 backlog=$2 line id until tep
+  while IFS= read -r line; do
+    id=${line%%$'\t'*}
+    until=${line#*$'\t'}
     OPEN_ALL[$id]=1
-    if [ "$KARTEN_OK" = 1 ] && [ ! -f "$KARTEN/$id.md" ]; then
-      list_add L_FEHLT N_FEHLT "$id@$label"
+    if [ "$until" = "?" ]; then
+      fehler_add "hold-until-unlesbar-$id"
+      continue
     fi
-  done < <(hold_ids "$backlog")
+    if [ -n "$until" ]; then
+      tep=$(date -d "$until" +%s 2>/dev/null) || {
+        fehler_add "hold-until-unlesbar-$id"
+        continue
+      }
+      [ "$tep" -gt "$TODAY_EPOCH" ] && continue
+    fi
+    if [ "$KARTEN_OK" = 1 ] && [ ! -f "$KARTEN/$id.md" ]; then
+      if [ -n "$until" ]; then
+        list_add L_FEHLT N_FEHLT "$id@$label"
+      else
+        list_add L_GEFR N_GEFR "$id@$label"
+      fi
+    fi
+  done < <(captain_rows "$backlog")
 }
 
 officers_scan() {  # walk data/secondmates.md like fm-brett-antworten.sh
@@ -392,7 +451,7 @@ action_disarm() {
 }
 
 action_selftest() {
-  local ok=1 home
+  local ok=1 home line id until tep
   if [ -r "$BACKLOG" ]; then
     echo "SELFTEST OK: Haupt-Backlog lesbar ($BACKLOG)"
   else
@@ -429,6 +488,21 @@ action_selftest() {
     fi
   else
     echo "SELFTEST OK: keine Offiziere registriert (secondmates.md abwesend)"
+  fi
+  if [ -r "$BACKLOG" ] && [ -d "$KARTEN" ] && [ -r "$KARTEN" ]; then
+    while IFS= read -r line; do
+      id=${line%%$'\t'*}
+      until=${line#*$'\t'}
+      [ "$until" = "?" ] && continue
+      if [ -n "$until" ]; then
+        tep=$(date -d "$until" +%s 2>/dev/null) || continue
+        [ "$tep" -gt "$TODAY_EPOCH" ] && continue
+      fi
+      if [ ! -f "$KARTEN/$id.md" ]; then
+        echo "SELFTEST FAIL: Haupt-Aufgabe $id ist offen und fristlos, aber ohne Karte (geparkt-ohne-frist)"
+        ok=0
+      fi
+    done < <(captain_rows "$BACKLOG")
   fi
   [ "$ok" = 1 ] && echo "SELFTEST OK"
   [ "$ok" = 1 ]

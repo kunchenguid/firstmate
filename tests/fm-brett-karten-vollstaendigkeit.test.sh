@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # End-to-end tests for the board card completeness guard: every open captain
 # hold of the main home and every registered officer home needs exactly one
-# card named <id>.md under data/brett-karten/. Missing cards and orphan cards
-# wake loudly with id and home, a card without a board-recognized answer way
-# wakes on its own, closed rows and other hold kinds stay quiet, unreadable
-# sources are their own finding instead of a silent skip, and silence means
-# the supply matched. The check never writes cards or backlogs.
+# card named <id>.md under data/brett-karten/, unless it is deliberately
+# parked into the future through hold-until. Due-dated gaps wake as fehlt,
+# undated gaps as geparkt-ohne-frist register findings, orphan cards and
+# cards without a board-recognized answer way wake on their own, closed rows
+# and other hold kinds stay quiet, unreadable sources are their own finding
+# instead of a silent skip, and silence means the supply matched. The check
+# never writes cards or backlogs.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,6 +16,11 @@ set -u
 
 CHECK="$ROOT/bin/fm-brett-karten-vollstaendigkeit.sh"
 TMP_ROOT=$(fm_test_tmproot fm-brett-karten-vollstaendigkeit)
+
+TODAY=$(date +%F)
+export FM_BRETT_KARTEN_TODAY="$TODAY"
+PAST=2020-01-01
+FUTURE=2099-12-31
 
 make_home() {  # <name> -> home path on stdout
   local home="$TMP_ROOT/$1"
@@ -28,10 +35,11 @@ EOF
   printf '%s\n' "$home"
 }
 
-write_hold() {  # <home> <id> [hold-kind] [checkbox]
-  local home=$1 id=$2 kind=${3:-captain} box=${4:- }
-  printf -- '- [%s] %s - Testposten %s (repo: x) (hold: test) (hold-kind: %s)\n' \
-    "$box" "$id" "$id" "$kind" >> "$home/data/backlog.md"
+write_hold() {  # <home> <id> [hold-kind] [checkbox] [hold-until]
+  local home=$1 id=$2 kind=${3:-captain} box=${4:- } until=${5:-} extra=
+  [ -n "$until" ] && extra=" (hold-until: $until)"
+  printf -- '- [%s] %s - Testposten %s (repo: x) (hold: test) (hold-kind: %s)%s\n' \
+    "$box" "$id" "$id" "$kind" "$extra" >> "$home/data/backlog.md"
 }
 
 write_card() {  # <home> <id> : supplies a card WITH a board-recognized answer way
@@ -61,7 +69,7 @@ run_check() {  # <main-home> -> one sweep's stdout
 
 H1=$(make_home h1)
 write_hold "$H1" posten-mit-karte
-write_hold "$H1" posten-ohne-karte
+write_hold "$H1" posten-ohne-karte captain ' ' "$PAST"
 write_card "$H1" posten-mit-karte
 
 out=$(run_check "$H1")
@@ -80,6 +88,14 @@ write_card "$H1" posten-ohne-karte
 out=$(run_check "$H1")
 [ -z "$out" ] || fail "a complete supply was not silent: $out"
 
+# A card whose hold is deliberately parked into the future is no orphan and
+# demands nothing.
+HF0=$(make_home hf0)
+write_hold "$HF0" zukunftsgeparkter-posten captain ' ' "$FUTURE"
+write_card "$HF0" zukunftsgeparkter-posten
+out=$(run_check "$HF0")
+[ -z "$out" ] || fail "a future-parked hold with a card was not silent: $out"
+
 # Only OPEN captain holds need cards: closed rows, other hold kinds, and a
 # title that merely mentions captains must never demand one.
 write_hold "$H1" geschlossener-posten captain x
@@ -94,7 +110,7 @@ out=$(run_check "$H1")
 # --- orphan card: loud even when the supply otherwise matches -------------------
 
 H3=$(make_home h3)
-write_hold "$H3" lebendiger-posten
+write_hold "$H3" lebendiger-posten captain ' ' "$PAST"
 write_card "$H3" lebendiger-posten
 write_card "$H3" verwaiste-alte-karte
 
@@ -137,8 +153,8 @@ aw_probe() {  # <slug> <section-line> <ja|nein> : does the board recognize this 
 }
 
 H4A=$(make_home h4a)
-write_hold "$H4A" frage-mit-weg
-write_hold "$H4A" frage-ohne-weg
+write_hold "$H4A" frage-mit-weg captain ' ' "$PAST"
+write_hold "$H4A" frage-ohne-weg captain ' ' "$PAST"
 write_card "$H4A" frage-mit-weg
 printf '# Karte frage-ohne-weg · Test\n\n## Lage\nNur Zahlenwege.\n\n## 1 · Erster Weg\nFolge.\n' \
   > "$H4A/data/brett-karten/frage-ohne-weg.md"
@@ -162,11 +178,56 @@ aw_probe klein '## a · Kleinbuchstabe' nein
 aw_probe doppel '## AB · Doppelbuchstabe' nein
 aw_probe ohneleer '##A · Kein Leerzeichen nach der Raute' nein
 
+# --- Fassung 2: hold-until dates steer the card demand --------------------------
+
+HF=$(make_home hf)
+write_hold "$HF" zukunftsfrist-posten captain ' ' "$FUTURE"
+write_hold "$HF" heutige-frist-posten captain ' ' "$TODAY"
+write_hold "$HF" ueberfaellige-frist-posten captain ' ' "$PAST"
+
+out=$(run_check "$HF")
+[ "$out" = "brett-karten 2 fehlt(heutige-frist-posten@haupt,ueberfaellige-frist-posten@haupt);" ] \
+  || fail "expected exactly the two due fehlte, got: $out"
+case $out in *zukunftsfrist-posten*) fail "a future-dated hold demanded a card: $out" ;; esac
+pass "ok - due dates demand cards, future dates stay out"
+
+# Undated open captain holds are register findings, never card demands.
+HG=$(make_home hg)
+write_hold "$HG" fristlos-bekannter-posten
+
+out=$(run_check "$HG")
+[ "$out" = "brett-karten 1 geparkt-ohne-frist(fristlos-bekannter-posten@haupt);" ] \
+  || fail "expected a geparkt-ohne-frist register finding, got: $out"
+
+O6B=$(make_home o6b)
+write_hold "$O6B" fristloser-offiziers-posten
+register_officer "$HG" sm-test "$O6B"
+out=$(run_check "$HG")
+[ "$out" = "brett-karten 2 geparkt-ohne-frist(fristlos-bekannter-posten@haupt,fristloser-offiziers-posten@sm-test);" ] \
+  || fail "expected both homes' geparkt-ohne-frist findings, got: $out"
+pass "ok - undated gaps reported per home as register findings"
+
+# An unparseable hold-until value is its own loud FEHLER, not a classed gap.
+HM=$(make_home hm)
+printf -- '- [ ] bald-posten - Testposten (repo: x) (hold: test) (hold-kind: captain) (hold-until: bald)\n' \
+  >> "$HM/data/backlog.md"
+out=$(run_check "$HM")
+[ "$out" = "brett-karten FEHLER(hold-until-unlesbar-bald-posten);" ] \
+  || fail "expected unparseable-hold-until FEHLER only, got: $out"
+pass "ok - unparseable hold-until named loudly"
+
+# A garbage clock override fails loudly instead of misclassifying everything.
+FM_BRETT_KARTEN_TODAY=bogus FM_HOME="$HG" "$CHECK" check >/dev/null 2>&1 &&
+  fail "a bogus clock override was accepted"
+FM_BRETT_KARTEN_TODAY=bogus FM_HOME="$HG" "$CHECK" check 2>&1 |
+  grep -q "FM_BRETT_KARTEN_TODAY" || fail "the bogus clock override did not name itself"
+pass "ok - clock override fails loudly when it is no date"
+
 # --- officer homes: same contract, labeled with the registry name ---------------
 
 M5=$(make_home m5)
 O5=$(make_home o5)
-write_hold "$O5" offizier-posten
+write_hold "$O5" offizier-posten captain ' ' "$PAST"
 register_officer "$M5" sm-test "$O5"
 
 out=$(run_check "$M5")
@@ -181,7 +242,7 @@ out=$(run_check "$M5")
 
 # An open captain hold in BOTH homes is one card keyed by the shared id.
 DUP=dup-posten-id
-write_hold "$M5" "$DUP"
+write_hold "$M5" "$DUP" captain ' ' "$PAST"
 out=$(run_check "$M5")
 case $out in
   *"1 fehlt($DUP@haupt)"*) pass "ok - shared id reported per home" ;;
@@ -250,7 +311,8 @@ case $out in
   *"FEHLER(karten-kein-ordner)"*) pass "ok - corrupt card path named loudly" ;;
   *) fail "expected karten-kein-ordner finding, got: $out" ;;
 esac
-case $out in *fehlt*|*waise*) fail "the comparison ran on an unusable directory: $out" ;; esac
+case $out in *fehlt* | *geparkt* | *waise*) fail "the comparison ran on an unusable directory: $out" ;;
+esac
 
 # An unreadable card directory is loud as well (root reads everything, so the
 # case is skipped there).
@@ -265,7 +327,7 @@ else
     *"FEHLER(karten-unlesbar)"*) pass "ok - unreadable card directory named loudly" ;;
     *) fail "expected karten-unlesbar finding, got: $out" ;;
   esac
-  case $out in *fehlt*|*waise*) fail "findings were derived from an unreadable directory: $out" ;; esac
+  case $out in *fehlt* | *geparkt* | *waise*) fail "findings were derived from an unreadable directory: $out" ;; esac
   chmod 755 "$H10/data/brett-karten"
 fi
 
@@ -305,6 +367,19 @@ rm "$H11/data/brett-karten/rote-karte.md"
 FM_HOME="$H11" "$CHECK" --selftest >/dev/null \
   || fail "selftest failed after the optionless card was removed"
 
+# The selftest also guards Fassung 2: an undated cardless main hold is a red
+# case, while a future-dated one stays out of it.
+write_hold "$H11" fristloser-selftest-posten
+FM_HOME="$H11" "$CHECK" --selftest >/dev/null 2>&1 \
+  && fail "selftest passed with an undated cardless hold present"
+FM_HOME="$H11" "$CHECK" --selftest 2>&1 | grep -q "fristloser-selftest-posten.*geparkt-ohne-frist" \
+  || fail "selftest did not name the undated cardless hold"
+sed -i '/fristloser-selftest-posten/d' "$H11/data/backlog.md"
+write_hold "$H11" zukunfts-selftest-posten captain ' ' "$FUTURE"
+FM_HOME="$H11" "$CHECK" --selftest >/dev/null \
+  || fail "selftest flagged a future-dated hold as a gap"
+pass "ok - selftest red-cases the fristlos gap and spares future parks"
+
 out=$(FM_HOME="$H11" "$CHECK" arm)
 [ "$out" = "armed: state/brett-karten-vollstaendigkeit.check.sh" ] \
   || fail "unexpected arm output: $out"
@@ -324,7 +399,7 @@ out=$(FM_HOME="$H11" "$CHECK" arm)
 
 # The armed shim really runs this check against the pinned home: a held task
 # without a card comes out of the shim itself.
-write_hold "$H11" shim-sichtbarer-posten
+write_hold "$H11" shim-sichtbarer-posten captain ' ' "$PAST"
 shim_out=$(FM_STATE_OVERRIDE="$H11/state" bash "$SHIM")
 case $shim_out in
   *"1 fehlt(shim-sichtbarer-posten@haupt)"*) pass "ok - armed shim reports through to its check" ;;
