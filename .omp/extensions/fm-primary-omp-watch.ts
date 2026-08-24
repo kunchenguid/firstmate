@@ -358,12 +358,12 @@ function startArm(api: ExtensionAPI, owner: SessionGeneration, predecessorArmPid
             await waitForRetry(attempt + 1);
           }
           if (!recovery && !failure) failure = "watcher: FAILED - omp extension could not restore watcher continuity after retries";
+          if (generationIsLive(owner)) owner.restoring = false;
           await sendWake(api, owner, message + (failure ? "\n\n" + failure : ""));
         } catch (error) {
+          if (generationIsLive(owner)) owner.restoring = false;
           const detail = error instanceof Error ? error.message : String(error);
           surfaceFailure(api, owner, "watcher: FAILED - omp extension could not deliver an actionable wake\n" + detail);
-        } finally {
-          if (generationIsLive(owner)) owner.restoring = false;
         }
       })();
       return;
