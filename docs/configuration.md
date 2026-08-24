@@ -241,6 +241,7 @@ The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](..
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 When Azure CLI is available, every Firstmate-spawned Codex worker asks its existing non-interactive session for a current `https://api.fabric.microsoft.com` access token before launch.
 When acquisition succeeds, only the Codex worker process and its children receive the token through `FABRIC_CORE_BEARER_TOKEN` and `FABRIC_DW_GLOBAL_BEARER_TOKEN`, matching the global Fabric Core and Fabric Warehouse MCP configuration.
+The bridge leaves any caller-provided `FABRIC_ACCESS_TOKEN` value and export state unchanged.
 The bridge does not put the token in a backend daemon, pane shell, process argument, profile, configuration file, log, or cache.
 An absent Azure CLI or an unavailable existing session does not start an interactive login and preserves the prior Codex launch behavior.
 [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) verifies exact token acquisition, process-only environment construction, argument and tracing secrecy, failure fallback, Codex-only scope, and spawn wiring with fake credentials.
