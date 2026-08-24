@@ -83,6 +83,11 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
+wake_ack_failed() {  # <reason>
+  printf 'WAKE_ACK_FAILED: %s\n' "$1" >&2
+  exit 1
+}
+
 # Print still-unread informational status lines (note: answers and pending-reply
 # resolutions) that the OPEN DECISIONS fold never carries. Uses the same
 # cursor-backed unread span as the annotation path, and runs on every drain -
@@ -282,26 +287,26 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
 if [ -n "$ACK_THROUGH" ]; then
-  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
-  ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') \
+    || wake_ack_failed "could not read inactive-outcome receipts"
+  ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') \
+    || wake_ack_failed "could not read inactive-reconcile receipts"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || wake_ack_failed "could not release the wake queue lock"
   DRAIN_LOCK_HELD=false
   if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
     || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
-    echo "wake drain: inactive outcome receipt could not be recorded safely" >&2
-    exit 1
+    wake_ack_failed "inactive outcome receipt could not be recorded safely"
   fi
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || wake_ack_failed "could not reacquire the wake queue lock"
   DRAIN_LOCK_HELD=true
-  DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
-  chmod 0600 "$DRAIN_TMP" || exit 1
+  DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") \
+    || wake_ack_failed "could not prepare acknowledged wake storage"
+  chmod 0600 "$DRAIN_TMP" || wake_ack_failed "could not secure acknowledged wake storage"
   awk -F '\t' -v cutoff="$ACK_THROUGH" '
     NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
-  ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
-  fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" || {
-    echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
-    exit 1
-  }
+  ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || wake_ack_failed "could not stage acknowledged wake consumption"
+  fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" \
+    || wake_ack_failed "secondmate stall receipt could not be recorded safely"
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
@@ -309,24 +314,24 @@ if [ -n "$ACK_THROUGH" ]; then
       0) ;;
       3) RECOVERY_ACK_MOVED=true ;;
       *)
-        echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command" >&2
-        exit 1
+        wake_ack_failed "recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command"
         ;;
     esac
   else
-    fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" \
+      || wake_ack_failed "could not read the recovery episode"
     RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
     if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
       RECOVERY_ACK_MOVED=true
     fi
   fi
   if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
-    echo "wake drain: acknowledged wakes could not be consumed safely" >&2
-    exit 1
+    wake_ack_failed "acknowledged wakes could not be consumed safely"
   fi
   DRAIN_TMP=
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || wake_ack_failed "could not release the acknowledged wake queue lock"
   DRAIN_LOCK_HELD=false
+  printf 'WAKE_ACKNOWLEDGED: through %s\n' "$ACK_THROUGH" >&2
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" >&2

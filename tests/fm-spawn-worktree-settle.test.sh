@@ -141,7 +141,139 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# A retired Claude binding exactly as fm-spawn writes it: the hook command
+# invokes bin/fm-busy-event.sh for the previous task id and touches that task's
+# turn-end token under the shared state dir.
+write_retired_claude_binding() {  # <worktree> <state-dir> <retired-id>
+  local wt=$1 state=$2 retired=$3 hook
+  hook="$wt/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s/bin/fm-busy-event.sh apply %s %s busy --gen g1 --source claude-hook --event user-prompt-submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"touch %s/%s.turn-ended"}]}]}}\n' \
+    "$ROOT" "$state" "$retired" "$state" "$retired" > "$hook"
+  printf '%s\n' "$hook"
+}
+
+# Regression for fm-stale-hook-binding-on-worktree-reuse: treehouse can hand a worktree that was previously occupied by a Claude task to a Codex task.
+# The new task has no Claude hook of its own, so an inherited binding would still write lifecycle transitions under the retired task id.
+test_recycled_worktree_does_not_inherit_retired_hook_binding() {
+  local rec id out status stale_hook
+  id=recycled-hook-z3
+  rec=$(make_settle_case recycled-hook "$id" 0)
+  read_settle_record "$rec"
+  stale_hook=$(write_retired_claude_binding "$WT_DIR" "$HOME_DIR/state" retired-task)
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should replace a recycled worktree's retired wiring"
+  [ ! -e "$stale_hook" ] \
+    || fail "a recycled Codex worktree inherited the retired Claude hook binding"
+  pass "a recycled worktree does not inherit the previous task's hook binding"
+}
+
+# Negative direction of the same cleanup: the paths Firstmate arms are ordinary
+# repo/user paths too. A file at one of them that Firstmate did not write - an
+# author's own Claude hook settings, or a repo-tracked OpenCode plugin - is not
+# retired wiring, so the spawn must leave it exactly as it found it and say so.
+test_spawn_leaves_files_it_did_not_write() {
+  local rec id out status authored_hook tracked_plugin authored_before tracked_before wt_git_dir
+  id=unowned-wiring-z4
+  rec=$(make_settle_case unowned-wiring "$id" 0)
+  read_settle_record "$rec"
+  authored_hook="$WT_DIR/.claude/settings.local.json"
+  mkdir -p "${authored_hook%/*}"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"make lint"}]}]}}\n' > "$authored_hook"
+  authored_before=$(cat "$authored_hook")
+  # Untracked and locally excluded, exactly as a crew worktree carries it, so
+  # the pooled-worktree base refresh still sees a clean tree.
+  wt_git_dir=$(git -C "$WT_DIR" rev-parse --absolute-git-dir)
+  mkdir -p "$wt_git_dir/info"
+  printf '.claude/settings.local.json\n' >> "$wt_git_dir/info/exclude"
+  # The repo's own OpenCode plugin lives on the base branch the pooled worktree
+  # is refreshed to, so it is present and tracked when the spawn arms wiring.
+  tracked_plugin="$WT_DIR/.opencode/plugins/fm-turn-end.js"
+  mkdir -p "$PROJ_DIR/.opencode/plugins"
+  printf 'export const RepoOwned = async () => ({});\n' > "$PROJ_DIR/.opencode/plugins/fm-turn-end.js"
+  tracked_before=$(cat "$PROJ_DIR/.opencode/plugins/fm-turn-end.js")
+  git -C "$PROJ_DIR" add .opencode/plugins/fm-turn-end.js
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'repo-owned opencode plugin'
+  git -C "$PROJ_DIR" push -q origin HEAD
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "an unattributable file must not abort the spawn"
+  [ -f "$authored_hook" ] || fail "spawn deleted a user-authored .claude/settings.local.json"
+  [ "$(cat "$authored_hook")" = "$authored_before" ] \
+    || fail "spawn rewrote a user-authored .claude/settings.local.json it did not arm"
+  [ -f "$tracked_plugin" ] || fail "spawn deleted a repo-tracked .opencode plugin"
+  [ "$(cat "$tracked_plugin")" = "$tracked_before" ] \
+    || fail "spawn rewrote a repo-tracked .opencode plugin"
+  [ -z "$(git -C "$WT_DIR" status --porcelain -- .opencode)" ] \
+    || fail "spawn left the repo-tracked plugin dirty before launch"
+  assert_contains "$out" "leaving .claude/settings.local.json" \
+    "spawn did not report the file whose provenance it could not establish"
+  assert_contains "$out" "leaving repo-tracked .opencode/plugins/fm-turn-end.js" \
+    "spawn did not report the repo-tracked plugin it left alone"
+  pass "spawn leaves and reports wiring paths it cannot prove firstmate wrote"
+}
+
+# make_secondmate_home <case-dir> <id> seeds a persistent secondmate home:
+# a marked, git-backed firstmate checkout that fm-spawn accepts as FIRSTMATE_HOME.
+make_secondmate_home() {  # <case-dir> <id>
+  local case_dir=$1 id=$2 home
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/config" "$home/data" "$home/projects" "$home/bin"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf '# Firstmate secondmate fixture\n' > "$home/AGENTS.md"
+  printf '#!/usr/bin/env bash\n' > "$home/bin/placeholder.sh"
+  git -C "$home" init -q
+  git -C "$home" add -A
+  git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed secondmate home'
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$home"
+}
+
+# A secondmate's worktree IS its persistent firstmate home, not a pooled
+# treehouse worktree: nothing else ever occupies it, and the spawn arms no
+# harness wiring in it. A respawn there must therefore not touch the home's own
+# files - the incident shape is an author's .claude/settings.local.json being
+# removed on every secondmate respawn.
+test_secondmate_respawn_keeps_authored_home_files() {
+  local rec id sm_home authored authored_before out status
+  id=secondmate-home-z5
+  rec=$(make_settle_case secondmate-home "$id" 0)
+  read_settle_record "$rec"
+  sm_home=$(make_secondmate_home "$(dirname "$HOME_DIR")" "$id")
+  authored="$sm_home/.claude/settings.local.json"
+  mkdir -p "${authored%/*}"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}\n' > "$authored"
+  authored_before=$(cat "$authored")
+  printf 'token=authored-by-hand\n' > "$sm_home/.fm-kimi-turnend"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$sm_home" FM_FAKE_PANE_STALE="$sm_home" \
+    FM_FAKE_PANE_STALE_READS=0 FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$sm_home" --secondmate 2>&1)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn failed: $out"
+  [ -f "$authored" ] \
+    || fail "secondmate respawn deleted a user-authored file from the persistent home"
+  [ "$(cat "$authored")" = "$authored_before" ] \
+    || fail "secondmate respawn rewrote a user-authored file in the persistent home"
+  [ -f "$sm_home/.fm-kimi-turnend" ] \
+    || fail "secondmate respawn deleted a firstmate-shaped file from the persistent home it never arms"
+  pass "a secondmate respawn leaves its persistent home's own files alone"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_recycled_worktree_does_not_inherit_retired_hook_binding
+test_spawn_leaves_files_it_did_not_write
+test_secondmate_respawn_keeps_authored_home_files
 
 echo "# all fm-spawn-worktree-settle tests passed"

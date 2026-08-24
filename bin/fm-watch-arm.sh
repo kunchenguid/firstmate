@@ -230,6 +230,17 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    acked:*)
+      # A dead or reused lock is not a new recovery episode.
+      # With no durable rows left to present, clearing it must not mint a fresh marker that replays an already-acknowledged handling turn.
+      if [ ! -s "$FM_WAKE_QUEUE" ]; then
+        fm_lock_remove_path "$WATCH_LOCK"
+        return $?
+      fi
+      ;;
+  esac
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }
 

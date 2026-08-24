@@ -55,6 +55,112 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
+fm_nm_sql_literal() {  # <value>
+  local value=${1-}
+  value=${value//\'/\'\'}
+  printf "'%s'" "$value"
+}
+
+# Resolve the private no-mistakes state database without changing it.
+# FM_NM_STATE_DB gives hermetic callers an explicit path.
+# Production uses the same NM_HOME location the no-mistakes CLI owns.
+# The _path form prints where the database is expected regardless of whether it
+# exists, so an unavailability report can name the concrete path it looked at.
+fm_nm_state_db_path() {
+  local db=${FM_NM_STATE_DB:-}
+  if [ -z "$db" ]; then
+    db="${NM_HOME:-${HOME}/.no-mistakes}/state.sqlite"
+  fi
+  printf '%s\n' "$db"
+}
+
+fm_nm_state_db() {
+  local db
+  db=$(fm_nm_state_db_path)
+  [ -f "$db" ] || return 1
+  printf '%s\n' "$db"
+}
+
+# Resolve the no-mistakes run id this worktree owns into FM_NM_RUN_ID.
+# The CLI's bare `axi status` resolver is process-ambient and may name another concurrent branch, so it is never an attribution source.
+# The durable registry includes ids, branch, repo, head, status, and creation order; active rows win over terminal siblings, then newest starts win.
+# Three outcomes, kept distinct so a caller never reads "the source was missing" as "there is no run":
+#   0 with FM_NM_RUN_ID set    - this worktree owns that run; read it with `axi status --run <id>`.
+#   0 with FM_NM_RUN_ID empty  - the registry was read and proves no run matches this worktree.
+#   2                          - no durable source could be consulted; FM_NM_RUN_ID_UNAVAILABLE_REASON names the missing one.
+# The result is assigned rather than printed so both halves survive without a
+# second lookup; callers must not run it in a command substitution.
+FM_NM_RUN_ID=
+FM_NM_RUN_ID_UNAVAILABLE_REASON=
+
+fm_nm_run_id_unavailable() {  # <reason>
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_NM_RUN_ID=
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_NM_RUN_ID_UNAVAILABLE_REASON=$1
+  return 2
+}
+
+fm_nm_run_id_for_worktree() {  # <worktree> <branch>
+  local wt=$1 branch=$2 db upstream query rows id run_head _status branch_query branch_rows
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_NM_RUN_ID=
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_NM_RUN_ID_UNAVAILABLE_REASON=
+  [ -d "$wt" ] && [ -n "$branch" ] || return 0
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    fm_nm_run_id_unavailable "sqlite3 is not installed, so the no-mistakes run registry cannot be read"
+    return 2
+  fi
+  if ! db=$(fm_nm_state_db); then
+    fm_nm_run_id_unavailable "no no-mistakes state database at $(fm_nm_state_db_path)"
+    return 2
+  fi
+  upstream=$(git -C "$wt" config --get remote.origin.url 2>/dev/null || true)
+  if [ -z "$upstream" ]; then
+    fm_nm_run_id_unavailable "no remote.origin.url in $wt, so no registry repo can be matched"
+    return 2
+  fi
+  query="SELECT r.id, r.head_sha, r.status
+FROM runs r
+JOIN repos p ON p.id = r.repo_id
+WHERE r.branch = $(fm_nm_sql_literal "$branch")
+  AND p.upstream_url = $(fm_nm_sql_literal "$upstream")
+ORDER BY CASE WHEN r.status IN ('pending', 'running', 'fixing', 'awaiting_approval', 'fix_review', 'ci') THEN 0 ELSE 1 END,
+         r.created_at DESC;"
+  if ! rows=$(sqlite3 -noheader -separator $'\t' "$db" "$query" 2>/dev/null); then
+    fm_nm_run_id_unavailable "no-mistakes state database $db could not be queried"
+    return 2
+  fi
+  if [ -z "$rows" ]; then
+    # The registry records one upstream spelling per repo row, so the same
+    # remote written as git@ here and https:// there matches nothing above.
+    # A branch row whose head is this worktree's own code identity proves the
+    # registry does hold this repo, so the miss is an unmatched upstream
+    # string - an unavailable source, not proof that no run exists.
+    branch_query="SELECT r.head_sha FROM runs r WHERE r.branch = $(fm_nm_sql_literal "$branch");"
+    branch_rows=$(sqlite3 -noheader "$db" "$branch_query" 2>/dev/null) || branch_rows=
+    if [ -n "$branch_rows" ]; then
+      while IFS= read -r run_head; do
+        [ -n "$run_head" ] || continue
+        if fm_nm_head_matches_worktree "$wt" "$run_head"; then
+          fm_nm_run_id_unavailable "no registry repo matches upstream $upstream (the run registry spells this remote differently)"
+          return 2
+        fi
+      done <<< "$branch_rows"
+    fi
+    return 0
+  fi
+  while IFS=$'\t' read -r id run_head _status; do
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    fm_nm_head_matches_worktree "$wt" "$run_head" || continue
+    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+    FM_NM_RUN_ID=$id
+    return 0
+  done <<< "$rows"
+  return 0
+}
+
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject

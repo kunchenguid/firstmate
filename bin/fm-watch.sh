@@ -1036,9 +1036,6 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 WATCHER_RECOVERY_PENDING=0
-if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2

@@ -2301,6 +2301,59 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+# 0 when file $1 is Firstmate-generated task wiring rather than someone else's
+# file that happens to sit at one of the paths Firstmate writes. Provenance is
+# read from the content Firstmate itself puts there: every armed hook body
+# invokes bin/fm-busy-event.sh or touches a turn-end token under this state
+# dir, and the two turn-end pointers are a single `token=<file>` line naming an
+# entry in Firstmate's private registry. Anything else is not attributable.
+recycled_wiring_is_firstmate_authored() {  # <file> <state-dir>
+  local file=$1 state=$2
+  case "${file##*/}" in
+    .fm-grok-turnend|.fm-kimi-turnend)
+      if grep -qE '^token=[A-Za-z0-9._-]+$' "$file" 2>/dev/null; then return 0; fi
+      return 1
+      ;;
+  esac
+  if grep -qF 'fm-busy-event.sh' "$file" 2>/dev/null; then return 0; fi
+  if [ -n "$state" ] && grep -qF "$state/" "$file" 2>/dev/null; then return 0; fi
+  return 1
+}
+
+clear_recycled_worktree_harness_wiring() {  # <worktree> <state-dir>
+  local wt=$1 state=$2 path rel
+  # A pooled worktree can outlive its previous task, so a new occupant must
+  # never inherit the retired task id even when it uses a harness with no
+  # replacement hook of its own.
+  # Retirement is scoped to wiring Firstmate itself wrote and can still prove
+  # it wrote: an untracked regular file at one of these paths whose content
+  # carries Firstmate's own binding. A repo-tracked file, a directory, a
+  # symlink, or an unattributable file is someone else's - it is left in place
+  # and reported, never deleted, and never aborts the spawn.
+  for path in \
+    "$wt/.claude/settings.local.json" \
+    "$wt/.opencode/plugins/fm-turn-end.js" \
+    "$wt/.opencode/plugins/fm-busy-state.js" \
+    "$wt/.fm-grok-turnend" \
+    "$wt/.fm-kimi-turnend"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    rel=${path#"$wt/"}
+    if [ -L "$path" ] || [ ! -f "$path" ]; then
+      echo "warning: leaving $rel in $wt: not a regular file, so firstmate provenance cannot be established" >&2
+      continue
+    fi
+    if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+      echo "warning: leaving repo-tracked $rel in $wt: firstmate did not write it" >&2
+      continue
+    fi
+    if ! recycled_wiring_is_firstmate_authored "$path" "$state"; then
+      echo "warning: leaving $rel in $wt: not firstmate-generated task wiring" >&2
+      continue
+    fi
+    rm -f "$path" || return 1
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -2315,6 +2368,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
+elif [ "$KIND" != secondmate ]; then
+  # Only a pooled crew worktree can carry another task's wiring. A secondmate
+  # runs in its own persistent firstmate home (WT is PROJ_ABS above), which is
+  # never recycled and never armed below, so its files are not Firstmate's to
+  # retire - the same exclusion fm-teardown.sh applies.
+  clear_recycled_worktree_harness_wiring "$WT" "$STATE_REAL" || {
+    echo "error: could not clear retired harness wiring from recycled worktree $WT" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every

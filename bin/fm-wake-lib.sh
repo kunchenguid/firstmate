@@ -289,6 +289,7 @@ fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
     "$lockdir/pid" \
+    "$lockdir/owner-frame" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
@@ -296,15 +297,33 @@ fm_lock_clean_known_files() {
     2>/dev/null || true
 }
 
+fm_lock_current_frame() {
+  # Bash 3.2 lacks BASHPID, but BASH_SUBSHELL still distinguishes a child frame from its parent when they share the same shell pid.
+  FM_LOCK_CURRENT_PID=${BASHPID:-$$}
+  FM_LOCK_CURRENT_FRAME="${FM_LOCK_CURRENT_PID}:${BASH_SUBSHELL:-0}"
+}
+
+fm_lock_owned_by_current_frame() {
+  local lockdir=$1 pid frame
+  fm_lock_current_frame
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$FM_LOCK_CURRENT_PID" ] || return 1
+  frame=$(cat "$lockdir/owner-frame" 2>/dev/null || true)
+  if [ -n "$frame" ]; then
+    [ "$frame" = "$FM_LOCK_CURRENT_FRAME" ]
+    return
+  fi
+  # A legacy owner record is safely distinguishable only where BASHPID exists.
+  [ -n "${BASHPID:-}" ]
+}
+
 fm_lock_set_role() {
-  local lockdir=$1 role=$2 current pid back
+  local lockdir=$1 role=$2 back
   case "$role" in
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 1
+  fm_lock_owned_by_current_frame "$lockdir" || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
   back=$(cat "$lockdir/role" 2>/dev/null || true)
   [ "$back" = "$role" ]
@@ -329,11 +348,14 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
-  printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
+  local ownerdir=$1 back
+  fm_lock_current_frame
+  printf '%s\n' "$FM_LOCK_CURRENT_PID" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$FM_LOCK_CURRENT_PID" ] || return 1
+  printf '%s\n' "$FM_LOCK_CURRENT_FRAME" > "$ownerdir/owner-frame" 2>/dev/null || return 1
+  back=$(cat "$ownerdir/owner-frame" 2>/dev/null || true)
+  [ "$back" = "$FM_LOCK_CURRENT_FRAME" ]
 }
 
 fm_lock_link_owner() {
@@ -378,14 +400,8 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
-  if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
-  fi
-  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  if [ "$back" != "$mypid" ]; then
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-}
+  if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -792,10 +808,7 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if fm_lock_owned_by_current_frame "$lockdir"; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -811,6 +824,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
@@ -860,12 +874,16 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
-    FM_LOCK_OWNER_DIR=
-    return 1
+  if [ "$lockdir" = "$STATE/.watch.lock" ]; then
+    fm_recovery_marker_snapshot "$STATE/.watcher-down" || true
+    if [ "${FM_RECOVERY_MARKER_STATE:-absent}" != acked ] || [ -s "$FM_WAKE_QUEUE" ]; then
+      if ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+        fm_lock_release "$steal"
+        FM_LOCK_HELD_PID=$cur
+        FM_LOCK_OWNER_DIR=
+        return 1
+      fi
+    fi
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
@@ -891,20 +909,16 @@ fm_lock_acquire_wait() {
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  local lockdir=$1 ownerdir
+  fm_lock_owned_by_current_frame "$lockdir" || return 0
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
-    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
-    [ "$pid" = "$current" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
 }

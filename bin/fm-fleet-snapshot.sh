@@ -96,7 +96,10 @@ esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+# Attribution now reports missing durable sources instead of guessing; the
+# digest allows extra time for that honest read and still reports timeout when
+# the bound is exhausted.
+FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-20}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -225,6 +228,7 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_CREW_STATE_NM_TIMEOUT="${FM_CREW_STATE_NM_TIMEOUT:-$FM_SNAPSHOT_SECONDMATE_TIMEOUT}" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
@@ -693,7 +697,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[] | select(.current_state.state == "unknown")
+        | {id,detail:(.current_state.detail // "attribution source unavailable")} ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
@@ -755,7 +760,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        and ($terminal_in_flight | length) == 0) as $valid
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
        elif ($unknown_children | length) > 0 then
-         "child current state unavailable: " + ($unknown_children | map(.id) | join(", "))
+       "child current state unavailable: " + ($unknown_children | map(.id + " (" + .detail + ")") | join(", "))
        else null end) as $reason
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
        elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
@@ -789,8 +794,11 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
-        endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
-          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
+        endpoints:([ $tasks[] | {id,state:.current_state.state,source:.current_state.source,
+          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})} ]
+          + [ $backlog.records[]? | select(.state == "in_flight" and (.id as $id | [$tasks[].id] | index($id) | not))
+              | {id, state:"unknown", source:"durable-record", endpoint:{target:null,exists:true,agent_alive:"unknown",status:"unknown",observed_at:$generated,freshness:"fresh",reason:"durable endpoint record absent from child summary"}} ]
+          | .[:$child_n]),
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
@@ -1227,6 +1235,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           FM_DATA_OVERRIDE="$home/data" \
           FM_CONFIG_OVERRIDE="$home/config" \
           FM_PROJECTS_OVERRIDE="$home/projects" \
+          FM_CREW_STATE_NM_TIMEOUT="$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
           FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
           FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
           FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
@@ -1239,6 +1248,16 @@ secondmate_current_json() {  # <parent-tasks-json>
       if [ "$summary_rc" -ne 0 ]; then
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
       else
+        expected_endpoints=$(for meta in "$home/state"/*.meta; do
+          [ -e "$meta" ] || continue
+          basename "$meta" .meta
+        done | jq -Rsc 'split("\n") | map(select(length > 0))')
+        summary=$(printf '%s' "$summary" | jq --argjson expected "$expected_endpoints" '
+          . as $root |
+          ($root.endpoints // []) as $known |
+          .endpoints = ($known + [$expected[] as $id |
+            select([$known[]?.id] | index($id) | not) |
+            {id:$id,state:"unknown",source:"durable-record",endpoint:{target:null,exists:true,agent_alive:"unknown",status:"unknown",observed_at:$root.generated,freshness:"fresh",reason:"durable endpoint record absent from child summary"}}])')
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
           reason="structured home snapshot exceeded byte limit"
@@ -1270,7 +1289,16 @@ secondmate_current_json() {  # <parent-tasks-json>
       state=$(printf '%s' "$summary" | jq -r '.state')
       current_reason=
       if [ "$summary_valid" != true ]; then
-        current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
+        summary_kind=$(printf '%s' "$summary" | jq -r '.invalidity.kind // ""')
+        summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
+        if [ "$summary_kind" = child_current_unavailable ]; then
+          case "$summary_reason" in
+            *"run attribution unavailable"*) current_reason="child current state lookup timed out or attribution unavailable: $summary_reason" ;;
+            *) current_reason="$summary_reason" ;;
+          esac
+        else
+          current_reason="structured home state invalid: $summary_reason"
+        fi
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
