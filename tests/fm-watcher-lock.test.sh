@@ -198,24 +198,36 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker contrib i pids pid wins total others
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  contrib="$dir/contributions"
   : > "$marker"
+  : > "$contrib"
+  total=40
+  others=$((total - 1))
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le "$total" ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        # Hold the lock until every OTHER contender has had its chance. A
+        # fixed sleep is shorter than the contention window on a loaded or
+        # multi-core host, so an early "winner" once exited and had its lock
+        # legitimately reclaimed as a dead-pid lock - a second winner in the
+        # ledger. Staying alive until all losers have finished makes the
+        # single-winner invariant hold deterministically.
+        while [ "$(wc -l < "$4" 2>/dev/null || true)" -lt "$5" ]; do
+          sleep 0.01
+        done
+      else
+        printf "%s\n" "$$" >> "$4"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$contrib" "$others" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -247,25 +259,37 @@ test_lock_steals_dead_pid_lock() {
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker contrib i pids pid wins total others
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  contrib="$dir/contributions"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  : > "$contrib"
+  total=40
+  others=$((total - 1))
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le "$total" ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        # Hold the stolen lock until every OTHER contender has had its chance,
+        # mirroring test_lock_single_winner_under_concurrency: a fixed sleep is
+        # shorter than the contention window on a loaded host, so an early
+        # "winner" previously exited and had its dead-pid lock reclaimed again.
+        while [ "$(wc -l < "$4" 2>/dev/null || true)" -lt "$5" ]; do
+          sleep 0.01
+        done
+      else
+        printf "%s\n" "$$" >> "$4"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$contrib" "$others" &
     pids="$pids $!"
     i=$((i + 1))
   done
