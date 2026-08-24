@@ -13,16 +13,8 @@ make_case() {  # <name>
   local dir=$1
   mkdir -p "$TMP_ROOT/$dir/home/state" "$TMP_ROOT/$dir/home/data" \
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
-    "$TMP_ROOT/$dir/project"
-  # A real worktree on a branch: teardown's committed-work guard reads HEAD's
-  # reachability before any return, and refuses outright when it cannot. The
-  # sentinel is committed so the cleanup path sees no uncommitted work either.
-  fm_git_worktree "$TMP_ROOT/$dir/project-repo" "$TMP_ROOT/$dir/worktree" "fm/$dir"
+    "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
-  git -C "$TMP_ROOT/$dir/worktree" add sentinel
-  git -C "$TMP_ROOT/$dir/worktree" \
-    -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm sentinel
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
