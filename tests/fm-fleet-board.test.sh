@@ -761,6 +761,30 @@ for health_mode in array invalid_utf8 malformed_http stream; do
   done
   [ -s "$health_port_file" ] || fail "$health_mode health fixture did not start"
   health_port=$(cat "$health_port_file")
+  if [ "$health_mode" = stream ]; then
+    python3 - "$SERVER" "$health_port" <<'PY' \
+      || fail "stream health probe outlived its total deadline"
+import runpy
+import sys
+import threading
+import time
+
+server = runpy.run_path(sys.argv[1])
+before = set(threading.enumerate())
+started = time.monotonic()
+result = server["health"](
+    {"port": int(sys.argv[2]), "instance": "endless-stream"}, timeout=0.1
+)
+elapsed = time.monotonic() - started
+leaked = [
+    thread.name
+    for thread in threading.enumerate()
+    if thread not in before and thread.is_alive()
+]
+if result is not None or elapsed >= 0.5 or leaked:
+    raise SystemExit(f"result={result!r} elapsed={elapsed:.3f}s leaked={leaked!r}")
+PY
+  fi
   jq -n --argjson pid "$HEALTH_PID" --argjson port "$health_port" '{
     schema:"fm-fleet-board-runtime.v1",
     instance:"malformed-health-instance",

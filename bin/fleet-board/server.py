@@ -21,6 +21,7 @@ import re
 import secrets
 import selectors
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -1082,11 +1083,14 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     if not isinstance(port, int):
         return None
     result: list[dict[str, Any]] = []
+    transport: list[socket.socket] = []
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
 
     def probe() -> None:
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
         try:
             connection.request("GET", "/healthz", headers={"Host": f"127.0.0.1:{port}"})
+            if connection.sock is not None:
+                transport.append(connection.sock)
             response = connection.getresponse()
             if response.status != HTTPStatus.OK:
                 return
@@ -1109,6 +1113,17 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     worker = threading.Thread(target=probe, daemon=True)
     worker.start()
     worker.join(timeout)
+    if worker.is_alive():
+        active_socket = transport[0] if transport else connection.sock
+        if active_socket is not None:
+            try:
+                active_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        # Socket timeouts reset after every byte. Shutdown enforces the total
+        # deadline, and this join proves no health reader survives the caller.
+        worker.join()
+        connection.close()
     return result[0] if result else None
 
 
