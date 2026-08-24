@@ -122,9 +122,17 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
-#   Cursor ship/scout credential setup is documented in
-#   docs/configuration.md "Environment variables"; secondmate launches keep
-#   their project-hook credential path and do not use that crew credential file.
+#   A Cursor ship/scout spawn resolves FM_CURSOR_AUTH_ENV (default
+#   $HOME/.config/crew-router/env) before provisioning, clears any inherited
+#   CURSOR_API_KEY, sources that file, and refuses unless it provides a non-empty
+#   key. docs/configuration.md "Environment variables" owns credential setup.
+#   The worker then launches the resolved Cursor binary as a bare interactive
+#   TUI with -f, an optional --model, and --workspace set to the task worktree.
+#   It omits --trust, accepts Cursor's one-time workspace-trust dialog during
+#   the ready gate, and delivers the absolute brief pointer through fm-send.
+#   Cursor secondmates do not read the crew credential file: they launch with
+#   --trust and -f in the secondmate home and receive the brief positionally so
+#   that their project-scope supervision hooks load.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
