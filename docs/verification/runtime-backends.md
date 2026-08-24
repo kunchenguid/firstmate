@@ -277,6 +277,7 @@ child inherits CLAUDE_PID=179487
 ```
 
 The marker names the session pid, every child inherits it, and it matches the pid the ancestry walk resolves.
+Matching that number is necessary rather than sufficient: because the value is an exec-time snapshot, a recycled pid keeps satisfying it, so the pid a marker names must also have started no later than the process that carried the marker, read from field 22 of `/proc/<pid>/stat` and refused outright when either side cannot be read.
 A later `export` does not rewrite `/proc/<pid>/environ`, so the value a process was started with survives its own reassignment, which is what carries the relationship across a reparented tree.
 Claude is the only adapter with a verified marker at this date.
 codex, opencode, pi, pi-signed, grok, kimi, and cursor have none, so on those harnesses session-lock ownership is decided by process ancestry alone and a session rehosted outside its own process tree still refuses its own home.

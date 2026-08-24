@@ -1309,20 +1309,217 @@ test_liveness_is_decided_before_any_recorded_cohort_signal() {
   pass "session-lock: a dead holder pid is refused before its recorded identity is consulted"
 }
 
+# Populate a fabricated proc root with the /proc/<pid>/stat lines the marker
+# ordering reads. `copy` takes a live process's REAL line, so a case can drive
+# the ordering from actual process start times; `write` fabricates one with a
+# chosen start time, for a case whose relationship the real times cannot express.
+# The comm sits in parentheses exactly as the kernel writes it, so the reader
+# under test parses a fabricated line the same way it parses a real one.
+make_stat_tool() {  # <proc-root>
+  local root=$1
+  mkdir -p "$root"
+  cat > "$root/stat-tool.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+mode=$1
+root=$2
+pid=$3
+mkdir -p "$root/$pid"
+case "$mode" in
+  copy) cat "/proc/$pid/stat" > "$root/$pid/stat" ;;
+  write) printf '%s (claude) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n' "$pid" "$4" > "$root/$pid/stat" ;;
+  *) exit 2 ;;
+esac
+SH
+}
+
 # Ask the cohort question about <pid> with a fabricated recorded environment for
 # it under proc root <root>: a launch marker naming the asking process, plus the
 # container the asking process is in. Both cohort signals are then satisfiable,
 # so only liveness is left to decide the verdict.
+#
+# The recorded start times are fabricated to AGREE with the relationship the
+# environ claims - the asking process launched the holder, so the holder starts
+# one tick later - because the marker path also requires that ordering. The real
+# holder here was started before the probe, so copying its real start time would
+# make this fixture assert an impossible launch and refuse for that reason
+# instead of the one under test. The case below drives that ordering apart on
+# purpose.
 cohort_probe_recorded_identity() {  # <proc-root> <pid>
   local root=$1 pid=$2
   mkdir -p "$root/$pid"
+  make_stat_tool "$root"
   harness_probe "
     HERDR_ENV=1
     HERDR_PANE_ID=fixture-pane
     FM_PROC_ROOT_OVERRIDE='$root'
+    bash '$root/stat-tool.sh' copy '$root' \"\$\$\"
+    bash '$root/stat-tool.sh' write '$root' $pid \$(( \$(fm_session_pid_start_time \"\$\$\") + 1 ))
     printf 'CLAUDE_PID=%s\0HERDR_ENV=1\0HERDR_PANE_ID=fixture-pane\0' \"\$\$\" > '$root/$pid/environ'
     fm_session_same_cohort $pid
   "
+}
+
+# The launch relationship is a number compared against a live pid, so a pid the
+# kernel has recycled onto an unrelated session of the same harness satisfies a
+# stale marker on identity alone. Ordering is what tells the two apart: a
+# launcher necessarily starts before whatever inherited its environment.
+#
+# Both cases below run the SAME fixture, with the SAME marker naming the SAME
+# live claude-typed holder and the same co-location, and differ ONLY in whether
+# the recorded start times can express the launch the marker claims. Neither can
+# pass by never reaching the marker path, because the other one must accept.
+cohort_probe_forward_marker() {  # <dir> real|launched
+  local dir=$1 order=$2 root="$1/proc"
+  mkdir -p "$dir"
+  make_stat_tool "$root"
+  cat > "$dir/probe.sh" <<'SH'
+# Runs INSIDE a claude-named process with the library already sourced, so this
+# process is the asking session and its own start time is the carrier's.
+set -u
+i=0
+# The holder is started HERE, so it genuinely starts after the asking process
+# and cannot be the launcher the marker below claims it is. The pause puts it
+# several clock ticks later rather than one: the ordering rule deliberately
+# accepts an equal tick, because a real launcher and the child it spawns can
+# share one, so a holder started in the same instant would prove nothing.
+sleep 0.3
+# The trailing no-op keeps bash from exec'ing the sleep and losing its name.
+"$FM_FIX_CLAUDE" -c 'printf "%s\n" "$$" > "$1/holder-pid"; sleep 120; :' _ "$FM_FIX_DIR" &
+while [ "$i" -lt 400 ] && [ ! -s "$FM_FIX_DIR/holder-pid" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+holder=$(tr -d '[:space:]' < "$FM_FIX_DIR/holder-pid")
+bash "$FM_FIX_ROOT/stat-tool.sh" copy "$FM_FIX_ROOT" "$$"
+case "$FM_FIX_ORDER" in
+  # The holder's REAL line, so its actual start time decides.
+  real) bash "$FM_FIX_ROOT/stat-tool.sh" copy "$FM_FIX_ROOT" "$holder" ;;
+  # A start time that agrees with the claim: our launcher predates us.
+  launched) bash "$FM_FIX_ROOT/stat-tool.sh" write "$FM_FIX_ROOT" "$holder" \
+    $(( $(fm_session_pid_start_time "$$") - 1 )) ;;
+esac
+printf 'HERDR_ENV=1\0HERDR_PANE_ID=fixture-pane\0' > "$FM_FIX_ROOT/$holder/environ"
+printf 'CLAUDE_PID=%s\0HERDR_ENV=1\0HERDR_PANE_ID=fixture-pane\0' "$holder" > "$FM_FIX_ROOT/$$/environ"
+{
+  printf 'holder=%s\n' "$holder"
+  printf 'launcher_self=%s\n' "$(fm_session_launcher_pid "$$" claude 2>/dev/null || printf NONE)"
+  printf 'kind_holder=%s\n' "$(fm_harness_pid_kind "$holder" 2>/dev/null || printf NONE)"
+  printf 'container_self=%s\n' "$(fm_session_container_self 2>/dev/null || printf NONE)"
+  printf 'container_holder=%s\n' "$(fm_session_container_of_pid "$holder" 2>/dev/null || printf NONE)"
+  printf 'start_self=%s\n' "$(fm_session_pid_start_time "$$" 2>/dev/null || printf NONE)"
+  printf 'start_holder=%s\n' "$(fm_session_pid_start_time "$holder" 2>/dev/null || printf NONE)"
+} > "$FM_FIX_DIR/report"
+fm_session_same_cohort "$holder"
+SH
+  harness_probe "
+    HERDR_ENV=1
+    HERDR_PANE_ID=fixture-pane
+    FM_PROC_ROOT_OVERRIDE='$root'
+    FM_FIX_ROOT='$root'
+    FM_FIX_DIR='$dir'
+    FM_FIX_CLAUDE='$NAMED_CLAUDE'
+    FM_FIX_ORDER='$order'
+    . '$dir/probe.sh'
+  "
+}
+
+forward_field() {  # <dir> <key>
+  sed -n "s/^$2=//p" "$1/report"
+}
+
+test_a_recycled_holder_pid_cannot_satisfy_a_stale_launch_marker() {
+  local ok bad
+  ok="$TMP_ROOT/cohort-marker-ordered"
+  bad="$TMP_ROOT/cohort-marker-recycled"
+
+  # Positive control on the identical fixture: with a start time that can express
+  # the launch the marker claims, the relationship is still accepted. Without it
+  # the refusal below could come from anything.
+  cohort_probe_forward_marker "$ok" launched \
+    || fail "a marker naming a holder that predates this process stopped being a launch relationship"$'\n'"$(cat "$ok/report" 2>/dev/null)"
+  COHORT_PIDS+=("$(forward_field "$ok" holder)")
+
+  if cohort_probe_forward_marker "$bad" real; then
+    COHORT_PIDS+=("$(forward_field "$bad" holder)")
+    fail "a live harness holder that started after this process was accepted as the launcher its recycled pid names, so an unrelated session takes this home"$'\n'"$(cat "$bad/report" 2>/dev/null)"
+  fi
+  COHORT_PIDS+=("$(forward_field "$bad" holder)")
+
+  # Divergence: the marker IS present and DOES name a live claude holder, and
+  # co-location holds, so only the ordering can be producing the refusal.
+  [ "$(forward_field "$bad" launcher_self)" = "$(forward_field "$bad" holder)" ] || fail \
+    "the fixture did not carry a marker naming the holder, so its refusal proves nothing"$'\n'"$(cat "$bad/report")"
+  [ "$(forward_field "$bad" kind_holder)" = claude ] || fail \
+    "the fixture holder did not resolve as a claude harness"$'\n'"$(cat "$bad/report")"
+  [ "$(forward_field "$bad" container_self)" = "$(forward_field "$bad" container_holder)" ] || fail \
+    "the fixture lost the co-location the relationship is AND-ed with"$'\n'"$(cat "$bad/report")"
+  # And the two fixtures really did diverge on the one thing under test.
+  [ "$(forward_field "$bad" start_holder)" -gt "$(forward_field "$bad" start_self)" ] || fail \
+    "the refused fixture's holder did not start after the asking process, so it does not reproduce a recycled pid"$'\n'"$(cat "$bad/report")"
+  [ "$(forward_field "$ok" start_holder)" -le "$(forward_field "$ok" start_self)" ] || fail \
+    "the accepted fixture's holder did not predate the asking process, so the pair does not differ on ordering"$'\n'"$(cat "$ok/report")"
+  pass "session-lock: a recycled holder pid cannot satisfy a stale launch marker"
+}
+
+# The reverse direction must survive the same rule, because the invariant is
+# stated about the CARRIER of the marker rather than about the asking side. A
+# blanket "the holder must predate us" rule would silently refuse every session
+# that recognizes a lock naming the session it started, which is the case
+# test_launching_session_owns_a_lock_naming_the_session_it_started pins
+# end-to-end; this asserts the ordering read itself agrees with it.
+test_marker_ordering_reads_both_directions_of_a_real_pair() {
+  local dir parent child
+  dir="$TMP_ROOT/cohort-marker-directions"
+  mkdir -p "$dir"
+  # A real launcher/launched pair: the parent necessarily starts first.
+  "$NAMED_CLAUDE" -c 'printf "%s\n" "$$" > "$1/parent-pid"; sleep 120; :' _ "$dir" &
+  COHORT_PIDS+=("$!")
+  parent=$(wait_for_file "$dir/parent-pid" "the ordering fixture parent pid")
+  "$NAMED_CLAUDE" -c 'printf "%s\n" "$$" > "$1/child-pid"; sleep 120; :' _ "$dir" &
+  COHORT_PIDS+=("$!")
+  child=$(wait_for_file "$dir/child-pid" "the ordering fixture child pid")
+
+  lib_probe "fm_session_marker_ordered $child $parent" \
+    || fail "a marker carried by the later process naming the earlier one was refused, which would break the forward direction"
+  if lib_probe "fm_session_marker_ordered $parent $child"; then
+    fail "a marker carried by the earlier process naming the later one was accepted, so ordering is not being read at all"
+  fi
+  # An unreadable start time refuses rather than accepts, so the marker path
+  # degrades to the ancestry verdict instead of opening up.
+  if lib_probe "fm_session_marker_ordered $child $(nonexistent_cohort_pid)"; then
+    fail "an unreadable start time was accepted, so the ordering check fails open"
+  fi
+  pass "session-lock: marker ordering accepts a launcher that predates its carrier and refuses one that does not"
+}
+
+# The start time is field 22 of /proc/<pid>/stat, and field 2 is the command name
+# in parentheses, which CAN contain spaces. A whole-line field index reads 0 for
+# this task's own truncated worker shape - the earliest start time expressible,
+# which would satisfy every forward comparison and fail open silently on exactly
+# the process this work exists to identify.
+test_start_time_survives_a_command_name_containing_spaces() {
+  local dir spaced plain
+  dir="$TMP_ROOT/cohort-spaced-comm-start"
+  mkdir -p "$dir"
+  "$WORKER_CLAUDE" -c 'printf "%s\n" "$$" > "$1/spaced-pid"; sleep 120; :' _ "$dir" &
+  COHORT_PIDS+=("$!")
+  spaced=$(wait_for_file "$dir/spaced-pid" "the spaced-comm fixture pid")
+  [ "$(ps -o comm= -p "$spaced")" != "$(basename -- "$NAMED_CLAUDE")" ] || fail \
+    "the spaced-comm fixture reported a plain command name, so it no longer reproduces the shape"
+
+  plain=$(lib_probe "fm_session_pid_start_time $spaced") \
+    || fail "the start time of a process whose command name contains spaces could not be read at all"
+  case "$plain" in
+    ''|*[!0-9]*) fail "the start time of a spaced command name did not parse as a number: '$plain'" ;;
+    0) fail "the start time of a spaced command name read as 0, which accepts every ordering comparison and fails open" ;;
+  esac
+  # And it agrees with the ordering rule: this process started before the
+  # fixture, so a marker the fixture carried could not name it as a launcher.
+  if lib_probe "fm_session_marker_ordered $$ $spaced"; then
+    fail "a spaced-comm process that started later was ordered as predating this one, so its start time was misread"
+  fi
+  pass "session-lock: a start time is read correctly when the command name contains spaces"
 }
 
 # Co-location has two providers so that neither is load-bearing alone. These two
@@ -1704,6 +1901,9 @@ test_the_same_harness_still_converges_on_the_identical_fixture
 test_colocated_session_without_a_launch_relationship_is_refused
 test_related_session_in_another_container_is_refused
 test_liveness_is_decided_before_any_recorded_cohort_signal
+test_a_recycled_holder_pid_cannot_satisfy_a_stale_launch_marker
+test_marker_ordering_reads_both_directions_of_a_real_pair
+test_start_time_survives_a_command_name_containing_spaces
 test_container_signal_alone_carries_co_location
 test_terminal_signal_alone_carries_co_location
 test_suspended_holder_releases_and_resumes

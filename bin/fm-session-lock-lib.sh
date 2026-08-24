@@ -688,6 +688,70 @@ EOF
   return 1
 }
 
+# Print the start time of pid $1 in clock ticks since boot, or return 1.
+#
+# Field 22 of /proc/<pid>/stat. It is fixed for the whole life of a pid and is
+# reassigned when the pid is reused, which is what lets a marker's named pid be
+# ORDERED against the process whose environment carried that marker.
+#
+# The parse deliberately discards everything through the LAST ')' rather than
+# taking field 22 of the raw line. Field 2 is the command name in parentheses and
+# it CAN contain spaces, which shifts every later field: a real background worker
+# reports `<pid> (claude bg-pty-h) S ...`, where a whole-line field 22 reads 0.
+# Zero is the earliest start time expressible, so it would satisfy every forward
+# comparison below - a silent fail-open on exactly the process shape this file
+# exists to identify. Do not simplify this back to a whole-line field index.
+#
+# FM_PROC_ROOT_OVERRIDE is honoured exactly as fm_session_pid_env honours it, so
+# one fixture drives both reads.
+fm_session_pid_start_time() {  # <pid>
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} raw rest value
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  raw=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+  case "$raw" in
+    *')'*) rest=${raw##*)} ;;
+    *) return 1 ;;
+  esac
+  value=$(printf '%s\n' "$rest" | awk '{print $20}')
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+# True when a marker naming pid $2 could actually have been carried by pid $1.
+#
+# ONE invariant, applied at every site a marker is accepted rather than as two
+# rules that can drift apart: A MARKER'S NAMED PID MUST NOT HAVE STARTED AFTER
+# THE PROCESS WHOSE ENVIRONMENT CARRIED IT. A launcher necessarily exists before
+# anything that inherited its environment, so this is a monotonic fact about the
+# pair rather than another name heuristic, and it is precisely what numeric
+# equality cannot tell: an environment snapshot naming pid 100 says nothing about
+# whether the process now holding pid 100 is the one it named.
+#
+# Callers supply the ACTUAL carrier, never $$ blindly, so the one invariant
+# produces both directions. Forward, where our own marker names the holder, the
+# carrier is this process or the ancestry member whose environ was read and the
+# holder must predate it. Reverse, where the holder's marker names us, the
+# carrier is the holder and the pid it names must predate the holder.
+#
+# The comparison is <=, not strict <. Clock ticks are coarse - commonly 10ms - so
+# a real launcher and the child it spawns can land on one tick value, and
+# refusing those would be a false refusal of a legitimate launch, which is the
+# failure class this whole mechanism exists to remove.
+#
+# Either start time being unreadable or unparseable REFUSES the relationship,
+# which degrades this path to the ancestry verdict rather than handing the home
+# to a session that merely inherited a recycled pid.
+fm_session_marker_ordered() {  # <carrier-pid> <named-pid>
+  local carrier named
+  carrier=$(fm_session_pid_start_time "$1") || return 1
+  named=$(fm_session_pid_start_time "$2") || return 1
+  [ "$named" -le "$carrier" ]
+}
+
 # True when live harness pid $1 is this process's OWN session reached through a
 # different process tree, recording the evidence in FM_SESSION_COHORT_EVIDENCE.
 #
@@ -712,7 +776,10 @@ EOF
 #      launching session instead of removing it. Either way this is what makes
 #      the holder OUR session rather than merely a neighbour, and it is the
 #      signal the process tree destroys when a harness rehosts a session under
-#      its own pty and the tree reparents to init.
+#      its own pty and the tree reparents to init. Either direction must also be
+#      ORDERED, per fm_session_marker_ordered above: the pid a marker names must
+#      not have started after the process that carried that marker, which is what
+#      stops a recycled pid from satisfying a stale marker.
 #   2. Co-location. Both processes are in the same innermost runtime container,
 #      or on the same controlling terminal. Two providers, either sufficient,
 #      because a rehosted session keeps its pane and loses its terminal.
@@ -720,9 +787,17 @@ EOF
 # Requiring the relationship is what preserves the property the lock exists for.
 # Co-location alone would accept a genuinely separate session that merely shares
 # a pane - a second agent started by hand in the captain's own terminal is
-# exactly that, and it must still be refused. Co-location alone would also be
-# the only thing standing between an unrelated harness and this home if the
-# holder's pid were recycled, which is why it corroborates rather than decides.
+# exactly that, and it must still be refused.
+#
+# The two signals are NOT fully independent under pid recycling, and that is
+# stated rather than implied away. A marker is an environment snapshot taken at
+# exec time and matched against the holder by numeric equality, so a marker
+# naming pid 100 keeps matching once pid 100 has been recycled onto an unrelated
+# session of the same harness: the relationship itself is stale-satisfied there,
+# and co-location alone would be what was left. What restores the relationship's
+# meaning is the start-time ordering every acceptance site below requires, since
+# a recycled occupant started after the process that carried the marker and so
+# cannot be the launcher that marker names.
 # $2 and $3 are internal fast paths for callers that have already done the same
 # work, and change no verdict: $2 is this session's harness ancestry when the
 # caller has already resolved it, and $3 is 1 only when the caller has already
@@ -773,7 +848,7 @@ EOF
   [ "$same_kind" -eq 1 ] || return 1
 
   launcher=$(fm_session_launcher_pid "$$" "$kind" 2>/dev/null || true)
-  if [ "$launcher" = "$pid" ]; then
+  if [ "$launcher" = "$pid" ] && fm_session_marker_ordered "$$" "$pid"; then
     related=1
     relation="launched this session"
   fi
@@ -781,7 +856,7 @@ EOF
     while IFS= read -r member; do
       [ -n "$member" ] || continue
       launcher=$(fm_session_launcher_pid "$member" "$kind" 2>/dev/null || true)
-      if [ "$launcher" = "$pid" ]; then
+      if [ "$launcher" = "$pid" ] && fm_session_marker_ordered "$member" "$pid"; then
         related=1
         relation="launched this session"
         break
@@ -792,7 +867,7 @@ EOF
   fi
   if [ "$related" -eq 0 ]; then
     launcher=$(fm_session_launcher_pid "$pid" "$kind" 2>/dev/null || true)
-    if [ -n "$launcher" ]; then
+    if [ -n "$launcher" ] && fm_session_marker_ordered "$pid" "$launcher"; then
       if [ "$launcher" = "$$" ]; then
         related=1
       else
