@@ -267,7 +267,7 @@ test_ship_mode_is_explicit_not_registry() {
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
 }
 
-# yolo is firstmate's approval authority and never reaches the worker, and a scout
+# yolo is firstmate's merge authority and never reaches the worker, and a scout
 # or charter carries no delivery contract. Each must refuse rather than accept and
 # discard the flag, which would look recorded but change nothing.
 test_delivery_flags_are_refused_where_they_do_not_apply() {
@@ -488,6 +488,39 @@ test_unguarded_briefs_omit_herdr_gate() {
       "$kind brief retained the removed Herdr gate"
   done
   pass "fm-brief.sh: unguarded ship and scout scaffolds omit the Herdr gate"
+}
+
+# Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
+# firstmate to replace EVERY `{TASK}` placeholder, so a placeholder quoted
+# anywhere but the genuine fill site is spliced full of the task body. This fork
+# also drops the unguarded Herdr gate that once carried such a quote
+# (test_unguarded_briefs_omit_herdr_gate), so the surviving contract is the fill
+# site itself: exactly one placeholder, and the documented global replace puts
+# the body in exactly once.
+test_documented_global_replace_leaves_one_task_fill_site() {
+  local home id brief kind count content filled body
+  home="$TMP_ROOT/task-fill-site-home"
+  mkdir -p "$home/data"
+  body='Restart the herdr session, then profile it'
+  for kind in ship scout; do
+    id="brief-fill-site-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    count=$(grep -c -F '{TASK}' "$brief")
+    [ "$count" = 1 ] \
+      || fail "$kind brief must carry exactly one {TASK} fill site, found $count"
+    content=$(cat "$brief")
+    filled=${content//'{TASK}'/$body}
+    count=$(printf '%s\n' "$filled" | grep -c -F "$body")
+    [ "$count" = 1 ] \
+      || fail "$kind brief: the documented global {TASK} replace duplicated the task body $count times"
+  done
+  pass "fm-brief.sh: the documented {TASK} fill lands only at the single fill site"
 }
 
 test_secondmate_no_projects_charter() {
@@ -778,6 +811,7 @@ test_ship_status_protocol_tracks_wait_and_pushed_head
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_unguarded_briefs_omit_herdr_gate
+test_documented_global_replace_leaves_one_task_fill_site
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
