@@ -355,25 +355,27 @@ const expectedUnset = [
 const expectedArgv = [
   "/opt/omp", "--cwd", "/isolated/cwd", "--add-dir", "/task/worktree",
   "--approval-mode", "yolo", "--no-title", "--no-extensions", "--no-skills",
-  "--no-lsp",
-  "--tools", "edit", "--model", "anthropic/claude-sonnet-4-5",
+  "--no-lsp", "--no-tools", "--model", "anthropic/claude-sonnet-4-5",
   "-e", "/state/task.omp-ext.ts",
 ];
 if (JSON.stringify(manifest.unsetEnvironment) !== JSON.stringify(expectedUnset)) process.exit(1);
 if (manifest.environment.FM_OMP_HARNESS !== "1") process.exit(1);
 if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit(1);
 if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
-const tools = manifest.argv[manifest.argv.indexOf("--tools") + 1].split(",");
-for (const forbidden of ["read", "write", "glob", "grep", "task", "browser", "computer", "web_search", "mcp", "bash"]) {
-  if (tools.includes(forbidden)) process.exit(1);
-}
+if (manifest.argv.includes("--tools")) process.exit(1);
+if (!manifest.argv.includes("--no-tools")) process.exit(1);
+if (!Array.isArray(manifest.effectiveTools) || manifest.effectiveTools.length !== 0) process.exit(1);
+if (!manifest.effectiveAstEdit || manifest.effectiveAstEdit.enabled !== false) process.exit(1);
 const templateManifest = {
   ...manifest,
   environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
-  argv: [
-    "__OMPBIN__", "--cwd", "__OMPCWD__", "--add-dir", "__WORKTREE__",
-    ...manifest.argv.slice(5, 14), "__OMPMODEL__", "-e", "__OMPEXT__",
-  ],
+  argv: manifest.argv.map((word) => ({
+    "/opt/omp": "__OMPBIN__",
+    "/isolated/cwd": "__OMPCWD__",
+    "/task/worktree": "__WORKTREE__",
+    "anthropic/claude-sonnet-4-5": "__OMPMODEL__",
+    "/state/task.omp-ext.ts": "__OMPEXT__",
+  })[word] || word),
 };
 const words = ["env"];
 for (const name of templateManifest.unsetEnvironment) words.push("-u", name);
@@ -382,7 +384,7 @@ words.push(...templateManifest.argv);
 const expectedTemplate = words.join(" ") + ' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"';
 if (process.env.TEMPLATE !== expectedTemplate) process.exit(1);
 NODE
-  pass "OMP candidate renderer emits one contained argv and tool boundary"
+  pass "OMP candidate renderer emits one contained argv with no tool surface"
 }
 
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
@@ -428,6 +430,9 @@ const retry = config.retry;
 if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
 if (!retry.fallbackChains || Array.isArray(retry.fallbackChains) || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
 if (JSON.stringify(retry) !== JSON.stringify(manifest.effectiveRetry)) process.exit(1);
+if (!config.astEdit || config.astEdit.enabled !== false) process.exit(1);
+if (JSON.stringify(config.astEdit) !== JSON.stringify(manifest.effectiveAstEdit)) process.exit(1);
+if (!Array.isArray(manifest.effectiveTools) || manifest.effectiveTools.length !== 0) process.exit(1);
 NODE
   "$ROOT/bin/fm-omp-candidate-artifacts.sh" extension "$ext" \
     "$ROOT/bin/fm-busy-event.sh" "$state" "$id" "$gen" "$turnend" \

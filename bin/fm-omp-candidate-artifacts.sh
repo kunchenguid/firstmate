@@ -7,15 +7,15 @@
 #   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
 # `prepare` creates a new agent directory containing config.yml and a new,
 # empty launch cwd. `manifest` emits the environment boundary and argv as JSON,
-# with local edit as the sole tool and LSP disabled;
+# with every built-in tool and LSP disabled;
 # `launch-template` emits the same boundary with spawn-time placeholders.
 # `extension` writes the First Mate busy-state adapter to <output>. Persistent
 # config and extension files are rendered beside their destinations and renamed
 # atomically. No mode starts OMP, opens a session, or calls a provider.
 set -eu
 
-OMP_TOOLS=edit
 OMP_RETRY_JSON='{"modelFallback":false,"usageAwareFallback":false,"fallbackChains":{}}'
+OMP_AST_EDIT_JSON='{"enabled":false}'
 
 usage() {
   echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension> | launch-template | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
@@ -34,7 +34,7 @@ javascript_literal() {
 render_config() {
   local destination=$1 temporary
   temporary=$(mktemp "${destination}.tmp.XXXXXX") || exit 1
-  if ! printf '%s\n' "{\"retry\":$OMP_RETRY_JSON}" > "$temporary"; then
+  if ! printf '%s\n' "{\"retry\":$OMP_RETRY_JSON,\"astEdit\":$OMP_AST_EDIT_JSON}" > "$temporary"; then
     rm -f -- "$temporary"
     exit 1
   fi
@@ -58,7 +58,7 @@ render_manifest() {
   local agent_dir=$1 cwd=$2 worktree=$3 binary=$4 model=$5 extension=$6
   OMP_AGENT_DIR=$agent_dir OMP_CWD=$cwd OMP_WORKTREE=$worktree \
     OMP_BINARY=$binary OMP_MODEL=$model OMP_EXTENSION=$extension \
-    OMP_TOOLS=$OMP_TOOLS OMP_RETRY_JSON=$OMP_RETRY_JSON node <<'NODE'
+    OMP_RETRY_JSON=$OMP_RETRY_JSON OMP_AST_EDIT_JSON=$OMP_AST_EDIT_JSON node <<'NODE'
 const manifest = {
   unsetEnvironment: [
     "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "GROK_AGENT",
@@ -77,11 +77,13 @@ const manifest = {
     "--no-extensions",
     "--no-skills",
     "--no-lsp",
-    "--tools", process.env.OMP_TOOLS,
+    "--no-tools",
     "--model", process.env.OMP_MODEL,
     "-e", process.env.OMP_EXTENSION,
   ],
   effectiveRetry: JSON.parse(process.env.OMP_RETRY_JSON),
+  effectiveAstEdit: JSON.parse(process.env.OMP_AST_EDIT_JSON),
+  effectiveTools: [],
 };
 process.stdout.write(JSON.stringify(manifest));
 NODE

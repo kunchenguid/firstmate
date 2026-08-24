@@ -353,11 +353,25 @@ fm_backend_target_of_meta() {  # <meta-file>
   local meta=$1 backend terminal window
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
+    if grep -q '^orca_allocation=' "$meta" 2>/dev/null; then
+      return 1
+    fi
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
+}
+
+fm_backend_cleanup_target_of_meta() {  # <meta-file>
+  local meta=$1 backend terminal
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = orca ]; then
+    terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] && printf '%s' "$terminal"
+    return 0
+  fi
+  fm_backend_target_of_meta "$meta"
 }
 
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely

@@ -41,7 +41,9 @@
 # cleanup-complete state.
 # A retained terminal in worktree recovery is a cleanup target, not a live
 # endpoint. Once it closes, teardown atomically retires that handle before the
-# fallible worktree removal so a retry skips the completed close.
+# fallible worktree removal so a retry skips the completed close. Successful
+# recovery worktree removal similarly advances to cleanup-complete before later
+# cleanup, so retries never repeat a completed backend operation.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -870,6 +872,24 @@ retire_orca_recovery_terminal() {
       print "orca_allocation=cleanup-complete"
       next
     }
+    { print }
+  ' "$meta" > "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$meta"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+retire_orca_recovery_worktree() {
+  local meta=$1 temporary
+  temporary=$(mktemp "${meta}.tmp.XXXXXX") || return 1
+  if ! awk -F= '
+    $1 == "terminal" || $1 == "orca_worktree_id" { next }
+    $1 == "worktree" { print "worktree="; next }
+    $1 == "orca_allocation" { print "orca_allocation=cleanup-complete"; next }
     { print }
   ' "$meta" > "$temporary"; then
     rm -f -- "$temporary"
@@ -2463,7 +2483,7 @@ cleanup_firstmate_home_children() {
     child_backend=$(fm_backend_of_meta "$child_meta")
     child_orca_allocation=
     if [ "$child_backend" = orca ]; then
-      child_t=$(meta_value "$child_meta" terminal)
+      child_t=$(fm_backend_cleanup_target_of_meta "$child_meta")
       child_orca_allocation=$(meta_value "$child_meta" orca_allocation)
     else
       child_t=$(fm_backend_target_of_meta "$child_meta")
@@ -2525,6 +2545,15 @@ cleanup_firstmate_home_children() {
       fi
       if orca_allocation_has_worktree "$child_orca_allocation"; then
         fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+        if [ -n "$child_orca_allocation" ]; then
+          retire_orca_recovery_worktree "$child_meta" || {
+            echo "error: could not retire removed recovery Orca worktree $child_orca_worktree_id; retaining child task metadata" >&2
+            return 1
+          }
+          child_orca_allocation=cleanup-complete
+          child_orca_worktree_id=
+          child_wt=
+        fi
       fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -2769,6 +2798,15 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
     fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+    if [ -n "$ORCA_ALLOCATION" ]; then
+      retire_orca_recovery_worktree "$META" || {
+        echo "error: could not retire removed recovery Orca worktree $ORCA_WORKTREE_ID; retaining task metadata" >&2
+        exit 1
+      }
+      ORCA_ALLOCATION=cleanup-complete
+      ORCA_WORKTREE_ID=
+      WT=
+    fi
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)

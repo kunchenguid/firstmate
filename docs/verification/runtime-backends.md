@@ -976,7 +976,7 @@ Evidence produced 2026-08-23 on macOS 26.5.0 arm64, Node v24.14.1:
 Scope of this evidence: the installed signed `pi` CLI (0.84.1 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
 
-## OMP candidate tool-name compatibility
+## OMP candidate tool containment
 
 On 2026-08-23 in the local control environment, the opt-in argument-validation guard ran against installed `omp/17.2.9`:
 
@@ -985,7 +985,7 @@ FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 ```
 
 ```text
-ok - installed omp/17.2.9 accepts the local-only candidate manifest and effective fallback isolation without session startup
+ok - installed omp/17.2.9 consumes the empty tool and isolated fallback boundary without session startup
 ```
-The guard appends a deliberately invalid tool name, so OMP exits during argument parsing without a prompt, TUI, session, provider call, or model turn.
+The guard consumes the candidate's no-tools, no-LSP, AST-edit-off, and fallback-isolation boundary through OMP's help and config subcommands without a prompt, TUI, session, provider call, or model turn.
 This is installed-binary compatibility evidence, not live First Mate lifecycle proof; OMP remains dormant until separately gated ATX-2170 verifies interrupt, exit, and relaunch control.

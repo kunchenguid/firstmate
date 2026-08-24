@@ -956,6 +956,20 @@ test_spawn_preserves_terminal_only_recovery_until_close_succeeds() {
   [ "$validated_target" = term-terminal-recovery ] \
     || fail "terminal-only cleanup validation lost its target, got '$validated_target'"
 
+  orca_case terminal-recovery-operational-refusal
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-send.sh" "$id" "must not enqueue" 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "fm-send accepted cleanup-only Orca recovery metadata"
+  assert_contains "$out" "no backend target recorded" \
+    "fm-send did not refuse the cleanup-only Orca target"
+  [ ! -s "$LOG" ] || fail "fm-send dispatched to a cleanup-only Orca terminal"
+  assert_absent "$state/$id.inbox" "fm-send enqueued work for a cleanup-only Orca task"
+
   orca_case terminal-recovery-close-fails
   printf '1\n' > "$RESP/1.exit"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1398,17 +1412,38 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
 
   orca_case recovery-retry-remove-succeeds
   printf '{"ok":true}\n' > "$RESP/1.out"
+  printf 'malformed\n' > "$state/.status-presentation-cursor"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
-  expect_code 0 $? "recovery teardown retry should remove the remaining worktree"$'\n'"$out"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery teardown should preserve retry state after later cleanup fails"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "recovery retry repeated an already completed terminal close"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-recovery-retry'$'\x1f''--force'$'\x1f''--json' \
     "recovery retry did not remove the remaining worktree"
-  assert_absent "$state/$id.meta" "successful recovery retry retained task metadata"
-  pass "Orca recovery advances metadata before retrying worktree cleanup"
+  assert_grep 'orca_allocation=cleanup-complete' "$state/$id.meta" \
+    "recovery teardown did not advance durable state after worktree removal"
+  assert_no_grep 'orca_worktree_id=' "$state/$id.meta" \
+    "recovery teardown retained an already removed worktree id"
+  assert_grep 'worktree=' "$state/$id.meta" \
+    "recovery teardown lost the validator-required empty worktree field"
+  assert_no_grep "worktree=$wt" "$state/$id.meta" \
+    "recovery teardown retained an already removed worktree path"
+
+  rm -f "$state/.status-presentation-cursor"
+  orca_case recovery-retry-finish-succeeds
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  expect_code 0 $? "cleanup-complete recovery retry should succeed"$'\n'"$out"
+  [ ! -s "$LOG" ] || fail "cleanup-complete recovery retry dispatched another Orca cleanup"
+  assert_absent "$state/$id.meta" "successful cleanup-complete retry retained task metadata"
+  pass "Orca recovery advances metadata after each successful backend cleanup"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {

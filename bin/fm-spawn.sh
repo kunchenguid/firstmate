@@ -1663,15 +1663,12 @@ launch_template() {
     # every auto-discovered user/project extension, and --no-skills drops the
     # ambient skill surface, so the only loaded extension is the firstmate-owned
     # -e __OMPEXT__ busy-state file written below.
-    # --tools is an ALLOWLIST limited to local edit. OMP's read, write, glob,
-    # and grep path grammars admit network, internal-resource, or mounted-device
-    # targets, so they are absent together with every command, delegation,
-    # network, and desktop tool. Narrowing this list is always safe; widening it
-    # is a captain decision.
-    # omp rejects an unknown --tools name with a usage error and refuses the
-    # whole launch rather than narrowing silently. The portable suite pins this
-    # exact string; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check
-    # against the installed pinned binary.
+    # --no-tools disables every built-in tool, including implied, expanded, and
+    # automatically injected tools. The isolated settings also disable AST edit,
+    # while --no-lsp disables its subprocess surface. Widening this empty tool
+    # boundary is a captain decision. The portable suite pins the emitted
+    # manifest; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check against
+    # the installed pinned binary's no-session consumer.
     # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
     # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
     # --add-dir. __OMPMODEL__ appears exactly once and always renders because
@@ -2001,10 +1998,6 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
-javascript_string_literal() {
-  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
 }
 
 resolved_existing_dir() {
