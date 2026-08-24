@@ -151,16 +151,29 @@ fm_agy_bounded_output() {  # <agy-binary> <args...>
   elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
   elif command -v perl >/dev/null 2>&1; then runner=perl
   fi
-  case "$runner" in
-    timeout|gtimeout)
-      "$runner" "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
-      ;;
-    perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-        "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
-      ;;
-    *) return 1 ;;
-  esac
+  # A probe borrows the CALLER's shell, and a pane multiplexer injects its pane
+  # identity into every process in a pane, so an unstripped probe inherits the
+  # caller's. That identity is what a harness status line reports its model,
+  # context and quota against - and a probe runs a full headless agy session,
+  # status line included. Left in place, a probe made from a Claude secondmate's
+  # pane pushes agy's model and a fresh session's 0% context onto that pane,
+  # flipping the agents sidebar to the probe's harness until the pane's own next
+  # redraw. A probe owns no pane, so it must carry no pane identity.
+  # bin/fm-test-run.sh strips the same set for the same reason.
+  (
+    unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
+      HERDR_SOCKET_PATH HERDR_SESSION 2>/dev/null || true
+    case "$runner" in
+      timeout|gtimeout)
+        "$runner" "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+        ;;
+      perl)
+        perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+          "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+        ;;
+      *) return 1 ;;
+    esac
+  )
 }
 
 # fm_agy_list_models: the account's own live catalogue, one

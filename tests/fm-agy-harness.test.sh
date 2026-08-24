@@ -21,7 +21,8 @@
 #      never `empty`, on any capability shape.
 #   5. Both model spellings agy accepts resolve against its catalogue, a model
 #      absent from it is refused, and the probe - a network call made while the
-#      spawn holds two locks - can never block indefinitely.
+#      spawn holds two locks - can never block indefinitely, and carries none of
+#      the caller's pane identity into the headless agy session it runs.
 #   6. agy runs every task kind, because it has a supervision protocol and a
 #      blocking primary Stop guard; muse still refuses a secondmate.
 set -u
@@ -249,6 +250,53 @@ test_catalogue_probe_cannot_block_indefinitely() {
   pass "fm-agy-lib: the catalogue probe is bounded and never blocks a lock-holding spawn"
 }
 
+# A probe runs a full headless agy session, status line included, on the CALLER's
+# shell. herdr injects its pane identity into every process in a pane, so an
+# unstripped probe inherits the caller's pane - and the status line then reports
+# the PROBE's model, context and quota against it. Made from a Claude
+# secondmate's pane, that flips its agents-sidebar row to agy's model and a fresh
+# session's 0% context until the pane's own next redraw. A probe owns no pane, so
+# no pane identity may survive into it.
+test_probe_carries_no_pane_identity() {
+  local dir seen
+  dir="$TMP_ROOT/pane-identity"
+  mkdir -p "$dir"
+  # Stands in for agy's status line: records every pane variable it can still see.
+  cat > "$dir/agy" <<'PROBE'
+#!/bin/sh
+: > "$LEAKED"
+for v in HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
+         HERDR_SOCKET_PATH HERDR_SESSION; do
+  eval "val=\${$v-}"
+  [ -z "$val" ] || echo "$v=$val" >> "$LEAKED"
+done
+printf 'model-id\tModel Name\n'
+PROBE
+  chmod +x "$dir/agy"
+
+  # Set on the CALLER's shell, exactly as herdr injects it into a live pane.
+  export LEAKED="$dir/leaked"
+  export HERDR_ENV=1 HERDR_PANE_ID=wQ:p2 HERDR_TAB_ID=wQ:t2 HERDR_WORKSPACE_ID=wQ
+  export HERDR_SOCKET_PATH=/tmp/herdr.sock HERDR_SESSION=default
+
+  fm_agy_bounded_output "$dir/agy" models >/dev/null 2>&1 \
+    || fail "the probe must still run once the pane identity is stripped"
+
+  [ -f "$LEAKED" ] || fail "the probe stand-in never ran, so nothing was proven"
+  seen=$(tr '\n' ' ' < "$LEAKED")
+  [ -z "${seen// /}" ] \
+    || fail "a probe must inherit no pane identity, but it still saw: $seen"
+
+  # The strip is scoped to a subshell, so the caller keeps its own pane identity
+  # and its status line goes on reporting against the pane it really owns.
+  [ "${HERDR_PANE_ID-}" = "wQ:p2" ] \
+    || fail "a probe must not strip the CALLER's pane identity, left '${HERDR_PANE_ID-}'"
+
+  unset LEAKED HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
+    HERDR_SOCKET_PATH HERDR_SESSION
+  pass "fm-agy-lib: a probe inherits no pane identity and cannot report against the caller's pane"
+}
+
 test_resolve_binary_refuses_when_absent() {
   local out rc=0
   out=$(PATH="$TMP_ROOT/empty-path" HOME="$TMP_ROOT/empty-home" fm_agy_resolve_binary 2>&1) || rc=$?
@@ -338,6 +386,7 @@ test_dead_shell_prompt_is_never_empty
 test_catalogue_accepts_both_spellings_agy_accepts
 test_resolve_binary_refuses_when_absent
 test_catalogue_probe_cannot_block_indefinitely
+test_probe_carries_no_pane_identity
 test_agy_runs_every_task_kind
 test_agy_lifecycle_mechanics_are_the_verified_ones
 test_agy_busy_source_trust_is_scoped
