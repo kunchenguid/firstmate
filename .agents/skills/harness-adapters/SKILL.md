@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and partially for omp.
 user-invocable: false
 metadata:
   internal: true
@@ -302,6 +302,36 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both the turn-end guard and watcher extensions, and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## omp / Oh My Pi (PARTIALLY VERIFIED 2026-08-24, omp v18.0.4)
+
+`omp` (Oh My Pi, package `@oh-my-pi/pi-coding-agent`) is a divergent FORK of pi-mono, not the `pi`/`pi-signed` adapter above under a new name.
+It has its own binary name, its own credential store (`agent.db`, sqlite, multi-credential), and its own native extension-discovery root (`.omp/extensions`, not `.pi/extensions`); see `omp://porting-from-pi-mono.md` "Intentional Divergences" for the full divergence list.
+Only the facts below are empirically verified; `bin/fm-spawn.sh` has NO launch template for `omp`, so a spawn naming it fails closed with "no launch template for harness 'omp'" exactly as the unverified-adapter contract requires - crew and secondmate dispatch on omp is NOT yet enabled.
+`bin/fm-harness.sh` DOES correctly detect a primary session running on omp (own-harness detection only).
+
+| Fact | Value |
+|---|---|
+| Binary | `omp`, a Bun-launched script (`bun /path/to/omp`); `ps -o comm=` reports the bare name `omp`, not `bun`, so ancestry matching needs no args probe (unlike node/python bare interpreters). |
+| Env marker | `OMPCODE=1`, set on every bash-tool child process. omp ALSO sets `CLAUDECODE=1` on the same children, deliberately, for Claude-Code bash-tool compatibility - the same "both markers present, ordering decides" hazard already documented for Cursor. `bin/fm-harness.sh` tests `OMPCODE` BEFORE `CLAUDECODE` for this reason. `PI_CODING_AGENT` is NOT set (confirmed absent), so omp is never misread as `pi`. |
+| Launch | Positional prompt (`omp "..."`) or bare interactive `omp`, the Pi/grok shape. |
+| Model flag | `--model <value>` (fuzzy match, e.g. `opus`, `gpt-5.2`, or `openai/gpt-5.2`). |
+| Effort flag | `--thinking <off\|minimal\|low\|medium\|high\|xhigh\|max\|auto>` - the same flag name as Pi's `--thinking`, but with a wider vocabulary (`off`, `minimal`, `auto` are new). |
+| Model discovery | `omp models` (subcommand, not a flag); no `--list-models` flag exists. |
+| Autonomy | `--auto-approve` (auto-approve every tool call) or `--approval-mode yolo`; no live unattended-run smoke was run in this pass. |
+| Extension flag | `-e, --extension <path>` (repeatable) - same flag as Pi. |
+| Exit command | `/exit`, confirmed live (cleanly exits the TUI, process exit 0). This DIFFERS from Pi's `/quit`. |
+| Interrupt | Not yet live-verified in this pass. |
+| Trust dialog | None observed on first launch in a fresh, never-before-seen directory (unlike Pi's per-path `~/.pi/agent/trust.json` gate); no trust-related flag, file, or doc reference found in `omp://*.md` or `omp --help`. Treat as tentative, not exhaustively verified, until a repeat launch and a non-interactive-vs-interactive comparison are captured. |
+| Busy state | NOT verified. The extension-runtime API surface the Pi guard extensions depend on (`isIdle`, `sendUserMessage` with `deliverAs: "followUp"`, `agent_start`/`turn_end` events) is present in the installed bundle, but no live turn-end-guard block/continue cycle was exercised. Keep at `unknown` per `bin/fm-busy-lib.sh`'s verification gate until that cycle is proven. |
+
+**Tracked pi extension compatibility (verified 2026-08-24, omp v18.0.4).**
+omp's native extension auto-discovery moved to `.omp/extensions`; a bare `.pi/extensions/*.ts` file with no `package.json` manifest is NOT auto-discovered (confirmed against `omp://extension-loading.md`).
+Explicit `-e` paths bypass discovery entirely and always load, regardless of source directory.
+Live-verified: `omp -e .pi/extensions/fm-primary-turnend-guard.ts -e .pi/extensions/fm-primary-pi-watch.ts -p "..." --no-session` loaded both tracked Pi primary-guard extensions with zero import or runtime errors and exit 0, including `fm-primary-pi-watch.ts`'s non-type-only `@earendil-works/pi-tui` component imports (`Box`, `Container`, `Text`) - omp's `legacy-pi-compat.ts` rewrites `@mariozechner/*`/`@earendil-works/*` specifiers onto its own host-bundled packages before evaluation, exactly as `omp://extension-loading.md` documents.
+This is evidence the SAME tracked extension files could serve omp via explicit `-e` paths without a fork, but the actual busy-state and turn-end-guard block/continue behavior was not exercised end to end, so this is NOT a substitute for the live guard verification `firstmate-coding-guidelines`'s harness-dependent-check rule requires before wiring it into `bin/fm-spawn.sh` or `bin/fm-busy-lib.sh`.
+
+**Remaining work before omp is a dispatchable crew/secondmate adapter:** an `omp|omp-signed`-shaped `launch_template` entry in `bin/fm-spawn.sh` (model/effort/extension flags above, positional brief, `-e` pointing at the same `.pi/extensions/fm-primary-turnend-guard.ts` and `.pi/extensions/fm-primary-pi-watch.ts` files used for Pi secondmates); a live turn-end-guard block/continue cycle to confirm the busy-state contract in `bin/fm-busy-lib.sh`; the interrupt key; the composer shape/glyph/idle-placeholder for `bin/fm-composer-lib.sh`; and a primary watcher-supervision protocol doc under `docs/supervision-protocols/` (today an omp-detected primary correctly falls back to `unknown.md` rather than misapplying Claude's protocol).
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

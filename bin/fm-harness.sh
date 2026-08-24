@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,6 +50,15 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # omp (Oh My Pi, @oh-my-pi/pi-coding-agent) is checked BEFORE claude,
+  # deliberately, for the same reason cursor is: omp deliberately sets
+  # CLAUDECODE=1 on every bash-tool child process for Claude-Code
+  # bash-tool-compat, alongside its own unambiguous OMPCODE=1 (verified live,
+  # omp v18.0.4, both env vars observed on the same bash child process).
+  # omp is a divergent fork of pi-mono (own binary name, own credential
+  # store, own native extension-discovery root .omp/extensions rather than
+  # .pi/extensions) and is NOT the pi/pi-signed adapter below.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -87,6 +96,10 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
+      # ps reports comm=omp for the bun-launched `bun /path/to/omp` process
+      # (verified live, omp v18.0.4: `ps -o comm=` prints the exact bare name
+      # `omp`, not `bun`), so an exact match is precise and needs no args probe.
+      omp) echo omp; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable
