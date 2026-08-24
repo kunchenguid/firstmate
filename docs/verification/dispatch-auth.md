@@ -227,7 +227,8 @@ Refusal-capable lines outside these syntax classes are not enumerated, and a lis
 Run `bin/fm-routing-guard-inventory.sh --write` to regenerate that inventory and `bin/fm-routing-guard-inventory.sh --check` to compare it with the current sources.
 `tests/fm-routing-guard-inventory.test.sh` detects source and inventory drift within the matched syntax classes, but it cannot prove that the class list is complete.
 
-The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
+The call sites this ship retained through the removal-API refactor are `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
+That is a refactor scope, not an inventory of where the routing gate attaches to dispatch; enumerate the current attachment points with `grep -oE 'fm_routing_decision_[a-z_]+' bin/fm-spawn.sh | sort -u`, which returns a strictly larger set including the primary validation entry point `fm_routing_decision_validate_and_prepare` and the applicability predicate `fm_routing_decision_required`.
 There are no surviving routing-lifecycle removal call sites.
 Atomic publication across the generation directory and its two artifacts, cleanup of partial artifacts, rollback, and adversarial replacement after an identity check remain deliberately outside this ship.
 
