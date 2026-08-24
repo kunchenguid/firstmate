@@ -281,7 +281,9 @@ function openStateLock(lock, name, { expectedHardlink } = {}) {
     }
     if (!sameStateLockEvidence(pathEvidence, openedEvidence)) {
       if (pathKind === "hardlinked" || openedKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
-      throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+      closeSync(fd);
+      fd = undefined;
+      return { changed: true };
     }
     const owner = readBoundedStateLockOwner(fd);
     const afterReadStat = fstatSync(fd, { bigint: true });
@@ -290,7 +292,11 @@ function openStateLock(lock, name, { expectedHardlink } = {}) {
       afterReadPathStat = lstatSync(lock, { bigint: true });
     } catch (error) {
       if (pathKind === "hardlinked" || expectedHardlink) throw hardlinkedStateLockChanged(name);
-      if (error?.code === "ENOENT") throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+      if (error?.code === "ENOENT") {
+        closeSync(fd);
+        fd = undefined;
+        return { changed: true };
+      }
       throw error;
     }
     const afterReadPathKind = stateLockKind(afterReadPathStat);
@@ -301,7 +307,9 @@ function openStateLock(lock, name, { expectedHardlink } = {}) {
       if (pathKind === "hardlinked" || openedKind === "hardlinked" || afterReadPathKind === "hardlinked" || expectedHardlink) {
         throw hardlinkedStateLockChanged(name);
       }
-      throw new Error(`unsafe Feishu ${name} state lock changed during inspection`);
+      closeSync(fd);
+      fd = undefined;
+      return { changed: true };
     }
     return {
       changed: false,

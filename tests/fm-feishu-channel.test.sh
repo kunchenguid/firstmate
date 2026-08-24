@@ -675,6 +675,35 @@ assert.equal(ingressCounts(home).delivered, 3, "session markers did not reconcil
 assert.equal(claimNextOutbound(home), undefined, "persisted Assistant entries were mirrored again after exact session resume");
 await emit(resumedPi, "session_shutdown", {}, resumed.ctx);
 
+const pairingPath = pathsForHome(home).pairing;
+const validPairingBytes = readFileSync(pairingPath, "utf8");
+const corruptPi = fakePi();
+registerFeishuNativeChannel(corruptPi);
+const corrupt = context(sessionId, sessionFile, sessionCwd, session.entries);
+await emit(corruptPi, "session_start", { reason: "resume" }, corrupt.ctx);
+for (let attempt = 0; attempt < 30 && !String(corrupt.statuses.get("fm-feishu") ?? "").startsWith("Feishu: bound"); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert(String(corrupt.statuses.get("fm-feishu") ?? "").startsWith("Feishu: bound"), "converged runtime did not activate before durable state corruption");
+writeFileSync(pairingPath, "{malformed\n");
+for (let attempt = 0; attempt < 20 && !corrupt.notifications.some(({ message }) => message.includes("malformed Feishu JSON")); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+assert(corrupt.notifications.some(({ message }) => message.includes("Feishu ingress stopped safely") && message.includes("malformed Feishu JSON")), "non-retryable state corruption did not stop ingress distinctly");
+assert.equal(corruptPi.sends.length, 0, "state-corruption stop offered native Pi input");
+writeFileSync(pairingPath, validPairingBytes);
+await emit(corruptPi, "session_shutdown", {}, corrupt.ctx);
+const recoveredPi = fakePi();
+registerFeishuNativeChannel(recoveredPi);
+const recovered = context(sessionId, sessionFile, sessionCwd, session.entries);
+await emit(recoveredPi, "session_start", { reason: "resume" }, recovered.ctx);
+for (let attempt = 0; attempt < 30 && !String(recovered.statuses.get("fm-feishu") ?? "").startsWith("Feishu: bound"); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert(String(recovered.statuses.get("fm-feishu") ?? "").startsWith("Feishu: bound"), "ingress did not recover after restoring corrupted durable state");
+assert.equal(recoveredPi.sends.length, 0, "recovered ingress resubmitted already delivered Feishu input");
+await emit(recoveredPi, "session_shutdown", {}, recovered.ctx);
+
 const wrongPi = fakePi();
 registerFeishuNativeChannel(wrongPi);
 const wrong = context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", sessionFile, sessionCwd, []);
