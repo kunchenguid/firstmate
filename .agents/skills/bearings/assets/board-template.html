@@ -443,9 +443,12 @@ __FM_BEARINGS_BOARD_DATA__
      text, so any renderer-produced text node CSS can visually cut also carries
      its exact full text as a native title tooltip - the visible label stays as
      rendered and the complete value stays reachable on hover. Build every such
-     node with titledEl and keep plain el for text that is already fully shown;
-     a node that already exists in the static markup instead sets .title beside
-     its textContent at the one place that fills it.
+     node with titledEl when its tooltip is exactly its visible text, or with
+     titledValueEl when the visible label is a deliberate short form of a longer
+     value (the landed PR link shows "#<number>" and titles the full URL), and
+     keep plain el for text that is already fully shown; a node that already
+     exists in the static markup instead sets .title beside its textContent at
+     the one place that fills it.
      The null guard matters because title reflects a DOMString: assigning a
      missing value would surface the literal "null" as the tooltip.
      tests/fm-bearings-board.test.sh renders a built board and asserts these
