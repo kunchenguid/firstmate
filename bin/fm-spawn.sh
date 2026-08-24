@@ -38,6 +38,9 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   Codex max is threaded only when `codex --version` reports 0.149.0 or newer;
+#   older or unparseable runtimes retain the requested effort in task metadata but
+#   omit the unsupported config from the launch.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1111,6 +1114,24 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
+# Codex 0.149.0 is the first locally verified runtime that accepts max reasoning.
+# Treat an unreadable or unparseable version as unsupported so an older worker can
+# still launch with its model while preserving the requested effort in metadata.
+codex_supports_max_effort() {
+  local output version major minor patch extra
+  output=$(codex --version 2>/dev/null) || return 1
+  version=$(printf '%s\n' "$output" \
+    | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/p' \
+    | head -n 1)
+  IFS='.' read -r major minor patch extra <<< "$version"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  [ "$major" -gt 0 ] && return 0
+  [ "$major" -eq 0 ] || return 1
+  [ "$minor" -gt 149 ] && return 0
+  [ "$minor" -eq 149 ] || return 1
+  [ "$patch" -ge 0 ]
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -1392,9 +1413,13 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # Codex config uses model_reasoning_effort for every supported profile level.
       case "$effort" in
-        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          if codex_supports_max_effort; then
+            printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+          fi
+          ;;
       esac
       ;;
     grok)

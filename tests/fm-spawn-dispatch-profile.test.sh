@@ -74,6 +74,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  fm_fake_version_tool "$fakebin" codex FM_FAKE_CODEX_VERSION 'codex-cli 0.149.0'
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -126,7 +127,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_CODEX_VERSION="${FM_TEST_CODEX_VERSION:-codex-cli 0.149.0}" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -452,19 +454,43 @@ test_codex_threads_model_and_effort() {
 }
 
 test_codex_threads_max_effort() {
+  local model suffix rec id out status launch
+  for model in gpt-5.6-sol gpt-5.6-luna; do
+    suffix=${model##*-}
+    id="profile-codex-max-$suffix-z4"
+    rec=$(make_spawn_case "profile-codex-max-$suffix" codex "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model "$model" --effort max)
+    status=$?
+    expect_code 0 "$status" "codex $model spawn with max effort should succeed"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" max
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex --model '$model' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+      "codex $model launch did not thread max reasoning effort config"
+  done
+  pass "codex sol and luna receive max model_reasoning_effort profile flags"
+}
+
+test_codex_omits_max_before_verified_version() {
   local rec id out status launch
-  id=profile-codex-max-z4
-  rec=$(make_spawn_case profile-codex-max codex "$id")
+  id=profile-codex-old-max-z4b
+  rec=$(make_spawn_case profile-codex-old-max codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(FM_TEST_CODEX_VERSION='codex-cli 0.148.1' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  expect_code 0 "$status" "older codex spawn with max effort should preserve launch compatibility"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread max reasoning effort config"
-  pass "codex receives max model_reasoning_effort profile flag"
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna' --dangerously-bypass-approvals-and-sandbox" \
+    "older codex launch did not preserve the model when max was omitted"
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "older codex launch must omit max reasoning effort"
+  pass "codex omits max below the verified runtime floor"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -839,6 +865,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_effort
+test_codex_omits_max_before_verified_version
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

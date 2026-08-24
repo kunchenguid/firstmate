@@ -21,6 +21,8 @@ ok - codex-cli 0.149.0 live E2E preserved the max-reasoning foreground checkpoin
 ```
 
 The env-gated guard makes a real credentialed Codex launch with `--model gpt-5.6-luna -c 'model_reasoning_effort="max"'` and then proves it returns from a foreground watcher checkpoint.
+`fm-spawn` therefore forwards Codex `max` only when `codex --version` reports 0.149.0 or newer, and omits the config on older or unparseable runtimes so those workers remain launchable.
+The portable `tests/fm-spawn-dispatch-profile.test.sh` regression covers both forwarding at the verified floor and omission on an older runtime.
 
 ## tmux
 
