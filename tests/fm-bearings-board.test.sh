@@ -109,10 +109,9 @@ extract_payload() {  # <board-path>
 # asserted from what the renderer actually produced rather than from a headless
 # browser that the runner may not have. The board page is generated public
 # output and the renderer is the real consumer under test.
-render_board_nodes() {  # <board-path>
+render_board_node_json() {  # <board-path>
   local render
-  command -v node >/dev/null 2>&1 \
-    || fail "node is required to render the board for the tooltip assertions"
+  command -v node >/dev/null 2>&1 || return 4
   render=$(BOARD_PAGE="$1" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
 
@@ -145,6 +144,7 @@ class Element {
     this.tagName = String(tag).toUpperCase();
     this.children = [];
     this.parentNode = null;
+    this.id = "";
     this.className = "";
     this.attributes = {};
     this.listeners = {};
@@ -198,9 +198,15 @@ class Element {
 }
 
 const byId = new Map();
+/* Each id node hangs off its own root so the collector below reports the id
+   node itself, not just whatever the renderer appends inside it. */
+const idRoots = [];
 for (const m of html.matchAll(/\bid="([^"]+)"/g)) {
   const node = new Element("div");
-  new Element("div").appendChild(node);
+  node.id = m[1];
+  const root = new Element("div");
+  root.appendChild(node);
+  idRoots.push(root);
   byId.set(m[1], node);
 }
 const main = new Element("main");
@@ -221,6 +227,7 @@ const nodes = [];
 const collect = (node) => node.children.forEach((child) => {
   nodes.push({
     tag: child.tagName,
+    id: child.id || null,
     classes: child.className ? child.className.split(/\s+/).filter(Boolean) : [],
     text: child.textContent,
     title: child.titleValue === undefined ? null : child.titleValue,
@@ -231,15 +238,31 @@ const collect = (node) => node.children.forEach((child) => {
 /* anything under .bb-main means the renderer bailed to its fail-closed card */
 const errored = main.children.length > 0;
 collect(main);
-byId.forEach((node) => collect(node));
+idRoots.forEach(collect);
 process.stdout.write(JSON.stringify({ errored, nodes }) + "\n");
 JS
   ) || return 1
+  printf '%s' "$render" | jq -e '.errored == false' >/dev/null || return 3
   # title reflects a DOMString, so absent text left to the DOM would surface as
   # the literal "null" - no rendered node may ever advertise that as its value.
-  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null \
-    || fail "the rendered board exposed a stringified null as a tooltip"
-  printf '%s\n' "$render"
+  printf '%s' "$render" | jq -e 'all(.nodes[]; .title != "null")' >/dev/null || return 2
+  printf '%s' "$render" | jq -c 'del(.errored)'
+}
+
+# Render <board-path> and publish the node JSON as RENDERED_NODES. The guards
+# above run inside a command substitution, where fail would only exit the
+# subshell and let a generic caller message mask the real cause, so they report
+# through distinct exit codes that this caller turns into the exact diagnostic.
+render_board_nodes() {  # <board-path>
+  local rc
+  RENDERED_NODES=$(render_board_node_json "$1") && return 0
+  rc=$?
+  case "$rc" in
+    2) fail "the rendered board exposed a stringified null as a tooltip" ;;
+    3) fail "the renderer fell back to its fail-closed card instead of rendering the board" ;;
+    4) fail "node is required to render the board for the tooltip assertions" ;;
+    *) fail "the shipped renderer could not run over the built board" ;;
+  esac
 }
 
 # Assert a rendered node of <class> carries <want> as its exact full tooltip.
@@ -386,6 +409,7 @@ test_rendered_truncated_text_has_full_native_tooltips() {
   # repo-bearing rows, and the genuinely-no-repo rows fall back to the routing
   # id, which the charted schema restricts to a slug.
   jq --arg marker "$marker" --arg long_id "$long_id" '
+    .generated = ($marker + "generated stamp") |
     .captains_call[0].repo = ($marker + "decision repo") |
     .captains_call[1].pr_url = "https://github.com/example/sample/pull/12345678901234567890?view=full&mode=review" |
     .captains_call += [{
@@ -452,9 +476,8 @@ test_rendered_truncated_text_has_full_native_tooltips() {
   grep -qF 'value <must stay text>' "$board" \
     && fail "the built board embedded the markup-like tooltip text as live markup"
 
-  render=$(render_board_nodes "$board") || fail "the shipped renderer could not run over the built board"
-  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
-    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
 
   for entry in \
     "bb-decision__repo|${marker}decision repo" \
@@ -472,6 +495,13 @@ test_rendered_truncated_text_has_full_native_tooltips() {
     "bb-row__sub|$long_id"; do
     assert_node_title "$render" "${entry%%|*}" "${entry#*|}"
   done
+
+  # The footer provenance is nowrap inside a flex-end row, so an overlong stamp
+  # escapes past the start edge where no scrolling can reach it.
+  printf '%s' "$render" | jq -e \
+    --arg want "fm-bearings-board.v1 · ${marker}generated stamp" '
+    any(.nodes[]; .id == "bb-provenance" and .text == $want and .title == $want)
+  ' >/dev/null || fail "the footer provenance did not expose its exact full text"
 
   # Tooltips carry the payload text verbatim - the renderer must not smuggle
   # entity-escaped or truncated text into the captain-facing value.
@@ -514,10 +544,8 @@ test_rendered_decision_body_text_exposes_full_values() {
 
   run_board "$home" build "$data" >/dev/null \
     || fail "the unbreakable-token decision board did not build"
-  render=$(render_board_nodes "$board") \
-    || fail "the shipped renderer could not run over the built board"
-  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
-    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
 
   for entry in \
     "bb-decision__title|Adopt the change tracked at $token" \
@@ -561,10 +589,8 @@ test_rendered_freeform_hint_is_reachable_beyond_the_placeholder() {
   grep -qF 'own words \u003ce.g.' "$board" \
     || fail "the markup-like freeform hint was not \\u003c-escaped in the injected payload"
 
-  render=$(render_board_nodes "$board") \
-    || fail "the shipped renderer could not run over the built board"
-  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
-    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
 
   # The visible placeholder keeps the hint and the tooltip carries the same
   # exact value, so the full text is reachable without relying on the browser
@@ -606,10 +632,8 @@ test_rendered_static_badges_stay_tooltip_free() {
 
   run_board "$home" build "$data" >/dev/null \
     || fail "the dynamic-badge board did not build"
-  render=$(render_board_nodes "$board") \
-    || fail "the shipped renderer could not run over the built board"
-  printf '%s' "$render" | jq -e '.errored == false' >/dev/null \
-    || fail "the renderer fell back to its fail-closed card instead of rendering the board"
+  render_board_nodes "$board"
+  render=$RENDERED_NODES
 
   # Payload-derived badge text is unbounded, so it carries its full value.
   printf '%s' "$render" | jq -e --arg risk "risk $risk" --arg state "$state" '

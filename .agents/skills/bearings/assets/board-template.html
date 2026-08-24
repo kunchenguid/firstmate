@@ -461,7 +461,10 @@ __FM_BEARINGS_BOARD_DATA__
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
-  document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+  var provenance = data.schema + " · " + data.generated;
+  var provenanceNode = document.getElementById("bb-provenance");
+  provenanceNode.textContent = provenance;
+  provenanceNode.title = provenance;
 
   /* stat strip */
   var callTotal = data.captains_call.length;
