@@ -988,6 +988,9 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    .agents/skills/magibook-pyspark/templates/*.py)
+      printf '%s\n' "__script__:fm-magibook-pyspark.test.sh"
+      ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
