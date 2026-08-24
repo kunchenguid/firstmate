@@ -1396,7 +1396,72 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# Story fmops-07 §5: composed `<origin>-decision-<key>` captain-holds live in
+# state/decisions/<id>.md instead of the backlog. Read them here so Bearings'
+# Captain's Call sees register-backed decisions alongside real captain-held
+# stories, without cross-cutting into the backlog projection above.
+decisions_register_json() {
+  local dir="$STATE/decisions"
+  if [ ! -d "$dir" ]; then
+    jq -n '{path:null,present:false,records:[]}'
+    return 0
+  fi
+  local files
+  files=$(find "$dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null | LC_ALL=C sort)
+  if [ -z "$files" ]; then
+    jq -n --arg path "$dir" '{path:$path,present:true,records:[]}'
+    return 0
+  fi
+  local records id state title hold_reason hold_until body_excerpt captain_actionable deferred
+  records='[]'
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .md)
+    # Grammar shared with the register lib: `field: value` lines above a lone
+    # `---` separator, then body.
+    state=$(awk '/^---$/ { if (h) exit; h=1; next } h && /^state: / { sub("^state: ", ""); print; exit }' "$f")
+    title=$(awk '/^---$/ { if (h) exit; h=1; next } h && /^title: / { sub("^title: ", ""); print; exit }' "$f")
+    hold_reason=$(awk '/^---$/ { if (h) exit; h=1; next } h && /^hold_reason: / { sub("^hold_reason: ", ""); print; exit }' "$f")
+    hold_until=$(awk '/^---$/ { if (h) exit; h=1; next } h && /^hold_until: / { sub("^hold_until: ", ""); print; exit }' "$f")
+    body_excerpt=$(awk '/^---$/ { seen++; next } seen >= 2 { print }' "$f" | tr '\n' ' ' | cut -c1-240)
+    # Register entries are always queued or done and always captain-held.
+    # captain_actionable mirrors the backlog rule: queued, held for the captain,
+    # a reason present, and (since register entries have no blockers) only the
+    # date gate can move it out of actionable.
+    if [ "$state" = queued ] && [ -n "$hold_reason" ] && { [ -z "$hold_until" ] || [ "$hold_until" \< "$SNAPSHOT_TODAY" ] || [ "$hold_until" = "$SNAPSHOT_TODAY" ]; }; then
+      captain_actionable=true
+    else
+      captain_actionable=false
+    fi
+    case "$hold_reason $body_excerpt" in
+      *SUPERSEDED*|*"NOT REQUIRED"*|*NOT-REQUIRED*|*DEFERRED*) deferred=true ;;
+      *) deferred=false ;;
+    esac
+    records=$(jq -n --argjson prev "$records" \
+      --arg id "$id" --arg title "$title" --arg state "$state" \
+      --arg reason "$hold_reason" --arg until_ "$hold_until" \
+      --arg body "$body_excerpt" \
+      --argjson actionable "$captain_actionable" --argjson deferred "$deferred" \
+      '$prev + [{
+        id:$id, title:$title, state:$state,
+        structured:true, source:"register",
+        hold_kind:"captain",
+        hold_reason:($reason | if . == "" then null else . end),
+        hold_until:($until_ | if . == "" then null else . end),
+        body_excerpt:($body | if . == "" then null else . end),
+        captain_actionable:$actionable,
+        deferred_marker:$deferred,
+        unresolved_blocker_ids:[],
+        current_role:(if $state == "done" then "done" else "held" end)
+      }]')
+  done <<EOF
+$files
+EOF
+  jq -n --arg path "$dir" --argjson records "$records" '{path:$path,present:true,records:$records}'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+DECISIONS_REGISTER_JSON=$(decisions_register_json) || { echo "fm-fleet-snapshot: decisions register read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
@@ -1422,6 +1487,7 @@ jq -n \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
   --argjson backlog "$BACKLOG_JSON" \
+  --argjson decisions_register "$DECISIONS_REGISTER_JSON" \
   --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
@@ -1436,6 +1502,7 @@ jq -n \
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
+     decisions_register:$decisions_register,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
