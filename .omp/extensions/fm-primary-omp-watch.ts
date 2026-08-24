@@ -333,13 +333,23 @@ function startArm(api: ExtensionAPI, owner: SessionGeneration, predecessorArmPid
             const replacement = startArm(api, owner, predecessor);
             const successor = owner.child;
             if (replacement.ok && successor && await waitForReadiness(successor)) {
-              recovery = armRecovery.get(successor);
-              failure = "";
-              break;
+              const successorRecovery = armRecovery.get(successor);
+              if (successorRecovery) {
+                const confirmed = confirmHandlingDelivery(successorRecovery);
+                if (confirmed.ok) {
+                  recovery = successorRecovery;
+                  failure = "";
+                  break;
+                }
+                failure = confirmed.detail;
+              } else {
+                failure = "watcher: FAILED - omp extension could not verify a ready successor watcher";
+              }
+            } else {
+              failure = replacement.ok
+                ? "watcher: FAILED - omp extension could not verify a ready successor watcher"
+                : replacement.message;
             }
-            failure = replacement.ok
-              ? "watcher: FAILED - omp extension could not verify a ready successor watcher"
-              : replacement.message;
             if (successor && !(await retireArm(successor))) {
               failure += "\nwatcher: FAILED - the unready successor arm did not exit within " + armRetireTimeoutMs + "ms";
               break;
@@ -348,10 +358,6 @@ function startArm(api: ExtensionAPI, owner: SessionGeneration, predecessorArmPid
             await waitForRetry(attempt + 1);
           }
           if (!recovery && !failure) failure = "watcher: FAILED - omp extension could not restore watcher continuity after retries";
-          if (recovery) {
-            const confirmed = confirmHandlingDelivery(recovery);
-            if (!confirmed.ok) failure = confirmed.detail;
-          }
           await sendWake(api, owner, message + (failure ? "\n\n" + failure : ""));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
