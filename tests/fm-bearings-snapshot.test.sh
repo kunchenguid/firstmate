@@ -375,14 +375,18 @@ EOF
 }
 
 test_structured_child_decision_reaches_captains_call() {
-  local home mate fakebin json
+  local home mate fakebin canonical json
   home=$(make_home child-decision-parent)
   mate="$TMP_ROOT/child-decision-home"
   write_domain_alpha_fixture "$home" "$mate"
   mkdir -p "$mate/projects/phase8"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
-- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+- [ ] phase8 - Sample rollout Phase 8 https://example.com/phase8-evidence (repo: sample) (kind: ship) (since 2026-07-13)
+  Risk assessment recorded by fm-task-risk.
+  Risk level: medium
+  Risk rationale: Release timing changes visible behavior.
+  Validate release evidence at https://example.com/phase8-evidence
 
 ## Queued
 - [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
@@ -396,6 +400,20 @@ EOF
   record_claude_state "$mate/state" phase8 idle
   printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[]
+    | select(.id == "domain-alpha")
+    | .decisions_open[]
+    | select(.id == "phase8" and .key == "release" and .source == "status")
+    | .title == "Sample rollout Phase 8"
+      and .repo == "sample"
+      and .kind == "ship"
+      and .risk.level == "medium"
+      and .context == "Validate release evidence at https://example.com/phase8-evidence"
+      and .links == ["https://example.com/phase8-evidence"]
+  ' >/dev/null || fail "status decision lost its canonical card fields: $canonical"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
@@ -550,7 +568,11 @@ test_secondmate_and_child_bounds_are_disclosed() {
   while [ "$i" -le 3 ]; do
     child="child-$i"
     mkdir -p "$mate/projects/$child"
-    printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    if [ "$i" -eq 1 ]; then
+      printf -- '- [ ] %s - Active %s https://example.com/active-1 (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    else
+      printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
+    fi
     fm_write_meta "$mate/state/$child.meta" \
       "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
       "harness=claude" "kind=ship" "mode=no-mistakes"
@@ -561,8 +583,13 @@ test_secondmate_and_child_bounds_are_disclosed() {
   printf '\n## Queued\n' >> "$mate/data/backlog.md"
   i=1
   while [ "$i" -le 3 ]; do
-    printf -- '- [ ] hold-%s - Held %s (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
-      "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    if [ "$i" -eq 1 ]; then
+      printf -- '- [ ] hold-%s - Held %s https://example.com/hold-1 (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
+        "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    else
+      printf -- '- [ ] hold-%s - Held %s (repo: sample) (kind: ship) (hold: waiting %s) (hold-kind: external)\n' \
+        "$i" "$i" "$i" >> "$mate/data/backlog.md"
+    fi
     i=$((i + 1))
   done
   printf '\n## Done\n' >> "$mate/data/backlog.md"
@@ -580,7 +607,16 @@ test_secondmate_and_child_bounds_are_disclosed() {
           and .counts.holds == 3 and (.holds | length) == 2
           and (.omitted | any(.surface == "holds" and .count == 1))
           and .counts.queued == 3 and (.queued | length) == 2
-          and (.omitted | any(.surface == "queued" and .count == 1)))
+          and (.omitted | any(.surface == "queued" and .count == 1))
+          and (.active_children[] | select(.id == "child-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/active-1"])
+          and (.holds[] | select(.id == "hold-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/hold-1"])
+          and (.queued[] | select(.id == "hold-1")
+            | .repo == "sample" and .kind == "ship"
+              and .links == ["https://example.com/hold-1"]))
       and (.secondmate_current.records | any(.id == "b" and .current.state == "no_active_work"))
   ' >/dev/null || fail "canonical secondmate or child bounds were not enforced: $canonical"
   json=$(FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \

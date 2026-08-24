@@ -707,6 +707,19 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def backlog_record($id):
+      [ $backlog.records[]? | select(.structured and .id == $id) ][0] // {};
+    def card_fields($work):
+      {
+        title:(($work.title // $work.id // null) | if . == null then null else trunc(120) end),
+        repo:(($work.repo // null) | if . == null then null else trunc(120) end),
+        kind:(($work.kind // null) | if . == null then null else trunc(40) end),
+        risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
+        context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
+        pr_url:(($work.pr_url // null) | if . == null then null else trunc(500) end),
+        report_path:(($work.report_path // null) | if . == null then null else trunc(500) end),
+        links:(($work.links // []) | map(trunc(500)))
+      };
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -718,20 +731,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
     | ([ $queued_all[]
          | select(.captain_actionable == true)
-         | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),
-            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
-            hold_until:(.hold_until // null),
+         | . as $work
+         | card_fields($work) +
+           {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
+            reason:(.hold_reason | trunc(160)),hold_until:(.hold_until // null),
             deferred_marker:(.deferred_marker // false),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
-         | {id:(.id | trunc(120)),title:(.title | trunc(120)),
-            repo:((.repo // null) | if . == null then null else trunc(120) end),
-            kind:((.kind // null) | if . == null then null else trunc(40) end),
-            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
-            context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
-            pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
-            report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-            links:((.links // []) | map(trunc(500))),
+         | . as $work
+         | card_fields($work) +
+           {id:(.id | trunc(120)),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
@@ -769,22 +777,21 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,source:.current_state.source,
-            title:(($work.title // .id) | trunc(120)),
-            repo:(($work.repo // null) | if . == null then null else trunc(120) end),
-            context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
-            risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
+         | card_fields($work) +
+           {id,state:.current_state.state,source:.current_state.source,
             pr_url:(($work.pr_url // .pr.url // null) | if . == null then null else trunc(500) end),
             report_path:(($work.report_path // .paths.report.path // null) | if . == null then null else trunc(500) end),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | backlog_record($t.id) as $work
+            | card_fields($work) +
+              {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
-         | {id:(.id | trunc(120)),title:(.title | trunc(90)),
-            risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
-            context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
+         | . as $work
+         | card_fields($work) +
+           {id:(.id | trunc(120)),title:(.title | trunc(90)),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
@@ -793,9 +800,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
-           | {id,title:(($work.title // .id) | trunc(90)),blocked_by:null,
-              risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
-              context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
+           | card_fields($work) +
+             {id,title:(($work.title // .id) | trunc(90)),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
@@ -827,7 +833,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+        queued:([$queued_all[] | . as $work | card_fields($work) +
+          {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
@@ -836,13 +843,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           deferred_marker:(.deferred_marker // false),
-          captain_actionable:(.captain_actionable // false),
-          risk:(.risk // {level:"unknown",rationale:null,source:"absent"}),
-          context:((.body_excerpt // null) | if . == null then null else trunc(240) end),
-          pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
-          report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-          repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          captain_actionable:(.captain_actionable // false)
+          }][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),

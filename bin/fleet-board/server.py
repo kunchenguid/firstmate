@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 import fcntl
+import http.client
 import json
 import os
 import pathlib
@@ -52,6 +53,7 @@ MAX_REQUEST_BYTES = 12_000
 STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/board-state.js": ("board-state.js", "text/javascript; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
@@ -165,6 +167,51 @@ def status_for(lane: str, record: dict[str, Any], task: dict[str, Any] | None) -
     }
 
 
+def decisions_for(
+    record: dict[str, Any], task: dict[str, Any] | None, task_id: str | None, lane: str
+) -> list[dict[str, Any]]:
+    decisions: list[dict[str, Any]] = []
+    hints = (task or {}).get("hints") or {}
+    open_decisions = hints.get("open_decisions") or []
+    candidates = open_decisions if isinstance(open_decisions, list) else []
+    if record.get("verb") in {"needs-decision", "captain-hold"}:
+        candidates = [record, *candidates]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        key = candidate.get("key")
+        if not isinstance(key, str) or not SLUG.fullmatch(key):
+            continue
+        decision = {
+            "key": key,
+            "verb": compact(candidate.get("verb"), 40) or "needs-decision",
+            "summary": compact(
+                candidate.get("summary") or candidate.get("reason") or record.get("hold_reason"),
+                280,
+            )
+            or "Captain decision required",
+            "reason": compact(candidate.get("reason"), 280),
+        }
+        if not any(existing["key"] == key for existing in decisions):
+            decisions.append(decision)
+    if not decisions and task_id and lane == "needs_you":
+        decisions.append(
+            {
+                "key": task_id,
+                "verb": "captain-hold",
+                "summary": compact(
+                    record.get("hold_reason")
+                    or record.get("blocked_reason")
+                    or ((task or {}).get("current_state") or {}).get("detail"),
+                    280,
+                )
+                or "Captain decision required",
+                "reason": None,
+            }
+        )
+    return decisions
+
+
 def base_card(
     *,
     key: str,
@@ -179,6 +226,7 @@ def base_card(
     generated: str,
 ) -> dict[str, Any]:
     is_open = lane != "done"
+    decisions = decisions_for(record, task, task_id, lane)
     return {
         "key": key,
         "id": task_id,
@@ -191,9 +239,10 @@ def base_card(
         "status": status_for(lane, record, task),
         "context": compact(record.get("context") or record.get("body_excerpt"), 1200),
         "evidence": evidence_for(record, task),
+        "decisions": decisions,
         "blocked_by": record.get("unresolved_blocker_ids") or record.get("blocked_by_ids") or [],
         "actions": {
-            "answer": bool(task_id and lane == "needs_you"),
+            "answer": bool(task_id and lane == "needs_you" and decisions),
             "request_details": bool(task_id and is_open),
         },
         "provenance": "registered-secondmate" if home_id != "primary" else "primary-home",
@@ -219,6 +268,10 @@ def merge_card(cards: dict[str, dict[str, Any]], card: dict[str, Any]) -> None:
     seen = {(item.get("kind"), item.get("value")) for item in merged["evidence"]}
     merged["evidence"].extend(
         item for item in fallback["evidence"] if (item.get("kind"), item.get("value")) not in seen
+    )
+    decision_keys = {item.get("key") for item in merged["decisions"]}
+    merged["decisions"].extend(
+        item for item in fallback["decisions"] if item.get("key") not in decision_keys
     )
     merged["actions"] = {
         "answer": bool(merged["actions"]["answer"] or fallback["actions"]["answer"]),
@@ -492,7 +545,6 @@ class FleetBoardServer(ThreadingHTTPServer):
         self.csrf = secrets.token_urlsafe(32)
         self.cache = SnapshotCache(root, home)
         self.actions_lock = threading.Lock()
-        self.recent_actions: dict[str, float] = {}
 
 
 class FleetBoardHandler(BaseHTTPRequestHandler):
@@ -500,6 +552,10 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"fleet-board: {self.address_string()} {fmt % args}\n")
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        if isinstance(code, int) and code >= 400:
+            super().log_request(code, size)
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -626,6 +682,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         home_id = payload.get("home_id")
         text = payload.get("text")
         request_id = payload.get("request_id")
+        decision_key = payload.get("decision_key")
         if action not in {"answer", "request_details"}:
             raise BoardError("Unknown action")
         if not isinstance(task_id, str) or not SLUG.fullmatch(task_id):
@@ -656,20 +713,22 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         permission = "answer" if action == "answer" else "request_details"
         if not (card.get("actions") or {}).get(permission):
             raise BoardError("This action is no longer available for the task's current state")
-        now = time.monotonic()
+        if action == "answer":
+            if not isinstance(decision_key, str) or not SLUG.fullmatch(decision_key):
+                raise BoardError("Select the captain decision being answered")
+            if decision_key not in {
+                decision.get("key") for decision in card.get("decisions") or []
+            }:
+                raise BoardError("That captain decision is no longer open")
         with self.server.actions_lock:
-            self.server.recent_actions = {
-                key: at for key, at in self.server.recent_actions.items() if now - at < 300
-            }
-            if request_id in self.server.recent_actions:
-                return {"queued": True, "duplicate": True, "request_id": request_id}
-            self.server.recent_actions[request_id] = now
             label = "Captain answer" if action == "answer" else "Captain request for more details"
+            decision_line = f"Decision: {decision_key}\n" if action == "answer" else ""
             note = (
                 "Fleet board instruction.\n"
                 f"Home: {home_id}\n"
                 f"Task: {task_id}\n"
                 f"Action: {action}\n"
+                f"{decision_line}"
                 f"Board observation: {observation}\n"
                 f"{label}:\n{text}\n"
                 "Revalidate the canonical task and its authority before acting, then update canonical state."
@@ -678,7 +737,14 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             env["FM_HOME"] = str(self.server.home)
             try:
                 completed = subprocess.run(
-                    [str(self.server.root / "bin" / "fm-inbox.sh"), "note", "-"],
+                    [
+                        str(self.server.root / "bin" / "fm-inbox.sh"),
+                        "note",
+                        "--request-id",
+                        request_id,
+                        "--json",
+                        "-",
+                    ],
                     input=note,
                     text=True,
                     capture_output=True,
@@ -687,17 +753,29 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as error:
-                self.server.recent_actions.pop(request_id, None)
                 raise BoardError(f"Could not reach the Firstmate inbox: {compact(error, 180)}") from error
-            if completed.returncode != 0:
-                self.server.recent_actions.pop(request_id, None)
-                detail = compact(completed.stderr, 240) or f"exit {completed.returncode}"
+            try:
+                inbox_result = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                inbox_result = None
+            if (
+                not isinstance(inbox_result, dict)
+                or inbox_result.get("schema") != "fm-inbox-note.v1"
+                or inbox_result.get("request_id") != request_id
+                or inbox_result.get("saved") is not True
+            ):
+                detail = (
+                    compact((inbox_result or {}).get("error"), 240)
+                    if isinstance(inbox_result, dict)
+                    else None
+                ) or compact(completed.stderr, 240) or f"exit {completed.returncode}"
                 raise BoardError(f"Firstmate did not accept the action: {detail}")
             return {
                 "queued": True,
-                "duplicate": False,
+                "duplicate": bool(inbox_result.get("duplicate")),
                 "request_id": request_id,
                 "observation": observation,
+                "wake": inbox_result.get("wake"),
             }
 
 
@@ -722,7 +800,13 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
             value = json.loads(response.read())
-    except (OSError, UnicodeDecodeError, urllib.error.URLError, json.JSONDecodeError):
+    except (
+        OSError,
+        UnicodeDecodeError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+    ):
         return None
     if not isinstance(value, dict):
         return None

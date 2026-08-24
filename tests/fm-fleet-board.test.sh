@@ -40,16 +40,16 @@ cat <<'JSON'
   "tasks":[
     {"id":"working-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Implementing the board"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"verify-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"run-step","detail":"Running behavior tests"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":"https://github.com/example/repo/pull/7"},"paths":{"report":{"present":false}}},
-    {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"}]},"pr":{"url":null},"paths":{"report":{"present":false}}}
+    {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"},{"key":"rollout","verb":"needs-decision","summary":"Choose the rollout window"}]},"pr":{"url":null},"paths":{"report":{"present":false}}}
   ],
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
     "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
-    "decisions_open":[{"id":"mate-choice","key":"mate-choice","verb":"needs-decision","summary":"Approve the contrast direction","reason":"Choose navy or rust","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"}}],
+    "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]}],
     "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
-    "counts":{"active_children":1,"decisions_open":1,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
+    "counts":{"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
   }],"truncated":0},
   "secondmate_landed":{"records":[]}
 }
@@ -59,12 +59,40 @@ SH
 cat > "$FAKE_ROOT/bin/fm-inbox.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${1:-}" = note ] && [ "${2:-}" = - ] || exit 2
-{
-  printf '%s\n' '--- action ---'
-  cat
-} >> "${FM_HOME:?}/inbox.log"
-printf 'noted: fixture\n'
+[ "${1:-}" = note ] || exit 2
+shift
+request_id=
+json=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --request-id) request_id=$2; shift 2 ;;
+    --json) json=1; shift ;;
+    -) shift; break ;;
+    *) exit 2 ;;
+  esac
+done
+[ -n "$request_id" ] && [ "$json" -eq 1 ] && [ "$#" -eq 0 ] || exit 2
+body=$(cat)
+note="${FM_HOME:?}/request-$request_id.note"
+duplicate=false
+if [ -f "$note" ]; then
+  duplicate=true
+else
+  printf '%s\n' "$body" > "$note"
+  {
+    printf '%s\n' '--- action ---'
+    printf '%s\n' "$body"
+  } >> "${FM_HOME:?}/inbox.log"
+fi
+wake=announced
+rc=0
+if [ -f "${FM_HOME:?}/wake.fail" ]; then
+  wake=failed
+  rc=1
+fi
+printf '{"schema":"fm-inbox-note.v1","id":"request-%s","request_id":"%s","saved":true,"duplicate":%s,"wake":"%s"}\n' \
+  "$request_id" "$request_id" "$duplicate" "$wake"
+exit "$rc"
 SH
 chmod +x "$FAKE_ROOT/bin/fm-fleet-snapshot.sh" "$FAKE_ROOT/bin/fm-inbox.sh"
 
@@ -124,6 +152,13 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rebound.example' "$url"
 [ "$code" = 403 ] || fail "application shell with a foreign Host header returned $code"
 pass "server is loopback-ready and serves a protected application shell"
 
+: > "$HOME_ROOT/server.err"
+curl -fsS "${url}healthz" >/dev/null || fail "health poll failed during access-log check"
+curl -fsS "${url}api/v1/board" >/dev/null || fail "board poll failed during access-log check"
+curl -fsS "$url" >/dev/null || fail "application poll failed during access-log check"
+[ ! -s "$HOME_ROOT/server.err" ] || fail "successful polling produced unbounded access-log output"
+pass "routine successful polling stays out of the always-on access log"
+
 FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
   python3 "$SERVER" --serve --port 0 >"$HOME_ROOT/second.out" 2>"$HOME_ROOT/second.err" &
 SECOND_PID=$!
@@ -152,7 +187,8 @@ printf '%s' "$board" | jq -e '
   and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:3,done:2}
   and .summary == {open:10,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
-       | .lane == "needs_you" and .actions.answer == true and .risk.level == "high")
+       | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
+         and ([.decisions[].key] | sort) == ["migration","rollout"])
   and ([.cards[] | select(.id == "verify-task")][0]
        | .lane == "verification" and (.evidence | map(.kind) | index("pull_request") != null))
   and ([.cards[] | select(.id == "mate-working")][0]
@@ -168,13 +204,21 @@ printf '%s' "$board" | jq -e '
          and .risk.level == "medium"
          and .context == "Completion context."
          and ([.evidence[].kind] | sort) == ["pull_request", "report"])
+  and ([.cards[] | select(.id == "mate-choice")][0]
+       | .title == "Set the visual direction"
+         and .repo == "firstmate"
+         and .kind == "ship"
+         and .context == "Visual direction context."
+         and ([.decisions[].key] | sort) == ["contrast","type-scale"]
+         and ([.evidence[] | select(.kind == "link") | .value] | sort)
+           == ["https://example.com/contrast","https://example.com/type-scale"])
   and (.warnings | index("Secondmate registry is incomplete: record_limit") != null)
   and (.warnings | index("design-mate: 2 holds omitted by the snapshot bound") != null)
 ' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
 
 csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
-payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
+payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
 code=$(curl -sS -o "$HOME_ROOT/no-csrf.json" -w '%{http_code}' \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions")
 [ "$code" = 403 ] || fail "action without CSRF token returned $code"
@@ -187,12 +231,18 @@ code=$(curl -sS -o "$HOME_ROOT/invalid-state.json" -w '%{http_code}' \
   -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$invalid_payload" "${url}api/v1/actions")
 [ "$code" = 400 ] || fail "answer on a non-decision task returned $code"
+closed_decision_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"closed-key","text":"Answer a closed decision.","request_id":"request-closed"}'
+code=$(curl -sS -o "$HOME_ROOT/closed-decision.json" -w '%{http_code}' \
+  -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$closed_decision_payload" "${url}api/v1/actions")
+[ "$code" = 400 ] || fail "answer routed to a non-open decision returned $code"
 response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions") \
   || fail "valid captain action was refused"
 printf '%s' "$response" | jq -e '.queued == true and .duplicate == false' >/dev/null \
   || fail "valid action did not report durable queueing"
 assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Task: captain-task" "inbox note omitted the task identity"
+assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Decision: migration" "inbox note omitted the selected decision key"
 assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Use the reversible route" "inbox note omitted the captain answer"
 response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions") \
@@ -202,6 +252,57 @@ printf '%s' "$response" | jq -e '.queued == true and .duplicate == true' >/dev/n
 [ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 1 ] \
   || fail "deduplicated action reached the inbox more than once"
 pass "captain actions require same-origin CSRF proof and queue exactly once"
+
+kill "$SERVER_PID" 2>/dev/null || fail "could not stop the server for durable retry verification"
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=''
+for _ in $(seq 1 100); do
+  [ ! -e "$runtime" ] && break
+  sleep 0.05
+done
+[ ! -e "$runtime" ] || fail "stopped server retained its runtime identity"
+FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
+  FM_FLEET_BOARD_CACHE_SECONDS=1 python3 "$SERVER" --serve --port 0 \
+  >"$HOME_ROOT/server-restarted.out" 2>"$HOME_ROOT/server-restarted.err" &
+SERVER_PID=$!
+for _ in $(seq 1 100); do
+  [ -s "$runtime" ] && break
+  sleep 0.05
+done
+[ -s "$runtime" ] || fail "fleet board did not restart for durable retry verification"
+url=$(jq -r '.url' "$runtime")
+board=$(curl -fsS "${url}api/v1/board") || fail "restarted board endpoint failed"
+csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
+response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions") \
+  || fail "durable captain action retry after restart was refused"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == true' >/dev/null \
+  || fail "server restart forgot the durable action request id"
+[ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 1 ] \
+  || fail "server restart duplicated a durable inbox instruction"
+pass "action idempotency survives the board process lifetime"
+
+touch "$HOME_ROOT/wake.fail"
+wake_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"rollout","text":"Use the morning rollout window.","request_id":"request-wake-failure"}'
+response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$wake_payload" "${url}api/v1/actions") \
+  || fail "a saved action was rejected when only its wake failed"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == false and .wake == "failed"' >/dev/null \
+  || fail "saved action did not disclose the wake failure"
+response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$wake_payload" "${url}api/v1/actions") \
+  || fail "saved action retry after wake failure was refused"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == true and .wake == "failed"' >/dev/null \
+  || fail "wake-failure retry was not durably deduplicated"
+[ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 2 ] \
+  || fail "wake-failure retry duplicated the durable inbox note"
+rm "$HOME_ROOT/wake.fail"
+response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$wake_payload" "${url}api/v1/actions") \
+  || fail "saved action could not retry its failed wake"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == true and .wake == "announced"' >/dev/null \
+  || fail "saved action did not recover its failed wake without duplication"
+pass "wake failure preserves one action and remains recoverable"
 
 touch "$HOME_ROOT/snapshot.fail"
 sleep 1.1
@@ -224,7 +325,7 @@ done
 pass "failed refreshes remain stale without repeated snapshot work"
 
 stale_csrf=$(printf '%s' "$stale" | jq -r '.actions.csrf_token')
-stale_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
+stale_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
 response=$(curl -fsS -H "X-Firstmate-CSRF: $stale_csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$stale_payload" "${url}api/v1/actions") \
   || fail "captain action on a stale last-good card was refused"
@@ -236,7 +337,7 @@ assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Board observation: stale-last-g
 assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Revalidate the canonical task" \
   "stale action did not require canonical revalidation"
 action_count=$(grep -o -- '--- action ---' "$HOME_ROOT/inbox.log" | wc -l | tr -d ' ')
-[ "$action_count" -eq 2 ] \
+[ "$action_count" -eq 3 ] \
   || fail "stale action did not reach the inbox exactly once (total actions: $action_count)"
 pass "stale last-good cards keep guarded actions available with revalidation provenance"
 
@@ -247,7 +348,7 @@ printf '%s' "$fresh" | jq -e '.health.stale == false' >/dev/null \
   || fail "a successful refresh did not clear stale health"
 touch "$HOME_ROOT/snapshot.fail"
 fresh_csrf=$(printf '%s' "$fresh" | jq -r '.actions.csrf_token')
-forced_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
+forced_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
 curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$forced_payload" "${url}api/v1/actions" >/dev/null \
   || fail "forced stale revalidation refused the guarded action"
@@ -283,6 +384,7 @@ HEALTH_FIXTURE="$TMP_ROOT/health-fixture.py"
 cat > "$HEALTH_FIXTURE" <<'PY'
 import http.server
 import pathlib
+import socket
 import sys
 
 mode = sys.argv[1]
@@ -299,11 +401,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
         pass
 
+if mode == "malformed_http":
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port_file.write_text(str(server.getsockname()[1]), encoding="utf-8")
+    while True:
+        connection, _address = server.accept()
+        with connection:
+            connection.recv(4096)
+            connection.sendall(b"this is not HTTP\r\n\r\n")
+
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 port_file.write_text(str(server.server_port), encoding="utf-8")
 server.serve_forever()
 PY
-for health_mode in array invalid_utf8; do
+for health_mode in array invalid_utf8 malformed_http; do
   health_port_file="$LIFE_HOME/$health_mode.port"
   python3 "$HEALTH_FIXTURE" "$health_mode" "$health_port_file" &
   HEALTH_PID=$!
@@ -395,6 +509,93 @@ RECYCLED_PID=''
 assert_contains "$recovered_url" "http://127.0.0.1:" \
   "lifecycle recovery did not return the replacement board URL"
 pass "stale runtime records recover safely when their PID belongs to another process"
+
+INBOX_HOME="$TMP_ROOT/inbox-home"
+mkdir -p "$INBOX_HOME/state" "$INBOX_HOME/data"
+inbox_out=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_HOME/state" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id durable-action --json - 2>"$INBOX_HOME/failed-wake.err")
+inbox_rc=$?
+[ "$inbox_rc" -ne 0 ] || fail "inbox wake fixture unexpectedly succeeded"
+printf '%s' "$inbox_out" | jq -e \
+  '.saved == true and .duplicate == false and .wake == "failed"' >/dev/null \
+  || fail "inbox did not report that the note survived its wake failure"
+[ "$(find "$INBOX_HOME/state/inbox" -maxdepth 1 -name '*.note' | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "failed wake did not leave exactly one durable inbox note"
+retry_out=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_HOME/state" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id durable-action --json - 2>"$INBOX_HOME/repeated-wake.err")
+retry_rc=$?
+[ "$retry_rc" -ne 0 ] || fail "repeated failed wake fixture unexpectedly succeeded"
+printf '%s' "$retry_out" | jq -e \
+  '.saved == true and .duplicate == true and .wake == "failed"' >/dev/null \
+  || fail "a new inbox process did not recognize the durable request id"
+[ "$(find "$INBOX_HOME/state/inbox" -maxdepth 1 -name '*.note' | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "inbox restart duplicated the failed-wake note"
+retry_out=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_HOME/state/.wake-queue" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id durable-action --json - 2>"$INBOX_HOME/recovered-wake.err")
+retry_rc=$?
+[ "$retry_rc" -eq 0 ] || fail "durable inbox retry did not recover its wake"
+printf '%s' "$retry_out" | jq -e \
+  '.saved == true and .duplicate == true and .wake == "announced"' >/dev/null \
+  || fail "durable inbox retry did not announce the existing note"
+FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  "$ROOT/bin/fm-inbox.sh" drain --ack request-durable-action >/dev/null \
+  || fail "durable inbox note could not be acknowledged"
+handled_out=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_HOME/state/.wake-queue" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id durable-action --json - 2>"$INBOX_HOME/handled-retry.err")
+printf '%s' "$handled_out" | jq -e \
+  '.saved == true and .duplicate == true and .wake == "handled"' >/dev/null \
+  || fail "handled inbox request id did not remain idempotent"
+conflict_out=$(printf '%s' 'Different action under the same id.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  FM_WAKE_QUEUE="$INBOX_HOME/state/.wake-queue" "$ROOT/bin/fm-inbox.sh" \
+  note --request-id durable-action --json - 2>"$INBOX_HOME/conflict.err")
+conflict_rc=$?
+[ "$conflict_rc" -ne 0 ] || fail "inbox accepted different content under an existing request id"
+printf '%s' "$conflict_out" | jq -e \
+  '.saved == false and .error == "request-id-conflict"' >/dev/null \
+  || fail "inbox request-id conflict was not machine-readable"
+pass "the inbox durably owns action idempotency and wake recovery"
+
+if command -v node >/dev/null 2>&1; then
+  if ! node - "$ROOT/bin/fleet-board/board-state.js" <<'JS'
+require(process.argv[2]);
+const { cardFingerprint, reconcileBoardState } = globalThis.FleetBoardState;
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const card = {
+  key: "primary:captain-task",
+  lane: "needs_you",
+  status: { label: "Waiting for you", source: "status-log" },
+  decisions: [{ key: "migration", verb: "needs-decision", summary: "Choose migration", reason: null }],
+};
+const pending = new Map([[card.key, { fingerprint: cardFingerprint(card) }]]);
+let result = reconcileBoardState(pending, card.key, [clone(card)]);
+if (pending.size !== 1 || result.selectedKey !== card.key) process.exit(1);
+const moved = clone(card);
+moved.lane = "done";
+moved.status = { label: "Completed", source: "backlog" };
+result = reconcileBoardState(pending, card.key, [moved]);
+if (pending.size !== 0 || result.selectedKey !== card.key) process.exit(1);
+const decisionPending = new Map([[card.key, { fingerprint: cardFingerprint(card) }]]);
+const nextDecision = clone(card);
+nextDecision.decisions = [{ key: "rollout", verb: "needs-decision", summary: "Choose rollout", reason: null }];
+reconcileBoardState(decisionPending, card.key, [nextDecision]);
+if (decisionPending.size !== 0) process.exit(1);
+result = reconcileBoardState(new Map(), card.key, []);
+if (result.selectedKey !== null || result.selectedCard !== null) process.exit(1);
+JS
+  then
+    fail "fleet board client-state reconciliation failed"
+  fi
+  pass "canonical card changes clear pending state and missing selections"
+fi
 
 OPEN_FAKEBIN="$TMP_ROOT/open-fakebin"
 mkdir -p "$OPEN_FAKEBIN"

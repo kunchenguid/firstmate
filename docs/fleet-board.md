@@ -30,8 +30,10 @@ Search and home or risk filters narrow the view without mutating it.
 
 Needs You cards expose **Answer Firstmate**.
 Every open structured card exposes **Request more details**.
+When one task has several open captain decisions, the card shows every key and the answer composer requires the captain to select the decision being answered.
 
 Both actions create a durable instruction in Firstmate's existing inbox and wake the normal Firstmate session.
+If the note is saved but its wake fails, the composer keeps the same request id and offers a safe wake retry.
 The server does not release a hold, close a task, steer a worker, or change a lane directly.
 The card remains in its canonical lane with a sent confirmation until Firstmate processes the instruction and the next snapshot observes the resulting state.
 
@@ -53,7 +55,7 @@ An invalid risk record also stays unknown rather than being guessed.
 The application binds only to `127.0.0.1` and is not a remote collaboration server.
 It serves bundled assets without third-party scripts, fonts, analytics, or network dependencies.
 State-changing HTTP requests require a per-process action token and a matching loopback origin.
-Repeated action request ids are deduplicated before reaching the Firstmate inbox.
+The Firstmate inbox owns durable action request ids, so retries after wake failures, process restarts, or later replays resolve to the same note instead of creating another instruction.
 
 The board keeps a short in-memory snapshot cache so multiple browser requests do not fan out into duplicate fleet reads.
 If a refresh fails after a successful read, it keeps the last good board visible and marks it stale with the failure reason.

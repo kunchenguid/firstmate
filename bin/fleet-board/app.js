@@ -1,5 +1,7 @@
 "use strict";
 
+const { cardFingerprint, reconcileBoardState } = globalThis.FleetBoardState;
+
 const state = {
   board: null,
   csrf: "",
@@ -74,6 +76,7 @@ function visibleCards() {
       card.status.wait_reason,
       card.home.label,
       card.risk.rationale,
+      ...(card.decisions || []).flatMap((decision) => [decision.summary, decision.reason]),
     ]
       .filter(Boolean)
       .join(" ")
@@ -113,7 +116,9 @@ function cardNode(card) {
   fragment.querySelector(".card-title").textContent = card.title;
   fragment.querySelector(".card-status").textContent = pending
     ? "Sent to Firstmate"
-    : card.status.wait_reason || card.status.label;
+    : card.decisions?.length > 1
+      ? `${card.decisions.length} decisions need you`
+      : card.status.wait_reason || card.status.label;
   fragment.querySelector(".card-context").textContent = card.context || "";
   fragment.querySelector(".card-evidence").textContent = card.evidence.length
     ? `${card.evidence.length} evidence ${card.evidence.length === 1 ? "item" : "items"}`
@@ -199,9 +204,31 @@ function evidenceSection(card) {
   return section;
 }
 
+function decisionsSection(card) {
+  if (!card.decisions?.length) return null;
+  const section = node("section", "detail-section");
+  section.append(node("span", "detail-label", "Captain decisions"));
+  const list = node("ol", "decision-list");
+  for (const decision of card.decisions) {
+    const row = node("li");
+    row.append(node("strong", "", decision.summary));
+    if (decision.reason && decision.reason !== decision.summary) {
+      row.append(node("p", "", decision.reason));
+    }
+    row.append(node("code", "", decision.key));
+    list.append(row);
+  }
+  section.append(list);
+  return section;
+}
+
 function openCard(key) {
-  const card = state.board.cards.find((item) => item.key === key);
-  if (!card) return;
+  const card = state.board?.cards.find((item) => item.key === key);
+  if (!card) {
+    state.selectedKey = null;
+    if (elements.dialog.open) elements.dialog.close();
+    return;
+  }
   state.selectedKey = key;
   elements.dialogHome.textContent = `${card.home.label} · ${card.lane.replaceAll("_", " ")}`;
   elements.dialogTitle.textContent = card.title;
@@ -230,7 +257,14 @@ function openCard(key) {
   context.append(node("span", "detail-label", "Context"));
   context.append(node("p", "detail-value", card.context || "No additional task context is recorded."));
 
-  elements.dialogBody.replaceChildren(lead, grid, context, evidenceSection(card));
+  const decisions = decisionsSection(card);
+  elements.dialogBody.replaceChildren(
+    lead,
+    grid,
+    ...(decisions ? [decisions] : []),
+    context,
+    evidenceSection(card)
+  );
   renderDialogActions(card);
   if (!elements.dialog.open) elements.dialog.showModal();
 }
@@ -260,6 +294,8 @@ function showComposer(card, action) {
   document.querySelector(".action-composer")?.remove();
   elements.dialogActions.hidden = true;
   const composer = node("form", "action-composer");
+  const requestId = crypto.randomUUID();
+  composer.dataset.cardFingerprint = cardFingerprint(card);
   const id = `action-${crypto.randomUUID()}`;
   const label = node("label", "", action === "answer" ? "Your answer" : "What should Firstmate clarify?");
   label.htmlFor = id;
@@ -272,6 +308,22 @@ function showComposer(card, action) {
     ? "Give Firstmate the decision and any constraints that matter."
     : "Please summarize the current status, remaining risk, evidence, and the exact decision you need from me.";
   if (action === "request_details") textarea.value = textarea.placeholder;
+  if (action === "answer") {
+    const choices = node("fieldset", "decision-choices");
+    choices.append(node("legend", "", "Decision to answer"));
+    for (const [index, decision] of card.decisions.entries()) {
+      const choice = node("label", "decision-choice");
+      const input = node("input");
+      input.type = "radio";
+      input.name = "decision_key";
+      input.value = decision.key;
+      input.required = true;
+      input.checked = index === 0;
+      choice.append(input, node("span", "", decision.summary));
+      choices.append(choice);
+    }
+    composer.append(choices);
+  }
   const footer = node("div", "composer-footer");
   footer.append(node("p", "composer-note", "This queues a durable instruction. The status changes only after Firstmate handles it."));
   const submit = node("button", `action-button ${action === "answer" ? "captain" : ""}`, action === "answer" ? "Send answer" : "Send request");
@@ -283,8 +335,17 @@ function showComposer(card, action) {
     submit.disabled = true;
     submit.textContent = "Sending…";
     try {
-      await sendAction(card, action, textarea.value);
-      state.pending.set(card.key, { action, at: Date.now() });
+      const decisionKey = action === "answer"
+        ? new FormData(composer).get("decision_key")
+        : null;
+      const result = await sendAction(card, action, textarea.value, requestId, decisionKey);
+      if (result.wake === "failed") {
+        submit.disabled = false;
+        submit.textContent = "Retry Firstmate wake";
+        showToast("Instruction saved, but Firstmate was not woken. Retry is safe.", "error");
+        return;
+      }
+      state.pending.set(card.key, { action, fingerprint: cardFingerprint(card) });
       showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
       renderBoard();
       openCard(card.key);
@@ -298,8 +359,7 @@ function showComposer(card, action) {
   textarea.focus();
 }
 
-async function sendAction(card, action, text) {
-  const requestId = crypto.randomUUID();
+async function sendAction(card, action, text, requestId, decisionKey) {
   const response = await fetch("/api/v1/actions", {
     method: "POST",
     headers: {
@@ -312,6 +372,7 @@ async function sendAction(card, action, text) {
       home_id: card.home.id,
       text,
       request_id: requestId,
+      ...(decisionKey ? { decision_key: decisionKey } : {}),
     }),
   });
   const payload = await response.json().catch(() => ({}));
@@ -344,16 +405,21 @@ async function loadBoard(force = false) {
     if (!response.ok) throw new Error(payload.error || `Firstmate returned ${response.status}`);
     state.board = payload;
     state.csrf = payload.actions.csrf_token;
-    for (const [key, pending] of state.pending) {
-      const card = payload.cards.find((item) => item.key === key);
-      if (!card || Date.now() - pending.at > 300000) state.pending.delete(key);
-    }
+    const previousSelectedKey = state.selectedKey;
+    const reconciled = reconcileBoardState(state.pending, state.selectedKey, payload.cards);
+    state.selectedKey = reconciled.selectedKey;
     updateHomeFilter();
     renderSummary();
     renderWarnings();
     renderBoard();
-    if (state.selectedKey && elements.dialog.open && !document.querySelector(".action-composer")) {
-      openCard(state.selectedKey);
+    if (previousSelectedKey && !reconciled.selectedCard && elements.dialog.open) {
+      elements.dialog.close();
+    } else if (reconciled.selectedCard && elements.dialog.open) {
+      const composer = document.querySelector(".action-composer");
+      if (!composer || composer.dataset.cardFingerprint !== cardFingerprint(reconciled.selectedCard)) {
+        composer?.remove();
+        openCard(reconciled.selectedCard.key);
+      }
     }
     if (payload.health.stale) {
       setFreshness("stale", `Last good snapshot ${relativeTime(payload.generated)}`);

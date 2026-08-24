@@ -667,6 +667,29 @@ main {
   overflow-wrap: anywhere;
 }
 
+.decision-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.decision-list li {
+  padding-left: 4px;
+  font-size: 13px;
+}
+
+.decision-list p {
+  margin: 3px 0;
+  color: var(--muted);
+}
+
+.decision-list code {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
 .evidence-list a {
   color: var(--ocean);
   font-weight: 700;
@@ -730,6 +753,32 @@ main {
   border: 1px solid var(--line-strong);
   border-radius: 5px;
   line-height: 1.45;
+}
+
+.decision-choices {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+}
+
+.decision-choices legend {
+  padding: 0 5px;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.decision-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-weight: 600;
+}
+
+.decision-choice input {
+  margin-top: 2px;
 }
 
 .composer-footer {
