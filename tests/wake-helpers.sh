@@ -128,6 +128,14 @@ recovery_marker_generation() {  # <marker-file>
   sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
 }
 
+# Acknowledge a presented durable wake. Under the U1.3b presentation-consume
+# model one further drain invocation consumes what the previous one presented;
+# <stderr-file> stays in the signature for the pre-merge generation-bound call
+# sites, whose WAKE_ACK_REQUIRED lines no longer exist.
+ack_drain_err() {  # <state> <stderr-file>
+  FM_STATE_OVERRIDE="$1" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1
+}
+
 make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
