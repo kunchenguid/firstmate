@@ -219,6 +219,9 @@ case "${1:-}" in
       case "$1" in
         -t) target=$2; shift 2 ;;
         -l) literal=1; shift ;;
+        # fm-send ends its option parsing with a bare `--` before the payload
+        # so dash-leading steer text can never be read as flags.
+        --) shift; break ;;
         *) break ;;
       esac
     done
