@@ -830,6 +830,7 @@ test_bound_secondmate_relaunch_refuses_a_malformed_registry_before_stop() {
   # A second entry whose suffix the parser cannot resolve at all.
   printf -- '- other - other domain (home: not-absolute; scope: x; added 2026-08-23)\n' \
     >> "$dir/home/data/secondmates.md"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
   out=$(run_control "$dir" sm11 relaunch); rc=$?
   expect_code 1 "$rc" "an unusable registry should refuse the relaunch"
   assert_contains "$out" "registry cannot be resolved" \
@@ -851,6 +852,7 @@ test_bound_secondmate_relaunch_refuses_a_duplicate_registry_entry_before_stop() 
   write_bound_secondmate "$dir" sm12 "$store"
   # The same id twice: which entry binds this mate's account is unresolvable.
   write_bound_secondmate_append "$dir" sm12 "$store"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
   out=$(run_control "$dir" sm12 relaunch); rc=$?
   expect_code 1 "$rc" "a duplicated registry id should refuse the relaunch"
   assert_contains "$out" "registry cannot be resolved" \
