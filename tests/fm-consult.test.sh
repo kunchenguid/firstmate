@@ -204,6 +204,49 @@ SHIM
   pass "fm-consult: the fallback publish refuses a rival brief instead of replacing it"
 }
 
+# A fallback publish can still fail while copying the staged brief into place.
+# The copier's own diagnosis is the only account of why, so it must reach the
+# operator rather than being written into the half-published brief. Both
+# stand-ins are exactly that filesystem: ln cannot link, and the copy fails.
+test_scaffold_reports_a_failed_fallback_copy() {
+  local home shim brief out rc lines leftovers
+  home=$(new_home fallback-copy-failure)
+  shim="$TMP_ROOT/fallback-copy-failure-shim"
+  mkdir -p "$shim"
+  cat > "$shim/ln" <<'SHIM'
+#!/usr/bin/env bash
+printf 'ln: %s: Operation not supported\n' "${*: -1}" >&2
+exit 1
+SHIM
+  # Only the copy out of the staged file fails; the staging fill, which reads a
+  # heredoc with no operands, still runs the real cat.
+  cat > "$shim/cat" <<'SHIM'
+#!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  command -p cat
+  exit $?
+fi
+printf 'cat: %s: Input/output error\n' "${*: -1}" >&2
+exit 1
+SHIM
+  chmod +x "$shim/ln" "$shim/cat"
+  brief="$home/data/uncopyable/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold uncopyable 2>&1); rc=$?
+  expect_code 2 "$rc" "a failed fallback copy must refuse (got: $out)"
+  assert_contains "$out" "could not publish the consultation brief" \
+    "the failed fallback copy was not reported as a publish failure"
+  case "$out" in
+    *"could not publish the consultation brief: "*"(cat: "*"Input/output error)") : ;;
+    *) fail "scaffold discarded the underlying cause of the fallback copy failure"$'\n'"--- output ---"$'\n'"$out" ;;
+  esac
+  lines=$(stdout_line_count "$out")
+  expect_code 1 "$lines" "the fallback copy refusal must stay on one line"
+  assert_absent "$brief" "a failed fallback copy left a brief behind"
+  leftovers=$(find "$home/data/uncopyable" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "the failed fallback copy left staged files behind (got: $out)"
+  pass "fm-consult: a failed fallback copy reports its cause and publishes nothing"
+}
+
 test_receive_refuses_missing_and_empty_reports() {
   local home out rc report
   home=$(new_home receive-refusal)
@@ -994,6 +1037,7 @@ test_scaffold_publishes_nothing_when_the_write_fails
 test_scaffold_never_replaces_a_brief_written_during_staging
 test_scaffold_publishes_a_brief_without_hard_link_support
 test_scaffold_without_hard_links_never_replaces_a_rival_brief
+test_scaffold_reports_a_failed_fallback_copy
 test_receive_refuses_missing_and_empty_reports
 test_path_traversing_id_is_refused
 test_receive_emits_untrusted_input_banner_and_summary

@@ -213,7 +213,7 @@ validate_consult_file() {
 }
 
 scaffold_consult() {
-  local id=$1 dir brief create_error staged publish_error
+  local id=$1 dir brief create_error staged publish_error publish_status
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
@@ -287,23 +287,34 @@ EOF
   # already exists, so a brief another writer created after the absence check
   # above survives. A move would replace it and still report success.
   # Not every writable filesystem supports hard links, so a failed link falls
-  # back to an exclusive create, which refuses an existing destination on any
-  # filesystem. The reservation is separate from the fill so that a fill that
-  # fails is known to be ours to remove rather than a rival's brief.
+  # back to one exclusive create that already carries the content: the
+  # no-clobber open refuses an existing destination on any filesystem, and the
+  # brief is never reopened by path afterwards, so a rival brief that appears
+  # in between is neither replaced nor truncated. Exit code 3 is that refusal;
+  # exit code 4 is a copy that failed into a destination this shell created, so
+  # removing it cannot take a rival's brief with it.
   if ln -- "$staged" "$brief" 2>/dev/null; then
     rm -f -- "$staged"
-  elif publish_error=$( (umask 077; set -o noclobber; : > "$brief") 2>&1 ); then
-    if ! publish_error=$(cat -- "$staged" > "$brief" 2>&1); then
-      rm -f -- "$staged" "$brief"
+  else
+    if publish_error=$( (
+      umask 077
+      set -o noclobber
+      { cat -- "$staged" || exit 4; } > "$brief" || exit 3
+    ) 2>&1 ); then
+      publish_status=0
+    else
+      publish_status=$?
+    fi
+    rm -f -- "$staged"
+    if [ "$publish_status" -eq 4 ]; then
+      rm -f -- "$brief"
+      die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
+    elif [ "$publish_status" -ne 0 ]; then
+      if [ -e "$brief" ] || [ -L "$brief" ]; then
+        die "consultation brief already exists: $brief"
+      fi
       die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
     fi
-    rm -f -- "$staged"
-  else
-    rm -f -- "$staged"
-    if [ -e "$brief" ] || [ -L "$brief" ]; then
-      die "consultation brief already exists: $brief"
-    fi
-    die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
   fi
   printf 'scaffolded: %s (replace every placeholder)\n' "$brief"
 }
