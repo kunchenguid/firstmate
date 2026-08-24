@@ -345,13 +345,13 @@ classify_signal() {  # <reason-after-colon> <state>
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
-    task=$(basename "$f"); task="${task%.status}"
-    status_is_actionable_now "$task" "$last" || continue
+    status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
     # (seen marker matches), skip escalating again. The seen marker is the
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
+    task=$(basename "$f"); task="${task%.status}"
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
@@ -385,13 +385,12 @@ classify_stale() {  # <window> <state>
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
-  if [ -n "$last" ] && status_is_actionable_now "$task" "$last"; then
+  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
-    # verb (working:) must never take the actionable stale path. Seen-status dedupe
+    # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
-    # prose once looked captain-relevant. The non-terminal needs-validation handoff,
-    # real terminal verbs, and legacy free-text captain lines keep the immediate
-    # actionable escalate/dedupe path.
+    # prose once looked captain-relevant. Real terminal verbs and legacy free-text
+    # captain lines without those verbs keep the terminal escalate/dedupe path.
     if ! status_is_terminal_verb "$last"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
@@ -404,10 +403,10 @@ classify_stale() {  # <window> <state>
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + actionable status (already escalated by signal): %s' "$last"
+      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
     fi
-    printf 'escalate|stale + actionable status: %s' "$last"
+    printf 'escalate|stale + terminal status: %s' "$last"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -1268,14 +1267,12 @@ handle_wake() {  # <reason> <state>
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
         last=$(last_status_line "$state/$task.status")
-        # Clear wedge aging for actionable handoffs, terminal results, and legacy
-        # free-text captain lines. Nonterminal progress verbs keep possible-wedge
-        # markers even if their prose once looked captain-relevant or was seen.
+        # Clear wedge aging only for terminal (or legacy free-text) captain lines.
+        # Nonterminal progress verbs keep possible-wedge markers even if free text
+        # once looked captain-relevant or was written into a seen marker.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-          if status_is_superseded_by_run_step "$task" "$last"; then
-            _clear_wedge=0
-          elif status_is_terminal_verb "$last"; then
+          if status_is_terminal_verb "$last"; then
             _clear_wedge=1
           else
             case "$(status_line_verb "$last")" in

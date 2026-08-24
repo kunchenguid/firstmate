@@ -102,7 +102,7 @@ test_classify_routine_signal_self() {
   case "$out" in self\|*) pass "routine signal self-handles" ;; *) fail "routine signal did not self-handle: $out" ;; esac
 }
 
-test_classify_actionable_signal_escalates() {
+test_classify_terminal_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
@@ -724,91 +724,6 @@ test_heartbeat_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
   pass "catch-all scan escalates a missed terminal once, not twice"
-}
-
-test_validation_handoff_current_state_guard() {
-  local dir state fakebin out current_state old_crew_state_bin old_fake_crew_state had_fake_crew_state=0
-  dir=$(make_case validation-handoff-current-state)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  printf 'needs-validation: implementation committed\n' > "$state/validation.status"
-  old_crew_state_bin=$FM_CREW_STATE_BIN
-  if [ "${FM_FAKE_CREW_STATE+x}" = x ]; then
-    had_fake_crew_state=1
-    old_fake_crew_state=$FM_FAKE_CREW_STATE
-  else
-    old_fake_crew_state=
-  fi
-  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  for current_state in \
-    'state: working · source: run-step · validating (running)' \
-    'state: parked · source: run-step · parked at awaiting_approval' \
-    'state: parked · source: run-step · parked at fix_review'; do
-    export FM_FAKE_CREW_STATE="$current_state"
-    out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-validation" "$state")
-    case "$out" in
-      self\|*) ;;
-      *) fail "attributed validation run escalated stale handoff: $out" ;;
-    esac
-    rm -f "$state/.subsuper-last-scan"
-    : > "$state/.subsuper-escalations"
-    FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
-    [ ! -s "$state/.subsuper-escalations" ] || fail "attributed validation run was escalated by heartbeat scan"
-  done
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · inactive handoff'
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-validation" "$state")
-  case "$out" in
-    escalate\|*) ;;
-    *) fail "inactive validation handoff was not actionable: $out" ;;
-  esac
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "inactive validation handoff was missed by heartbeat scan"
-  export FM_CREW_STATE_BIN="$old_crew_state_bin"
-  if [ "$had_fake_crew_state" = 1 ]; then
-    export FM_FAKE_CREW_STATE="$old_fake_crew_state"
-  else
-    unset FM_FAKE_CREW_STATE
-  fi
-  pass "active validation suppresses stale handoff paths while inactive handoff remains actionable"
-}
-
-test_validation_handoff_retains_wedge_marker() {
-  local dir state fakebin win key pane old_crew_state_bin old_fake_crew_state had_fake_crew_state=0
-  dir=$(make_case validation-handoff-wedge-marker)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  win='sess:fm-validation'
-  key=validation
-  pane="$dir/pane.txt"
-  fm_write_meta "$state/validation.meta" "window=$win" "backend=tmux"
-  printf 'needs-validation: implementation committed\n' > "$state/validation.status"
-  printf 'idle prompt $\n' > "$pane"
-  old_crew_state_bin=$FM_CREW_STATE_BIN
-  if [ "${FM_FAKE_CREW_STATE+x}" = x ]; then
-    had_fake_crew_state=1
-    old_fake_crew_state=$FM_FAKE_CREW_STATE
-  else
-    old_fake_crew_state=
-  fi
-  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at fix_review'
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
-  [ -e "$state/.subsuper-stale-$key" ] || fail "attributed validation handoff lost wedge marker"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "attributed validation handoff escalated immediately"
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · validation ended quietly'
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW="$win" \
-    FM_FAKE_TMUX_CAPTURE="$pane" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "retained wedge marker did not escalate after validation ended"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "retained wedge marker was not cleared after escalation"
-  export FM_CREW_STATE_BIN="$old_crew_state_bin"
-  if [ "$had_fake_crew_state" = 1 ]; then
-    export FM_FAKE_CREW_STATE="$old_fake_crew_state"
-  else
-    unset FM_FAKE_CREW_STATE
-  fi
-  pass "validation handoff retains wedge aging through a quiet run"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -2013,7 +1928,7 @@ test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
-test_classify_actionable_signal_escalates
+test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
@@ -2043,8 +1958,6 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
-test_validation_handoff_current_state_guard
-test_validation_handoff_retains_wedge_marker
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

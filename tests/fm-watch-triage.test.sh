@@ -25,9 +25,6 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
-# shellcheck source=bin/fm-watch.sh
-. "$WATCH"
-
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
 ack_stopped_cycle() {  # <state>
@@ -191,22 +188,22 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
-test_stale_has_actionable_status_classifier() {
+test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
   printf 'done: ready in branch fm/x\n' > "$state/term.status"
-  stale_has_actionable_status "sess:fm-term" "$state" || fail "terminal stale status not classified actionable"
+  stale_is_terminal "sess:fm-term" "$state" || fail "terminal stale status not classified actionable"
   fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
   printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
-  stale_has_actionable_status "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
+  stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
   printf 'needs-validation: implementation committed\n' > "$state/handoff.status"
-  stale_has_actionable_status "sess:fm-handoff" "$state" || fail "non-terminal validation handoff not classified actionable"
+  stale_is_terminal "sess:fm-handoff" "$state" || fail "non-terminal validation handoff not classified actionable"
   status_is_terminal_verb "$(last_status_line "$state/handoff.status")" \
     && fail "actionable validation handoff was classified terminal"
   printf 'working: compiling\n' > "$state/nonterm.status"
-  stale_has_actionable_status "sess:fm-nonterm" "$state" && fail "routine non-terminal stale classified actionable"
-  stale_has_actionable_status "sess:fm-missing" "$state" && fail "stale with no status classified actionable"
-  pass "stale_has_actionable_status separates actionable handoffs/results from routine progress"
+  stale_is_terminal "sess:fm-nonterm" "$state" && fail "routine non-terminal stale classified actionable"
+  stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified actionable"
+  pass "stale_is_terminal treats needs-validation as actionable but non-terminal"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -797,12 +794,12 @@ test_terminal_stale_surfaced() {
 # log gets no new entry once firstmate hands it to a no-mistakes validation
 # (AGENTS.md's sparse status-reporting contract), so the log keeps showing its
 # pre-validation needs-validation: line as the LAST line for the run's entire
-# (possibly many-minutes) duration. stale_has_actionable_status alone has no run-step awareness and
+# (possibly many-minutes) duration. stale_is_terminal alone has no run-step awareness and
 # would treat that leftover as still-current every time the pane goes quiet,
 # immediately surfacing a crew that is actively validating. crew_is_provably_working
 # must get a chance to override a captain-relevant-but-stale status line, exactly
 # as it already does for a plain non-terminal one.
-test_stale_actionable_status_overridden_by_active_run() {
+test_stale_terminal_status_overridden_by_active_run() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale-overridden); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
@@ -2537,35 +2534,6 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
-test_heartbeat_scan_reuses_current_state_for_marking() {
-  local dir state fakebin calls
-  dir=$(make_case heartbeat-scan-reuse); state="$dir/state"; fakebin="$dir/fakebin"
-  calls="$dir/crew-state-calls"
-  printf 'needs-validation: implementation committed\n' > "$state/needs-validation-task.status"
-  cat > "$fakebin/fm-crew-state.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-calls=${FM_CREW_STATE_CALLS:?}
-count=$(cat "$calls" 2>/dev/null || echo 0)
-printf '%s\n' "$((count + 1))" > "$calls"
-printf '%s\n' 'state: stopped · source: none · fake'
-SH
-  chmod +x "$fakebin/fm-crew-state.sh"
-  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  FM_CREW_STATE_CALLS="$calls"
-  export FM_CREW_STATE_CALLS
-  # shellcheck disable=SC2034
-  STATE="$state"
-  heartbeat_scan_finds_actionable \
-    || fail "heartbeat scan did not find the inactive validation handoff"
-  mark_all_captain_relevant_surfaced "$FM_HEARTBEAT_ACTIONABLE_ROWS"
-  [ "$(cat "$calls")" = 1 ] \
-    || fail "heartbeat detection and marking re-read current state: $(cat "$calls")"
-  [ "$(cat "$state/.hb-surfaced-needs-validation-task")" = 'needs-validation: implementation committed' ] \
-    || fail "heartbeat marking did not reuse the detected status row"
-  pass "heartbeat detection reuses one current-state verdict while marking"
-}
-
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -2659,7 +2627,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 }
 
 test_signal_reason_is_actionable_classifier
-test_stale_has_actionable_status_classifier
+test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
@@ -2679,7 +2647,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
-test_stale_actionable_status_overridden_by_active_run
+test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
@@ -2715,7 +2683,6 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
-test_heartbeat_scan_reuses_current_state_for_marking
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
