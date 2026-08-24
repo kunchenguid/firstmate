@@ -90,7 +90,9 @@ run_typed() {
 
 # newest_record <case-dir>: the one .msg written under the fixture inbox.
 newest_record() {
-  ls -1 "$1/state/sendfile.inbox/"*.msg 2>/dev/null | sort | tail -1
+  local recs=("$1/state/sendfile.inbox/"*.msg)
+  [ -e "${recs[0]}" ] || return 1
+  printf '%s\n' "${recs[$(( ${#recs[@]} - 1 ))]}"
 }
 
 # record_body <case-dir>: everything past the three schema/at/-- header lines.

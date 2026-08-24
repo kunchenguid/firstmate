@@ -276,7 +276,7 @@ test_terminal_status_closes_the_lane() {
 }
 
 test_api_error_far_above_prompt_is_reported_not_nudged() {
-  local dir id=oxfehler out i
+  local dir id=oxfehler out
   dir=$(make_anstoss_case api-error-positive)
   write_lane_meta "$dir" "$id"
   seed_lane "$dir" "$id"
@@ -287,7 +287,7 @@ test_api_error_far_above_prompt_is_reported_not_nudged() {
   # error and composer to prove the FULL surface is read.
   {
     printf 'API Error (Request timed out, no request id received)\n'
-    for i in $(seq 1 60); do printf '\n'; done
+    for _ in $(seq 1 60); do printf '\n'; done
     printf '? Retry  ·  esc to clear\n'
     printf '╭──────────────────────╮\n'
     printf '│ >                    │\n'
