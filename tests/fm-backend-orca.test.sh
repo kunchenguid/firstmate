@@ -23,6 +23,10 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ -n "${FM_ORCA_COLLISION_META:-}" ] \
+   && [ "${1:-} ${2:-}" = "${FM_ORCA_COLLISION_ON:-worktree rm}" ]; then
+  printf 'sentinel=original\n' > "$FM_ORCA_COLLISION_META"
+fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -544,6 +548,32 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
+test_spawn_refuses_existing_task_metadata_before_orca_allocation() {
+  local proj data state config id out status original
+  id="orcaexistingz8"
+  proj="$TMP_ROOT/existing-project"
+  data="$TMP_ROOT/existing-data"
+  state="$TMP_ROOT/existing-state"
+  config="$TMP_ROOT/existing-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  original=$'window=fm-orig\nendpoint_task_id=orig\nsentinel=original'
+  printf '%s\n' "$original" > "$state/$id.meta"
+  orca_case existing-task
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "a fresh Orca spawn must refuse an existing task record"
+  assert_contains "$out" "task $id already has metadata" "existing-task refusal should name the durable collision"
+  [ "$(cat "$state/$id.meta")" = "$original" ] || fail "existing task metadata was changed"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''repo' \
+    "existing task refusal must precede Orca repository or worktree allocation"
+  pass "fm-spawn.sh --backend orca: refuses existing task metadata before allocation"
+}
+
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
   local home subhome data state config id out status
   id="orcasmz1"
@@ -719,6 +749,37 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves and tears down a worktree-only recovery record"
 }
 
+test_orca_recovery_publication_never_replaces_a_racing_task_record() {
+  local proj wt data state config id out status
+  id="orcarecoverycollisionz2"
+  proj="$TMP_ROOT/recovery-collision-project"
+  wt="$TMP_ROOT/recovery-collision-wt"
+  data="$TMP_ROOT/recovery-collision-data"
+  state="$TMP_ROOT/recovery-collision-state"
+  config="$TMP_ROOT/recovery-collision-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  orca_case recovery-collision
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-recovery-collision"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-recovery-collision","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '1\n' > "$RESP/4.exit"
+  printf '1\n' > "$RESP/5.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_COLLISION_META="$state/$id.meta" FM_ORCA_COLLISION_ON='worktree rm' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "terminal creation and cleanup failure must abort the spawn"
+  assert_contains "$out" "could not publish recovery metadata" \
+    "a recovery collision must be surfaced"
+  [ "$(cat "$state/$id.meta")" = "sentinel=original" ] \
+    || fail "recovery publication replaced the racing durable task record"
+  pass "Orca recovery publication never replaces a racing task record"
+}
+
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state config id out status log_text terminal_close_count worktree_remove_count
   id="orcametafailz9"
@@ -728,7 +789,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   state="$TMP_ROOT/meta-fail-state"
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$state/$id.meta" "$config"
+  mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -737,6 +798,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
   printf '1\n' > "$RESP/6.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_COLLISION_META="$state/$id.meta" FM_ORCA_COLLISION_ON='worktree create' \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -755,12 +817,13 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   [ "$worktree_remove_count" -eq 1 ] || fail "metadata-publication abort should remove the Orca worktree exactly once"
   assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''send' \
     "metadata-publication abort must happen before any harness launch is sent"
-  [ ! -f "$state/$id.meta" ] || fail "metadata-write abort should not publish a regular metadata file"
-  pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+  [ "$(cat "$state/$id.meta")" = "sentinel=original" ] \
+    || fail "metadata-publication abort replaced the racing task record"
+  pass "fm-spawn.sh --backend orca: preserves racing metadata and releases allocations"
 }
 
 test_spawn_recovers_from_partial_orca_metadata_render() {
-  local proj wt data state config id out status log_text validated_target
+  local proj wt data state config id out status log_text validated_target endpoint_out endpoint_status
   id="orcapartialmetaz3"
   proj="$TMP_ROOT/partial-meta-project"
   wt="$TMP_ROOT/partial-meta-wt"
@@ -774,6 +837,7 @@ test_spawn_recovers_from_partial_orca_metadata_render() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-partial-meta"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-meta","path":"%s"},"terminal":{"handle":"term-partial-meta"}}}\n' "$wt" > "$RESP/3.out"
+  printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
@@ -808,11 +872,19 @@ test_spawn_recovers_from_partial_orca_metadata_render() {
   assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''send' \
     "partial metadata render must abort before launch delivery"
   assert_present "$state/$id.meta" "failed Orca cleanup should publish a recovery record"
-  validated_target=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"; printf "%s" "$FM_BACKEND_VALIDATED_TARGET"' \
+  assert_grep 'orca_allocation=worktree-only' "$state/$id.meta" \
+    "partial metadata recovery must be marked cleanup-only"
+  endpoint_out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
+    "$ROOT" "$state/$id.meta" "$id" 2>&1)
+  endpoint_status=$?
+  [ "$endpoint_status" -ne 0 ] || fail "partial metadata recovery must not validate as a live endpoint"
+  assert_contains "$endpoint_out" "cleanup-only" \
+    "partial metadata recovery endpoint refusal must name its scope"
+  validated_target=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2" cleanup; printf "%s" "$FM_BACKEND_VALIDATED_TARGET"' \
     "$ROOT" "$state/$id.meta" "$id")
   [ "$validated_target" = "term-partial-meta" ] \
-    || fail "recovery metadata should validate the stranded terminal, got '$validated_target'"
-  pass "fm-spawn.sh --backend orca: partial metadata failure preserves a valid recovery record"
+    || fail "cleanup validation should retain the terminal retry target, got '$validated_target'"
+  pass "fm-spawn.sh --backend orca: partial metadata failure preserves cleanup-only recovery"
 }
 
 test_spawn_launches_omp_through_the_orca_backend() {
@@ -1586,11 +1658,13 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_refuses_existing_task_metadata_before_orca_allocation
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_orca_recovery_publication_never_replaces_a_racing_task_record
 test_spawn_launches_omp_through_the_orca_backend
 test_teardown_removes_the_orca_omp_endpoint
 test_spawn_releases_orca_resources_when_metadata_write_fails

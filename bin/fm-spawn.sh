@@ -184,6 +184,8 @@
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
 # semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
+# Its executable must report exactly omp/17.2.9 through one portable,
+# hard-bounded five-second --version probe before launch preparation continues.
 # omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
 # The value is validated structurally (exactly one slash between two identifier
 # segments of letters, digits, dot, underscore, or dash), passed through
@@ -206,10 +208,12 @@
 # final endpoint validation before watcher, endpoint, worktree, task-state, or
 # config mutation.
 # If an Orca allocation cannot be released during aborted spawn cleanup, this
-# script atomically publishes a cleanup-only recovery record. A known worktree
-# path omits terminal= and sets orca_allocation=worktree-only; an ID-only Orca
-# response records worktree= empty, omits terminal=, and sets
-# orca_allocation=worktree-id-only. Only teardown cleanup accepts either shape.
+# script atomically publishes a cleanup-only recovery record without replacing
+# an existing task record. A known worktree path sets
+# orca_allocation=worktree-only; an ID-only Orca response records worktree=
+# empty and sets orca_allocation=worktree-id-only. Either shape retains
+# terminal= only when cleanup must be able to retry closing that handle. Only
+# teardown cleanup accepts these records.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -288,6 +292,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -1102,9 +1108,17 @@ spawn_render_orca_recovery_meta() {
   fi
   if [ -z "${WT:-}" ]; then
     echo "orca_allocation=worktree-id-only" || return 1
-  elif [ -z "${ORCA_TERMINAL:-}" ]; then
+  else
     echo "orca_allocation=worktree-only" || return 1
   fi
+}
+
+spawn_publish_no_replace() {
+  local source=$1 target=$2
+  if ! ln "$source" "$target"; then
+    return 1
+  fi
+  rm -f "$source" 2>/dev/null || true
 }
 
 spawn_publish_orca_recovery_meta() {
@@ -1118,7 +1132,7 @@ spawn_publish_orca_recovery_meta() {
     rm -f "$recovery_tmp" 2>/dev/null || true
     return 1
   fi
-  if ! mv -f "$recovery_tmp" "$recovery_path"; then
+  if ! spawn_publish_no_replace "$recovery_tmp" "$recovery_path"; then
     rm -f "$recovery_tmp" 2>/dev/null || true
     return 1
   fi
@@ -1171,7 +1185,9 @@ spawn_abort_cleanup() {
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      if fm_backend_orca_close_terminal "$ORCA_TERMINAL" 2>/dev/null; then
+        ORCA_TERMINAL=
+      fi
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
@@ -1386,6 +1402,12 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+if [ "$RELAUNCH" -eq 0 ] \
+   && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  echo "error: task $ID already has metadata at $STATE/$ID.meta; refusing to create a second endpoint" >&2
+  exit 1
+fi
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1783,6 +1805,7 @@ resolve_kimi_binary() {
 # could relax is not a pin. Moving to another release is a code change that
 # comes with fresh verification.
 FM_OMP_REQUIRED_VERSION='omp/17.2.9'
+FM_OMP_VERSION_PROBE_SECONDS=5
 
 # resolve_omp_binary: absolute path to the pinned `omp` on PATH, or a refusal.
 # The `--version` identity probe is the ONLY invocation of the installed asset
@@ -1803,7 +1826,8 @@ resolve_omp_binary() {
       candidate="$dir/$(basename "$candidate")"
       ;;
   esac
-  reported=$("$candidate" --version 2>/dev/null | head -n 1 | tr -d '[:space:]') || reported=
+  reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
+  reported=$(printf '%s\n' "$reported" | head -n 1 | tr -d '[:space:]')
   if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
     echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
     return 1
@@ -1974,6 +1998,10 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+javascript_string_literal() {
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
 }
 
 resolved_existing_dir() {
@@ -2966,6 +2994,11 @@ EOF
       # explicit -e path outside the project loads without the fork's
       # project-trust gate. Lives in state/, and --no-extensions on the launch
       # command means this is the ONLY extension omp loads.
+      OMP_BUSY_EVENT_JS=$(javascript_string_literal "$FM_ROOT/bin/fm-busy-event.sh") || exit 1
+      OMP_STATE_JS=$(javascript_string_literal "$STATE_REAL") || exit 1
+      OMP_ID_JS=$(javascript_string_literal "$ID") || exit 1
+      OMP_BUSY_GEN_JS=$(javascript_string_literal "$BUSY_GEN") || exit 1
+      OMP_TURNEND_JS=$(javascript_string_literal "$TURNEND") || exit 1
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -2984,9 +3017,9 @@ EOF
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
-      "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    execFile($OMP_BUSY_EVENT_JS, [
+      "apply", $OMP_STATE_JS, $OMP_ID_JS, state,
+      "--gen", $OMP_BUSY_GEN_JS, "--source", "omp-ext", "--event", event,
     ], () => resolve());
   });
 export default function (omp: any) {
@@ -3002,7 +3035,7 @@ export default function (omp: any) {
       // This build does not know that settle-event name; the other one covers it.
     }
   }
-  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("turn_end", () => execFile("touch", [$OMP_TURNEND_JS]));
 }
 EOF
       ;;
@@ -3263,10 +3296,14 @@ if ! render_spawn_meta > "$SPAWN_META_PATH"; then
 fi
 if [ "$RELAUNCH" -eq 1 ] || [ "$BACKEND" = orca ]; then
   SPAWN_META_PUBLISH_STARTED=1
-  if ! mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  else
+    spawn_publish_no_replace "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  fi || {
     echo "error: failed to publish metadata for $ID; aborting launch" >&2
     exit 1
-  fi
+  }
   if [ "$RELAUNCH" -eq 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
   fi

@@ -128,7 +128,11 @@ if [ -n "\${FM_OMP_STUB_LOG:-}" ]; then
   } >> "\$FM_OMP_STUB_LOG"
 fi
 if [ "\${1:-}" = --version ]; then
-  printf '%s\n' "$version"
+  if [ "$version" = hang ]; then
+    sleep 30
+  else
+    printf '%s\n' "$version"
+  fi
   exit 0
 fi
 echo "omp stub refuses to run a session" >&2
@@ -173,7 +177,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   local home=$1 wt=$2 fakebin=$3 path
   shift 3
   path="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -189,7 +193,7 @@ run_spawn_guarded() {  # <home> <wt> <fakebin> <spawn-args...>
   local home=$1 wt=$2 fakebin=$3 path
   shift 3
   path="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -316,6 +320,22 @@ test_omp_refuses_a_substituted_binary() {
   pass "omp refuses a substituted executable that reports another agent's version"
 }
 
+test_omp_version_probe_is_hard_bounded() {
+  local rec id=omp-version-hang out status started elapsed
+  rec=$(make_omp_case omp-version-hang claude "$id" hang)
+  read_case_record "$rec"
+  started=$(date +%s)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  status=$?
+  elapsed=$(($(date +%s) - started))
+  [ "$status" -ne 0 ] || fail "a hanging OMP version probe must refuse the spawn"
+  [ "$elapsed" -le 8 ] || fail "the OMP version probe exceeded its five-second bound: ${elapsed}s"
+  assert_contains "$out" "omp version drift" "a timed-out OMP probe must fail the version pin"
+  assert_absent "$HOME_DIR/state/$id.meta" "a timed-out OMP probe published task metadata"
+  pass "OMP version identity probing is hard-bounded"
+}
+
 # --- launch shape ----------------------------------------------------------
 
 test_omp_launch_argv_is_contained() {
@@ -364,6 +384,46 @@ test_omp_launch_argv_is_contained() {
   assert_not_contains "$launch" "--thinking" "omp launch must not select an effort level"
   assert_not_contains "$launch" "--reasoning-effort" "omp launch must not select an effort level"
   pass "omp launch argv is contained: markers cleared, surface reduced, one extension, no delegation or network tooling"
+}
+
+test_omp_extension_executes_with_encoded_supported_paths() {
+  local rec id=omp-path-encoding out weird_home weird_root ext executable_ext record i
+  rec=$(make_omp_case omp-path-encoding claude "$id")
+  read_case_record "$rec"
+  weird_home="$CASE_DIR/"$'home-quote\'-back\\slash'
+  weird_root="$CASE_DIR/"$'root-quote\'-back\\slash-line\nbreak'
+  mv "$HOME_DIR" "$weird_home"
+  HOME_DIR=$weird_home
+  ln -s "$ROOT" "$weird_root"
+  out=$(FM_TEST_ROOT_OVERRIDE="$weird_root" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  expect_code 0 $? "OMP should render its extension under supported special-character paths: $out"
+  ext="$HOME_DIR/state/$id.omp-ext.ts"
+  executable_ext="$CASE_DIR/encoded-ext.ts"
+  cp "$ext" "$executable_ext"
+  node --experimental-strip-types --input-type=module - "$executable_ext" <<'NODE' \
+    || fail "the generated OMP extension did not parse and execute"
+import { pathToFileURL } from "node:url";
+const extensionPath = process.argv[2];
+const handlers = new Map();
+const module = await import(pathToFileURL(extensionPath).href);
+module.default({ on(name, handler) { handlers.set(name, handler); } });
+await handlers.get("agent_start")();
+handlers.get("turn_end")();
+await new Promise((resolve) => setTimeout(resolve, 300));
+NODE
+  record="$HOME_DIR/state/$id.busy-state"
+  assert_grep 'state=busy source=omp-ext event=agent-start' "$record" \
+    "the generated extension did not invoke the exact encoded busy-event path"
+  i=0
+  while [ ! -e "$HOME_DIR/state/$id.turn-ended" ] && [ "$i" -lt 50 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  assert_present "$HOME_DIR/state/$id.turn-ended" \
+    "the generated extension did not touch the exact encoded turn-end path"
+  pass "OMP extension paths are valid JavaScript literals and execute exactly"
 }
 
 test_omp_records_exact_task_metadata() {
@@ -1165,7 +1225,9 @@ test_omp_accepts_only_the_exact_pinned_version
 test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
+test_omp_version_probe_is_hard_bounded
 test_omp_launch_argv_is_contained
+test_omp_extension_executes_with_encoded_supported_paths
 test_omp_records_exact_task_metadata
 test_omp_accepts_a_scout_launch
 test_omp_launch_carries_exactly_one_qualified_model_flag

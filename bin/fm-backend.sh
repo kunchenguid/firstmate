@@ -552,7 +552,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         return 1
       }
       if [ "$allocation" = worktree-only ]; then
-        if [ "$validation_scope" != cleanup ] || [ -n "$terminal" ] || [ -z "$worktree" ]; then
+        if [ "$validation_scope" != cleanup ] || [ -z "$worktree" ]; then
           echo "REFUSED: worktree-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
           return 1
         fi
@@ -577,11 +577,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      if [ "$allocation" = worktree-only ]; then
-        window=
-      else
-        window=$terminal
-      fi
+      window=$terminal
       ;;
     cmux)
       [ "$binding" = "$id" ] || {
