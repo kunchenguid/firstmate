@@ -100,6 +100,7 @@ esac
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT:-0}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -126,6 +127,12 @@ validate_positive_bound() {  # <name> <value>
 case "$FM_SNAPSHOT_SECONDMATES" in
   ''|*[!0-9]*)
     echo "fm-fleet-snapshot: FM_SNAPSHOT_SECONDMATES must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+case "$FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT" in
+  ''|*[!0-9]*)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT must be a non-negative integer" >&2
     exit 2
     ;;
 esac
@@ -176,7 +183,8 @@ queued with hold_reason, hold_kind, hold_until, deferred_marker, and plural
 blocker fields for downstream projections. A captain hold is actionable only
 when every blocker is Done and any hold-until date has arrived.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
-bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT
+(default 0, disabled), and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -709,15 +717,19 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
       | if length > $n then .[:$n] + "…" else . end;
     def backlog_record($id):
       [ $backlog.records[]? | select(.structured and .id == $id) ][0] // {};
-    def card_fields($work):
+    def task_record($id):
+      [ $tasks[]? | select(.id == $id) ][0] // null;
+    def card_fields($work; $task):
       {
-        title:(($work.title // $work.id // null) | if . == null then null else trunc(120) end),
-        repo:(($work.repo // null) | if . == null then null else trunc(120) end),
-        kind:(($work.kind // null) | if . == null then null else trunc(40) end),
+        title:(($work.title // $work.id // $task.id // null) | if . == null then null else trunc(120) end),
+        repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
+        kind:(($work.kind // $task.kind // null) | if . == null then null else trunc(40) end),
         risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
         context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
-        pr_url:(($work.pr_url // null) | if . == null then null else trunc(500) end),
-        report_path:(($work.report_path // null) | if . == null then null else trunc(500) end),
+        pr_url:(($work.pr_url // $task.pr.url // null) | if . == null then null else trunc(500) end),
+        report_path:(($work.report_path //
+          (if $task.paths.report.present == true then $task.paths.report.path else null end) // null)
+          | if . == null then null else trunc(500) end),
         links:(($work.links // []) | map(trunc(500)))
       };
     ([ $backlog.records[]?
@@ -732,13 +744,13 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | . as $work
-         | card_fields($work) +
+         | card_fields($work; task_record($work.id)) +
            {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),hold_until:(.hold_until // null),
             deferred_marker:(.deferred_marker // false),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .hold_kind != "captain")
          | . as $work
-         | card_fields($work) +
+         | card_fields($work; task_record($work.id)) +
            {id:(.id | trunc(120)),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
@@ -775,32 +787,32 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         else empty end]) as $strict_invalidities
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
-         | $tasks[]
+         | $tasks[] as $task
+         | $task
          | select(.id == $work.id and .current_state.state == "working")
-         | card_fields($work) +
+         | card_fields($work; $task) +
            {id,state:.current_state.state,source:.current_state.source,
-            pr_url:(($work.pr_url // .pr.url // null) | if . == null then null else trunc(500) end),
-            report_path:(($work.report_path // .paths.report.path // null) | if . == null then null else trunc(500) end),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | backlog_record($t.id) as $work
-            | card_fields($work) +
+            | card_fields($work; $t) +
               {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | . as $work
-         | card_fields($work) +
+         | card_fields($work; task_record($work.id)) +
            {id:(.id | trunc(120)),title:(.title | trunc(90)),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
             reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
-           | $tasks[]
+           | $tasks[] as $task
+           | $task
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
-           | card_fields($work) +
+           | card_fields($work; $task) +
              {id,title:(($work.title // .id) | trunc(90)),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
@@ -833,7 +845,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | . as $work | card_fields($work) +
+        queued:([$queued_all[] | . as $work | card_fields($work; task_record($work.id)) +
           {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
@@ -1200,6 +1212,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local summary_deadline=0 summary_timeout remaining now
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1222,6 +1235,9 @@ secondmate_current_json() {  # <parent-tasks-json>
   rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
+  if [ "$FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT" -gt 0 ]; then
+    summary_deadline=$(($(date +%s) + FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT))
+  fi
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1273,12 +1289,24 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
     fi
     if [ -z "$reason" ]; then
-      if [ "$remote" = true ]; then
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+      summary_timeout=$FM_SNAPSHOT_SECONDMATE_TIMEOUT
+      if [ "$summary_deadline" -gt 0 ]; then
+        now=$(date +%s)
+        remaining=$((summary_deadline - now))
+        if [ "$remaining" -le 0 ]; then
+          reason="structured home snapshot skipped after total budget expired"
+        elif [ "$remaining" -lt "$summary_timeout" ]; then
+          summary_timeout=$remaining
+        fi
+      fi
+      if [ -n "$reason" ]; then
+        :
+      elif [ "$remote" = true ]; then
+        summary=$(fm_run_timed "$summary_timeout" \
           "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
         summary_rc=$?
       else
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
+        summary=$(fm_run_timed "$summary_timeout" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" \
           FM_HOME="$home" \
           FM_STATE_OVERRIDE="$home/state" \
@@ -1294,7 +1322,9 @@ secondmate_current_json() {  # <parent-tasks-json>
           "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
         summary_rc=$?
       fi
-      if [ "$summary_rc" -ne 0 ]; then
+      if [ -n "$reason" ]; then
+        :
+      elif [ "$summary_rc" -ne 0 ]; then
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')

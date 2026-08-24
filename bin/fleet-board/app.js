@@ -1,12 +1,21 @@
 "use strict";
 
-const { cardFingerprint, reconcileBoardState } = globalThis.FleetBoardState;
+const {
+  applyActionObservation,
+  beginAction,
+  cardFingerprint,
+  draftIsAvailable,
+  reconcileBoardState,
+} = globalThis.FleetBoardState;
 
 const state = {
   board: null,
   csrf: "",
   selectedKey: null,
+  dialogOpenerKey: null,
   pending: new Map(),
+  drafts: new Map(),
+  renderedBoard: "",
   loading: false,
 };
 
@@ -41,6 +50,18 @@ function node(tag, className, text) {
   return element;
 }
 
+function focusedKey(container) {
+  const active = document.activeElement;
+  return active && container.contains(active) ? active.dataset.focusKey || null : null;
+}
+
+function focusByKey(key, fallback = null) {
+  if (!key) return;
+  const target = [...document.querySelectorAll("[data-focus-key]")]
+    .find((element) => element.dataset.focusKey === key);
+  (target || fallback)?.focus();
+}
+
 function riskLabel(risk) {
   return risk.level === "unknown" ? "Unassessed" : `${risk.level} risk`;
 }
@@ -54,6 +75,19 @@ function relativeTime(value) {
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
+}
+
+function cardPresentation(card) {
+  const { observed_at: _observedAt, ...presented } = card;
+  return presented;
+}
+
+function dialogFingerprint(card) {
+  return JSON.stringify({
+    card: cardPresentation(card),
+    pending: state.pending.has(card.key),
+    draft: state.drafts.get(card.key) || null,
+  });
 }
 
 function visibleCards() {
@@ -125,13 +159,26 @@ function cardNode(card) {
     : "No linked evidence yet";
   fragment.querySelector(".card-id").textContent = card.id || "Unstructured record";
   open.setAttribute("aria-label", `Open details for ${card.title}`);
-  open.addEventListener("click", () => openCard(card.key));
+  open.dataset.focusKey = `card:${card.key}`;
+  open.addEventListener("click", () => {
+    state.dialogOpenerKey = card.key;
+    openCard(card.key);
+  });
   return fragment;
 }
 
 function renderBoard() {
   if (!state.board) return;
   const cards = visibleCards();
+  const fingerprint = JSON.stringify({
+    cards: cards.map(cardPresentation),
+    pending: [...state.pending.keys()].sort(),
+    query: elements.search.value,
+    home: elements.homeFilter.value,
+    risk: elements.riskFilter.value,
+  });
+  if (fingerprint === state.renderedBoard) return;
+  const focusKey = focusedKey(elements.board);
   const fragment = document.createDocumentFragment();
   for (const lane of state.board.lanes) {
     const laneFragment = elements.laneTemplate.content.cloneNode(true);
@@ -151,7 +198,9 @@ function renderBoard() {
     fragment.append(laneFragment);
   }
   elements.board.replaceChildren(fragment);
+  state.renderedBoard = fingerprint;
   elements.empty.hidden = cards.length > 0;
+  focusByKey(focusKey, elements.board);
 }
 
 function renderWarnings() {
@@ -194,6 +243,7 @@ function evidenceSection(card) {
       link.href = item.url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
+      link.dataset.focusKey = `dialog:evidence:${item.kind}:${item.value}`;
       row.append(link);
     } else {
       row.append(node("code", "", item.value));
@@ -229,6 +279,13 @@ function openCard(key) {
     if (elements.dialog.open) elements.dialog.close();
     return;
   }
+  const wasOpen = elements.dialog.open;
+  const renderFingerprint = dialogFingerprint(card);
+  if (wasOpen && elements.dialog.dataset.renderFingerprint === renderFingerprint) {
+    state.selectedKey = key;
+    return;
+  }
+  const focusKey = focusedKey(elements.dialog);
   state.selectedKey = key;
   elements.dialogHome.textContent = `${card.home.label} · ${card.lane.replaceAll("_", " ")}`;
   elements.dialogTitle.textContent = card.title;
@@ -266,7 +323,14 @@ function openCard(key) {
     evidenceSection(card)
   );
   renderDialogActions(card);
-  if (!elements.dialog.open) elements.dialog.showModal();
+  const draft = state.drafts.get(card.key);
+  if (draft && draftIsAvailable(draft, card)) renderComposer(card, draft, false);
+  elements.dialog.dataset.renderFingerprint = renderFingerprint;
+  if (!wasOpen) {
+    elements.dialog.showModal();
+  } else {
+    focusByKey(focusKey, elements.dialogClose);
+  }
 }
 
 function renderDialogActions(card) {
@@ -277,6 +341,7 @@ function renderDialogActions(card) {
   if (card.actions.request_details) {
     const details = node("button", "action-button secondary", "Request more details");
     details.type = "button";
+    details.dataset.focusKey = "dialog:request-details";
     details.disabled = pending;
     details.addEventListener("click", () => showComposer(card, "request_details"));
     elements.dialogActions.append(details);
@@ -284,6 +349,7 @@ function renderDialogActions(card) {
   if (card.actions.answer) {
     const answer = node("button", "action-button captain", "Answer Firstmate");
     answer.type = "button";
+    answer.dataset.focusKey = "dialog:answer";
     answer.disabled = pending;
     answer.addEventListener("click", () => showComposer(card, "answer"));
     elements.dialogActions.append(answer);
@@ -291,11 +357,29 @@ function renderDialogActions(card) {
 }
 
 function showComposer(card, action) {
+  let draft = state.drafts.get(card.key);
+  if (!draft || draft.action !== action) {
+    draft = {
+      action,
+      text: action === "request_details"
+        ? "Please summarize the current status, remaining risk, evidence, and the exact decision you need from me."
+        : "",
+      decisionKey: action === "answer" ? card.decisions[0]?.key || null : null,
+      requestId: null,
+      attempted: false,
+      inFlight: false,
+      saved: false,
+    };
+    state.drafts.set(card.key, draft);
+  }
+  renderComposer(card, draft, true);
+}
+
+function renderComposer(card, draft, focus) {
   document.querySelector(".action-composer")?.remove();
   elements.dialogActions.hidden = true;
+  const action = draft.action;
   const composer = node("form", "action-composer");
-  const requestId = crypto.randomUUID();
-  composer.dataset.cardFingerprint = cardFingerprint(card);
   const id = `action-${crypto.randomUUID()}`;
   const label = node("label", "", action === "answer" ? "Your answer" : "What should Firstmate clarify?");
   label.htmlFor = id;
@@ -304,10 +388,15 @@ function showComposer(card, action) {
   textarea.name = "text";
   textarea.maxLength = 8000;
   textarea.required = true;
+  textarea.dataset.focusKey = "dialog:composer-text";
   textarea.placeholder = action === "answer"
     ? "Give Firstmate the decision and any constraints that matter."
     : "Please summarize the current status, remaining risk, evidence, and the exact decision you need from me.";
-  if (action === "request_details") textarea.value = textarea.placeholder;
+  textarea.value = draft.text;
+  textarea.disabled = draft.attempted;
+  textarea.addEventListener("input", () => {
+    draft.text = textarea.value;
+  });
   if (action === "answer") {
     const choices = node("fieldset", "decision-choices");
     choices.append(node("legend", "", "Decision to answer"));
@@ -318,7 +407,12 @@ function showComposer(card, action) {
       input.name = "decision_key";
       input.value = decision.key;
       input.required = true;
-      input.checked = index === 0;
+      input.checked = decision.key === draft.decisionKey || (!draft.decisionKey && index === 0);
+      input.disabled = draft.attempted;
+      input.dataset.focusKey = `dialog:decision:${decision.key}`;
+      input.addEventListener("change", () => {
+        if (input.checked) draft.decisionKey = decision.key;
+      });
       choice.append(input, node("span", "", decision.summary));
       choices.append(choice);
     }
@@ -326,37 +420,76 @@ function showComposer(card, action) {
   }
   const footer = node("div", "composer-footer");
   footer.append(node("p", "composer-note", "This queues a durable instruction. The status changes only after Firstmate handles it."));
-  const submit = node("button", `action-button ${action === "answer" ? "captain" : ""}`, action === "answer" ? "Send answer" : "Send request");
+  if (!draft.attempted) {
+    const cancel = node("button", "action-button secondary", "Cancel");
+    cancel.type = "button";
+    cancel.dataset.focusKey = "dialog:composer-cancel";
+    cancel.addEventListener("click", () => {
+      state.drafts.delete(card.key);
+      openCard(card.key);
+    });
+    footer.append(cancel);
+  }
+  const submitLabel = draft.inFlight
+    ? "Sending…"
+    : draft.saved
+      ? "Retry Firstmate wake"
+      : draft.attempted
+        ? "Retry send"
+        : action === "answer"
+          ? "Send answer"
+          : "Send request";
+  const submit = node("button", `action-button ${action === "answer" ? "captain" : ""}`, submitLabel);
   submit.type = "submit";
+  submit.disabled = draft.inFlight;
+  submit.dataset.focusKey = "dialog:composer-submit";
   footer.append(submit);
   composer.append(label, textarea, footer);
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
-    submit.disabled = true;
-    submit.textContent = "Sending…";
+    draft.text = textarea.value;
+    if (action === "answer") {
+      const selectedDecision = new FormData(composer).get("decision_key");
+      if (selectedDecision) draft.decisionKey = selectedDecision;
+    }
+    const operation = beginAction(state.drafts, card.key, () => crypto.randomUUID());
+    renderComposer(card, operation, false);
     try {
-      const decisionKey = action === "answer"
-        ? new FormData(composer).get("decision_key")
-        : null;
-      const result = await sendAction(card, action, textarea.value, requestId, decisionKey);
+      const result = await sendAction(
+        card,
+        operation.action,
+        operation.text,
+        operation.requestId,
+        operation.decisionKey
+      );
+      state.board = applyActionObservation(state.board, result);
+      if (result.observation === "stale-last-good") {
+        renderWarnings();
+        setFreshness("stale", `Last good snapshot ${relativeTime(state.board.generated)}`);
+      }
       if (result.wake === "failed") {
-        submit.disabled = false;
-        submit.textContent = "Retry Firstmate wake";
+        operation.inFlight = false;
+        operation.saved = true;
+        if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);
         showToast("Instruction saved, but Firstmate was not woken. Retry is safe.", "error");
         return;
       }
-      state.pending.set(card.key, { action, fingerprint: cardFingerprint(card) });
+      state.drafts.delete(card.key);
+      const currentCard = state.board.cards.find((item) => item.key === card.key) || card;
+      state.pending.set(card.key, { action, fingerprint: cardFingerprint(currentCard) });
       showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
       renderBoard();
-      openCard(card.key);
+      if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);
     } catch (error) {
-      submit.disabled = false;
-      submit.textContent = action === "answer" ? "Send answer" : "Send request";
+      operation.inFlight = false;
+      if (state.drafts.get(card.key) === operation && state.selectedKey === card.key && elements.dialog.open) {
+        openCard(card.key);
+      }
       showToast(error.message || "The action could not be sent.", "error");
     }
   });
   elements.dialogBody.append(composer);
-  textarea.focus();
+  if (focus) textarea.focus();
 }
 
 async function sendAction(card, action, text, requestId, decisionKey) {
@@ -406,7 +539,12 @@ async function loadBoard(force = false) {
     state.board = payload;
     state.csrf = payload.actions.csrf_token;
     const previousSelectedKey = state.selectedKey;
-    const reconciled = reconcileBoardState(state.pending, state.selectedKey, payload.cards);
+    const reconciled = reconcileBoardState(
+      state.pending,
+      state.drafts,
+      state.selectedKey,
+      payload.cards
+    );
     state.selectedKey = reconciled.selectedKey;
     updateHomeFilter();
     renderSummary();
@@ -415,11 +553,7 @@ async function loadBoard(force = false) {
     if (previousSelectedKey && !reconciled.selectedCard && elements.dialog.open) {
       elements.dialog.close();
     } else if (reconciled.selectedCard && elements.dialog.open) {
-      const composer = document.querySelector(".action-composer");
-      if (!composer || composer.dataset.cardFingerprint !== cardFingerprint(reconciled.selectedCard)) {
-        composer?.remove();
-        openCard(reconciled.selectedCard.key);
-      }
+      openCard(reconciled.selectedCard.key);
     }
     if (payload.health.stale) {
       setFreshness("stale", `Last good snapshot ${relativeTime(payload.generated)}`);
@@ -441,7 +575,10 @@ elements.riskFilter.addEventListener("change", renderBoard);
 elements.refresh.addEventListener("click", () => loadBoard(true));
 elements.dialogClose.addEventListener("click", () => elements.dialog.close());
 elements.dialog.addEventListener("close", () => {
+  const openerKey = state.dialogOpenerKey;
   state.selectedKey = null;
+  state.dialogOpenerKey = null;
+  queueMicrotask(() => focusByKey(`card:${openerKey}`));
 });
 elements.dialog.addEventListener("click", (event) => {
   if (event.target === elements.dialog) elements.dialog.close();

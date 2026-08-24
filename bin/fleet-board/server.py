@@ -50,6 +50,7 @@ LANE_PRIORITY = {
 SLUG = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 MAX_ACTION_BYTES = 8_192
 MAX_REQUEST_BYTES = 12_000
+MAX_HEALTH_BYTES = 4_096
 STATIC_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -113,7 +114,9 @@ def evidence_for(record: dict[str, Any], task: dict[str, Any] | None) -> list[di
 
 
 def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
-    if record.get("state") == "done":
+    current = (task or {}).get("current_state") or {}
+    current_state = current.get("state")
+    if record.get("state") == "done" and (task is None or current_state == "done"):
         return "done"
     hints = (task or {}).get("hints") or {}
     if record.get("captain_actionable") or hints.get("pending_decision") or hints.get("blocked_event"):
@@ -126,8 +129,7 @@ def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
         if record.get("hold_reason") or record.get("unresolved_blocker_ids"):
             return "waiting"
         return "backlog"
-    current = (task or {}).get("current_state") or {}
-    state = current.get("state")
+    state = current_state
     source = current.get("source")
     if state == "working" and source == "run-step":
         return "verification"
@@ -282,7 +284,9 @@ def merge_card(cards: dict[str, dict[str, Any]], card: dict[str, Any]) -> None:
     cards[card["key"]] = merged
 
 
-def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        raise BoardError("Firstmate returned a malformed fleet snapshot")
     if snapshot.get("schema") != "fm-fleet-snapshot.v1":
         raise BoardError("Firstmate returned an unsupported fleet snapshot")
     generated = snapshot.get("generated") or ""
@@ -292,6 +296,7 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     cards: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
 
+    structured_backlog_ids: set[str] = set()
     for record in (snapshot.get("backlog") or {}).get("records") or []:
         if not record.get("structured"):
             if record.get("state") == "done":
@@ -312,6 +317,8 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             merge_card(cards, card)
             continue
         task_id = record.get("id")
+        if isinstance(task_id, str):
+            structured_backlog_ids.add(task_id)
         task = tasks.get(task_id)
         lane = main_lane(record, task)
         card = base_card(
@@ -327,6 +334,40 @@ def board_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             generated=generated,
         )
         merge_card(cards, card)
+        task_state = ((task or {}).get("current_state") or {}).get("state")
+        if record.get("state") == "done" and task and task_state != "done":
+            warnings.append(
+                f"{task_id}: live primary task state {task_state or 'unknown'} conflicts with its Done backlog row"
+            )
+
+    for task_id, task in tasks.items():
+        if task_id in structured_backlog_ids:
+            continue
+        current = task.get("current_state") or {}
+        record = {
+            "repo": task.get("project"),
+            "kind": task.get("kind"),
+            "risk": {"level": "unknown", "rationale": None, "source": "absent"},
+            "context": current.get("detail"),
+            "links": [],
+        }
+        lane = main_lane(record, task)
+        merge_card(
+            cards,
+            base_card(
+                key=f"primary:{task_id}",
+                task_id=task_id if SLUG.fullmatch(task_id) else None,
+                title=task_id,
+                lane=lane,
+                home_id="primary",
+                home_label=home_label,
+                remote=False,
+                record=record,
+                task=task,
+                generated=generated,
+            ),
+        )
+        warnings.append(f"{task_id}: live primary task has no structured backlog record")
 
     inventory = snapshot.get("main_inventory") or {}
     if inventory.get("valid") is False:
@@ -490,6 +531,10 @@ class SnapshotCache:
                 env.setdefault("FM_SNAPSHOT_SECONDMATE_DECISIONS", "200")
                 env.setdefault("FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME", "30")
                 env.setdefault("FM_SNAPSHOT_SECONDMATE_MAX_BYTES", "2097152")
+                env.setdefault(
+                    "FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT",
+                    str(max(1, int(self.timeout) - 2)),
+                )
                 completed = subprocess.run(
                     [str(self.root / "bin" / "fm-fleet-snapshot.sh"), "--json"],
                     check=False,
@@ -502,11 +547,20 @@ class SnapshotCache:
                     detail = compact(completed.stderr, 300) or f"exit {completed.returncode}"
                     raise BoardError(f"Fleet snapshot failed: {detail}")
                 snapshot = json.loads(completed.stdout)
-                self.board = board_from_snapshot(snapshot)
+                try:
+                    self.board = board_from_snapshot(snapshot)
+                except (AttributeError, KeyError, TypeError, ValueError) as error:
+                    raise BoardError("Firstmate returned a malformed fleet snapshot") from error
                 self.loaded_at = self.attempted_at = time.monotonic()
                 self.last_error = None
                 return self._response()
-            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, BoardError) as error:
+            except (
+                OSError,
+                UnicodeDecodeError,
+                subprocess.TimeoutExpired,
+                json.JSONDecodeError,
+                BoardError,
+            ) as error:
                 self.attempted_at = time.monotonic()
                 self.last_error = compact(str(error), 320) or "Fleet snapshot failed"
                 if self.board is None:
@@ -729,7 +783,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 f"Task: {task_id}\n"
                 f"Action: {action}\n"
                 f"{decision_line}"
-                f"Board observation: {observation}\n"
+                "Board observation: stale-last-good or fresh projection, revalidated at submission.\n"
                 f"{label}:\n{text}\n"
                 "Revalidate the canonical task and its authority before acting, then update canonical state."
             )
@@ -775,6 +829,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 "duplicate": bool(inbox_result.get("duplicate")),
                 "request_id": request_id,
                 "observation": observation,
+                "health": board.get("health"),
                 "wake": inbox_result.get("wake"),
             }
 
@@ -797,22 +852,32 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     port = runtime.get("port")
     if not isinstance(port, int):
         return None
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
-            value = json.loads(response.read())
-    except (
-        OSError,
-        UnicodeDecodeError,
-        urllib.error.URLError,
-        http.client.HTTPException,
-        json.JSONDecodeError,
-    ):
-        return None
-    if not isinstance(value, dict):
-        return None
-    if value.get("instance") != runtime.get("instance"):
-        return None
-    return value
+    result: list[dict[str, Any]] = []
+
+    def probe() -> None:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/healthz", timeout=timeout
+            ) as response:
+                body = response.read(MAX_HEALTH_BYTES + 1)
+            if len(body) > MAX_HEALTH_BYTES:
+                return
+            value = json.loads(body)
+        except (
+            OSError,
+            UnicodeDecodeError,
+            urllib.error.URLError,
+            http.client.HTTPException,
+            json.JSONDecodeError,
+        ):
+            return
+        if isinstance(value, dict) and value.get("instance") == runtime.get("instance"):
+            result.append(value)
+
+    worker = threading.Thread(target=probe, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return result[0] if result else None
 
 
 def process_exists(pid: Any) -> bool:
@@ -1031,8 +1096,24 @@ def main() -> int:
     if args.port < 0 or args.port > 65535:
         raise BoardError("Port must be between 0 and 65535")
     if args.serve:
-        instance = args.instance or uuid.uuid4().hex
-        return serve(root, home, args.port, instance)
+        if not args.instance:
+            instance = uuid.uuid4().hex
+            try:
+                os.execv(
+                    sys.executable,
+                    [
+                        sys.executable,
+                        str(pathlib.Path(__file__).resolve()),
+                        "--serve",
+                        "--port",
+                        str(args.port),
+                        "--instance",
+                        instance,
+                    ],
+                )
+            except OSError as error:
+                raise BoardError(f"Could not establish the foreground instance: {error}") from error
+        return serve(root, home, args.port, args.instance)
     if args.start:
         print(start(root, home, args.port)["url"])
         return 0

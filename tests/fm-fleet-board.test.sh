@@ -23,6 +23,18 @@ if [ -f "${FM_HOME:?}/snapshot.fail" ]; then
   printf 'fixture snapshot failure\n' >&2
   exit 1
 fi
+if [ -f "${FM_HOME:?}/snapshot.invalid-utf8" ]; then
+  printf '\377'
+  exit 0
+fi
+if [ -f "${FM_HOME:?}/snapshot.array" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ -f "${FM_HOME:?}/snapshot.bad-shape" ]; then
+  printf '{"schema":"fm-fleet-snapshot.v1","backlog":{"records":[null]}}\n'
+  exit 0
+fi
 cat <<'JSON'
 {
   "schema":"fm-fleet-snapshot.v1",
@@ -35,12 +47,15 @@ cat <<'JSON'
     {"order":4,"structured":true,"id":"captain-task","title":"Choose the safe route","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"high","rationale":"Irreversible data choice.","source":"task-body"},"body_excerpt":"Two valid choices remain.","hold_reason":"Choose the migration strategy","hold_kind":"captain","captain_actionable":true,"unresolved_blocker_ids":[],"links":[]},
     {"order":5,"structured":true,"id":"waiting-task","title":"Wait for the tide","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"unknown","rationale":null,"source":"absent"},"blocked_reason":"Awaiting vendor approval","captain_actionable":false,"unresolved_blocker_ids":["vendor-approval"],"links":[]},
     {"order":6,"structured":true,"id":"deferred-task","title":"Revisit the harbor plan","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"body_excerpt":"Deferred until the next planning cycle.","deferred_marker":true,"captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
-    {"order":7,"structured":true,"id":"done-task","title":"Land the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Documentation only.","source":"task-body"},"captain_actionable":false,"unresolved_blocker_ids":[],"report_path":"data/done-task/report.md","links":[]}
+    {"order":7,"structured":true,"id":"done-task","title":"Land the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Documentation only.","source":"task-body"},"captain_actionable":false,"unresolved_blocker_ids":[],"report_path":"data/done-task/report.md","links":[]},
+    {"order":8,"structured":true,"id":"reactivated-task","title":"Reopen the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"The completed task was reactivated.","source":"task-body"},"body_excerpt":"The live worker is canonical.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]}
   ]},
   "tasks":[
     {"id":"working-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Implementing the board"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"verify-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"run-step","detail":"Running behavior tests"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":"https://github.com/example/repo/pull/7"},"paths":{"report":{"present":false}}},
-    {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"},{"key":"rollout","verb":"needs-decision","summary":"Choose the rollout window"}]},"pr":{"url":null},"paths":{"report":{"present":false}}}
+    {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"},{"key":"rollout","verb":"needs-decision","summary":"Choose the rollout window"}]},"pr":{"url":null},"paths":{"report":{"present":false}}},
+    {"id":"live-only-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Repairing uncharted work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
+    {"id":"reactivated-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Reopening completed work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}}
   ],
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
@@ -76,6 +91,10 @@ body=$(cat)
 note="${FM_HOME:?}/request-$request_id.note"
 duplicate=false
 if [ -f "$note" ]; then
+  if [ "$(cat "$note")" != "$body" ]; then
+    printf '{"schema":"fm-inbox-note.v1","request_id":"%s","saved":false,"duplicate":true,"wake":"not-attempted","error":"request-id-conflict"}\n' "$request_id"
+    exit 3
+  fi
   duplicate=true
 else
   printf '%s\n' "$body" > "$note"
@@ -119,6 +138,7 @@ cleanup_server() {
     wait "$SECOND_PID" 2>/dev/null || true
   fi
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -CONT "$SERVER_PID" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
@@ -184,8 +204,8 @@ pass "one serving process owns the home for its full lifetime"
 board=$(curl -fsS "${url}api/v1/board") || fail "board endpoint failed"
 printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
-  and .counts == {backlog:2,in_progress:2,verification:1,needs_you:2,waiting:3,done:2}
-  and .summary == {open:10,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:2,in_progress:4,verification:1,needs_you:2,waiting:3,done:2}
+  and .summary == {open:12,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
          and ([.decisions[].key] | sort) == ["migration","rollout"])
@@ -193,6 +213,10 @@ printf '%s' "$board" | jq -e '
        | .lane == "verification" and (.evidence | map(.kind) | index("pull_request") != null))
   and ([.cards[] | select(.id == "mate-working")][0]
        | .lane == "in_progress" and .home.id == "design-mate")
+  and ([.cards[] | select(.id == "live-only-task")][0]
+       | .lane == "in_progress" and .context == "Repairing uncharted work")
+  and ([.cards[] | select(.id == "reactivated-task")][0]
+       | .lane == "in_progress" and .title == "Reopen the chart")
   and ([.cards[] | select(.id == "deferred-task")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "mate-held")][0]
@@ -214,8 +238,24 @@ printf '%s' "$board" | jq -e '
            == ["https://example.com/contrast","https://example.com/type-scale"])
   and (.warnings | index("Secondmate registry is incomplete: record_limit") != null)
   and (.warnings | index("design-mate: 2 holds omitted by the snapshot bound") != null)
+  and (.warnings | index("live-only-task: live primary task has no structured backlog record") != null)
+  and (.warnings | index("reactivated-task: live primary task state working conflicts with its Done backlog row") != null)
 ' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
+
+for malformed_snapshot in invalid-utf8 array bad-shape; do
+  touch "$HOME_ROOT/snapshot.$malformed_snapshot"
+  malformed=$(curl -fsS "${url}api/v1/board?refresh=1") \
+    || fail "$malformed_snapshot snapshot escaped the last-good boundary"
+  printf '%s' "$malformed" | jq -e '.health.stale == true and .counts.in_progress == 4' >/dev/null \
+    || fail "$malformed_snapshot snapshot did not retain a visibly stale board"
+  rm "$HOME_ROOT/snapshot.$malformed_snapshot"
+  board=$(curl -fsS "${url}api/v1/board?refresh=1") \
+    || fail "board did not recover after $malformed_snapshot snapshot data"
+  printf '%s' "$board" | jq -e '.health.stale == false' >/dev/null \
+    || fail "$malformed_snapshot recovery remained stale"
+done
+pass "malformed snapshot bytes and shapes stay inside the last-good boundary"
 
 csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
 payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
@@ -331,6 +371,7 @@ response=$(curl -fsS -H "X-Firstmate-CSRF: $stale_csrf" -H "Origin: ${url%/}" \
   || fail "captain action on a stale last-good card was refused"
 printf '%s' "$response" | jq -e '
   .queued == true and .duplicate == false and .observation == "stale-last-good"
+  and .health.stale == true and (.health.error | contains("fixture snapshot failure"))
 ' >/dev/null || fail "stale action did not report its observation provenance"
 assert_contains "$(cat "$HOME_ROOT/inbox.log")" "Board observation: stale-last-good" \
   "stale action omitted its provenance from the Firstmate instruction"
@@ -346,8 +387,17 @@ sleep 1.1
 fresh=$(curl -fsS "${url}api/v1/board") || fail "board did not recover after snapshot restoration"
 printf '%s' "$fresh" | jq -e '.health.stale == false' >/dev/null \
   || fail "a successful refresh did not clear stale health"
-touch "$HOME_ROOT/snapshot.fail"
 fresh_csrf=$(printf '%s' "$fresh" | jq -r '.actions.csrf_token')
+response=$(curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$stale_payload" "${url}api/v1/actions") \
+  || fail "saved stale action could not retry after snapshot recovery"
+printf '%s' "$response" | jq -e \
+  '.queued == true and .duplicate == true and .observation == "fresh"' >/dev/null \
+  || fail "snapshot freshness changed the durable action identity"
+[ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 3 ] \
+  || fail "freshness-changing retry duplicated the durable inbox note"
+pass "durable action content is stable across snapshot freshness changes"
+touch "$HOME_ROOT/snapshot.fail"
 forced_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
 curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$forced_payload" "${url}api/v1/actions" >/dev/null \
@@ -356,6 +406,19 @@ forced_stale=$(curl -fsS "${url}api/v1/board") || fail "board disappeared after 
 printf '%s' "$forced_stale" | jq -e '.health.stale == true' >/dev/null \
   || fail "an ordinary cache hit hid the latest forced refresh failure"
 pass "the latest failed refresh stays visible inside the cache window"
+
+foreground_instance=$(jq -r '.instance' "$runtime")
+kill -STOP "$SERVER_PID" 2>/dev/null || fail "could not suspend the foreground server identity fixture"
+if FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$HOME_ROOT" FM_STATE_OVERRIDE="$HOME_ROOT/state" \
+  python3 "$SERVER" --stop >"$HOME_ROOT/suspended-stop.out" 2>"$HOME_ROOT/suspended-stop.err"; then
+  kill -CONT "$SERVER_PID" 2>/dev/null || true
+  fail "an unhealthy foreground owner was discarded as an unrelated process"
+fi
+[ "$(jq -r '.instance' "$runtime")" = "$foreground_instance" ] \
+  || fail "foreground recovery replaced the suspended owner's runtime identity"
+kill -CONT "$SERVER_PID" 2>/dev/null || fail "could not resume the foreground server identity fixture"
+curl -fsS "${url}healthz" >/dev/null || fail "foreground owner did not recover after identity verification"
+pass "foreground serving publishes process-verifiable instance identity"
 
 kill "$SERVER_PID" 2>/dev/null || fail "could not stop the foreground fixture server"
 wait "$SERVER_PID" 2>/dev/null || true
@@ -386,6 +449,7 @@ import http.server
 import pathlib
 import socket
 import sys
+import time
 
 mode = sys.argv[1]
 port_file = pathlib.Path(sys.argv[2])
@@ -401,7 +465,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
         pass
 
-if mode == "malformed_http":
+if mode in {"malformed_http", "stream"}:
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
@@ -411,13 +475,24 @@ if mode == "malformed_http":
         connection, _address = server.accept()
         with connection:
             connection.recv(4096)
-            connection.sendall(b"this is not HTTP\r\n\r\n")
+            if mode == "malformed_http":
+                connection.sendall(b"this is not HTTP\r\n\r\n")
+                continue
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n"
+            )
+            try:
+                while True:
+                    connection.sendall(b"1\r\n{\r\n")
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 port_file.write_text(str(server.server_port), encoding="utf-8")
 server.serve_forever()
 PY
-for health_mode in array invalid_utf8 malformed_http; do
+for health_mode in array invalid_utf8 malformed_http stream; do
   health_port_file="$LIFE_HOME/$health_mode.port"
   python3 "$HEALTH_FIXTURE" "$health_mode" "$health_port_file" &
   HEALTH_PID=$!
@@ -434,8 +509,10 @@ for health_mode in array invalid_utf8 malformed_http; do
     port:$port,
     url:("http://127.0.0.1:" + ($port | tostring) + "/")
   }' > "$LIFE_HOME/state/fleet-board/runtime.json"
-  status_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
-    FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status 2>"$LIFE_HOME/$health_mode.status.err")
+  status_out=$(bash -c '. "$1"; shift; fm_run_timed 2 "$@"' _ \
+    "$ROOT/bin/fm-timeout-lib.sh" env FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
+    FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status \
+    2>"$LIFE_HOME/$health_mode.status.err")
   status_rc=$?
   [ "$status_rc" -eq 1 ] && [ "$status_out" = "not running" ] \
     || fail "$health_mode health response escaped the failed-identity boundary"
@@ -565,36 +642,80 @@ printf '%s' "$conflict_out" | jq -e \
 pass "the inbox durably owns action idempotency and wake recovery"
 
 if command -v node >/dev/null 2>&1; then
+  node --check "$ROOT/bin/fleet-board/app.js" >/dev/null \
+    || fail "fleet board client script did not parse"
   if ! node - "$ROOT/bin/fleet-board/board-state.js" <<'JS'
 require(process.argv[2]);
-const { cardFingerprint, reconcileBoardState } = globalThis.FleetBoardState;
+const {
+  applyActionObservation,
+  beginAction,
+  cardFingerprint,
+  reconcileBoardState,
+} = globalThis.FleetBoardState;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const card = {
   key: "primary:captain-task",
   lane: "needs_you",
   status: { label: "Waiting for you", source: "status-log" },
   decisions: [{ key: "migration", verb: "needs-decision", summary: "Choose migration", reason: null }],
+  actions: { answer: true, request_details: true },
 };
 const pending = new Map([[card.key, { fingerprint: cardFingerprint(card) }]]);
-let result = reconcileBoardState(pending, card.key, [clone(card)]);
+const drafts = new Map();
+let result = reconcileBoardState(pending, drafts, card.key, [clone(card)]);
 if (pending.size !== 1 || result.selectedKey !== card.key) process.exit(1);
 const moved = clone(card);
 moved.lane = "done";
 moved.status = { label: "Completed", source: "backlog" };
-result = reconcileBoardState(pending, card.key, [moved]);
+moved.actions = { answer: false, request_details: false };
+result = reconcileBoardState(pending, drafts, card.key, [moved]);
 if (pending.size !== 0 || result.selectedKey !== card.key) process.exit(1);
 const decisionPending = new Map([[card.key, { fingerprint: cardFingerprint(card) }]]);
 const nextDecision = clone(card);
 nextDecision.decisions = [{ key: "rollout", verb: "needs-decision", summary: "Choose rollout", reason: null }];
-reconcileBoardState(decisionPending, card.key, [nextDecision]);
+reconcileBoardState(decisionPending, new Map(), card.key, [nextDecision]);
 if (decisionPending.size !== 0) process.exit(1);
-result = reconcileBoardState(new Map(), card.key, []);
+result = reconcileBoardState(new Map(), new Map(), card.key, []);
 if (result.selectedKey !== null || result.selectedCard !== null) process.exit(1);
+
+const actionDrafts = new Map([[card.key, {
+  action: "answer",
+  text: "Keep the reversible route.",
+  decisionKey: "migration",
+  requestId: null,
+  attempted: false,
+  inFlight: false,
+}]]);
+let generated = 0;
+const first = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
+if (actionDrafts.get(card.key) !== first || !first.inFlight || generated !== 1) process.exit(1);
+first.inFlight = false;
+const retry = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
+if (retry.requestId !== "request-1" || generated !== 1) process.exit(1);
+
+const unsent = new Map([[card.key, {
+  action: "answer",
+  text: "Preserve this draft.",
+  decisionKey: "migration",
+  requestId: null,
+}]]);
+const statusChanged = clone(card);
+statusChanged.status = { label: "Still waiting for you", source: "fresh-status" };
+reconcileBoardState(new Map(), unsent, card.key, [statusChanged]);
+if (unsent.get(card.key)?.text !== "Preserve this draft.") process.exit(1);
+reconcileBoardState(new Map(), unsent, card.key, [nextDecision]);
+if (unsent.size !== 0) process.exit(1);
+
+const observed = applyActionObservation(
+  { generated: "2026-08-24T11:00:00Z", health: { stale: false, error: null } },
+  { observation: "stale-last-good", health: { stale: true, error: "fixture failure" } }
+);
+if (!observed.health.stale || observed.health.error !== "fixture failure") process.exit(1);
 JS
   then
     fail "fleet board client-state reconciliation failed"
   fi
-  pass "canonical card changes clear pending state and missing selections"
+  pass "client actions, drafts, stale health, and canonical state reconcile durably"
 fi
 
 OPEN_FAKEBIN="$TMP_ROOT/open-fakebin"

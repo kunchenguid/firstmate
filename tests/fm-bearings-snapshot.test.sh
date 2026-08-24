@@ -443,6 +443,108 @@ append_secondmate_registry() {  # <parent> <id> <home>
     "$2" "$3" >> "$1/data/secondmates.md"
 }
 
+test_secondmate_task_evidence_is_self_contained() {
+  local home mate fakebin canonical active_pr decision_pr parked_pr
+  home=$(make_home task-evidence-parent)
+  mate="$TMP_ROOT/task-evidence-home"
+  make_valid_secondmate_home evidence "$mate"
+  mate=$(cd "$mate" && pwd -P)
+  : > "$home/data/secondmates.md"
+  append_secondmate_registry "$home" evidence "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-evidence - Active evidence task (repo: firstmate) (kind: ship)
+- [ ] decision-evidence - Decision evidence task (repo: firstmate) (kind: ship)
+- [ ] parked-evidence - Parked evidence task (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/active" "$mate/projects/decision" "$mate/projects/parked" \
+    "$mate/data/decision-evidence" "$mate/data/parked-evidence"
+  active_pr=https://github.com/kunchenguid/firstmate/pull/301
+  decision_pr=https://github.com/kunchenguid/firstmate/pull/302
+  parked_pr=https://github.com/kunchenguid/firstmate/pull/303
+  fm_write_meta "$mate/state/active-evidence.meta" \
+    "window=firstmate:fm-active-evidence" "worktree=$mate/projects/active" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$active_pr"
+  record_claude_state "$mate/state" active-evidence busy
+  printf 'working: exercising active evidence\n' > "$mate/state/active-evidence.status"
+  fm_write_meta "$mate/state/decision-evidence.meta" \
+    "window=firstmate:fm-decision-evidence" "worktree=$mate/projects/decision" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$decision_pr"
+  record_claude_state "$mate/state" decision-evidence idle
+  printf 'needs-decision [key=evidence-route]: choose the evidence route\n' \
+    > "$mate/state/decision-evidence.status"
+  printf '# Decision evidence\n' > "$mate/data/decision-evidence/report.md"
+  fm_write_meta "$mate/state/parked-evidence.meta" \
+    "window=firstmate:fm-parked-evidence" "worktree=$mate/projects/parked" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=$parked_pr"
+  record_claude_state "$mate/state" parked-evidence idle
+  printf 'paused: waiting for the evidence owner\n' > "$mate/state/parked-evidence.status"
+  printf '# Parked evidence\n' > "$mate/data/parked-evidence/report.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e \
+    --arg active_pr "$active_pr" --arg decision_pr "$decision_pr" --arg parked_pr "$parked_pr" \
+    --arg decision_report "$mate/data/decision-evidence/report.md" \
+    --arg parked_report "$mate/data/parked-evidence/report.md" '
+    .secondmate_current.records[] | select(.id == "evidence")
+    | (.active_children[] | select(.id == "active-evidence")
+        | .pr_url == $active_pr and .report_path == null)
+      and (.decisions_open[] | select(.id == "decision-evidence")
+        | .pr_url == $decision_pr and .report_path == $decision_report)
+      and (.holds[] | select(.id == "parked-evidence")
+        | .pr_url == $parked_pr and .report_path == $parked_report)
+  ' >/dev/null || fail "task-backed secondmate surfaces lost or invented evidence: $canonical"
+  pass "task-backed secondmate cards project only canonical present evidence"
+}
+
+test_secondmate_reads_respect_one_total_budget() {
+  local home fakebin slow_ssh canonical snapshot_rc id
+  home=$(make_home total-secondmate-budget)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  : > "$home/data/secondmates.md"
+  for id in remote-a remote-b remote-c; do
+    printf -- '- %s - fixture domain (host: %s; root: /srv/firstmate; home: /srv/%s; scope: fixture; projects: sample; added 2026-08-24)\n' \
+      "$id" "$id" "$id" >> "$home/data/secondmates.md"
+  done
+  fakebin=$(make_fakebin "$home")
+  slow_ssh="$fakebin/slow-ssh"
+  cat > "$slow_ssh" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$slow_ssh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  canonical=$(fm_run_timed 6 env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SSH_BIN="$slow_ssh" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
+    FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT=2 FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  snapshot_rc=$?
+  [ "$snapshot_rc" -eq 0 ] || fail "total-budgeted secondmate snapshot returned $snapshot_rc"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.total == 3
+      and .secondmate_current.shown == 3
+      and .secondmate_current.truncated == 0
+      and ([.secondmate_current.records[] | select(.current.state == "unknown")] | length) == 3
+      and ([.secondmate_current.records[].current.reason
+            | select(contains("total budget expired"))] | length) >= 1
+  ' >/dev/null || fail "total-budgeted secondmate reads lost canonical home records: $canonical"
+  pass "registered secondmate reads share one bounded snapshot budget"
+}
+
 append_landed_row() {  # <secondmate-home> <id> <title> <date>
   printf -- '- [x] %s - %s (repo: firstmate) (kind: ship) (merged %s)\n' \
     "$2" "$3" "$4" >> "$1/data/backlog.md"
@@ -2015,6 +2117,8 @@ test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
+test_secondmate_task_evidence_is_self_contained
+test_secondmate_reads_respect_one_total_budget
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
