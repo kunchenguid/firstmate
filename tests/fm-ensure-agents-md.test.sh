@@ -219,6 +219,47 @@ test_existing_crlf_agents_md_with_section_stays_unchanged() {
   pass "fm-ensure-agents-md.sh: CRLF AGENTS.md with the section stays unchanged"
 }
 
+test_existing_agents_md_with_titled_suffix_section_stays_unchanged() {
+  local repo agents out
+  repo="$TMP_ROOT/titled-suffix-project"
+  mkdir -p "$repo"
+  # A budget-note suffix on the section title is legitimate home knowledge;
+  # the heading prefix must be recognized so no duplicate section is appended.
+  printf '# Existing agent memory\n\nDeploy with kubectl.\n\n## Maintaining this file (Budget 5000 tok; neue Lektion verdraengt eine alte)\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  write_fixture_claude_pointer "$repo"
+  agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on titled-suffix AGENTS.md"
+  assert_contains "$out" "unchanged:" "titled-suffix self-governance section was not recognized"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "titled-suffix AGENTS.md gained a duplicate self-governance section"
+  pass "fm-ensure-agents-md.sh: titled suffix variant of the section is recognized"
+}
+
+test_existing_crlf_agents_md_with_titled_suffix_section_stays_unchanged() {
+  local repo agents out count
+  repo="$TMP_ROOT/crlf-titled-suffix-project"
+  mkdir -p "$repo"
+  printf '%s\r\n' \
+    '# Existing agent memory' \
+    '' \
+    '## Maintaining this file (Budget 5000 tok)' \
+    '' \
+    'Keep this file for knowledge useful to almost every future agent session in this project.' > "$repo/AGENTS.md"
+  write_fixture_claude_pointer "$repo"
+  agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on CRLF titled-suffix AGENTS.md"
+  assert_contains "$out" "unchanged:" "CRLF titled-suffix self-governance section was not recognized"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "CRLF titled-suffix AGENTS.md gained a duplicate self-governance section"
+  count=$(LC_ALL=C grep -a -c '^## Maintaining this file' "$agents")
+  [ "$count" -eq 1 ] || fail "CRLF titled-suffix AGENTS.md has $count self-governance headings"
+  pass "fm-ensure-agents-md.sh: CRLF titled suffix variant of the section is recognized"
+}
+
 test_existing_crlf_agents_md_without_section_preserves_crlf() {
   local repo agents out
   repo="$TMP_ROOT/crlf-injected-project"
@@ -361,7 +402,9 @@ test_existing_agents_md_with_symlink_gains_self_governance
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
 test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
+test_existing_agents_md_with_titled_suffix_section_stays_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
+test_existing_crlf_agents_md_with_titled_suffix_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
 test_canonical_pointer_is_accepted_when_both_are_real_files
 test_distinct_real_files_are_refused
