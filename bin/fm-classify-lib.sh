@@ -58,8 +58,9 @@ FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT='needs-validation'
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# its away-mode classification. FM_CAPTAIN_RE replaces the general set when a home
+# needs a custom verb vocabulary, but cannot suppress the required implementation
+# handoff; absent, this default applies.
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
@@ -132,10 +133,13 @@ status_is_captain_relevant() {
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
+    "${FM_CLASSIFY_NEEDS_VALIDATION_VERB:-$FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT}")
+      return 0
+      ;;
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|"${FM_CLASSIFY_NEEDS_VALIDATION_VERB:-$FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT}"|needs-decision|blocked|failed) return 0 ;;
+      done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"

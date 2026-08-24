@@ -222,7 +222,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity legacy_captain_re
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -260,6 +260,12 @@ test_classifier_primitives() {
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  legacy_captain_re='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+  FM_CAPTAIN_RE="$legacy_captain_re" status_is_captain_relevant "needs-validation: implementation committed" \
+    || fail "a legacy FM_CAPTAIN_RE override suppressed the required validation handoff"
+  FM_CLASSIFY_NEEDS_VALIDATION_VERB=validate-next FM_CAPTAIN_RE="$legacy_captain_re" \
+    status_is_captain_relevant "validate-next: implementation committed" \
+    || fail "the overridden validation handoff verb was suppressed by FM_CAPTAIN_RE"
   FM_CAPTAIN_RE='merged|custom-verb:' status_is_captain_relevant "working: rebased onto merged #76" \
     && fail "FM_CAPTAIN_RE override bypassed working: suppression"
   FM_CAPTAIN_RE='checks green|custom-verb:' status_is_captain_relevant "paused: checks green pending approval" \
