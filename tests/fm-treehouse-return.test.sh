@@ -275,7 +275,8 @@ test_orca_guard_refusal_preserves_the_worktree() {
   out=$(run_orca_teardown "$case_dir" orca-refusal "$wt" 2>&1)
   rc=$?
   errexit_restore
-  [ "$rc" -ne 0 ] || fail "Orca teardown ignored an unrescuable commit: $out"
+  [ "$rc" -eq 5 ] \
+    || fail "an Orca committed-work guard refusal did not keep its reserved status (got $rc): $out"
   [ ! -e "$case_dir/orca-worktree-removed" ] \
     || fail "guard refusal still let Orca delete the worktree: $out"
   [ -d "$wt" ] || fail "guard refusal deleted the Orca worktree holding unreferenced commits: $out"
@@ -285,6 +286,96 @@ test_orca_guard_refusal_preserves_the_worktree() {
   assert_contains "$out" 'REFUSED: cannot create rescue ref' \
     "Orca guard refusal did not report why the committed work could not be rescued"
   pass "an Orca committed-work guard refusal preserves the worktree instead of deleting it"
+}
+
+test_unborn_head_passes_through_without_refusing() {
+  local case_dir wt out rc
+  case_dir="$TMP_ROOT/unborn-head"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  # `git init` with nothing committed: HEAD names no commit at all, so there is
+  # no committed work to certify and nothing a removal could lose.
+  git init -q "$wt"
+
+  errexit_off
+  out=$(fm_treehouse_return_guard unborn-head "$wt" 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -eq 0 ] || fail "an unborn HEAD refused a return that can lose nothing: $out"
+  [ -z "$out" ] || fail "an unborn HEAD reported a rescue or refusal it never needed: $out"
+  pass "an unborn HEAD passes through instead of refusing forever"
+}
+
+test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head() {
+  local case_dir wt head out rc
+  case_dir="$TMP_ROOT/unborn-vs-damaged"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$wt"
+  git -C "$wt" commit -q --allow-empty -m committed-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  # The branch HEAD points at still exists in the ref store, but its contents
+  # can no longer be read. That is a damaged worktree, not an unborn one, so it
+  # must keep failing closed even though HEAD no longer resolves.
+  git -C "$wt" pack-refs --all
+  rm -f "$wt/.git/packed-refs"
+  mkdir -p "$wt/.git/refs/heads"
+  printf 'not-a-sha\n' > "$wt/.git/refs/heads/$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo main)"
+
+  errexit_off
+  out=$(fm_treehouse_return_guard unborn-vs-damaged "$wt" 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] \
+    || fail "a damaged branch ref was treated as an unborn HEAD and passed through: $out"
+  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "a damaged branch ref did not refuse with a concrete reason"
+  [ -n "$head" ] || fail "fixture never produced a commit to protect"
+  pass "an unreadable branch ref still refuses instead of passing as unborn"
+}
+
+test_pooled_guard_refusal_keeps_hooks_and_reserved_status() {
+  local case_dir repo wt head marker out rc
+  case_dir="$TMP_ROOT/pooled-guard-refusal"
+  repo="$case_dir/repo"
+  wt="$case_dir/pool-worktree"
+  marker="$case_dir/treehouse-return-called"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
+    "$case_dir/fakebin" "$case_dir/pool"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+  fm_git_worktree "$repo" "$wt" fm/pooled-refusal
+  git -C "$wt" checkout -q --detach
+  git -C "$wt" commit -q --allow-empty -m unnamed-pool-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  mkdir -p "$wt/.claude"
+  printf '{}\n' > "$wt/.claude/settings.local.json"
+  # A file at refs/firstmate/rescue/<id> blocks the <id>/<timestamp> ref below
+  # it, so this detached commit can be neither certified nor rescued.
+  mkdir -p "$repo/.git/refs/firstmate/rescue"
+  git -C "$repo" rev-parse refs/heads/fm/pooled-refusal \
+    > "$repo/.git/refs/firstmate/rescue/pooled-refusal"
+  write_teardown_meta "$case_dir" pooled-refusal "$wt"
+
+  errexit_off
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" pooled-refusal 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -eq 5 ] \
+    || fail "a pooled committed-work guard refusal did not keep its reserved status (got $rc): $out"
+  [ ! -e "$marker" ] || fail "the guard refusal still handed the worktree to treehouse: $out"
+  [ -d "$wt" ] || fail "the guard refusal deleted the pooled worktree: $out"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] \
+    || fail "the preserved pooled worktree no longer holds its unreferenced commit"
+  assert_present "$wt/.claude/settings.local.json" \
+    "the guard refusal stripped the preserved worktree's harness hook file"
+  assert_present "$case_dir/home/state/pooled-refusal.meta" \
+    "the guard refusal removed the pooled task record"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "the pooled guard refusal did not report why the committed work could not be rescued"
+  assert_not_contains "$out" 'error: treehouse return failed' \
+    "the pooled guard refusal was mislabeled as a treehouse return failure"
+  pass "a pooled guard refusal preserves the worktree's hooks and keeps its reserved status"
 }
 
 test_broken_ref_store_still_rescues_detached_commit() {
@@ -433,6 +524,41 @@ run_child_orca_teardown() {  # <case-dir> <orca-worktree-path>
   FM_ORCA_RM_MARKER="$case_dir/child-orca-worktree-removed" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" domain --force 2>&1
+}
+
+test_child_orca_stale_record_still_guards_the_removed_worktree() {
+  local case_dir childproj live head out rescue_refs
+  case_dir=$(make_child_orca_case child-orca-stale-record)
+  childproj="$case_dir/projects/alpha"
+  live="$case_dir/live-orca-worktree"
+  # The recorded path is stale - renamed or re-provisioned - while the recorded
+  # id still resolves to a live worktree holding an uncommitted-to-any-ref
+  # commit. That worktree is what Orca actually removes.
+  git -C "$childproj" worktree add -q --detach "$live" HEAD
+  git -C "$live" commit -q --allow-empty -m unnamed-live-orca-work
+  head=$(git -C "$live" rev-parse HEAD)
+  fm_write_meta "$case_dir/subhome/state/child-orca.meta" \
+    'window=fm-child-orca' \
+    'endpoint_task_id=child-orca' \
+    'terminal=term-7' \
+    "worktree=$case_dir/renamed-away-orca-worktree" \
+    "project=$childproj" \
+    'backend=orca' \
+    'orca_worktree_id=wt-1' \
+    'kind=ship' \
+    'mode=local-only'
+
+  out=$(run_child_orca_teardown "$case_dir" "$live") \
+    || fail "forced secondmate teardown over a stale child Orca record failed: $out"
+  assert_present "$case_dir/child-orca-worktree-removed" \
+    "forced secondmate teardown never removed the worktree the recorded id resolves to"
+  rescue_refs=$(git -C "$childproj" for-each-ref --contains="$head" --format='%(refname)' \
+    refs/firstmate/rescue/child-orca)
+  [ -n "$rescue_refs" ] \
+    || fail "a stale child Orca record let Orca delete an unreferenced commit: $out"
+  assert_contains "$out" 'RESCUED: committed work' \
+    "the id-resolved child Orca removal did not report its rescue"
+  pass "a stale child Orca record still guards the worktree its id resolves to"
 }
 
 test_child_orca_id_path_mismatch_refuses_removal() {
@@ -845,6 +971,9 @@ test_orca_drops_a_task_branch_whose_work_is_already_contained() {
 }
 
 test_broken_ref_store_still_rescues_detached_commit
+test_unborn_head_passes_through_without_refusing
+test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head
+test_pooled_guard_refusal_keeps_hooks_and_reserved_status
 test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo
 test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree
 test_guard_refusal_preserves_child_worktree_commits
@@ -858,6 +987,7 @@ test_orca_drops_a_task_branch_whose_work_is_already_contained
 test_child_orca_detached_commit_is_rescued_before_removal
 test_child_orca_guard_refusal_preserves_the_worktree
 test_child_orca_id_path_mismatch_refuses_removal
+test_child_orca_stale_record_still_guards_the_removed_worktree
 test_secondmate_home_return_reports_a_guard_refusal_as_one
 test_child_worktree_without_treehouse_rescues_committed_work
 test_child_worktree_without_treehouse_refuses_unrescuable_work

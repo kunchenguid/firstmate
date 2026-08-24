@@ -2471,7 +2471,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_resolved child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2532,6 +2532,15 @@ cleanup_firstmate_home_children() {
         guard_child_worktree_removal "$child_id" "$child_wt" "child Orca worktree" || return $?
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      else
+        # A stale or empty worktree record still leaves Orca removing whatever
+        # its id resolves to, so certify that worktree instead of skipping the
+        # guard entirely. An id Orca cannot resolve names nothing to inspect,
+        # and its removal fails on the same id.
+        child_orca_resolved=$(fm_backend_worktree_path orca "$child_orca_worktree_id" 2>/dev/null || true)
+        if [ -n "$child_orca_resolved" ] && [ -d "$child_orca_resolved" ]; then
+          guard_child_worktree_removal "$child_id" "$child_orca_resolved" "child Orca worktree" || return $?
+        fi
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -2786,7 +2795,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     else
       [ -z "$ORCA_GUARD_OUT" ] || printf '%s\n' "$ORCA_GUARD_OUT" >&2
       echo "REFUSED: the committed-work guard blocked Orca worktree removal for $ID; preserving $WT and every commit it still holds." >&2
-      exit 1
+      exit "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
     fi
 
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2802,6 +2811,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # The committed-work guard runs before the hook removal below, so a refusal
+  # preserves this worktree exactly as the worker left it. The return still runs
+  # its own guard; once this one has rescued or certified HEAD, that pass is a
+  # no-op.
+  if POOL_GUARD_OUT=$(fm_treehouse_return_guard "$ID" "$WT" 2>&1); then
+    [ -z "$POOL_GUARD_OUT" ] || printf '%s\n' "$POOL_GUARD_OUT"
+  else
+    [ -z "$POOL_GUARD_OUT" ] || printf '%s\n' "$POOL_GUARD_OUT" >&2
+    echo "REFUSED: committed work in worktree $WT for $ID could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+    exit "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -2813,10 +2833,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    && POOL_RETURN_RC=0 || POOL_RETURN_RC=$?
+  if [ "$POOL_RETURN_RC" -ne 0 ]; then
+    if [ "$POOL_RETURN_RC" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+      echo "REFUSED: committed work in worktree $WT for $ID could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
+    else
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    fi
+    exit "$POOL_RETURN_RC"
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

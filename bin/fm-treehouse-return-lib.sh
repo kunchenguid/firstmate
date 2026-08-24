@@ -8,8 +8,9 @@
 # they can be pruned and do not retain the work on this machine.
 #
 # A target that is not a Git worktree has no HEAD commit to certify, so the
-# guard passes it through. A target bearing a .git entry that Git cannot read
-# is different: it may hold committed work, so the guard refuses it.
+# guard passes it through, as does a Git worktree whose HEAD is provably unborn.
+# A target bearing a .git entry that Git cannot read is different: it may hold
+# committed work, so the guard refuses it.
 #
 # When HEAD has no durable ref, the wrapper adds
 # refs/firstmate/rescue/<task-id>/<timestamp> at HEAD before it returns the
@@ -54,8 +55,30 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
   return "$rc"
 }
 
+# An unborn HEAD - `git init` or `checkout --orphan` with nothing committed yet -
+# names no commit at all, so there is no committed work for the guard to
+# certify. That is a determined state, not an undeterminable one, and it is the
+# only HEAD-resolution failure this returns true for: the branch HEAD points at
+# must be provably absent from a ref store that answered the question in full -
+# git reports a ref it holds but cannot read as a warning rather than an error,
+# so any diagnostic disqualifies the answer. A ref store that cannot answer, or
+# a HEAD that is not a symbolic refs/heads ref, stays a refusal so damaged
+# worktrees keep failing closed.
+fm_treehouse_return_head_is_unborn() {  # <worktree-path>
+  local worktree_path=$1 head_ref
+
+  fm_treehouse_return_git "$worktree_path" symbolic-ref -q HEAD || return 1
+  head_ref=$FM_TREEHOUSE_RETURN_GIT_OUT
+  case "$head_ref" in
+    refs/heads/?*) ;;
+    *) return 1 ;;
+  esac
+  fm_treehouse_return_git "$worktree_path" for-each-ref --format='%(refname)' "$head_ref" || return 1
+  [ -z "$FM_TREEHOUSE_RETURN_GIT_OUT" ] && [ -z "$FM_TREEHOUSE_RETURN_GIT_ERR" ]
+}
+
 fm_treehouse_return_guard() {
-  local task_id=$1 worktree=$2 worktree_path head refs timestamp base_ref rescue_ref update_err suffix=0
+  local task_id=$1 worktree=$2 worktree_path head head_err refs timestamp base_ref rescue_ref update_err suffix=0
 
   if ! worktree_path=$(cd -P -- "$worktree" 2>/dev/null && pwd -P) || [ -z "$worktree_path" ]; then
     printf 'REFUSED: cannot determine committed-work reachability for %s: worktree directory is unavailable.\n' \
@@ -83,8 +106,10 @@ fm_treehouse_return_guard() {
   fi
 
   if ! fm_treehouse_return_git "$worktree_path" rev-parse --verify 'HEAD^{commit}'; then
+    head_err=$FM_TREEHOUSE_RETURN_GIT_ERR
+    fm_treehouse_return_head_is_unborn "$worktree_path" && return 0
     printf 'REFUSED: cannot determine committed-work reachability for %s: git could not resolve HEAD (%s).\n' \
-      "$worktree" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
+      "$worktree" "$head_err" >&2
     return 1
   fi
   head=$FM_TREEHOUSE_RETURN_GIT_OUT
