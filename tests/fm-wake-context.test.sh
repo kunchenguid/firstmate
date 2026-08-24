@@ -367,7 +367,7 @@ test_collection_timeout_spans_slow_crew_probes() {
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
   finished=$(date +%s); [ "$status" -ne 0 ] || fail "deux sondes lentes ont produit un paquet"
   [ $((finished - started)) -lt 6 ] || fail "les sondes lentes ont dépassé la borne agrégée"
-  grep -Fx 'alpha' "$home/crew-state.calls" >/dev/null && grep -Fx 'beta' "$home/crew-state.calls" >/dev/null \
+  { grep -Fx 'alpha' "$home/crew-state.calls" >/dev/null && grep -Fx 'beta' "$home/crew-state.calls" >/dev/null; } \
     || fail "la borne agrégée n’a pas couvert deux vraies sondes lentes"
   grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback des sondes lentes manque"
   grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback des sondes lentes a perdu l’ACK"
