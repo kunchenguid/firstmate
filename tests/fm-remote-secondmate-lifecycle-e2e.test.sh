@@ -1334,6 +1334,10 @@ printf 'diverged preferences\n' \
 # its lock symlink, and an atomic staging file behind in the same directories.
 mkdir "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z"
 printf '4242\n' > "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z/pid"
+mkdir "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z/reclaim"
+printf '4242\n' > "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z/reclaim/pid"
+mkdir "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z/reclaim.dead.4242"
+printf '4242\n' > "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z/reclaim.dead.4242/pid"
 ln -s "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock.owner.aB3d9Z" \
   "$REMOTE_HOME/config/.fm-inherit-crew-harness.lock"
 printf 'partial payload\n' > "$REMOTE_HOME/data/.inherit.Qz71xW"

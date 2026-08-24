@@ -700,14 +700,24 @@ with_remote_route_locks() { # <secondmate-id> <function> <args...>
   shift 2
   case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe remote handoff id: $id" >&2; return 1 ;; esac
   ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
-  fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
+  if ! fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"; then
+    echo "error: could not lock the secondmate registry for $id" >&2
+    ACTIVE_REGISTRY_LOCK=
+    release_remote_locks
+    return 1
+  fi
   if [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" != 1 ]; then
     echo "error: pending outbox has no matching remote secondmate route: $id" >&2
     release_remote_locks
     return 1
   fi
   ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$id.lock"
-  fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
+  if ! fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"; then
+    echo "error: could not lock the pending handoff outbox for $id" >&2
+    ACTIVE_HANDOFF_LOCK=
+    release_remote_locks
+    return 1
+  fi
   if "$operation" "$@"; then rc=0; else rc=$?; fi
   release_remote_locks
   return "$rc"

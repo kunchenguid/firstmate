@@ -96,16 +96,41 @@ retired_mktemp_suffix_valid() { # <suffix>
   return 1
 }
 
-# A lock owner directory holds only the files bin/fm-wake-lib.sh's owner
-# contract writes and cleans.
-retired_lock_owner_dir_valid() { # <path>
+# A stale-recovery serialization marker bin/fm-wake-lib.sh leaves inside a lock
+# owner directory: a directory whose only entry is the reclaimer's pid file.
+retired_lock_reclaim_marker_valid() { # <path>
   local dir=$1 entry
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "${entry##*/}" = pid ] || return 1
     retired_plain_file "$entry" || return 1
+  done
+  return 0
+}
+
+# A lock owner directory holds only the files bin/fm-wake-lib.sh's owner
+# contract writes and cleans, plus the reclaim markers its stale-recovery path
+# creates there.
+retired_lock_owner_dir_valid() { # <path>
+  local dir=$1 entry suffix
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
     case "${entry##*/}" in
-      pid|fm-home|pid-identity|role|watcher-path) ;;
+      pid|fm-home|pid-identity|role|watcher-path)
+        retired_plain_file "$entry" || return 1
+        ;;
+      reclaim)
+        retired_lock_reclaim_marker_valid "$entry" || return 1
+        ;;
+      reclaim.dead.*)
+        suffix=${entry##*.}
+        case "$suffix" in
+          ''|*[!0-9]*) return 1 ;;
+        esac
+        retired_lock_reclaim_marker_valid "$entry" || return 1
+        ;;
       *) return 1 ;;
     esac
   done
