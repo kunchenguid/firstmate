@@ -1175,6 +1175,24 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
 # recognized shell process per <ps-bin>.
 # BSD ps reports comm as argv0, so a login shell arrives as "-zsh"; strip the
 # login dash exactly like the idle-shell proof's argv0 normalization.
+# fm_backend_herdr_pid_is_lone_and_childless: the operating-system process
+# table shows exactly one row for <pid> and no process whose parent is <pid>.
+# Single owner of the childless evidence both agent-absence proofs need: a
+# suspended job is still a CHILD of the shell that job control returned the
+# terminal to, so a lone foreground shell alone never proves the pane is
+# agent-free.
+fm_backend_herdr_pid_is_lone_and_childless() {  # <pid>
+  local pid=$1 ps_bin rows
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$pid" '
+    $1 == shell { found++ }
+    $2 == shell { child++ }
+    END { exit(found == 1 && child == 0 ? 0 : 1) }
+  '
+}
+
 fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   local comm
   comm=$("$1" -p "$2" -o comm= 2>/dev/null) || return 1
@@ -1248,13 +1266,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
 
   ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-    $1 == shell { found++ }
-    $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
-  ' || return 1
+  fm_backend_herdr_pid_is_lone_and_childless "$shell_pid" || return 1
   stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
   printf '%s\n' "$shell_pid"
@@ -1938,11 +1950,13 @@ fm_backend_herdr_pane_registration_state() {  # <session> <pane_id>
 # fm_backend_herdr_pane_idle_shell_pid), so a multi-process group can be a
 # passing artifact of a redrawing prompt rather than a real answer. ONLY that
 # genuinely transient shape (`ambiguous`) is resampled over a bounded settle
-# window. A failed CLI call, a malformed or shape-changed response, and a
-# clean group that simply is not the agent are permanent within any settle
-# window, so they refuse immediately rather than paying the whole window on
-# every liveness read in the fleet polling loops. The retry never converts
-# uncertainty into agent-free: only a corroborated lone-shell sample can print
+# window, together with a lone own-shell whose transient child has not yet
+# reaped. A failed CLI call, a malformed or shape-changed response, a clean
+# group that simply is not the agent, and a lone shell that is not the pane's
+# own shell are all permanent within any settle window, so they refuse
+# immediately rather than paying the whole window on every liveness read in
+# the fleet polling loops. The retry never converts uncertainty into
+# agent-free: only a corroborated, childless lone-own-shell sample can print
 # no-agent.
 fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
   local attempt=0 max_attempts=${FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS:-10} state
@@ -1972,25 +1986,33 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 # repository's shared harness process matcher (fm_harness_process_matches),
 # which recognizes the shapes that matcher's owners already document and exact
 # equality cannot see: a version-named Claude Code executable identified by its
-# install path, and a bare `node` running a bundled cursor-agent. The second
-# route is consulted ONLY for a process the shell allowlist below does not
-# claim, so it can add `live` but can never turn a lone login shell into one,
-# and it never participates in the no-agent decision at all: an unmatched
-# process stays unknown and refuses exactly as before.
+# install path, and a harness running under a bare interpreter. Muse is named
+# explicitly for the same reason the tmux classifier names it: its installed
+# binary is muse-bin-<version>, which the launcher execs, so the version IS
+# the live process name and no install path component ever carries `muse`.
+# The second route is consulted ONLY for a process the shell allowlist below
+# does not claim, so it can add `live` but can never turn a lone login shell
+# into one, and it never participates in the no-agent decision at all: an
+# unmatched process stays unknown and refuses exactly as before.
 #
 # no-agent is the only verdict that licenses action (relaunch and the
-# already-stopped exit report), so it is corroborated exactly like the sibling
-# fm_backend_herdr_pane_idle_shell_sample proof reading the same payload: the
-# lone foreground process must BE the pane's own shell (shell_pid ==
-# foreground_process_group_id == foreground_processes[0].pid), never merely
-# some shell holding the foreground while the agent sits stopped behind it.
+# already-stopped exit report), so it carries the FULL agent-absence proof the
+# sibling fm_backend_herdr_pane_idle_shell_sample already owns, reading the
+# same payload. The pid triple (shell_pid == foreground_process_group_id ==
+# foreground_processes[0].pid) rules out a foreign shell holding the
+# foreground, and the operating-system process table must additionally show
+# that shell alone and CHILDLESS. The second half is what excludes a SUSPENDED
+# agent: job control hands the terminal back to the pane's own login shell
+# while the stopped harness remains that shell's child, so the pid triple
+# alone would read a merely suspended agent as agent-free and license a second
+# harness into the pane that still owns it.
 #
 # One jq pass reads the whole payload: its first line carries the pid
 # corroboration verdict and every following line is one foreground process, so
 # a proof that may run FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS times inside the
 # settle loop, per window, per fleet poll, forks jq once per sample.
 fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
-  local session=$1 pane_id=$2 agent=$3 info rows pid_state count=0
+  local session=$1 pane_id=$2 agent=$3 info rows head pid_state shell_pid count=0
   local name argv0 argv agent_name kind lone_kind
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
     printf 'unknown'
@@ -2007,18 +2029,22 @@ fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
             and ((.argv0 // .argv[0] // null) | type == "string" and length > 0)))
       then
         $r.process_info as $p
-        | (if (($p.shell_pid | type == "number" and . > 1)
-               and ($p.foreground_process_group_id | type == "number" and . > 1)
-               and ($p.foreground_processes[0].pid | type == "number" and . > 1))
-           then (if ($p.foreground_process_group_id == $p.shell_pid
-                     and $p.foreground_processes[0].pid == $p.shell_pid)
-                 then "own-shell" else "foreign-shell" end)
-           else "no-pids" end),
+        | ((if (($p.shell_pid | type == "number" and . > 1)
+                and ($p.foreground_process_group_id | type == "number" and . > 1)
+                and ($p.foreground_processes[0].pid | type == "number" and . > 1))
+            then (if ($p.foreground_process_group_id == $p.shell_pid
+                      and $p.foreground_processes[0].pid == $p.shell_pid)
+                  then "own-shell" else "foreign-shell" end)
+            else "no-pids" end) as $st
+           | [$st, (if $st == "no-pids" then 0 else ($p.shell_pid | floor) end)] | @tsv),
           ($p.foreground_processes[]
            | [.name, (.argv0 // .argv[0]), ((.argv // []) | join(" "))] | @tsv)
       else empty end
   ' 2>/dev/null) || { printf 'unknown'; return 0; }
-  pid_state=${rows%%$'\n'*}
+  head=${rows%%$'\n'*}
+  IFS=$'\t' read -r pid_state shell_pid <<EOF
+$head
+EOF
   case "$pid_state" in own-shell|foreign-shell|no-pids) ;; *) printf 'unknown'; return 0 ;; esac
   case "$rows" in
     *$'\n'*) rows=${rows#*$'\n'} ;;
@@ -2036,17 +2062,18 @@ fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
   [ "$count" -gt 0 ] || { printf 'unknown'; return 0; }
   [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
   [ "$lone_kind" = shell ] || { printf 'unknown'; return 0; }
-  case "$pid_state" in
-    own-shell) printf 'no-agent' ;;
-    foreign-shell) printf 'ambiguous' ;;
-    *) printf 'unknown' ;;
-  esac
+  [ "$pid_state" = own-shell ] || { printf 'unknown'; return 0; }
+  case "$shell_pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  fm_backend_herdr_pid_is_lone_and_childless "$shell_pid" || { printf 'ambiguous'; return 0; }
+  printf 'no-agent'
 }
 
 # fm_backend_herdr_classify_foreground_process: agent|shell|other for one
 # foreground process, given <registered-agent-basename>. Exact registry
-# equality first, then the shell allowlist (which the shared matcher may never
-# override), then the shared harness matcher as the second route to agent.
+# equality first, then the shell allowlist (which the second route may never
+# override, and which carries the same shells the tmux classifier recognizes
+# so the two vocabularies cannot drift), then Muse's anchored version-named
+# binary, then the shared harness matcher.
 fm_backend_herdr_classify_foreground_process() {  # <name> <argv0> <argv> <agent-name>
   local name=$1 argv0=$2 argv=$3 agent_name=$4 base_name base_argv0
   base_name=${name#-}; base_name=${base_name##*/}; base_name=${base_name%.exe}
@@ -2056,8 +2083,13 @@ fm_backend_herdr_classify_foreground_process() {  # <name> <argv0> <argv> <agent
     printf 'agent'
     return 0
   fi
+  if [ "$base_name" = "$base_argv0" ]; then
+    case "$base_name" in
+      sh|bash|zsh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell'; return 0 ;;
+    esac
+  fi
   case "$base_name:$base_argv0" in
-    sh:sh|bash:bash|zsh:zsh|dash:dash|ksh:ksh|fish:fish) printf 'shell'; return 0 ;;
+    muse:*|muse-bin-*:*|*:muse|*:muse-bin-*) printf 'agent'; return 0 ;;
   esac
   if fm_harness_process_matches "$name" "${argv:-$argv0}" \
     || fm_harness_process_matches "$argv0" "${argv:-$argv0}"; then

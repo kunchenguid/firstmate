@@ -418,8 +418,19 @@ test_sweep_never_closes_a_registered_herdr_endpoint() {
   fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
   log="$w/herdr-calls.log"; : > "$log"
 
+  # The pane's own login shell is lone and childless, which is what makes the
+  # lifecycle verdict `dead` in the first place.
+  cat > "$w/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n4242 1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$w/ps"
+
   out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_HOME="$w/home" \
-    FM_HERDR_CALL_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+    FM_HERDR_PS_BIN="$w/ps" FM_HERDR_CALL_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 
   assert_not_contains "$(cat "$log")" "pane close" \
     "a dead-classified but still-registered Herdr pane must never be closed"

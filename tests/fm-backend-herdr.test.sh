@@ -587,8 +587,29 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   pass "fm_backend_herdr_create_task: a same-labeled tab with a live (even idle) registered agent still refuses exactly as before"
 }
 
+# make_foreground_ps <dir> <shell-pid> [child-pid]: a fake process table for
+# the foreground agent-absence proof's childless evidence. With no child pid
+# the shell is lone and childless (a genuinely agent-free pane); with one it
+# models a suspended job still parented by the shell job control handed the
+# terminal back to.
+make_foreground_ps() {  # <dir> <shell-pid> [child-pid] -> echoes the ps path
+  local dir=$1 pid=$2 child=${3:-} rows
+  mkdir -p "$dir"
+  rows="1 0\n$pid 1\n"
+  [ -z "$child" ] || rows="$rows$child $pid\n"
+  cat > "$dir/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "-axo pid=,ppid=") printf '$rows' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  printf '%s\n' "$dir/ps"
+}
+
 test_terminal_done_needs_foreground_evidence_and_is_never_a_husk() {
-  local dir log resp fb out
+  local dir log resp fb out psbin
 
   # A done registration whose foreground group is a lone login shell: the
   # agent really is gone, so lifecycle may relaunch, but husk close refuses.
@@ -603,7 +624,8 @@ test_terminal_done_needs_foreground_evidence_and_is_never_a_husk() {
   printf '{"result":{"agent":{"agent":"opencode","agent_status":"done"}}}\n' > "$resp/7.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv":["/bin/zsh"]}]}}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" bash -c '
     . "$0/bin/backends/herdr.sh"
     pane=$(fm_backend_herdr_pane_agent_state fmtest w1:p2)
     if fm_backend_herdr_tab_is_husk fmtest w1:p2; then husk=accepts; else husk=refuses; fi
@@ -646,7 +668,7 @@ test_terminal_done_needs_foreground_evidence_and_is_never_a_husk() {
 }
 
 test_foreground_proof_settles_transient_prompt_helpers() {
-  local dir log resp fb out samples
+  local dir log resp fb out samples psbin
 
   # An idle shell transiently hosts a prompt helper as a second foreground
   # process. That ambiguous sample must be retried, not turned into a refusal.
@@ -656,7 +678,8 @@ test_foreground_proof_settles_transient_prompt_helpers() {
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"zsh","argv0":"zsh"},{"name":"starship","argv":["/usr/local/bin/starship","prompt"]}]}}}\n' > "$resp/3.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv":["/bin/zsh"]}]}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
     FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=3 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
   [ "$out" = no-agent ] \
@@ -711,21 +734,59 @@ test_foreground_proof_settles_transient_prompt_helpers() {
 }
 
 test_agent_free_verdict_requires_the_panes_own_shell() {
-  local dir log resp fb out
+  local dir log resp fb out psbin samples
 
-  # An agent stopped with SIGTSTP leaves a shell holding the foreground that
-  # is NOT the pane's own login shell. `no-agent` is the only verdict that
-  # licenses a relaunch into the endpoint, so it must refuse this shape.
+  # A nested shell the operator started holds the foreground: its pid is not
+  # the pane's own shell. `no-agent` is the only verdict that licenses a
+  # relaunch into the endpoint, so it must refuse this shape - and refuse on
+  # the first sample, because a foreign shell is a settled answer, not a
+  # transient one.
   dir="$TMP_ROOT/foreground-foreign-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"zsh","argv0":"zsh"}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=10 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
   [ "$out" = unknown ] \
     || fail "a foreground shell that is not the pane's own shell must refuse as unknown, got '$out'"
+  samples=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$samples" = 1 ] \
+    || fail "a foreign foreground shell must not be resampled, saw $samples samples"
+
+  # The real SIGTSTP shape: job control hands the terminal back to the pane's
+  # OWN login shell, so the pid triple corroborates perfectly, while the
+  # suspended harness is still that shell's child. Reading this as agent-free
+  # would report already-stopped for an agent that resumes on `fg`, and would
+  # license a second harness into the pane that still owns it.
+  dir="$TMP_ROOT/foreground-suspended-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  for n in 3 4 5 6 7 8 9 10 11 12; do
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh"}]}}}\n' > "$resp/$n.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  psbin=$(make_foreground_ps "$dir" 4242 4243)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "a suspended agent behind the pane's own shell must refuse as unknown, got '$out'"
+
+  # ...and the lifecycle verdict a relaunch gate reads must not be `dead`,
+  # which is the only state bin/fm-spawn.sh --relaunch accepts.
+  dir="$TMP_ROOT/foreground-suspended-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  psbin=$(make_foreground_ps "$dir" 4242 4243)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state herdr fmtest:w1:p2' "$ROOT")
+  [ "$out" = unreadable ] \
+    || fail "a suspended agent must never present the 'dead' verdict a relaunch requires, got '$out'"
 
   # The same shape without the corroborating fields at all is equally refused.
   dir="$TMP_ROOT/foreground-shell-no-pids"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -743,7 +804,7 @@ test_agent_free_verdict_requires_the_panes_own_shell() {
 }
 
 test_shared_harness_matcher_is_a_second_route_to_live() {
-  local dir log resp fb out
+  local dir log resp fb out psbin
 
   # Claude Code's native installer names the per-session executable by its
   # version, so exact equality with the registered `agent` sees nothing while
@@ -775,6 +836,33 @@ test_shared_harness_matcher_is_a_second_route_to_live() {
   [ "$out" = live ] \
     || fail "a harness running under a bare interpreter must be recognized as live, got '$out'"
 
+  # Muse's installed binary is muse-bin-<version> and the launcher execs it,
+  # so the version IS the live process name; no install path component ever
+  # carries `muse`, which is why the shared path matcher cannot see it.
+  dir="$TMP_ROOT/foreground-muse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"muse","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"muse-bin-0.1.0","argv0":"/Users/x/.local/bin/muse-bin-0.1.0"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = live ] \
+    || fail "a version-named muse binary must be recognized as live, got '$out'"
+
+  # The muse arm is anchored, not globbed: `muse` is a common English
+  # fragment, so an unrelated musescore pane must never read as an agent.
+  dir="$TMP_ROOT/foreground-musescore"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"musescore","argv0":"musescore"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "an unrelated musescore process must stay unknown, got '$out'"
+
   # The second route may only ADD live. A lone login shell over a stale
   # registration stays agent-free, and an unrelated process stays unknown.
   dir="$TMP_ROOT/foreground-matcher-keeps-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -782,7 +870,8 @@ test_shared_harness_matcher_is_a_second_route_to_live() {
   printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"-zsh","argv":["-zsh"]}]}}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
     FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
   [ "$out" = no-agent ] \
@@ -799,11 +888,26 @@ test_shared_harness_matcher_is_a_second_route_to_live() {
   [ "$out" = unknown ] \
     || fail "an unrelated node process must stay unknown and refuse, got '$out'"
 
+  # The shell vocabulary matches the tmux classifier's, so a host whose pane
+  # login shell is tcsh is not silently excluded from stale-registration
+  # recovery.
+  dir="$TMP_ROOT/foreground-tcsh"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"tcsh","argv0":"-tcsh"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = no-agent ] \
+    || fail "a lone tcsh login shell must be agent-free like every other recognized shell, got '$out'"
+
   pass "fm_backend_herdr: the shared harness matcher adds a second route to live without widening agent-free"
 }
 
 test_endpoint_closeable_keeps_registration_only_safety() {
-  local dir log resp fb out
+  local dir log resp fb out psbin
 
   # A stale idle registration over the pane's own login shell: lifecycle says
   # dead (no agent process), but the pane is NOT closeable.
@@ -814,7 +918,8 @@ test_endpoint_closeable_keeps_registration_only_safety() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/4.out"
   printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" bash -c '
     . "$0/bin/fm-backend.sh"
     state=$(fm_backend_agent_state herdr fmtest:w1:p2)
     if fm_backend_endpoint_closeable herdr fmtest:w1:p2; then closeable=yes; else closeable=no; fi
@@ -842,7 +947,7 @@ test_endpoint_closeable_keeps_registration_only_safety() {
 }
 
 test_live_registration_requires_a_matching_foreground_agent() {
-  local dir log resp fb out
+  local dir log resp fb out psbin
 
   dir="$TMP_ROOT/idle-registration-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
@@ -851,7 +956,8 @@ test_live_registration_requires_a_matching_foreground_agent() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/4.out"
   printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+  psbin=$(make_foreground_ps "$dir" 4242)
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PS_BIN="$psbin" bash -c '
     . "$0/bin/backends/herdr.sh"
     lifecycle=$(fm_backend_herdr_pane_agent_state fmtest w1:p2)
     if fm_backend_herdr_tab_is_husk fmtest w1:p2; then husk=accepts; else husk=refuses; fi
