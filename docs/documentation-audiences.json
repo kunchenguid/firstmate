@@ -129,6 +129,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -185,6 +189,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".greptile/rules.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -195,6 +203,10 @@
     {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "GROK_BOT.md",
+      "audience": "public-product"
     },
     {
       "path": "README.md",
@@ -241,7 +253,7 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/decision-hold-lifecycle.md",
+      "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -250,6 +262,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
     {
@@ -277,6 +293,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },
@@ -298,6 +318,10 @@
     },
     {
       "path": "docs/supervision-protocols/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/cursor.md",
       "audience": "agent-runtime"
     },
     {
@@ -359,6 +383,10 @@
     {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/voice-relay.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/watcher-continuity.md",

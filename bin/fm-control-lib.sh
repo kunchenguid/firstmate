@@ -91,9 +91,9 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse and cursor are
-# crewmate/scout adapters only: neither has a primary supervision protocol, and
-# bin/fm-spawn.sh refuses a --secondmate launch on either. The control plane
+# Which task kinds an adapter is verified to run. muse is a crewmate/scout
+# adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
+# refuses a --secondmate launch on it. The control plane
 # asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -101,7 +101,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    cursor|muse) [ "$kind" != secondmate ] || return 1 ;;
+    muse) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }

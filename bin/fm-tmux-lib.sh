@@ -16,8 +16,8 @@
 # pending text after retries, while the separate turn-started conversion accepts
 # an unknown post-Enter composer only after this submit observed an idle baseline
 # become busy.
-# Herdr's OpenCode busy-queue limitation remains documented in
-# docs/herdr-backend.md.
+# The queued-Enter policy itself lives in fm_composer_queued_enter_verdict
+# (bin/fm-composer-lib.sh); this file supplies tmux's pane-busy primitive.
 #
 # FM_COMPOSER_IDLE_RE is interpreted by the shared classifier with its structural
 # and styling safety gates.
@@ -43,6 +43,8 @@
 
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -148,7 +150,43 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
+  # Cursor Agent CLI parks its terminal cursor OUTSIDE its composer, below the
+  # footer, with #{cursor_flag} 0 - so on a Cursor pane tmux's cursor row is not
+  # a composer locator and the cursor-anchored read can only ever answer
+  # `unknown`. Reclassify that pane the way every cursorless backend already
+  # classifies it, letting the bottom-most shape win, which is the same rule
+  # herdr, zellij, cmux, and orca use for every harness including this one.
+  # Gated on Cursor's own structural process identity, never on the verdict
+  # alone, so the strict blank-row posture that owns `unknown` for every other
+  # harness is untouched.
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
   printf '%s' "$verdict"
+}
+
+# fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
+# a genuine Cursor Agent CLI process. Cursor runs as a bundled node script, so
+# tmux's own #{pane_current_command} reports a bare `node`; identity therefore
+# comes from Cursor's name or install tree in the command path or argv[0], whose
+# single owner is bin/fm-cursor-lib.sh. The foreground scoping (pgid = tpgid)
+# matches fm_tmux_composer_identity, so a pane whose agent exited to a shell has
+# no Cursor foreground process and gets no reclassification.
+fm_tmux_pane_is_cursor() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args argv0
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    fm_cursor_process_matches "$comm" '' "$argv0" && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_pane_input_pending: 0 when the composer is not proven empty, so pending
@@ -202,7 +240,7 @@ fm_pane_is_busy() {  # <target> [harness]
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state busy_state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -234,15 +272,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     return 0
   fi
   # Retries exhausted, composer still shows proven pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
-    printf 'empty'
-  else
-    printf 'pending'
-  fi
+  # Busy conversion is owned by fm_composer_queued_enter_verdict.
+  busy_state=idle
+  fm_pane_is_busy "$target" && busy_state=busy
+  fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

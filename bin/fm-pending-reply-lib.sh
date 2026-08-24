@@ -19,6 +19,9 @@
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
+# One more durable input, owned by bin/fm-procevent-remote-reply.sh and read
+# here: state/remote-replies/<task_id>.caught-up, the remote reply mirror's
+# watermark (see the remote reply-channel freshness section below).
 # Each record is a key=value file owned by this library. Schema:
 #   schema=fm-pending-reply.v1
 #   corr_id=                privacy-safe correlation token
@@ -175,7 +178,7 @@ fm_pending_reply_get() {  # <record-path> <key>
 }
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
-  local state=$1 corr=$2 task_id=$3 rec phase
+  local state=$1 corr=$2 task_id=$3 rec phase delivered
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -183,6 +186,11 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
     awaiting_report|recovery_sending|recovery_sent) return 0 ;;
+    delivery_unknown)
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      [ -z "$delivered" ]
+      return $?
+      ;;
   esac
   return 1
 }
@@ -341,6 +349,18 @@ fm_pending_reply_prepare_delivery() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_confirm_delivery_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_confirm_delivery_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 now marker
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
   if ! fm_pending_reply_prepare_delivery "$state" "$corr"; then
@@ -369,7 +389,7 @@ fm_pending_reply_mark_delivery_unknown() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" phase delivery_unknown
 }
 
-fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
+_fm_pending_reply_reconcile_delivery_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec delivered marker entry delivery_state value epoch
   local grace now age phase
   rec=$(fm_pending_reply_path "$state" "$corr")
@@ -407,6 +427,68 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
       ;;
   esac
   return 1
+}
+
+fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+fm_pending_reply_delivery_attempt_unresolved() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec delivered marker entry
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -z "$delivered" ] || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  entry=$(cat "$marker" 2>/dev/null || true)
+  case "$entry" in attempted=*) return 0 ;; esac
+  return 1
+}
+
+# A definitive backend rejection makes the existing correlation retryable again.
+# Reconciliation may have aged the same attempted sidecar to delivery_unknown
+# while the backend call was in flight, so both undelivered phases converge here
+# under the per-correlation lock; a confirmed delivery can never be reset.
+fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_reset_known_undelivered_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec delivered phase marker entry
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  [ -z "$delivered" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in awaiting_report|delivery_unknown) ;; *) return 1 ;; esac
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  [ -e "$marker" ] || [ -L "$marker" ] || {
+    [ "$phase" = awaiting_report ]
+    return $?
+  }
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  entry=$(cat "$marker" 2>/dev/null || true)
+  case "$entry" in attempted=*) ;; *) return 1 ;; esac
+  [ "$phase" = awaiting_report ] \
+    || fm_pending_reply_set "$rec" phase awaiting_report || return 1
+  rm -f -- "$marker"
 }
 
 # Drop an undelivered expectation after a failed send so transport failure does
@@ -698,6 +780,74 @@ fm_pending_reply_mark_turn_completed() {  # <state-dir> <corr_id> [which: reques
   return 0
 }
 
+# --- remote reply-channel freshness -----------------------------------------
+#
+# A LOCAL secondmate appends its report straight into the parent's
+# state/<id>.status, so an absent correlated line there is immediate evidence
+# that no report was written. A REMOTE mate's reports reach that same file only
+# through the asynchronous mirror in bin/fm-procevent-remote-reply.sh, so the
+# same absence proves nothing until that mirror has actually been read past the
+# turn that should have produced the report. Without this distinction the guard
+# nags a REPOST REQUIRED for a reply the mate did write and the parent simply
+# had not received yet - the common case, because the mirror's poll window is
+# comparable to the recovery grace.
+#
+# The mirror therefore publishes one watermark: the epoch at which it last knew
+# it had read the remote log through its end. Only that adapter writes it (it
+# owns the channel), and only this library reads it. A channel that is behind,
+# unarmed, or broken simply never advances the watermark, so the request stays
+# durably open and un-nagged; the mirror escalates its own continuity failures.
+fm_pending_reply_remote_channel_watermark_path() {  # <state-dir> <task_id>
+  printf '%s/remote-replies/%s.caught-up' "$1" "$2"
+}
+
+# Record that the mirrored remote reply log for <task_id> was read through its
+# end at <epoch> (default now). Called only by the remote reply adapter.
+fm_pending_reply_note_remote_channel_caught_up() {  # <state-dir> <task_id> [epoch]
+  local state=$1 task_id=$2 epoch=${3-} path dir tmp
+  [ -n "$state" ] && [ -n "$task_id" ] || return 2
+  case "$epoch" in ''|*[!0-9]*) epoch=$(fm_pending_reply_now) ;; esac
+  path=$(fm_pending_reply_remote_channel_watermark_path "$state" "$task_id")
+  dir=$(dirname "$path")
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  [ ! -L "$path" ] || return 1
+  tmp="$dir/.caught-up.$task_id.$$"
+  printf 'caught_up_epoch=%s\n' "$epoch" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$path"
+}
+
+# Print the watermark epoch, or nothing when the channel never reported itself
+# caught up. Never invents a value.
+fm_pending_reply_remote_channel_epoch() {  # <state-dir> <task_id>
+  local path epoch
+  path=$(fm_pending_reply_remote_channel_watermark_path "$1" "$2")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  epoch=$(sed -n 's/^caught_up_epoch=//p' "$path" 2>/dev/null | head -1)
+  case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$epoch"
+}
+
+# 0 when <task_id> is a secondmate whose reports cross a machine boundary.
+fm_pending_reply_target_is_remote() {  # <state-dir> <task_id>
+  local meta="$1/$2.meta"
+  [ -f "$meta" ] || return 1
+  [ -n "$(fm_meta_get "$meta" remote_host)" ]
+}
+
+# 0 when "no correlated report in the parent status log" is admissible evidence
+# that the mate never reported: always for a local target, and for a remote one
+# only once the mirror has been read through its end at or after <since-epoch>.
+fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-epoch>
+  local state=$1 task_id=$2 since=$3 caught
+  fm_pending_reply_target_is_remote "$state" "$task_id" || return 0
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  caught=$(fm_pending_reply_remote_channel_epoch "$state" "$task_id")
+  [ -n "$caught" ] || return 1
+  [ "$caught" -ge "$since" ]
+}
+
 # Build the one automatic recovery message for a pending record.
 fm_pending_reply_recovery_message() {  # <record-path>
   local rec=$1 corr summary token msg
@@ -736,6 +886,8 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   age=$((now - delivered))
   [ "$age" -ge "$grace" ] || return 1
   task_id=$(fm_pending_reply_get "$rec" task_id)
+  # A remote mate's report may exist and simply not have been mirrored yet.
+  fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
@@ -976,7 +1128,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = delivery_unknown ]; then
-    fm_pending_reply_reconcile_delivery "$state" "$corr" || true
+    _fm_pending_reply_reconcile_delivery_locked "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     [ "$phase" = delivery_unknown ] || return 0
   fi
@@ -984,6 +1136,10 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     recovery_sent)
       completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
       [ -n "$completed" ] || return 1
+      # Same reply-channel evidence rule the recovery repost obeys: a missing
+      # correlated report is not a missed report until the mirror caught up.
+      fm_pending_reply_missing_report_is_evidence "$state" \
+        "$(fm_pending_reply_get "$rec" task_id)" "$completed" || return 1
       ;;
     delivery_unknown|recovery_failed|recovery_unknown) ;;
     *) return 1 ;;

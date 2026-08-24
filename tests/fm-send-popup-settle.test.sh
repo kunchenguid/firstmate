@@ -9,12 +9,16 @@
 # Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
 # settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
 #
+# The settle matrix governs the TYPED plane (harness-native invocations and
+# explicit backend targets); a task-selector message that is not an invocation
+# rides the durable inbox instead, where only the constant doorbell (fixed
+# fast settle) touches the terminal:
 #   /...            -> 1.2  (universal; `/` only starts a command, never plain text)
 #   $... to codex   -> 1.2  (scoped: codex opens a `$<skill>` popup)
-#   $... to claude  -> 0.3  (NOT codex: `$` commonly starts plain text "$5", "$HOME")
+#   $... to claude  -> inbox plane (NOT codex: `$` commonly starts plain text)
 #   $... explicit   -> 0.3  (session:window target has no meta -> harness unknown
-#                            -> non-codex safe default)
-#   plain text      -> 0.3  (fast path)
+#                            -> non-codex safe default, still typed)
+#   plain text      -> inbox plane for a selector, 0.3 typed for an explicit target
 #
 # The popup-settle is the FIRST sleep recorded: fm_tmux_submit_core types the text,
 # then `sleep "$settle"`, then the Enter-retry loop (sleep 0.4 each) and finally
@@ -109,6 +113,30 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
   pass "fm-send popup-settle: $label -> ${expected}s"
 }
 
+# rides_inbox <label> <harness> <message>: a task-selector message that is NOT
+# a harness-native invocation no longer types its payload at all - it rides
+# the durable inbox, so no popup-settle question exists for it. Assert the
+# routing (record enqueued, payload never typed) and that the doorbell's own
+# fixed fast settle (0.3) is the first sleep, so the codex-scoped `$` rule can
+# never regress into slowing plain text again.
+rides_inbox() {  # <label> <harness> <message>
+  local label=$1 harness=$2 msg=$3
+  local dir fb log home rc first
+  dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state"
+  fb=$(make_stubs "$dir"); log="$dir/sleep.log"; home="$dir"
+  fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=$harness"
+  : > "$log"
+  env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    "$SEND" fm-popupcase "$msg" 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "$label: send should succeed"
+  grep -qF -- "$msg" "$home/state/popupcase.inbox/001.msg" \
+    || fail "$label: the steer should be enqueued in the task inbox"
+  first=$(head -1 "$log")
+  [ "$first" = "0.3" ] || fail "$label: the doorbell ring should keep the fast settle, got '$first'"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
+  pass "fm-send popup-settle: $label -> inbox plane, fast doorbell"
+}
+
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
 first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
 
@@ -116,12 +144,13 @@ first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
 # task id, not only by the legacy `fm-<id>` window label.
 first_settle 1.2 'codex $skill exact task id -> long settle' codex '$no-mistakes' exact
 
-# Same `$` message to claude keeps the fast path: `$` is ordinary text there.
-first_settle 0.3 'claude $-message -> fast path' claude '$no-mistakes'
+# Same `$` message to claude is ordinary text there: it rides the inbox and
+# only the fast doorbell touches the terminal.
+rides_inbox 'claude $-message' claude '$no-mistakes'
 
-# `$`-prefixed plain text to claude (a price) must NOT popup-settle - the regression
-# the codex scoping exists to prevent.
-first_settle 0.3 'claude "$5/month" -> fast path' claude '$5/month is cheap'
+# `$`-prefixed plain text to claude (a price) is likewise ordinary text - the
+# regression the codex scoping exists to prevent can no longer slow it.
+rides_inbox 'claude "$5/month"' claude '$5/month is cheap'
 
 # An explicit session:window target has no meta, so the harness is unknown and
 # treated as non-codex: the safe default keeps the fast path even for a `$` message.
@@ -134,5 +163,5 @@ first_settle 1.2 'claude /command -> long settle (slash unchanged)' claude '/no-
 # A `/` to codex is likewise still the long settle (slash path untouched).
 first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
-# Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
-first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+# Plain text to codex rides the inbox - the codex scope is `$`-prefixed only.
+rides_inbox 'codex plain text' codex 'just a normal steer'
