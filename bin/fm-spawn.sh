@@ -1274,8 +1274,24 @@ case "$HARNESS" in
     CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
     if [ "$KIND" != secondmate ]; then
       CURSOR_AUTH_ENV=${FM_CURSOR_AUTH_ENV:-${HOME:-}/.config/crew-router/env}
+      CURSOR_AUTH_ENV=$(fm_cursor_canonical_path "$CURSOR_AUTH_ENV")
       if [ ! -f "$CURSOR_AUTH_ENV" ]; then
         echo "error: Cursor auth env file '$CURSOR_AUTH_ENV' is absent; set FM_CURSOR_AUTH_ENV to a readable env file that exports CURSOR_API_KEY, or install crew-router auth at ~/.config/crew-router/env" >&2
+        exit 1
+      fi
+      if [ ! -r "$CURSOR_AUTH_ENV" ]; then
+        echo "error: Cursor auth env file '$CURSOR_AUTH_ENV' is unreadable; set FM_CURSOR_AUTH_ENV to a readable env file that exports CURSOR_API_KEY" >&2
+        exit 1
+      fi
+      cursor_load_auth_for_spawn() {
+        unset CURSOR_API_KEY
+        # shellcheck source=/dev/null
+        . "$CURSOR_AUTH_ENV" || return 1
+        [ -n "${CURSOR_API_KEY:-}" ] || return 1
+        export CURSOR_API_KEY
+      }
+      if ! (cursor_load_auth_for_spawn); then
+        echo "error: Cursor auth env file '$CURSOR_AUTH_ENV' could not be sourced or does not provide a non-empty CURSOR_API_KEY" >&2
         exit 1
       fi
     fi
@@ -1285,9 +1301,7 @@ case "$HARNESS" in
         return
       fi
       (
-        # shellcheck source=/dev/null
-        . "$CURSOR_AUTH_ENV" || exit 1
-        export CURSOR_API_KEY
+        cursor_load_auth_for_spawn || exit 1
         fm_cursor_list_models "$CURSOR_BIN"
       )
     }
@@ -2252,13 +2266,6 @@ cursor_trust_dialog_visible() {  # <plain-pane-capture>
      || printf '%s\n' "$pane" | grep -Fq 'Trust this workspace'; }
 }
 
-cursor_ready_signal_visible() {  # <plain-pane-capture>
-  local pane=$1
-  cursor_composer_is_empty \
-    || { printf '%s\n' "$pane" | grep -Fq 'Plan, search, build anything'; } \
-    || { printf '%s\n' "$pane" | grep -Fq 'Add a follow-up'; }
-}
-
 cursor_wait_for_launch_ready() {
   local pane i=0 max=${FM_CURSOR_LAUNCH_POLLS:-60} interval=${FM_CURSOR_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
@@ -2266,7 +2273,7 @@ cursor_wait_for_launch_ready() {
     if cursor_trust_dialog_visible "$pane"; then
       spawn_send_key "$T" Enter
       sleep "$interval"
-    elif cursor_ready_signal_visible "$pane"; then
+    elif cursor_composer_is_empty; then
       return 0
     fi
     i=$((i + 1))
@@ -2815,7 +2822,7 @@ case "$HARNESS" in
     if [ "$KIND" != secondmate ] && [ "$LAUNCH" = __CURSOR_BARE__ ]; then
       sq_cursor_auth=$(shell_quote "${CURSOR_AUTH_ENV:-${HOME:-}/.config/crew-router/env}")
       sq_cursor_bin=$(shell_quote "$CURSOR_BIN")
-      CURSOR_INNER=". $sq_cursor_auth && export CURSOR_API_KEY && exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS $sq_cursor_bin -f $MODELFLAG--workspace $sq_worktree"
+      CURSOR_INNER="unset CURSOR_API_KEY; . $sq_cursor_auth || exit 1; [ -n \"\${CURSOR_API_KEY:-}\" ] || exit 1; export CURSOR_API_KEY; exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS $sq_cursor_bin -f $MODELFLAG--workspace $sq_worktree"
       LAUNCH="sh -c $(shell_quote "$CURSOR_INNER")"
     fi
     ;;

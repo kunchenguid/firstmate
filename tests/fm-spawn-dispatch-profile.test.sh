@@ -50,10 +50,10 @@ cursor_screen() {
       printf '  → Firstmate instruction waiting: list /tmp/inbox/*.msg\n\n  Composer 2.5                                          Run Everything\n'
       ;;
     delivered)
-      printf '  → Add a follow-up\n\n  Composer 2.5                                          Run Everything\n'
+      printf '\033[2m  → \033[0;7mA\033[0;2mdd a follow-up\033[0m\n\n  Composer 2.5                                          Run Everything\n'
       ;;
     ready)
-      printf '  → Plan, search, build anything\n\n  Composer 2.5                                          Run Everything\n'
+      printf '\033[2m  → \033[0;7mP\033[0;2mlan, search, build anything\033[0m\n\n  Composer 2.5                                          Run Everything\n'
       ;;
     *)
       printf 'shell\n'
@@ -62,7 +62,8 @@ cursor_screen() {
 }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{cursor_y}"*) printf '2\n'; exit 0 ;;
+  *"#{cursor_y}"*) printf '0\n'; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'cursor-agent\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -585,13 +586,14 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
-  local rec id out status launch auth_env brief_real inbox_record inbox_body
+  local rec id out status launch auth_env auth_env_real brief_real inbox_record inbox_body
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
   auth_env="$HOME_DIR/config/crew-router/env"
   mkdir -p "$(dirname -- "$auth_env")"
   printf 'CURSOR_API_KEY=crew-router-key\n' > "$auth_env"
+  auth_env_real="$(cd "$(dirname -- "$auth_env")" && pwd -P)/$(basename -- "$auth_env")"
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
 
   out=$(FM_CURSOR_AUTH_ENV="$auth_env" FM_TEST_CURSOR_REQUIRED_API_KEY=crew-router-key \
@@ -603,8 +605,10 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "sh -c" \
     "cursor launch must source auth through a bounded sh -c wrapper"
-  assert_contains "$launch" "$auth_env" \
+  assert_contains "$launch" "$auth_env_real" \
     "cursor launch must source the configured auth env file"
+  assert_contains "$launch" "unset CURSOR_API_KEY" \
+    "cursor launch must clear inherited Cursor credentials before sourcing auth"
   assert_contains "$launch" "export CURSOR_API_KEY" \
     "cursor launch must export CURSOR_API_KEY after sourcing auth"
   assert_contains "$launch" "-f --model" \
@@ -648,18 +652,76 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
 }
 
 test_cursor_refuses_spawn_without_auth_env() {
-  local rec id out status missing
+  local rec id out status missing missing_real
   id=profile-cursor-noauth-z6f
   rec=$(make_spawn_case profile-cursor-noauth cursor "$id")
   read_case_record "$rec"
   missing="$HOME_DIR/missing-crew-router.env"
+  missing_real="$(cd "$(dirname -- "$missing")" && pwd -P)/$(basename -- "$missing")"
   out=$(FM_CURSOR_AUTH_ENV="$missing" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse when the auth env file is absent"
-  assert_contains "$out" "auth env file '$missing' is absent" \
+  assert_contains "$out" "auth env file '$missing_real' is absent" \
     "cursor auth refusal did not name the missing env file"
   [ ! -s "$LAUNCH_LOG" ] || fail "cursor auth refusal must happen before launch"
   pass "cursor refuses spawn when its auth env file is absent"
+}
+
+test_cursor_refuses_auth_env_without_key_despite_ambient_key() {
+  local rec id out status auth_env
+  id=profile-cursor-empty-auth-z6g
+  rec=$(make_spawn_case profile-cursor-empty-auth cursor "$id")
+  read_case_record "$rec"
+  auth_env="$HOME_DIR/config/crew-router/env"
+  mkdir -p "$(dirname -- "$auth_env")"
+  printf 'CURSOR_ENDPOINT=https://api2.cursor.sh\n' > "$auth_env"
+
+  out=$(CURSOR_API_KEY=ambient-parent-key FM_CURSOR_AUTH_ENV="$auth_env" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "cursor spawn should refuse an auth env file without a key"
+  assert_contains "$out" "does not provide a non-empty CURSOR_API_KEY" \
+    "cursor auth refusal did not identify the missing credential"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor missing-key refusal must happen before launch"
+  pass "cursor refuses auth files that rely on ambient credentials"
+}
+
+test_cursor_refuses_malformed_auth_env() {
+  local rec id out status auth_env
+  id=profile-cursor-malformed-auth-z6h
+  rec=$(make_spawn_case profile-cursor-malformed-auth cursor "$id")
+  read_case_record "$rec"
+  auth_env="$HOME_DIR/config/crew-router/env"
+  mkdir -p "$(dirname -- "$auth_env")"
+  printf 'not valid shell syntax (\n' > "$auth_env"
+
+  out=$(FM_CURSOR_AUTH_ENV="$auth_env" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "cursor spawn should refuse a malformed auth env file"
+  assert_contains "$out" "could not be sourced" \
+    "cursor auth refusal did not identify the malformed env file"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor malformed-auth refusal must happen before launch"
+  pass "cursor refuses malformed auth files before launch"
+}
+
+test_cursor_resolves_relative_auth_env_before_launch() {
+  local rec id out status auth_env auth_env_real launch
+  id=profile-cursor-relative-auth-z6i
+  rec=$(make_spawn_case profile-cursor-relative-auth cursor "$id")
+  read_case_record "$rec"
+  auth_env="$CASE_DIR/cursor.env"
+  auth_env_real="$(cd "$(dirname -- "$auth_env")" && pwd -P)/$(basename -- "$auth_env")"
+  printf 'CURSOR_API_KEY=relative-key\n' > "$auth_env"
+
+  out=$(cd "$CASE_DIR" && FM_CURSOR_AUTH_ENV=cursor.env FM_TEST_CURSOR_REQUIRED_API_KEY=relative-key \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "cursor spawn should resolve a relative auth env path"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "$auth_env_real" \
+    "cursor launch did not preserve the canonical auth env path across workspaces"
+  pass "cursor resolves relative auth paths before provisioning"
 }
 
 test_cursor_refuses_model_absent_from_live_catalog() {
@@ -958,6 +1020,9 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_spawn_without_auth_env
+test_cursor_refuses_auth_env_without_key_despite_ambient_key
+test_cursor_refuses_malformed_auth_env
+test_cursor_resolves_relative_auth_env_before_launch
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
