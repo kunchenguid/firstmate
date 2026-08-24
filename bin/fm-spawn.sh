@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir-or-name> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir-or-name> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -134,6 +134,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A bare project name and a projects/<name> argument resolve against this
+#   home's projects dir before a relative path in the caller's cwd is considered.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1483,10 +1485,20 @@ resolved_existing_dir() {
 }
 
 resolve_project_dir_arg() {
-  local path=$1
+  local path=$1 candidate
   case "$path" in
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-    *) printf '%s\n' "$path" ;;
+    */*) printf '%s\n' "$path" ;;
+    *)
+      candidate="$PROJECTS/$path"
+      if [ -d "$candidate" ]; then
+        printf '%s\n' "$candidate"
+      elif [ -d "$path" ]; then
+        printf '%s\n' "$path"
+      else
+        printf '%s\n' "$candidate"
+      fi
+      ;;
   esac
 }
 
@@ -1652,7 +1664,11 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_RESOLVED=$(resolve_project_dir_arg "$PROJ")
+  if ! PROJ_ABS=$(CDPATH='' cd -- "$PROJ_RESOLVED" 2>/dev/null && pwd); then
+    echo "error: project directory cannot be resolved: $PROJ (tried '$PROJ_RESOLVED')" >&2
+    exit 1
+  fi
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi

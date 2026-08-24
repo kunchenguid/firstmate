@@ -186,6 +186,19 @@ run_spawn() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
+run_scout_spawn() {
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --scout --harness codex \
+      --model gpt-5.6-sol --effort medium 2>&1
+}
+
 test_spawn_isolation_abort() {
   local home proj fakebin out status
   home="$TMP_ROOT/spawn-home"
@@ -213,6 +226,40 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+}
+
+# The real reconcile-github-delivery-state scout passed the bare project name
+# `analytics`, while earlier successful analytics spawns passed projects/analytics.
+# Pin the complete corrected path: a bare name resolves through FM_HOME/projects,
+# treehouse reports a distinct linked worktree, and only that isolated root is
+# published in task metadata.
+test_spawn_bare_project_name_reaches_isolated_worktree() {
+  local home project wt caller fakebin out status meta
+  home="$TMP_ROOT/reconcile-home"
+  project="$home/projects/analytics"
+  wt="$TMP_ROOT/reconcile-analytics-wt"
+  caller="$TMP_ROOT/reconcile-caller"
+  mkdir -p "$home/projects" "$caller/analytics"
+  make_repo "$project" >/dev/null
+  git -C "$project" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/reconcile-fake")
+
+  out=$(cd "$caller" && run_scout_spawn "$home" reconcile-github-delivery-state analytics "$wt" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "bare-name scout spawn should reach an isolated worktree"
+  assert_contains "$out" "spawned reconcile-github-delivery-state harness=codex kind=scout" \
+    "bare-name scout spawn did not report success"
+  assert_contains "$out" "worktree=$wt" \
+    "bare-name scout spawn did not report the isolated treehouse worktree"
+  meta="$home/state/reconcile-github-delivery-state.meta"
+  assert_grep "project=$project" "$meta" \
+    "bare project name did not resolve against the firstmate home's projects dir"
+  assert_grep "worktree=$wt" "$meta" \
+    "spawn metadata did not publish the isolated worktree"
+  [ "$(git -C "$wt" rev-parse --show-toplevel)" = "$wt" ] \
+    || fail "resolved target is not the linked-worktree root"
+  [ "$wt" != "$project" ] || fail "resolved worktree equals the primary project checkout"
+  pass "fm-spawn: a bare project name reaches a genuine isolated worktree"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -307,4 +354,5 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_bare_project_name_reaches_isolated_worktree
 test_spawn_tmux_window_construction
