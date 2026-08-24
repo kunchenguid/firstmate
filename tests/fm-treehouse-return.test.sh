@@ -13,6 +13,9 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-treehouse-return)
 TREEHOUSE=$(command -v treehouse 2>/dev/null || true)
 
+# shellcheck source=bin/fm-treehouse-return-lib.sh
+. "$ROOT/bin/fm-treehouse-return-lib.sh"
+
 fake_treehouse_bin() {  # <fakebin-dir>
   cat > "$1/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -202,8 +205,82 @@ test_worktree_inside_another_repo_refuses_instead_of_borrowing_it() {
   pass "an unreadable worktree inside another repository refuses instead of borrowing its HEAD"
 }
 
+test_unrescuable_commit_reports_the_concrete_git_reason() {
+  local case_dir repo wt out rc
+  case_dir="$TMP_ROOT/rescue-ref-blocked"
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$repo"
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q --detach "$wt" HEAD
+  git -C "$wt" commit -q --allow-empty -m detached-work
+  # A file at refs/firstmate/rescue/<id> blocks the <id>/<timestamp> ref below it,
+  # so update-ref fails for a reason only its stderr carries. It points at the
+  # baseline so it never makes the detached HEAD durable by itself.
+  mkdir -p "$repo/.git/refs/firstmate/rescue"
+  git -C "$repo" rev-parse HEAD > "$repo/.git/refs/firstmate/rescue/blocked-return"
+
+  set +e
+  out=$(fm_treehouse_return_guard blocked-return "$wt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "guard accepted a worktree whose rescue ref could not be created"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "blocked rescue ref did not refuse"
+  assert_contains "$out" "exists; cannot create" \
+    "blocked rescue ref discarded the concrete git reason"
+  pass "an unrescuable commit refuses with the concrete git reason"
+}
+
+test_durable_branch_returns_even_with_an_unusable_task_id() {
+  local case_dir repo wt out rc rescue_refs
+  case_dir="$TMP_ROOT/unusable-task-id"
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$repo"
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q "$wt" -b fm/durable-branch HEAD
+  git -C "$wt" commit -q --allow-empty -m branch-work
+
+  set +e
+  out=$(fm_treehouse_return_guard '' "$wt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "durable branch work was blocked by an unusable task id: $out"
+  assert_not_contains "$out" 'REFUSED' "durable branch return refused over the task id"
+  rescue_refs=$(git -C "$repo" for-each-ref --format='%(refname)' refs/firstmate/rescue)
+  [ -z "$rescue_refs" ] || fail "durable branch return created rescue refs: $rescue_refs"
+  pass "durable branch work returns even when the task id cannot name a rescue ref"
+}
+
+test_unusable_task_id_refuses_unrescuable_committed_work() {
+  local case_dir repo wt out rc
+  case_dir="$TMP_ROOT/unusable-task-id-detached"
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$repo"
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q --detach "$wt" HEAD
+  git -C "$wt" commit -q --allow-empty -m detached-work
+
+  set +e
+  out=$(fm_treehouse_return_guard '' "$wt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unnamed committed work returned under an unusable task id"
+  assert_contains "$out" 'REFUSED: cannot rescue committed work' \
+    "unusable task id did not refuse unnamed committed work"
+  pass "an unusable task id still refuses to return unnamed committed work"
+}
+
 test_broken_ref_store_still_rescues_detached_commit
 test_worktree_inside_another_repo_refuses_instead_of_borrowing_it
+test_unrescuable_commit_reports_the_concrete_git_reason
+test_durable_branch_returns_even_with_an_unusable_task_id
+test_unusable_task_id_refuses_unrescuable_committed_work
 
 if [ -z "$TREEHOUSE" ]; then
   printf '%s\n' 'skip: treehouse not found'

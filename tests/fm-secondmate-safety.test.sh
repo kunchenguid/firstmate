@@ -355,6 +355,43 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   pass "home seed rollback warns when treehouse-acquired return fails"
 }
 
+test_home_seed_returns_acquired_home_after_late_validation_failure() {
+  local home acquired acquired_abs sink fakebin log err lease
+  home="$TMP_ROOT/dash-late-fail-home"
+  acquired="$TMP_ROOT/dash-late-fail-acquired-home"
+  sink="$TMP_ROOT/dash-late-fail-sink"
+  err="$TMP_ROOT/dash-late-fail.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-late-fail-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  # A leaf-file refusal is reached through `|| return 1` after the home is
+  # already leased, so the rollback runs from the EXIT trap after the seeding
+  # frame has been popped.
+  printf 'outside\n' > "$sink"
+  mkdir -p "$acquired/data"
+  ln -s "$sink" "$acquired/data/projects.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-late-fail-fake")
+  log="$TMP_ROOT/dash-late-fail-fake/tmux.log"
+  lease="$TMP_ROOT/dash-late-fail-fake/lease"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_SECONDMATE_CHARTER='dash late scope' FM_SECONDMATE_SCOPE='dash late scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an acquired home with a symlinked leaf file"
+  fi
+  grep -F 'secondmate leaf file must not be a symlink:' "$err" >/dev/null \
+    || fail "seed did not explain the late leaf-file refusal"
+  grep -F 'unbound variable' "$err" >/dev/null \
+    && fail "seed rollback aborted on an out-of-scope variable: $(cat "$err")"
+  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+    || fail "late seed failure never returned the leased home: $(cat "$err")"
+  pass "home seed rollback returns the leased home after a late validation failure"
+}
+
 test_home_seed_does_not_return_unsafe_acquired_home() {
   local home descendant fakebin log err
   home="$TMP_ROOT/dash-active-home"
@@ -2965,6 +3002,7 @@ test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
+test_home_seed_returns_acquired_home_after_late_validation_failure
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter

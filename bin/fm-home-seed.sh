@@ -519,6 +519,7 @@ seed_exit_cleanup() {
   seed_registry_lock_release
 }
 SEED_HOME=
+SEED_TASK_ID=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
@@ -639,7 +640,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$id" "$SEED_HOME"
+      seed_return_treehouse_home "${SEED_TASK_ID:-}" "$SEED_HOME"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -838,6 +839,7 @@ seed_home() {
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
+  SEED_TASK_ID=$id
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
   SEED_HOME_CREATED=0

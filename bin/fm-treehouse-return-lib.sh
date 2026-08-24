@@ -44,13 +44,8 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
 }
 
 fm_treehouse_return_guard() {
-  local task_id=$1 worktree=$2 worktree_path head refs timestamp base_ref rescue_ref suffix=0
+  local task_id=$1 worktree=$2 worktree_path head refs timestamp base_ref rescue_ref update_err suffix=0
 
-  if ! fm_treehouse_return_task_id_safe "$task_id"; then
-    printf 'REFUSED: cannot return %s because task id %s is unsafe for a rescue ref.\n' \
-      "$worktree" "${task_id:-<empty>}" >&2
-    return 1
-  fi
   if ! worktree_path=$(cd -P -- "$worktree" 2>/dev/null && pwd -P) || [ -z "$worktree_path" ]; then
     printf 'REFUSED: cannot determine committed-work reachability for %s: worktree directory is unavailable.\n' \
       "$worktree" >&2
@@ -73,6 +68,12 @@ fm_treehouse_return_guard() {
   refs=$FM_TREEHOUSE_RETURN_GIT_OUT
   [ -z "$refs" ] || return 0
 
+  if ! fm_treehouse_return_task_id_safe "$task_id"; then
+    printf 'REFUSED: cannot rescue committed work at %s for %s because task id %s is unsafe for a rescue ref.\n' \
+      "$head" "$worktree" "${task_id:-<empty>}" >&2
+    return 1
+  fi
+
   if ! timestamp=$(date -u +%Y%m%dT%H%M%SZ 2>&1); then
     printf 'REFUSED: cannot create a rescue ref for %s at %s: timestamp generation failed (%s).\n' \
       "$worktree" "$head" "$timestamp" >&2
@@ -87,6 +88,7 @@ fm_treehouse_return_guard() {
         "$head" "$rescue_ref" "$worktree"
       return 0
     fi
+    update_err=$FM_TREEHOUSE_RETURN_GIT_ERR
 
     if fm_treehouse_return_git "$worktree_path" show-ref --verify --quiet "$rescue_ref"; then
       suffix=$((suffix + 1))
@@ -100,7 +102,7 @@ fm_treehouse_return_guard() {
     fi
 
     printf 'REFUSED: cannot create rescue ref %s for %s at %s: %s.\n' \
-      "$rescue_ref" "$worktree" "$head" "$FM_TREEHOUSE_RETURN_GIT_ERR" >&2
+      "$rescue_ref" "$worktree" "$head" "$update_err" >&2
     return 1
   done
 }
