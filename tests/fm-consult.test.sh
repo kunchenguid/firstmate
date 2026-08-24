@@ -788,6 +788,73 @@ test_scaffold_refuses_an_unwritable_data_root() {
   pass "fm-consult: scaffold refuses an unwritable data root without leaking a shell error"
 }
 
+test_dangling_data_root_symlink_is_refused_by_every_command() {
+  local home target out rc cmd
+  home=$(new_home dangling-root)
+  target="$TMP_ROOT/dangling-root-volume"
+  mkdir -p "$target"
+  rmdir "$home/data"
+  ln -s "$target" "$home/data"
+  run_consult "$home" scaffold alpha >/dev/null
+  printf '# Answer\nEvidence.\n' > "$target/alpha/consult-report.md"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "a healthy symlinked data root must keep working"
+  has_exact_line "$out" "alpha: report received" || fail "the healthy symlinked root did not report"
+
+  mv "$target" "$TMP_ROOT/dangling-root-volume-unmounted"
+
+  for cmd in status receive scaffold; do
+    case "$cmd" in
+      status) out=$(run_consult "$home" status 2>&1); rc=$? ;;
+      receive) out=$(run_consult "$home" receive alpha 2>&1); rc=$? ;;
+      scaffold) out=$(run_consult "$home" scaffold beta 2>&1); rc=$? ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$cmd exited zero against a data root whose target is missing"
+    assert_not_contains "$out" "no consultations" \
+      "$cmd claimed there are no consultations while the data root was broken"
+    assert_contains "$out" "symlink whose target is missing" \
+      "$cmd did not name the broken data root as the cause"
+    assert_not_contains "$out" "could not create consultation directory" \
+      "$cmd reported a generic creation failure instead of the broken root"
+  done
+
+  out=$(run_consult "$home" status alpha 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status <id> exited zero against a data root whose target is missing"
+  assert_contains "$out" "symlink whose target is missing" \
+    "status <id> did not name the broken data root as the cause"
+  assert_not_contains "$out" "no such consultation" \
+    "status <id> blamed the consultation instead of the broken data root"
+
+  mv "$TMP_ROOT/dangling-root-volume-unmounted" "$target"
+  pass "fm-consult: a data root whose symlink target is missing is refused by every command"
+}
+
+test_scaffold_reports_the_underlying_creation_failure() {
+  local home out rc lines
+  home="$TMP_ROOT/uncreatable-home"
+  mkdir -p "$home"
+  home=$(cd "$home" && pwd -P)
+  chmod 0500 "$home"
+  if [ -w "$home" ]; then
+    chmod 0700 "$home"
+    pass "fm-consult: creation diagnostics (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" scaffold alpha 2>&1); rc=$?
+  chmod 0700 "$home"
+  expect_code 2 "$rc" "scaffold must refuse an uncreatable data directory through fm-consult"
+  assert_contains "$out" "fm-consult: " "scaffold leaked a bare tool error instead of an fm-consult refusal"
+  assert_contains "$out" "could not create consultation directory" "the creation refusal was not explicit"
+  case "$out" in
+    *"could not create consultation directory: "*"("*")") : ;;
+    *) fail "scaffold discarded the underlying cause of the creation failure"$'\n'"--- output ---"$'\n'"$out" ;;
+  esac
+  lines=$(stdout_line_count "$out")
+  expect_code 1 "$lines" "the creation refusal must stay on one line"
+  pass "fm-consult: scaffold reports the underlying cause of a creation failure on one line"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -818,5 +885,7 @@ test_scaffold_refuses_an_unwritable_consultation_directory
 test_scaffold_bootstraps_a_missing_data_directory
 test_status_one_and_listing_agree_on_what_is_a_consultation
 test_scaffold_refuses_an_unwritable_data_root
+test_dangling_data_root_symlink_is_refused_by_every_command
+test_scaffold_reports_the_underlying_creation_failure
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command

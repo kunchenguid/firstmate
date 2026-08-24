@@ -140,11 +140,26 @@ display_name() {
 # so a symlink is refused unfollowed. Either way only fixed paths beneath the
 # directory are created or statted, so search alone is what every command needs;
 # read is demanded separately by the one caller that enumerates.
+# Render a tool's stderr as one parenthesized clause: first line only, escaped
+# the same way an untrusted name is, so a failing command cannot forge extra
+# output lines through a refusal message.
+parenthesized_cause() {
+  local text=${1:-}
+  [ -n "$text" ] || return 0
+  text=${text%%$'\n'*}
+  [ -n "$text" ] || return 0
+  printf ' (%s)' "$(display_name "$text")"
+}
+
 consult_directory_ok() {
   local dir=$1 role=$2
   CONSULT_REFUSAL=
   if [ "$role" = consultation ] && [ -L "$dir" ]; then
     CONSULT_REFUSAL="consultation directory must not be a symlink: $(display_name "$dir")"
+    return 1
+  fi
+  if [ -L "$dir" ] && [ ! -e "$dir" ]; then
+    CONSULT_REFUSAL="$role directory is a symlink whose target is missing; restore or repoint it: $(display_name "$dir")"
     return 1
   fi
   if [ -e "$dir" ] && [ ! -d "$dir" ]; then
@@ -196,7 +211,7 @@ validate_consult_file() {
 }
 
 scaffold_consult() {
-  local id=$1 dir brief
+  local id=$1 dir brief create_error
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
@@ -208,8 +223,8 @@ scaffold_consult() {
     || die "consultation directory is not writable; fix its permissions: $(display_name "$dir")"
   [ -d "$dir" ] || [ ! -d "$DATA" ] || [ -w "$DATA" ] \
     || die "data directory is not writable; fix its permissions: $(display_name "$DATA")"
-  (umask 077; mkdir -p -- "$dir" 2>/dev/null) \
-    || die "could not create consultation directory: $dir"
+  create_error=$( (umask 077; mkdir -p -- "$dir") 2>&1 ) \
+    || die "could not create consultation directory: $(display_name "$dir")$(parenthesized_cause "$create_error")"
 
   cat > "$brief" <<'EOF'
 # External advisor consultation
@@ -330,8 +345,6 @@ status_one() {
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
-  [ -e "$dir" ] || [ -L "$dir" ] \
-    || die "no such consultation: $(display_name "$dir"); scaffold it first"
   validate_consult_directory "$dir"
   consult_entry_present "$dir" \
     || die "no such consultation: $(display_name "$dir"); scaffold it first"
