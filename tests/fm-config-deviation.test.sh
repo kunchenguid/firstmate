@@ -217,6 +217,30 @@ test_unsafe_held_values_are_refused() {
   pass "unsafe held values are rejected before normal convergence"
 }
 
+test_equal_hardlinked_held_value_is_refused() {
+  local rec primary second report linked out
+  rec=$(new_home_pair equal-hardlinked-value)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'herdr\n' > "$primary/config/backend"
+  linked="$TMP_ROOT/equal-hardlinked-value-target"
+  printf 'herdr\n' > "$linked"
+  ln "$linked" "$second/config/backend"
+  printf '%s\n' "verified backend pin" > "$second/config/backend.deviation"
+  report="$TMP_ROOT/equal-hardlinked-value.report"
+
+  out=$(converge "$primary" "$second" "$report") \
+    || fail "equal hardlinked held value did not follow normal convergence"
+
+  assert_contains "$out" "held value is hardlinked" \
+    "an equal hardlinked held value must be reported as rejected"
+  [ "$(fm_inherit_file_link_count "$second/config/backend")" = 1 ] \
+    || fail "normal convergence preserved the equal hardlinked held value"
+  assert_grep $'backend\tpushed\t' "$report" \
+    "an equal hardlinked held value must converge instead of remaining unchanged"
+  pass "an equal hardlinked held value is rejected and replaced"
+}
+
 test_deviation_holds_against_primary_absence() {
   local rec primary second report out
   rec=$(new_home_pair absence)
@@ -497,6 +521,7 @@ test_primary_revokes_by_removing_the_record
 test_record_without_evidence_is_refused
 test_record_for_a_non_deviable_item_is_refused
 test_unsafe_held_values_are_refused
+test_equal_hardlinked_held_value_is_refused
 test_deviation_holds_against_primary_absence
 test_remote_receiver_honors_the_record
 test_remote_receiver_agreement_stays_quiet

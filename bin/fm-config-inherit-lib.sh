@@ -608,7 +608,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest deviation_record deviation_value_rejected reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -622,6 +622,12 @@ propagate_inheritable_config() {
     fi
     src="$src_config/$item"
     dest="$dest_config/$item"
+    deviation_record="$dest$FM_CONFIG_DEVIATION_SUFFIX"
+    deviation_value_rejected=0
+    if { [ -e "$deviation_record" ] || [ -L "$deviation_record" ]; } \
+      && fm_config_deviation_value_rejection "$dest" >/dev/null; then
+      deviation_value_rejected=1
+    fi
     # This one scalar config is consumed as a local safety boundary, so reject
     # every unsafe or malformed source/destination artifact before the generic
     # byte-copy behavior below can treat it as ordinary inherited material.
@@ -670,7 +676,8 @@ propagate_inheritable_config() {
         record_inheritable_config_result "$item" skipped "$reason"
         continue
       fi
-      if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+      if [ "$deviation_value_rejected" -eq 1 ] \
+        || [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
         if fm_config_deviation_holds "$dest_config" "$item" "$src" "$dest"; then
           continue
         fi
