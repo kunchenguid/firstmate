@@ -1011,13 +1011,23 @@ delivery_selftest() {  # <state>
   local state=$1 record="$1/.subsuper-delivery-selftest" target backend
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  local deadline attempt=0
+  local deadline attempt=0 window sleep_secs
+  window=${FM_DELIVERY_SELFTEST_SECS:-45}
+  case "$window" in
+    ''|*[!0-9]*) window=45 ;;
+    *) [ "$window" -gt 0 ] 2>/dev/null || window=45 ;;
+  esac
+  sleep_secs=${FM_DELIVERY_SELFTEST_SLEEP:-3}
+  case "$sleep_secs" in
+    ''|*[!0-9]*) sleep_secs=3 ;;
+    *) [ "$sleep_secs" -gt 0 ] 2>/dev/null || sleep_secs=3 ;;
+  esac
   rm -f "$record" 2>/dev/null || true
   afk_active "$state" || { printf 'skipped afk-inactive\n' > "$record"; return 0; }
   # Bounded retry, not one shot: at entry the captain's own composer can still
   # hold an unsent line, which the composer guard correctly defers on. Retrying
   # for a short window distinguishes "not this instant" from "cannot deliver".
-  deadline=$(( $(date +%s) + ${FM_DELIVERY_SELFTEST_SECS:-45} ))
+  deadline=$(( $(date +%s) + window ))
   while :; do
     attempt=$((attempt + 1))
     if FM_INJECT_IGNORE_BUSY=1 inject_msg \
@@ -1027,7 +1037,7 @@ delivery_selftest() {  # <state>
       return 0
     fi
     [ "$(date +%s)" -lt "$deadline" ] || break
-    sleep "${FM_DELIVERY_SELFTEST_SLEEP:-3}"
+    sleep "$sleep_secs"
   done
   printf 'failed %s could not confirm an injection into %s (backend=%s)\n' \
     "$(_now)" "$target" "$backend" > "$record"
