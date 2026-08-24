@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.2` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.3` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
