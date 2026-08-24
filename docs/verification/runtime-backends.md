@@ -6,6 +6,22 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex max reasoning profile
+
+Codex's `model_reasoning_effort=max` launch profile was verified on 2026-08-24 with codex-cli 0.149.0 on macOS arm64.
+
+```sh
+FM_CODEX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-continuity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - codex-cli 0.149.0 live E2E preserved the max-reasoning foreground checkpoint path
+```
+
+The env-gated guard makes a real credentialed Codex launch with `--model gpt-5.6-luna -c 'model_reasoning_effort="max"'` and then proves it returns from a foreground watcher checkpoint.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
