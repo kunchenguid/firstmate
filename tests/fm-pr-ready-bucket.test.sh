@@ -9,9 +9,11 @@
 #   (d) bors-ci-merge-queue author, queue comment, or Rollup created is in-Bors
 #   (e) drafts and release-please PRs targeting main are omitted
 #   (f) pending required CI is omitted rather than blocked or ready
-#   (g) default repo is Chamber-Hero/memberos; --repo overrides
+#   (g) default repo is Chamber-Hero/memberos; --repo/--base overrides
+#       require --required-check and use that list, not MemberOS defaults
 #   (h) the helper is read-only (no merge/comment/review) and does not
 #       scrape the Bors host
+#   (i) truncated labels, checks, or comments never classify as ready
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -85,8 +87,9 @@ import csv, json, sys
 path, has_next, cursor = sys.argv[1], sys.argv[2], sys.argv[3]
 prs = [json.loads(arg) for arg in sys.argv[4:]]
 keys = [
-    "author", "base", "bors_author", "bors_last", "checks", "draft",
-    "head", "labels", "mergeable", "number", "review", "title", "url",
+    "author", "base", "bors_author", "bors_last", "checks", "checks_truncated",
+    "comments_truncated", "draft", "head", "labels", "labels_truncated",
+    "mergeable", "number", "review", "title", "url",
 ]
 with open(path, "w", encoding="utf-8") as fh:
     fh.write(f"hasNextPage: {has_next}\n")
@@ -101,9 +104,12 @@ with open(path, "w", encoding="utf-8") as fh:
             "true" if pr.get("bors_author") else "false",
             pr.get("bors_last", ""),
             pr.get("checks", ""),
+            "true" if pr.get("checks_truncated") else "false",
+            "true" if pr.get("comments_truncated") else "false",
             "true" if pr.get("draft") else "false",
             pr.get("head", "feat/x"),
             pr.get("labels", ""),
+            "true" if pr.get("labels_truncated") else "false",
             pr.get("mergeable", "MERGEABLE"),
             pr.get("number", 1),
             pr.get("review", "APPROVED"),
@@ -128,10 +134,15 @@ pr_json() {
     --arg head "${10:-feat/x}" \
     --argjson bors_author "${11:-false}" \
     --arg bors_last "${12:-}" \
+    --argjson labels_truncated "${13:-false}" \
+    --argjson checks_truncated "${14:-false}" \
+    --argjson comments_truncated "${15:-false}" \
     '{
       number:$number, title:$title, mergeable:$mergeable, base:$base,
       checks:$checks, labels:$labels, review:$review, draft:$draft,
       author:$author, head:$head, bors_author:$bors_author, bors_last:$bors_last,
+      labels_truncated:$labels_truncated, checks_truncated:$checks_truncated,
+      comments_truncated:$comments_truncated,
       url:("https://github.com/Chamber-Hero/memberos/pull/" + ($number|tostring))
     }'
 }
@@ -146,6 +157,10 @@ test_help_and_bad_args() {
   expect_code 2 $? "--nope should be a usage error"
   "$BUCKET" --repo not-a-repo >/dev/null 2>&1
   expect_code 2 $? "malformed --repo should be a usage error"
+  "$BUCKET" --repo Example-Org/other >/dev/null 2>&1
+  expect_code 2 $? "--repo without --required-check should be a usage error"
+  "$BUCKET" --base develop >/dev/null 2>&1
+  expect_code 2 $? "--base without --required-check should be a usage error"
   pass "fm-pr-ready-bucket help and usage errors"
 }
 
@@ -278,7 +293,7 @@ test_repo_override_and_read_only() {
   local case_dir out
   case_dir=$(make_case repo-override)
   write_page "$case_dir/page.toon" false ""
-  out=$(run_bucket "$case_dir" --repo Example-Org/other --json)
+  out=$(run_bucket "$case_dir" --repo Example-Org/other --required-check "CI (Depot) / lint" --json)
   [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.repo')" = "Example-Org/other" ] \
     || fail "repo-override: JSON should echo the requested repo, got: $out"
   grep -F "Example-Org" "$case_dir/gh-axi.log" >/dev/null \
@@ -289,6 +304,52 @@ test_repo_override_and_read_only() {
     fail "repo-override: gh-axi write operations were invoked"
   fi
   pass "fm-pr-ready-bucket honors --repo and only reads through gh-axi graphql"
+}
+
+test_required_check_override_replaces_memberos_list() {
+  local case_dir out custom_red
+  case_dir=$(make_case required-check)
+  custom_red="${GREEN_CHECKS};other-ci=failure"
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 601 "feat: other policy" MERGEABLE main "$custom_red")"
+  out=$(run_bucket "$case_dir" --repo Example-Org/other --required-check other-ci --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "required-check: target red check must not be ready, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.blocked | length')" = 1 ] \
+    || fail "required-check: target red check should be blocked, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '
+    .blocked[] | select(.number==601) | .reasons[] | test("red required CI.*other-ci")
+  ' >/dev/null || fail "required-check: should name the override check, got: $out"
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 1 ] \
+    || fail "required-check: MemberOS defaults should still treat Depot-green as ready, got: $out"
+  pass "fm-pr-ready-bucket uses --required-check instead of the MemberOS list"
+}
+
+test_truncated_nested_state_is_not_ready() {
+  local case_dir out
+  case_dir=$(make_case truncated)
+  write_page "$case_dir/page.toon" false "" \
+    "$(pr_json 701 "feat: labels truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/x false "" true false false)" \
+    "$(pr_json 702 "feat: checks truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/y false "" false true false)" \
+    "$(pr_json 703 "feat: comments truncated" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/z false "" false false true)" \
+    "$(pr_json 704 "feat: blocker still blocks" MERGEABLE main "$GREEN_CHECKS" "review-blocker" APPROVED false alice feat/b false "" true false false)" \
+    "$(pr_json 705 "feat: queued despite truncation" MERGEABLE main "$GREEN_CHECKS" "" APPROVED false alice feat/q false "Rollup created" false false true)"
+  out=$(run_bucket "$case_dir" --json)
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.ready | length')" = 0 ] \
+    || fail "truncated: no truncated PR should be ready, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.blocked | length')" = 4 ] \
+    || fail "truncated: expected four blocked PRs, got: $out"
+  [ "$(printf '%s\n' "$out" | "$REAL_JQ" -r '.in_bors | length')" = 1 ] \
+    || fail "truncated: latest Bors comment should still be in-Bors, got: $out"
+  printf '%s\n' "$out" | "$REAL_JQ" -e '
+    (.blocked[] | select(.number==701) | .reasons | index("incomplete GitHub state")) != null
+    and (.blocked[] | select(.number==702) | .reasons | index("incomplete GitHub state")) != null
+    and (.blocked[] | select(.number==703) | .reasons | index("incomplete GitHub state")) != null
+    and (.blocked[] | select(.number==704) | .reasons | index("review-blocker")) != null
+    and (.in_bors[] | select(.number==705))
+  ' >/dev/null || fail "truncated: missing expected buckets/reasons, got: $out"
+  pass "fm-pr-ready-bucket refuses to mark truncated nested GitHub state ready"
 }
 
 test_does_not_fetch_bors_host() {
@@ -338,5 +399,7 @@ test_in_bors_author_and_comment
 test_stale_bors_comment_is_not_in_bors
 test_omits_draft_release_and_pending
 test_repo_override_and_read_only
+test_required_check_override_replaces_memberos_list
+test_truncated_nested_state_is_not_ready
 test_does_not_fetch_bors_host
 test_empty_listing_prints_four_groups

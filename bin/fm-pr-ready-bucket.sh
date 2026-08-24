@@ -10,8 +10,9 @@
 #            release/release-please, every required Depot + title/body lint
 #            check green, no review-blocker label, no CHANGES_REQUESTED,
 #            not stacked
-#   blocked  conflicts, red required CI, review-blocker, or CHANGES_REQUESTED
-#            (main-targeting non-draft non-release PRs only)
+#   blocked  conflicts, red required CI, review-blocker, CHANGES_REQUESTED,
+#            or truncated nested GitHub state (main-targeting non-draft
+#            non-release PRs only)
 #   stacked  open PR whose base is not --base
 #   in-Bors  open rollup PRs authored by bors-ci-merge-queue (optional [bot]
 #            suffix) or PRs with a GitHub comment from that bot (or Homu
@@ -22,11 +23,16 @@
 # than treated as blocked.
 #
 # Usage:
-#   fm-pr-ready-bucket.sh [--repo OWNER/NAME] [--base BRANCH] [--json]
+#   fm-pr-ready-bucket.sh [--repo OWNER/NAME] [--base BRANCH]
+#                        [--required-check NAME]... [--json]
 #   fm-pr-ready-bucket.sh --help
 #
 # Default --repo is Chamber-Hero/memberos.
 # Default --base is main.
+# --repo or --base other than those defaults requires --required-check,
+# so a different forge target cannot silently keep the MemberOS main list.
+# Nested label, check, and comment pages include pageInfo; a truncated
+# connection is never classified ready (blocked: incomplete GitHub state).
 # Required checks (MemberOS main ruleset: Depot CI + title/body lint):
 #   CI (Depot) / lint
 #   CI (Depot) / typecheck
@@ -46,7 +52,7 @@ DEFAULT_BASE=main
 PAGE_SIZE=50
 MAX_PAGES=20
 
-REQUIRED_CHECKS_JSON='[
+MEMBEROS_REQUIRED_CHECKS_JSON='[
   "CI (Depot) / lint",
   "CI (Depot) / typecheck",
   "CI (Depot) / build",
@@ -60,7 +66,7 @@ REQUIRED_CHECKS_JSON='[
 ]'
 
 # shellcheck disable=SC2016 # GraphQL $variables are for GitHub, not the shell.
-GQL_QUERY='query($owner:String!,$name:String!,$after:String,$pageSize:Int!){ repository(owner:$owner,name:$name){ pullRequests(first:$pageSize,states:OPEN,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}){ pageInfo{hasNextPage endCursor} nodes{ number title url isDraft mergeable baseRefName headRefName author{login} reviewDecision labels(first:20){nodes{name}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:40){nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}}}}}}} comments(last:30){nodes{author{login} body}} } } } }'
+GQL_QUERY='query($owner:String!,$name:String!,$after:String,$pageSize:Int!){ repository(owner:$owner,name:$name){ pullRequests(first:$pageSize,states:OPEN,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}){ pageInfo{hasNextPage endCursor} nodes{ number title url isDraft mergeable baseRefName headRefName author{login} reviewDecision labels(first:100){pageInfo{hasNextPage} nodes{name}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}}}}}}} comments(last:100){pageInfo{hasPreviousPage} nodes{author{login} body}} } } } }'
 
 # Compact records for local classification. gh-axi --jq keeps these keys and
 # TOON-encodes the object; the embedded decoder below is the only parser.
@@ -79,10 +85,13 @@ GQL_JQ='.data.repository.pullRequests | {
       author: (.author.login // ""),
       review: (.reviewDecision // ""),
       labels: ([.labels.nodes[]?.name] | join(",")),
+      labels_truncated: (.labels.pageInfo.hasNextPage // false),
       checks: ([
         .commits.nodes[0]?.commit.statusCheckRollup.contexts.nodes[]? |
         ((.name // .context // "") + "=" + ((.conclusion // .state // .status // "") | ascii_downcase))
       ] | join(";")),
+      checks_truncated: ((.commits.nodes[0]?.commit.statusCheckRollup.contexts.pageInfo.hasNextPage) // false),
+      comments_truncated: (.comments.pageInfo.hasPreviousPage // false),
       bors_author: ((.author.login // "") | test("^(bors-ci-merge-queue|bors)(\\[bot\\])?$"; "i")),
       bors_last: ((
         [.comments.nodes[]? | select((.author.login // "") | test("^(bors-ci-merge-queue|bors)(\\[bot\\])?$"; "i")) | ((.body // "") | gsub("[\t\n]"; " "))]
@@ -121,6 +130,10 @@ CLASSIFY_JQ='
       ((.bors_last // "") | test("has been approved|now in the \\[queue\\]|Trying:|:hourglass:|Rollup created"; "i"))
       and ((.bors_last // "") | test("unapproved|not previously approved|unmergeable"; "i") | not)
     );
+  def incomplete_state:
+    ((.labels_truncated == true) and (has_blocker_label | not))
+    or (.checks_truncated == true)
+    or ((.comments_truncated == true) and (in_bors | not));
   def red_required($checks):
     [$required[] | select(req_status(.; $checks) == "red")];
   def pending_required($checks):
@@ -131,7 +144,8 @@ CLASSIFY_JQ='
         (if .mergeable == "CONFLICTING" then "conflicts" else empty end),
         (if has_blocker_label then "review-blocker" else empty end),
         (if .review == "CHANGES_REQUESTED" then "CHANGES_REQUESTED" else empty end),
-        (red_required($checks) as $red | if ($red | length) > 0 then "red required CI: \($red | join(", "))" else empty end)
+        (red_required($checks) as $red | if ($red | length) > 0 then "red required CI: \($red | join(", "))" else empty end),
+        (if incomplete_state then "incomplete GitHub state" else empty end)
       ];
   def item:
     {
@@ -145,6 +159,7 @@ CLASSIFY_JQ='
     if in_bors then "in_bors"
     elif .base != $base then "stacked"
     elif (.draft == true) or is_release then "omit"
+    elif incomplete_state then "blocked"
     else
       (reasons) as $r
       | parse_checks as $checks
@@ -165,11 +180,13 @@ CLASSIFY_JQ='
 
 usage() {
   cat <<'EOF'
-usage: fm-pr-ready-bucket.sh [--repo OWNER/NAME] [--base BRANCH] [--json]
+usage: fm-pr-ready-bucket.sh [--repo OWNER/NAME] [--base BRANCH]
+                            [--required-check NAME]... [--json]
        fm-pr-ready-bucket.sh --help
 
 Read-only listing of open GitHub PRs grouped for the next bors rollup.
 Default --repo is Chamber-Hero/memberos. Default --base is main.
+--repo or --base other than those defaults requires --required-check NAME.
 GitHub is the ready-bucket; this command does not scrape a Bors host.
 Prints ready, blocked, stacked, and in-Bors groups with full PR URLs.
 EOF
@@ -178,6 +195,7 @@ EOF
 REPO=$DEFAULT_REPO
 BASE=$DEFAULT_BASE
 JSON_OUT=0
+REQUIRED_CHECK_NAMES=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -205,6 +223,17 @@ while [ "$#" -gt 0 ]; do
       ;;
     --base=*)
       BASE=${1#--base=}
+      shift
+      ;;
+    --required-check)
+      [ "$#" -ge 2 ] || { echo "error: --required-check needs a check name" >&2; exit 2; }
+      [ -n "$2" ] || { echo "error: --required-check needs a check name" >&2; exit 2; }
+      REQUIRED_CHECK_NAMES+=("$2")
+      shift 2
+      ;;
+    --required-check=*)
+      [ -n "${1#--required-check=}" ] || { echo "error: --required-check needs a check name" >&2; exit 2; }
+      REQUIRED_CHECK_NAMES+=("${1#--required-check=}")
       shift
       ;;
     *)
@@ -236,10 +265,22 @@ case "$BASE" in
     exit 2
     ;;
 esac
+if [ "${#REQUIRED_CHECK_NAMES[@]}" -gt 0 ]; then
+  :
+elif [ "$REPO" != "$DEFAULT_REPO" ] || [ "$BASE" != "$DEFAULT_BASE" ]; then
+  echo "error: --repo/--base override needs --required-check NAME" >&2
+  exit 2
+fi
 
 command -v gh-axi >/dev/null 2>&1 || { echo "error: gh-axi not found" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "error: jq not found" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 not found" >&2; exit 1; }
+
+if [ "${#REQUIRED_CHECK_NAMES[@]}" -gt 0 ]; then
+  REQUIRED_CHECKS_JSON=$(printf '%s\n' "${REQUIRED_CHECK_NAMES[@]}" | jq -R . | jq -s -c .)
+else
+  REQUIRED_CHECKS_JSON=$MEMBEROS_REQUIRED_CHECKS_JSON
+fi
 
 # Decode one gh-axi TOON page (hasNextPage/endCursor plus a tabular prs array)
 # into JSON. The decoder is intentionally narrow: it only understands the
@@ -255,7 +296,7 @@ has_next = False
 cursor = ""
 prs = []
 table_re = re.compile(r"^prs\[(\d+)\](?:\{([^}]*)\})?:\s*(.*)$")
-bool_keys = {"draft", "bors_author"}
+bool_keys = {"draft", "bors_author", "labels_truncated", "checks_truncated", "comments_truncated"}
 lines = text.splitlines()
 i = 0
 while i < len(lines):
