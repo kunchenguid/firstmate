@@ -265,6 +265,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/escalation-alert",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
