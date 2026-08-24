@@ -83,15 +83,18 @@ FM_HOME=$(CDPATH='' cd -- "$FM_HOME_INPUT" 2>/dev/null && pwd -P) \
 resolve_directory_input() {
   local name=$1 path=$2 resolved
   case "$path" in
-    /*) printf '%s\n' "$path"; return 0 ;;
+    /*) ;;
+    *) path="$(pwd)/$path" ;;
   esac
-  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) \
-    || die "$name directory cannot be resolved: $path"
+  [ -d "$path" ] || die "$name directory cannot be resolved: $2"
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || resolved=$path
   printf '%s\n' "$resolved"
 }
 
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 2
+elif [ -d "$FM_HOME/data" ]; then
+  DATA=$(resolve_directory_input data "$FM_HOME/data") || exit 2
 else
   DATA="$FM_HOME/data"
 fi
@@ -126,19 +129,29 @@ display_name() {
   esac
 }
 
+# The role is both the noun in the refusal and the policy. The data root is
+# supplied by the operator and already canonicalized, so a symlinked spelling is
+# theirs to choose, but status_all enumerates it and so needs read as well as
+# search. A consultation directory is discovered rather than supplied, so a
+# symlink is refused unfollowed; only its two fixed artifact names are ever
+# statted, so search alone is enough to report it.
 consult_directory_ok() {
-  local dir=$1 label=$2
+  local dir=$1 role=$2
   CONSULT_REFUSAL=
-  if [ -L "$dir" ]; then
-    CONSULT_REFUSAL="$label directory must not be a symlink: $(display_name "$dir")"
+  if [ "$role" = consultation ] && [ -L "$dir" ]; then
+    CONSULT_REFUSAL="consultation directory must not be a symlink: $(display_name "$dir")"
     return 1
   fi
   if [ -e "$dir" ] && [ ! -d "$dir" ]; then
-    CONSULT_REFUSAL="$label path is not a directory: $(display_name "$dir")"
+    CONSULT_REFUSAL="$role path is not a directory: $(display_name "$dir")"
     return 1
   fi
-  if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
-    CONSULT_REFUSAL="$label directory is not readable and searchable, so its consultations cannot be reported completely; fix its permissions: $(display_name "$dir")"
+  if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+    CONSULT_REFUSAL="$role directory is not searchable, so its consultations cannot be reported; fix its permissions: $(display_name "$dir")"
+    return 1
+  fi
+  if [ "$role" = data ] && [ -d "$dir" ] && [ ! -r "$dir" ]; then
+    CONSULT_REFUSAL="data directory is not readable, so consultations cannot be listed completely; fix its permissions: $(display_name "$dir")"
     return 1
   fi
   return 0
@@ -241,6 +254,8 @@ receive_consult() {
   validate_consult_directory "$dir"
   validate_consult_file "$report" "consultation report"
   [ -s "$report" ] || die "consultation report is missing or empty: $report"
+  [ -r "$report" ] \
+    || die "consultation report is not readable; fix its permissions: $(display_name "$report")"
 
   lines=$(awk 'END { print NR + 0 }' "$report")
   headings=$(awk '/^#+([[:space:]]|$)/ { count++ } END { print count + 0 }' "$report")

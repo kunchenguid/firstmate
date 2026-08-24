@@ -353,18 +353,25 @@ test_status_all_refuses_a_symlinked_directory_with_no_consult_files() {
   pass "fm-consult: status refuses a symlinked directory even with no consult files behind it"
 }
 
-test_status_refuses_a_data_directory_that_is_a_symlink() {
-  local home target out rc
+test_symlinked_data_root_is_resolved_not_refused() {
+  local home target out rc physical
   home=$(new_home status-data-symlink)
   target="$TMP_ROOT/status-data-symlink-target"
   mkdir -p "$target"
+  physical=$(cd "$target" && pwd -P)
   rmdir "$home/data"
   ln -s "$target" "$home/data"
+
+  out=$(run_consult "$home" scaffold alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "an operator-supplied symlinked data root must be accepted"
+  assert_present "$target/alpha/consult-brief.md" "scaffold did not write through the symlinked data root"
+  assert_contains "$out" "$physical/alpha/consult-brief.md" "scaffold did not report the resolved physical path"
+
   out=$(run_consult "$home" status 2>&1); rc=$?
-  [ "$rc" -ne 0 ] || fail "status accepted a symlinked data directory"
-  assert_contains "$out" "data directory must not be a symlink" \
-    "data-directory refusal lost its distinct label"
-  pass "fm-consult: a symlinked data directory is refused with its own label"
+  expect_code 0 "$rc" "status must read through a symlinked data root"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
+    || fail "listing did not read through the symlinked data root"
+  pass "fm-consult: a symlinked data root is resolved rather than refused"
 }
 
 test_status_all_ignores_non_consultation_data_entries() {
@@ -413,8 +420,8 @@ test_status_all_ignores_a_directory_holding_no_consultation() {
 test_data_override_redirects_every_command() {
   local home override rel out rc report
   home=$(new_home data-override)
-  override="$TMP_ROOT/data-override-elsewhere"
-  mkdir -p "$override"
+  mkdir -p "$TMP_ROOT/data-override-elsewhere"
+  override=$(cd "$TMP_ROOT/data-override-elsewhere" && pwd -P)
 
   out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" scaffold redirected)
   assert_present "$override/redirected/consult-brief.md" "scaffold ignored FM_DATA_OVERRIDE"
@@ -435,7 +442,7 @@ test_data_override_redirects_every_command() {
   out=$(FM_DATA_OVERRIDE="$override" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status redirected)
   has_exact_line "$out" "redirected: report received" "single status did not read the overridden data directory"
 
-  rel=$(basename "$override")
+  rel=data-override-elsewhere
   out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE="$rel" FM_HOME="$home" "$ROOT/bin/fm-consult.sh" status)
   has_exact_line "$out" "redirected: report received" "a relative FM_DATA_OVERRIDE was not resolved"
 
@@ -447,8 +454,9 @@ test_data_override_redirects_every_command() {
 
   out=$(FM_DATA_OVERRIDE="$TMP_ROOT/data-override-absent" FM_HOME="$home" \
     "$ROOT/bin/fm-consult.sh" status 2>&1); rc=$?
-  expect_code 0 "$rc" "an absolute FM_DATA_OVERRIDE that does not exist yet must be accepted"
-  assert_contains "$out" "no consultations" "an empty overridden data directory must report no consultations"
+  expect_code 2 "$rc" "an unresolvable absolute FM_DATA_OVERRIDE must be refused like a relative one"
+  assert_contains "$out" "FM_DATA_OVERRIDE directory cannot be resolved" \
+    "the unresolvable absolute override refusal did not name FM_DATA_OVERRIDE"
   pass "fm-consult: FM_DATA_OVERRIDE redirects scaffold, receive, and status"
 }
 
@@ -483,10 +491,17 @@ test_status_refuses_an_unreadable_data_directory() {
   fi
 
   out=$(run_consult "$home" status 2>&1); rc=$?
-  chmod 700 "$home/data"
   [ "$rc" -ne 0 ] || fail "status exited zero on a data directory it could not read"
   assert_not_contains "$out" "no consultations" \
     "status claimed there are no consultations while a real one was unreadable"
+  assert_contains "$out" "data directory is not searchable" "the non-searchable-data refusal was not explicit"
+
+  chmod 0300 "$home/data"
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  chmod 700 "$home/data"
+  [ "$rc" -ne 0 ] || fail "status exited zero on a data directory it could not enumerate"
+  assert_not_contains "$out" "no consultations" \
+    "status claimed there are no consultations while the listing could not be enumerated"
   assert_contains "$out" "data directory is not readable" "the unreadable-data refusal was not explicit"
   pass "fm-consult: an unreadable data directory is refused, not reported as empty"
 }
@@ -511,14 +526,14 @@ test_unreadable_consultation_directory_is_refused_by_every_command() {
   has_exact_line "$out" "gamma: brief written; still awaiting a report" \
     || fail "listing dropped the consultation after the unreadable one"
   assert_contains "$out" "beta: refused (" "listing silently dropped an unreadable consultation directory"
-  assert_contains "$out" "not readable and searchable" "refused line did not name the permission reason"
+  assert_contains "$out" "not searchable" "refused line did not name the permission reason"
   expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported consultation"
   [ "$rc" -ne 0 ] || fail "status listing exited zero despite an unreadable consultation directory"
 
   out=$(run_consult "$home" status beta 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "single status mislabeled an unreadable consultation instead of refusing"
   assert_not_contains "$out" "no brief written" "single status reported a written brief as unwritten"
-  assert_contains "$out" "not readable and searchable" "single status refusal did not name the permission reason"
+  assert_contains "$out" "not searchable" "single status refusal did not name the permission reason"
 
   out=$(run_consult "$home" receive beta 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "receive accepted an unreadable consultation directory"
@@ -556,6 +571,93 @@ test_status_of_an_absent_consult_id_is_refused() {
   pass "fm-consult: an absent consult id is refused while an empty consultation still reports"
 }
 
+test_searchable_but_unreadable_consultation_is_reported() {
+  local home out rc
+  home=$(new_home consult-0300)
+  run_consult "$home" scaffold alpha >/dev/null
+  printf '# Answer\nEvidence.\n' > "$home/data/alpha/consult-report.md"
+  mkdir -p "$home/data/handoff"
+  printf 'unrelated\n' > "$home/data/handoff/notes.md"
+  chmod 0300 "$home/data/alpha" "$home/data/handoff"
+  if [ -r "$home/data/alpha" ]; then
+    chmod 0700 "$home/data/alpha" "$home/data/handoff"
+    pass "fm-consult: searchable-but-unreadable consultation (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" status alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "a searchable consultation directory must be reportable without read permission"
+  has_exact_line "$out" "alpha: report received" || fail "a searchable consultation was not reported"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "a searchable consultation must not make the listing fail"
+  has_exact_line "$out" "alpha: report received" || fail "listing dropped a searchable consultation"
+  assert_not_contains "$out" "handoff" "an unrelated searchable directory was reported as a consultation"
+  expect_code 1 "$(stdout_line_count "$out")" "listing reported an entry that is not a consultation"
+
+  out=$(run_consult "$home" receive alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "receive must read a report inside a searchable consultation directory"
+  assert_contains "$out" "UNTRUSTED EXTERNAL CONTENT" "receive omitted its banner"
+
+  chmod 0600 "$home/data/alpha"
+  out=$(run_consult "$home" status alpha 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-searchable consultation directory was not refused"
+  assert_contains "$out" "not searchable" "the non-searchable refusal did not name the permission reason"
+  chmod 0700 "$home/data/alpha" "$home/data/handoff"
+  pass "fm-consult: a searchable consultation is reported and only non-searchable is refused"
+}
+
+test_receive_refuses_an_unreadable_report_through_fm_consult() {
+  local home report out rc
+  home=$(new_home receive-unreadable)
+  run_consult "$home" scaffold alpha >/dev/null
+  report="$home/data/alpha/consult-report.md"
+  printf '# Answer\nEvidence.\n' > "$report"
+  chmod 000 "$report"
+  if [ -r "$report" ]; then
+    chmod 600 "$report"
+    pass "fm-consult: unreadable report (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" receive alpha 2>&1); rc=$?
+  expect_code 2 "$rc" "receive must refuse an unreadable report through fm-consult"
+  assert_contains "$out" "fm-consult: " "receive leaked a bare tool error instead of an fm-consult refusal"
+  assert_contains "$out" "consultation report is not readable" "the unreadable-report refusal was not explicit"
+  assert_not_contains "$out" "awk" "receive leaked a bare awk error"
+
+  out=$(run_consult "$home" status alpha 2>&1); rc=$?
+  expect_code 0 "$rc" "status must not fail merely because a report body is unreadable"
+  has_exact_line "$out" "alpha: report received" || fail "an unreadable report body changed status classification"
+  chmod 600 "$report"
+  pass "fm-consult: receive refuses an unreadable report while status still classifies it"
+}
+
+test_symlinked_data_override_resolves_identically_for_both_spellings() {
+  local home target out rc physical
+  home=$(new_home override-symlink)
+  target="$TMP_ROOT/override-symlink-target"
+  mkdir -p "$target"
+  ln -s "$target" "$TMP_ROOT/override-symlink-link"
+  physical=$(cd "$target" && pwd -P)
+
+  out=$(FM_DATA_OVERRIDE="$TMP_ROOT/override-symlink-link" FM_HOME="$home" \
+    "$ROOT/bin/fm-consult.sh" scaffold abs 2>&1); rc=$?
+  expect_code 0 "$rc" "an absolute symlinked FM_DATA_OVERRIDE must be accepted"
+  assert_contains "$out" "$physical/abs/consult-brief.md" \
+    "the absolute spelling did not resolve to the physical destination"
+
+  out=$(cd "$TMP_ROOT" && FM_DATA_OVERRIDE=override-symlink-link FM_HOME="$home" \
+    "$ROOT/bin/fm-consult.sh" scaffold rel 2>&1); rc=$?
+  expect_code 0 "$rc" "a relative symlinked FM_DATA_OVERRIDE must be accepted"
+  assert_contains "$out" "$physical/rel/consult-brief.md" \
+    "the relative spelling did not resolve to the physical destination"
+
+  assert_present "$target/abs/consult-brief.md" "the absolute spelling wrote somewhere else"
+  assert_present "$target/rel/consult-brief.md" "the relative spelling wrote somewhere else"
+  pass "fm-consult: both spellings of a symlinked data override resolve to the same destination"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -572,11 +674,14 @@ test_status_all_refuses_a_hidden_entry_without_dropping_the_rest
 test_status_all_reports_no_consultations_for_an_empty_data_directory
 test_status_all_cannot_forge_a_status_line
 test_status_all_refuses_a_symlinked_directory_with_no_consult_files
-test_status_refuses_a_data_directory_that_is_a_symlink
+test_symlinked_data_root_is_resolved_not_refused
 test_status_all_ignores_non_consultation_data_entries
 test_status_all_reports_only_consultations_in_a_seeded_home
 test_status_refuses_an_unreadable_data_directory
 test_unreadable_consultation_directory_is_refused_by_every_command
 test_status_of_an_absent_consult_id_is_refused
+test_searchable_but_unreadable_consultation_is_reported
+test_receive_refuses_an_unreadable_report_through_fm_consult
+test_symlinked_data_override_resolves_identically_for_both_spellings
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command
