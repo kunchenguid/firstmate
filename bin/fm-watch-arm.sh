@@ -727,7 +727,15 @@ wait_owned_child() {
     while fm_pid_alive "$child" && [ "$(date +%s)" -lt "$bail_deadline" ]; do
       sleep 0.05
     done
-    wait "$child" 2>/dev/null || true
+    # Only reap when the child is dead or a reapable zombie; a child that truly
+    # survives SIGKILL (an uninterruptible D-state wait) must not block this arm
+    # forever on `wait` - that would reintroduce the unbounded hang the bounded
+    # retirement exists to prevent. Reaping a zombie always returns immediately,
+    # so a normal retire is unchanged. A still-alive child then fails the stale
+    # release below, keeping its lock exactly as the retirement contract records.
+    if [ -n "$child" ] && { ! fm_pid_alive "$child" || ! watch_child_running; }; then
+      wait "$child" 2>/dev/null || true
+    fi
     child=
     child_group=
     if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime \
