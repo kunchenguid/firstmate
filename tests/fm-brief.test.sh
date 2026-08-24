@@ -286,8 +286,14 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+base-branch on a secondmate charter|brief-refused-b5 --secondmate --no-projects --base-branch develop|--base-branch applies only to ship and scout briefs
+empty base-branch value|brief-refused-b6 some-proj --mode no-mistakes --base-branch=|--base-branch requires a non-empty value
+invalid base-branch name|brief-refused-b7 some-proj --mode no-mistakes --base-branch bad..name|--base-branch is not a usable git branch name
+branch-name on a secondmate charter|brief-refused-b8 --secondmate --no-projects --branch-name feature/x|--branch-name applies only to ship and scout briefs
+empty branch-name value|brief-refused-b9 some-proj --mode no-mistakes --branch-name=|--branch-name requires a non-empty value
+invalid branch-name|brief-refused-b10 some-proj --mode no-mistakes --branch-name bad..name|--branch-name is not a usable git branch name
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and misplaced --base-branch/--branch-name are refused, never silently dropped"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -762,6 +768,149 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --base-branch is the worker-facing form of the spawn header's
+# retarget-after-green sequence. Without the flag, existing DOD wording stays
+# unchanged. With it, no-mistakes retargets after first green and reconfirms CI;
+# direct-PR opens against the named base; scout only records the freshen base.
+test_base_branch_worker_steps() {
+  local home brief
+  home="$TMP_ROOT/base-branch-brief-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-nm-omit some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "omitted --base-branch no-mistakes brief should scaffold"
+  brief="$home/data/brief-base-nm-omit/brief.md"
+  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished." "$brief" \
+    "omitted --base-branch must keep the historical no-mistakes done line"
+  assert_no_grep "gh pr edit" "$brief" \
+    "omitted --base-branch no-mistakes brief must not retarget the PR"
+  assert_no_grep "Base branch contract: base_branch=" "$brief" \
+    "omitted --base-branch no-mistakes brief must not add a base contract"
+  assert_grep "at a detached HEAD on a clean default branch" "$brief" \
+    "omitted --base-branch must keep the default-branch setup line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-nm-on some-proj --mode no-mistakes --base-branch develop >/dev/null 2>&1 \
+    || fail "--base-branch no-mistakes brief should scaffold"
+  brief="$home/data/brief-base-nm-on/brief.md"
+  assert_grep "at a detached HEAD on \`develop\`" "$brief" \
+    "--base-branch no-mistakes brief must name the freshen base in Setup"
+  assert_grep "Do not pass --skip pr" "$brief" \
+    "--base-branch no-mistakes brief must keep the pipeline running normally"
+  assert_grep "Base branch contract: base_branch=develop" "$brief" \
+    "--base-branch no-mistakes brief must record its PR target contract"
+  assert_grep "gh pr edit <number> --base 'develop'" "$brief" \
+    "--base-branch no-mistakes brief must retarget after first green"
+  assert_grep "gh-axi pr checks <number>" "$brief" \
+    "--base-branch no-mistakes brief must reconfirm CI after retarget"
+  assert_grep "Do not trust the pre-retarget green" "$brief" \
+    "--base-branch no-mistakes brief must not treat the first green as done"
+  assert_no_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\`" "$brief" \
+    "--base-branch no-mistakes brief must not keep the immediate-done line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dpr-omit some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "omitted --base-branch direct-PR brief should scaffold"
+  brief="$home/data/brief-base-dpr-omit/brief.md"
+  assert_grep "open a PR with \`gh-axi\`" "$brief" \
+    "omitted --base-branch must keep the historical direct-PR create line"
+  assert_no_grep "gh-axi pr create --base" "$brief" \
+    "omitted --base-branch direct-PR brief must not pin a create base"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dpr-on some-proj --mode direct-PR --base-branch develop >/dev/null 2>&1 \
+    || fail "--base-branch direct-PR brief should scaffold"
+  brief="$home/data/brief-base-dpr-on/brief.md"
+  assert_grep "gh-axi pr create --base 'develop'" "$brief" \
+    "--base-branch direct-PR brief must open against the named base"
+  assert_no_grep "gh-axi pr edit" "$brief" \
+    "direct-PR --base-branch must open against the named base instead of retargeting"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-on some-proj --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "--base-branch scout brief should scaffold"
+  brief="$home/data/brief-base-scout-on/brief.md"
+  assert_grep "at a detached HEAD on \`develop\`" "$brief" \
+    "--base-branch scout brief must name the freshen base in Setup"
+  assert_grep "Base branch contract: base_branch=develop" "$brief" \
+    "--base-branch scout brief must record its freshen base contract"
+  assert_no_grep "gh-axi pr edit" "$brief" \
+    "scout --base-branch must not add a PR retarget step"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-shell some-proj --mode no-mistakes --base-branch 'topic;id' >/dev/null 2>&1 \
+    || fail "shell-metacharacter --base-branch brief should scaffold"
+  brief="$home/data/brief-base-shell/brief.md"
+  assert_grep "gh pr edit <number> --base 'topic;id'" "$brief" \
+    "--base-branch must quote shell metacharacters in the retarget command"
+  assert_grep "Base branch contract: base_branch=topic;id" "$brief" \
+    "--base-branch must preserve the raw value in its contract line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-shell-dpr some-proj --mode direct-PR --base-branch 'topic;id' >/dev/null 2>&1 \
+    || fail "shell-metacharacter direct-PR --base-branch brief should scaffold"
+  brief="$home/data/brief-base-shell-dpr/brief.md"
+  assert_grep "gh-axi pr create --base 'topic;id'" "$brief" \
+    "--base-branch must quote shell metacharacters in the create command"
+  pass "fm-brief.sh: --base-branch writes retarget-after-green steps only when set"
+}
+
+# --branch-name replaces every generated fm/<id> crew branch. Omitted keeps
+# today's exact fm/<id> wording and does not write a Crew branch contract line.
+test_branch_name_worker_steps() {
+  local home brief
+  home="$TMP_ROOT/branch-name-brief-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-omit some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "omitted --branch-name no-mistakes brief should scaffold"
+  brief="$home/data/brief-bn-omit/brief.md"
+  assert_grep "git checkout -b fm/brief-bn-omit" "$brief" \
+    "omitted --branch-name must keep the historical fm/<id> checkout command"
+  assert_no_grep "Crew branch: branch=" "$brief" \
+    "omitted --branch-name must not write a Crew branch contract line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-on some-proj --mode no-mistakes --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
+    || fail "--branch-name no-mistakes brief should scaffold"
+  brief="$home/data/brief-bn-on/brief.md"
+  assert_grep "git checkout -b 'feature/TD-131-visual-dom-editor'" "$brief" \
+    "--branch-name must replace the checkout command"
+  assert_grep "Crew branch: branch=feature/TD-131-visual-dom-editor" "$brief" \
+    "--branch-name must record the crew branch contract"
+  assert_no_grep "git checkout -b fm/brief-bn-on" "$brief" \
+    "--branch-name must not keep the default fm/<id> checkout command"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-shell some-proj --mode no-mistakes --branch-name 'topic;id' >/dev/null 2>&1 \
+    || fail "shell-metacharacter --branch-name brief should scaffold"
+  brief="$home/data/brief-bn-shell/brief.md"
+  assert_grep "git checkout -b 'topic;id'" "$brief" \
+    "--branch-name must quote shell metacharacters in the checkout command"
+  assert_grep "Crew branch: branch=topic;id" "$brief" \
+    "--branch-name must preserve the raw value in its contract line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-dpr some-proj --mode direct-PR --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
+    || fail "--branch-name direct-PR brief should scaffold"
+  brief="$home/data/brief-bn-dpr/brief.md"
+  assert_grep "push only your \`feature/TD-131-visual-dom-editor\` branch" "$brief" \
+    "--branch-name must replace the direct-PR push-rule branch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-local-omit some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "omitted --branch-name local-only brief should scaffold"
+  brief="$home/data/brief-bn-local-omit/brief.md"
+  assert_grep "done: ready in branch fm/brief-bn-local-omit" "$brief" \
+    "omitted --branch-name must keep the historical local-only done line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-local-on some-proj --mode local-only --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
+    || fail "--branch-name local-only brief should scaffold"
+  brief="$home/data/brief-bn-local-on/brief.md"
+  assert_grep "done: ready in branch feature/TD-131-visual-dom-editor" "$brief" \
+    "--branch-name must replace the local-only done line"
+  assert_grep "Work only on your \`feature/TD-131-visual-dom-editor\` branch" "$brief" \
+    "--branch-name must replace the local-only push-rule branch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-scout some-proj --scout --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
+    || fail "--branch-name scout brief should scaffold"
+  brief="$home/data/brief-bn-scout/brief.md"
+  assert_present "$brief" "scout --branch-name brief was not scaffolded"
+  assert_no_grep "git checkout -b" "$brief" \
+    "scout briefs must not invent a checkout command when --branch-name is set"
+  pass "fm-brief.sh: --branch-name replaces generated fm/<id> crew branches only when set"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +932,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_base_branch_worker_steps
+test_branch_name_worker_steps

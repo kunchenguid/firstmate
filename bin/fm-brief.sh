@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--base-branch <branch>] [--branch-name <name>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--base-branch <branch>] [--branch-name <name>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -43,6 +43,22 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
+# --base-branch <branch> writes the worker-facing steps for the sequence owned
+# by bin/fm-spawn.sh's header: freshen from that branch, ship normally, retarget
+# a no-mistakes PR after first green, and reconfirm CI. A direct-PR brief opens
+# with gh-axi pr create --base <branch>; a local-only or scout brief only records
+# the freshen base. --secondmate refuses the flag.
+# --branch-name <name> replaces every generated `fm/<task-id>` crew branch
+# (checkout command, push-rule text, local-only done line) with that name.
+# The name must pass `git check-ref-format --branch`. When omitted, scaffolds
+# still use `fm/<task-id>` exactly as today. --secondmate refuses the flag.
+# A custom name is recorded as `Crew branch: branch=<name>` on ship briefs.
+# Other scripts that reconstruct `fm/<id>` instead of reading a recorded branch:
+# bin/fm-merge-local.sh (local-only merge looks up `fm/<id>`), bin/fm-promote.sh
+# (next-step hint tells the scout to create `fm/<id>`), and
+# bin/fm-review-diff.sh (prefers `fm/<id>`, then falls back to the worktree HEAD).
+# bin/fm-spawn.sh, bin/fm-teardown.sh, bin/fm-control.sh, and
+# bin/fm-crew-state.sh do not reconstruct that pattern.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -111,6 +127,10 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BASE_BRANCH=
+BASE_BRANCH_SET=0
+BRANCH_NAME=
+BRANCH_NAME_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -120,6 +140,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      'base-branch') BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
+      'branch-name') BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -132,6 +154,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --base-branch) want_value='base-branch' ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
+    --branch-name) want_value='branch-name' ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -140,6 +166,8 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || { echo "error: --base-branch requires a non-empty value" >&2; exit 1; }
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || { echo "error: --branch-name requires a non-empty value" >&2; exit 1; }
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -159,7 +187,31 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+if [ "$KIND" = secondmate ] && [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  echo "error: --base-branch applies only to ship and scout briefs; a secondmate already owns its home" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  echo "error: --branch-name applies only to ship and scout briefs; a secondmate already owns its home" >&2
+  exit 1
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1 || {
+    echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
+    exit 1
+  }
+fi
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  git check-ref-format --branch "$BRANCH_NAME" >/dev/null 2>&1 || {
+    echo "error: --branch-name is not a usable git branch name: $BRANCH_NAME" >&2
+    exit 1
+  }
+fi
 ID=${POS[0]}
+CREW_BRANCH="fm/$ID"
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  CREW_BRANCH=$BRANCH_NAME
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -183,6 +235,16 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+BASE_BRANCH_COMMAND=$BASE_BRANCH
+CREW_BRANCH_COMMAND=$CREW_BRANCH
+BASE_BRANCH_CONTRACT=
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  BASE_BRANCH_COMMAND=$(shell_quote "$BASE_BRANCH")
+  BASE_BRANCH_CONTRACT=$'\nBase branch contract: base_branch='$BASE_BRANCH
+fi
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  CREW_BRANCH_COMMAND=$(shell_quote "$CREW_BRANCH")
+fi
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -289,6 +351,12 @@ fi
 
 REPO=${POS[1]}
 
+if [ -n "$BASE_BRANCH" ]; then
+  SETUP_HEAD="at a detached HEAD on \`$BASE_BRANCH\`"
+else
+  SETUP_HEAD="at a detached HEAD on a clean default branch"
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -331,7 +399,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, $SETUP_HEAD.$BASE_BRANCH_CONTRACT
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -381,11 +449,11 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `'"$CREW_BRANCH"'` branch). Never merge a PR.'
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`main\`."
     ;;
   *)  # no-mistakes
     SETUP2="
@@ -393,7 +461,13 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$CREW_BRANCH" "$BASE_BRANCH") || exit 1
+if [ -n "$BASE_BRANCH" ]; then
+  DOD="${DOD}"$'\n'"Base branch contract: base_branch=$BASE_BRANCH"
+fi
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  DOD="${DOD}"$'\n'"Crew branch: branch=$CREW_BRANCH"
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -404,13 +478,13 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, $SETUP_HEAD.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $CREW_BRANCH_COMMAND\`$SETUP2
 
 # Rules
 $RULE1
