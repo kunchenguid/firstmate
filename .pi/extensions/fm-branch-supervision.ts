@@ -90,6 +90,7 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const MERGE_NOTE_ANCHOR = "⚓";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -355,7 +356,8 @@ export default function (pi: ExtensionAPI) {
     summary: string,
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
-    const note = `${MERGE_NOTE_BOAT} branch merged [${verdict}] ${task}: ${summary}`;
+    const glyph = verdict === "captain" ? MERGE_NOTE_ANCHOR : MERGE_NOTE_BOAT;
+    const note = `${glyph} ${task}: ${summary}`;
     const message = { customType: "fm-branch-merge", content: note, display: true };
     if (verdict === "captain") {
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
@@ -727,11 +729,15 @@ ${context.command}
 
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    const boat = note.startsWith(MERGE_NOTE_BOAT) ? MERGE_NOTE_BOAT : "";
-    const rest = boat ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    const glyph = note.startsWith(MERGE_NOTE_ANCHOR)
+      ? MERGE_NOTE_ANCHOR
+      : note.startsWith(MERGE_NOTE_BOAT)
+        ? MERGE_NOTE_BOAT
+        : "";
+    const rest = glyph ? note.slice(glyph.length) : note;
     const outputPad = 1;
     return new Text(
-      `${boat ? theme.fg("customMessageText", boat) : ""}${theme.fg("dim", rest)}`,
+      `${glyph ? theme.fg("customMessageText", glyph) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,
     );
