@@ -26,7 +26,18 @@ PINNED_VERSION=omp/17.2.9
 [ "$VERSION" = "$PINNED_VERSION" ] \
   || fail "installed omp is '$VERSION', expected '$PINNED_VERSION'"
 
-TOOLS=read,write,edit,glob,grep
+MANIFEST=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
+  /isolated/agent /isolated/cwd /task/worktree "$OMP_BIN" provider/model /state/task.omp-ext.ts) \
+  || fail "candidate OMP manifest did not render"
+TOOLS=$(MANIFEST=$MANIFEST node -e '
+const manifest = JSON.parse(process.env.MANIFEST);
+const index = manifest.argv.indexOf("--tools");
+if (index < 0 || !manifest.unsetEnvironment.includes("PI_CONFIG_FILES")) process.exit(1);
+const retry = manifest.effectiveRetry;
+if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
+if (!retry.fallbackChains || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
+process.stdout.write(manifest.argv[index + 1]);
+') || fail "candidate OMP manifest does not carry the required containment settings"
 SENTINEL=__fm_not_a_tool__
 
 omp_unknown_names() {

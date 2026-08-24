@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -eu
 
+OMP_TOOLS=read,write,edit,glob,grep
+OMP_RETRY_JSON='{"modelFallback":false,"usageAwareFallback":false,"fallbackChains":{}}'
+
 usage() {
-  echo "usage: fm-omp-candidate-artifacts.sh config <output> | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
+  echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension> | launch-template | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
   exit 2
 }
 
@@ -18,11 +21,69 @@ javascript_literal() {
 render_config() {
   local destination=$1 temporary
   temporary=$(mktemp "${destination}.tmp.XXXXXX") || exit 1
-  if ! printf '%s\n' '{"retry":{"modelFallback":false,"usageAwareFallback":false,"fallbackChains":{}}}' > "$temporary"; then
+  if ! printf '%s\n' "{\"retry\":$OMP_RETRY_JSON}" > "$temporary"; then
     rm -f -- "$temporary"
     exit 1
   fi
   atomic_publish "$destination" "$temporary"
+}
+
+prepare_isolated_settings() {
+  local agent_dir=$1 cwd=$2
+  if [ -e "$agent_dir" ] || [ -L "$agent_dir" ] || [ -e "$cwd" ] || [ -L "$cwd" ]; then
+    echo "error: candidate OMP isolation directories already exist" >&2
+    return 1
+  fi
+  mkdir -p "$agent_dir" "$cwd" || return 1
+  if ! render_config "$agent_dir/config.yml"; then
+    rmdir "$cwd" "$agent_dir" 2>/dev/null || true
+    return 1
+  fi
+}
+
+render_manifest() {
+  local agent_dir=$1 cwd=$2 worktree=$3 binary=$4 model=$5 extension=$6
+  OMP_AGENT_DIR=$agent_dir OMP_CWD=$cwd OMP_WORKTREE=$worktree \
+    OMP_BINARY=$binary OMP_MODEL=$model OMP_EXTENSION=$extension \
+    OMP_TOOLS=$OMP_TOOLS OMP_RETRY_JSON=$OMP_RETRY_JSON node <<'NODE'
+const manifest = {
+  unsetEnvironment: [
+    "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "GROK_AGENT",
+    "FM_PI_HARNESS", "CURSOR_AGENT", "CURSOR_INVOKED_AS", "TRACEPARENT",
+  ],
+  environment: {
+    FM_OMP_HARNESS: "1",
+    PI_CODING_AGENT_DIR: process.env.OMP_AGENT_DIR,
+  },
+  argv: [
+    process.env.OMP_BINARY,
+    "--cwd", process.env.OMP_CWD,
+    "--add-dir", process.env.OMP_WORKTREE,
+    "--approval-mode", "yolo",
+    "--no-title",
+    "--no-extensions",
+    "--no-skills",
+    "--tools", process.env.OMP_TOOLS,
+    "--model", process.env.OMP_MODEL,
+    "-e", process.env.OMP_EXTENSION,
+  ],
+  effectiveRetry: JSON.parse(process.env.OMP_RETRY_JSON),
+};
+process.stdout.write(JSON.stringify(manifest));
+NODE
+}
+
+render_launch_template() {
+  render_manifest __OMPAGENTDIR__ __OMPCWD__ __WORKTREE__ __OMPBIN__ __OMPMODEL__ __OMPEXT__ \
+    | node -e '
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
+const words = ["env"];
+for (const name of manifest.unsetEnvironment) words.push("-u", name);
+for (const [name, value] of Object.entries(manifest.environment)) words.push(`${name}=${value}`);
+words.push(...manifest.argv);
+process.stdout.write(words.join(" ") + " \"$(__OPINPUT__ encode launch-brief < __BRIEF__)\"");
+'
 }
 
 render_extension() {
@@ -67,9 +128,17 @@ EOF
 }
 
 case "${1:-}" in
-  config)
-    [ "$#" -eq 2 ] || usage
-    render_config "$2"
+  prepare)
+    [ "$#" -eq 3 ] || usage
+    prepare_isolated_settings "$2" "$3"
+    ;;
+  manifest)
+    [ "$#" -eq 7 ] || usage
+    render_manifest "$2" "$3" "$4" "$5" "$6" "$7"
+    ;;
+  launch-template)
+    [ "$#" -eq 1 ] || usage
+    render_launch_template
     ;;
   extension)
     [ "$#" -eq 7 ] || usage

@@ -339,51 +339,49 @@ test_omp_version_probe_is_hard_bounded() {
 # --- launch shape ----------------------------------------------------------
 
 test_omp_launch_argv_is_contained() {
-  local rec id=omp-argv out launch tmux_log tools ext_flags
-  rec=$(make_omp_case omp-argv claude "$id")
-  read_case_record "$rec"
-  tmux_log="$CASE_DIR/tmux-sends"
-  : > "$tmux_log"
-  out=$(FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "omp spawn should succeed: $out"
-  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
-  [ -n "$launch" ] || fail "no omp launch command was delivered to the pane"
-
-  # One contiguous assertion pins the whole head of the command line: the
-  # foreign markers are cleared, the firstmate-owned marker replaces them, the
-  # resolved absolute binary follows, and the FIRST argument after it is a flag
-  # rather than one of omp's subcommands (auth, token, usage, setup, update,
-  # plugin, marketplace, acp), which is what keeps those surfaces unreachable.
-  assert_contains "$launch" \
-    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
-    "omp launch argv is not the contained shape"
-
-  # The allowlist is exact, so a later widening has to be deliberate.
-  tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')
-  [ "$tools" = "read,write,edit,glob,grep" ] \
-    || fail "omp tool allowlist drifted, got '$tools'"
-  case ",$tools," in
-    *,task,*) fail "omp allowlist must exclude the task subagent tool" ;;
-    *,browser,*) fail "omp allowlist must exclude the browser tool" ;;
-    *,computer,*) fail "omp allowlist must exclude the computer tool" ;;
-    *,web_search,*) fail "omp allowlist must exclude web search" ;;
-    *,mcp,*) fail "omp allowlist must exclude MCP tooling" ;;
-    *,bash,*) fail "omp allowlist must exclude command execution" ;;
-  esac
-
-  # Exactly one extension is loaded, and it is the firstmate-owned state file.
-  # grep -c counts LINES, so the occurrences are counted explicitly.
-  ext_flags=$(printf '%s\n' "$launch" | grep -o -- ' -e ' | wc -l | tr -d '[:space:]')
-  [ "$ext_flags" = 1 ] || fail "omp launch must load exactly one extension, found $ext_flags"
-  assert_present "$HOME_DIR/state/$id.omp-ext.ts" "omp spawn did not write the state-owned extension"
-
-  # A positional brief, and no effort axis reaching the launch. The model axis is
-  # asserted in full by its own case below.
-  assert_contains "$launch" "encode launch-brief" "omp launch missing the positional brief"
-  assert_not_contains "$launch" "--thinking" "omp launch must not select an effort level"
-  assert_not_contains "$launch" "--reasoning-effort" "omp launch must not select an effort level"
-  pass "omp launch argv is contained: markers cleared, surface reduced, one extension, no delegation or network tooling"
+  local manifest template
+  manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
+    /isolated/agent /isolated/cwd /task/worktree /opt/omp "$OMP_MODEL" /state/task.omp-ext.ts) \
+    || fail "candidate OMP manifest did not render"
+  template=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template) \
+    || fail "candidate OMP launch template did not render"
+  MANIFEST=$manifest TEMPLATE=$template node <<'NODE' \
+    || fail "candidate OMP manifest or launch template widened its containment boundary"
+const manifest = JSON.parse(process.env.MANIFEST);
+const expectedUnset = [
+  "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "GROK_AGENT",
+  "FM_PI_HARNESS", "CURSOR_AGENT", "CURSOR_INVOKED_AS", "TRACEPARENT",
+];
+const expectedArgv = [
+  "/opt/omp", "--cwd", "/isolated/cwd", "--add-dir", "/task/worktree",
+  "--approval-mode", "yolo", "--no-title", "--no-extensions", "--no-skills",
+  "--tools", "read,write,edit,glob,grep", "--model", "anthropic/claude-sonnet-4-5",
+  "-e", "/state/task.omp-ext.ts",
+];
+if (JSON.stringify(manifest.unsetEnvironment) !== JSON.stringify(expectedUnset)) process.exit(1);
+if (manifest.environment.FM_OMP_HARNESS !== "1") process.exit(1);
+if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit(1);
+if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
+const tools = manifest.argv[manifest.argv.indexOf("--tools") + 1].split(",");
+for (const forbidden of ["task", "browser", "computer", "web_search", "mcp", "bash"]) {
+  if (tools.includes(forbidden)) process.exit(1);
+}
+const templateManifest = {
+  ...manifest,
+  environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
+  argv: [
+    "__OMPBIN__", "--cwd", "__OMPCWD__", "--add-dir", "__WORKTREE__",
+    ...manifest.argv.slice(5, 13), "__OMPMODEL__", "-e", "__OMPEXT__",
+  ],
+};
+const words = ["env"];
+for (const name of templateManifest.unsetEnvironment) words.push("-u", name);
+for (const [name, value] of Object.entries(templateManifest.environment)) words.push(`${name}=${value}`);
+words.push(...templateManifest.argv);
+const expectedTemplate = words.join(" ") + ' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"';
+if (process.env.TEMPLATE !== expectedTemplate) process.exit(1);
+NODE
+  pass "OMP candidate renderer emits one contained argv and tool boundary"
 }
 
 test_omp_extension_executes_with_encoded_supported_paths() {
@@ -546,23 +544,59 @@ test_omp_forces_trace_off_and_clears_ambient_carrier() {
 }
 
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
-  local state id gen config ext record turnend
+  local state id gen agent_dir isolated_cwd ambient_agent ambient_project ambient_overlay manifest ext record turnend
   state="$TMP_ROOT/candidate-artifacts/state"
   id=omp-candidate-artifacts
-  config="$state/$id.omp-config.json"
+  agent_dir="$state/isolated-agent"
+  isolated_cwd="$state/isolated-cwd"
+  ambient_agent="$state/ambient-agent"
+  ambient_project="$state/ambient-project"
+  ambient_overlay="$state/ambient-overlay.json"
   ext="$state/$id.omp-ext.ts"
   record="$state/$id.busy-state"
   turnend="$state/$id.turn-ended"
   mkdir -p "$state"
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") || fail "could not arm the candidate artifact fixture"
-  "$ROOT/bin/fm-omp-candidate-artifacts.sh" config "$config" \
-    || fail "could not render the candidate OMP config"
-  node - "$config" <<'NODE' || fail "the candidate OMP config does not disable every fallback"
+  mkdir -p "$ambient_agent" "$ambient_project/.omp"
+  printf '%s\n' '{"retry":{"modelFallback":true,"usageAwareFallback":true,"fallbackChains":{"ambient":["provider/model"]}}}' > "$ambient_agent/config.yml"
+  printf '%s\n' '{"retry":{"fallbackChains":{"project":["provider/model"]}}}' > "$ambient_project/.omp/config.yml"
+  printf '%s\n' '{"retry":{"fallbackChains":{"overlay":["provider/model"]}}}' > "$ambient_overlay"
+  "$ROOT/bin/fm-omp-candidate-artifacts.sh" prepare "$agent_dir" "$isolated_cwd" \
+    || fail "could not prepare isolated candidate OMP settings"
+  manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
+    "$agent_dir" "$isolated_cwd" /task/worktree /opt/omp "$OMP_MODEL" "$ext") \
+    || fail "could not render the candidate OMP manifest"
+  MANIFEST=$manifest AMBIENT_AGENT=$ambient_agent AMBIENT_PROJECT=$ambient_project \
+    PI_CONFIG_FILES=$ambient_overlay node <<'NODE' \
+    || fail "ambient OMP fallback settings survived the isolated launch boundary"
 const fs = require("node:fs");
-const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const retry = value.retry;
+const path = require("node:path");
+const manifest = JSON.parse(process.env.MANIFEST);
+if (!manifest.unsetEnvironment.includes("PI_CONFIG_FILES")) process.exit(1);
+if (manifest.environment.PI_CODING_AGENT_DIR === process.env.AMBIENT_AGENT) process.exit(1);
+const cwdIndex = manifest.argv.indexOf("--cwd");
+const cwd = manifest.argv[cwdIndex + 1];
+if (cwd === process.env.AMBIENT_PROJECT) process.exit(1);
+const merge = (base, overlay) => {
+  const result = { ...base };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value && typeof value === "object" && !Array.isArray(value)
+      && result[key] && typeof result[key] === "object" && !Array.isArray(result[key])) {
+      result[key] = merge(result[key], value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+};
+const global = JSON.parse(fs.readFileSync(path.join(manifest.environment.PI_CODING_AGENT_DIR, "config.yml"), "utf8"));
+const projectPath = path.join(cwd, ".omp", "config.yml");
+const project = fs.existsSync(projectPath) ? JSON.parse(fs.readFileSync(projectPath, "utf8")) : {};
+const effective = merge(global, project);
+const retry = effective.retry;
 if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
 if (!retry.fallbackChains || Array.isArray(retry.fallbackChains) || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
+if (JSON.stringify(retry) !== JSON.stringify(manifest.effectiveRetry)) process.exit(1);
 NODE
   "$ROOT/bin/fm-omp-candidate-artifacts.sh" extension "$ext" \
     "$ROOT/bin/fm-busy-event.sh" "$state" "$id" "$gen" "$turnend" \
@@ -590,7 +624,7 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 NODE
   assert_grep 'state=idle source=omp-ext event=agent-end' "$record" \
     "the final OMP settle event did not record idle"
-  pass "OMP candidate artifacts disable fallbacks and preserve busy across willContinue"
+  pass "OMP candidate isolation clears effective fallbacks and preserves busy across willContinue"
 }
 
 # --- refusal ordering probes ------------------------------------------------
@@ -1270,6 +1304,7 @@ test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_version_probe_is_hard_bounded
+test_omp_launch_argv_is_contained
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix

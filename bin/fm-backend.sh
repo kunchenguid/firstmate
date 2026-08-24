@@ -547,11 +547,13 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         1) allocation=$(fm_backend_meta_exact_value "$meta" orca_allocation) || allocation=invalid ;;
         *) allocation=invalid ;;
       esac
-      [ -n "$worktree_id" ] || {
-        echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
-        return 1
-      }
-      if [ "$allocation" = worktree-only ]; then
+      if [ "$allocation" = terminal-only ]; then
+        if [ "$validation_scope" != cleanup ] || [ -z "$terminal" ] \
+          || [ -n "$worktree" ] || [ -n "$worktree_id" ]; then
+          echo "REFUSED: terminal-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
+          return 1
+        fi
+      elif [ "$allocation" = worktree-only ]; then
         if [ "$validation_scope" != cleanup ] || [ -z "$worktree" ]; then
           echo "REFUSED: worktree-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
           return 1
@@ -568,11 +570,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
       fi
+      if [ "$allocation" != terminal-only ] && [ -z "$worktree_id" ]; then
+        echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
+        return 1
+      fi
       if [ "$window" != "fm-$id" ] \
         || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || { [ "$allocation" = worktree-id-only ] \
           && ! fm_backend_orca_cleanup_id_valid "$worktree_id"; } \
         || { [ "$allocation" != worktree-id-only ] \
+          && [ "$allocation" != terminal-only ] \
           && ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; }; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1

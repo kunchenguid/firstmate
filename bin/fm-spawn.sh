@@ -163,7 +163,9 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts
-#     __OMPCONFIG__ absolute path to state/<task-id>.omp-config.json
+#     __OMPAGENTDIR__ isolated OMP agent directory under the task temp root
+#     __OMPCWD__   isolated OMP project-settings directory under the task temp root
+#     __OMPMODEL__ quoted explicit provider/model selected for the OMP candidate
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -184,7 +186,8 @@
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # omp (Oh My Pi) is dormant. Every runnable selection is refused until ATX-2170
 # records live proof that firstmate can interrupt, exit, and relaunch it.
-# bin/fm-omp-candidate-artifacts.sh owns the candidate-only config and extension.
+# bin/fm-omp-candidate-artifacts.sh owns the candidate-only launch manifest,
+# isolated config, and extension.
 # Its executable must report exactly omp/17.2.9 through one portable,
 # hard-bounded five-second --version probe before launch preparation continues.
 # omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
@@ -193,8 +196,10 @@
 # byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
 # --provider flag. This script does not inspect where a caller obtained that
 # value and claims nothing about it; it reads no ambient omp default. Its
-# isolated per-launch overlay disables model fallback, usage-aware fallback,
-# and every fallback chain. On a fresh spawn, an absent, unqualified, or malformed value
+# isolated per-launch agent directory and clean settings cwd exclude every
+# lower-priority settings layer; their config disables model fallback,
+# usage-aware fallback, and every fallback chain. On a fresh spawn, an absent,
+# unqualified, or malformed value
 # refuses before the watcher guard and before any lock, endpoint, worktree,
 # state, config, registry, metadata, or extension mutation. On a relaunch, the
 # task lifecycle and metadata locks first bind one stable record; the same gate
@@ -211,10 +216,12 @@
 # config mutation.
 # If an Orca allocation cannot be released during aborted spawn cleanup, this
 # script atomically publishes a cleanup-only recovery record without replacing
-# an existing task record. A known worktree path sets
+# an existing task record. A failed terminal close after successful worktree
+# removal omits orca_worktree_id=, records worktree= empty, retains terminal=,
+# and sets orca_allocation=terminal-only. A known worktree path sets
 # orca_allocation=worktree-only; an ID-only Orca response records worktree=
-# empty and sets orca_allocation=worktree-id-only. Either shape retains
-# terminal= only when cleanup must be able to retry closing that handle. Only
+# empty and sets orca_allocation=worktree-id-only. The worktree recovery shapes
+# retain terminal= only when cleanup must also retry closing that handle. Only
 # teardown cleanup accepts these records.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
@@ -1139,11 +1146,16 @@ spawn_render_orca_recovery_meta() {
   echo "model=${MODEL:-default}" || return 1
   echo "effort=${EFFORT:-default}" || return 1
   echo "backend=orca" || return 1
-  echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
+  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
+  fi
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     echo "terminal=$ORCA_TERMINAL" || return 1
   fi
-  if [ -z "${WT:-}" ]; then
+  if [ -z "${ORCA_WORKTREE_ID:-}" ]; then
+    [ -n "${ORCA_TERMINAL:-}" ] || return 1
+    echo "orca_allocation=terminal-only" || return 1
+  elif [ -z "${WT:-}" ]; then
     echo "orca_allocation=worktree-id-only" || return 1
   else
     echo "orca_allocation=worktree-only" || return 1
@@ -1227,10 +1239,14 @@ spawn_abort_cleanup() {
       fi
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        if ! spawn_publish_orca_recovery_meta; then
-          echo "error: could not publish recovery metadata for stranded Orca worktree $ORCA_WORKTREE_ID" >&2
-        fi
+      if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        ORCA_WORKTREE_ID=
+        WT=
+      fi
+    fi
+    if [ -n "${ORCA_TERMINAL:-}" ] || [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+      if ! spawn_publish_orca_recovery_meta; then
+        echo "error: could not publish recovery metadata for stranded Orca allocation ${ORCA_WORKTREE_ID:-$ORCA_TERMINAL}" >&2
       fi
     fi
   fi
@@ -1668,9 +1684,11 @@ launch_template() {
     # whole launch rather than narrowing silently. The portable suite pins this
     # exact string; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check
     # against the installed pinned binary.
-    # __OMPCONFIG__ is the isolated fallback-disabling overlay. __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
-    # above refuses the spawn unless this exact launch was given a fully qualified
-    # provider/model, so omp never selects a provider for itself. No
+    # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
+    # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
+    # --add-dir. __OMPMODEL__ appears exactly once and always renders because
+    # require_omp_launch_model above refuses unless this exact launch was given
+    # a fully qualified provider/model, so omp never selects a provider for itself. No
     # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
     # pilot pins it under its own approval.
     # The env -u prefix clears the foreign primary markers whose detection
@@ -1682,7 +1700,7 @@ launch_template() {
     # pair is here: cursor-agent does not clear its own markers, so an omp
     # worker launched from a cursor primary would otherwise inherit them and
     # self-report cursor.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --config __OMPCONFIG__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template ;;
     *) return 1 ;;
   esac
 }
@@ -2987,7 +3005,9 @@ export default function (pi: any) {
 EOF
       ;;
     omp)
-      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" config "$STATE/$ID.omp-config.json" || exit 1
+      OMP_AGENT_DIR="$TASK_TMP/omp-agent"
+      OMP_CWD="$TASK_TMP/omp-cwd"
+      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" prepare "$OMP_AGENT_DIR" "$OMP_CWD" || exit 1
       "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" extension \
         "$STATE/$ID.omp-ext.ts" "$FM_ROOT/bin/fm-busy-event.sh" \
         "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" || exit 1
@@ -3280,7 +3300,9 @@ sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
-sq_ompconfig=$(shell_quote "$STATE/$ID.omp-config.json")
+sq_ompagentdir=$(shell_quote "${OMP_AGENT_DIR:-}")
+sq_ompcwd=$(shell_quote "${OMP_CWD:-}")
+sq_ompmodel=$(shell_quote "$MODEL")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -3293,7 +3315,9 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
-LAUNCH=${LAUNCH//__OMPCONFIG__/$sq_ompconfig}
+LAUNCH=${LAUNCH//__OMPAGENTDIR__/$sq_ompagentdir}
+LAUNCH=${LAUNCH//__OMPCWD__/$sq_ompcwd}
+LAUNCH=${LAUNCH//__OMPMODEL__/$sq_ompmodel}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

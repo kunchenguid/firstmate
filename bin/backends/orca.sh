@@ -286,7 +286,7 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
 
 fm_backend_orca_close_terminal() {  # <terminal-id>
   fm_backend_orca_tool_check || return 1
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1
+  fm_backend_orca_run_json orca terminal close --terminal "$1" --json
 }
 
 fm_backend_orca_kill() {  # <terminal-id>
