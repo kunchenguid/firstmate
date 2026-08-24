@@ -213,7 +213,7 @@ validate_consult_file() {
 }
 
 scaffold_consult() {
-  local id=$1 dir brief create_error staged
+  local id=$1 dir brief create_error staged publish_error
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
@@ -283,10 +283,17 @@ EOF
     rm -f -- "$staged"
     die "could not write the consultation brief: $(display_name "$brief")"
   fi
-  if ! mv -- "$staged" "$brief"; then
+  # Publish by linking, not moving: creating a link fails when the destination
+  # already exists, so a brief another writer created after the absence check
+  # above survives. A move would replace it and still report success.
+  if ! publish_error=$(ln -- "$staged" "$brief" 2>&1); then
     rm -f -- "$staged"
-    die "could not publish the consultation brief: $(display_name "$brief")"
+    if [ -e "$brief" ] || [ -L "$brief" ]; then
+      die "consultation brief already exists: $brief"
+    fi
+    die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
   fi
+  rm -f -- "$staged"
   printf 'scaffolded: %s (replace every placeholder)\n' "$brief"
 }
 

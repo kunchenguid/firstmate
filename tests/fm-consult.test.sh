@@ -104,6 +104,36 @@ test_scaffold_publishes_nothing_when_the_write_fails() {
   pass "fm-consult: a failed brief write publishes nothing and stays retryable"
 }
 
+# The absence check and the publish are separate steps, so a brief can appear in
+# between. Publishing must still refuse rather than replace it. The mktemp stand-in
+# makes that interval deterministic: it creates the staged file and the rival brief
+# together, exactly as a second writer that wins the race would leave them.
+test_scaffold_never_replaces_a_brief_written_during_staging() {
+  local home shim brief out rc leftovers
+  home=$(new_home publish-race)
+  shim="$TMP_ROOT/publish-race-shim"
+  mkdir -p "$shim"
+  cat > "$shim/mktemp" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+template=${*: -1}
+dir=${template%/*}
+staged="$dir/.consult-brief.rival"
+: > "$staged"
+printf 'rival brief\n' > "$dir/consult-brief.md"
+printf '%s\n' "$staged"
+SHIM
+  chmod +x "$shim/mktemp"
+  brief="$home/data/raced/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold raced 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "scaffold reported success over a brief written during staging"
+  assert_contains "$out" "already exists" "the racing refusal was not explicit"
+  [ "$(cat "$brief")" = "rival brief" ] || fail "scaffold replaced a brief written during staging"
+  leftovers=$(find "$home/data/raced" -mindepth 1 ! -name consult-brief.md 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "the refused publish left staged files behind (got: $out)"
+  pass "fm-consult: scaffold refuses to replace a brief that appears while it stages"
+}
+
 test_receive_refuses_missing_and_empty_reports() {
   local home out rc report
   home=$(new_home receive-refusal)
@@ -891,6 +921,7 @@ test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
 test_scaffold_publishes_nothing_when_the_write_fails
+test_scaffold_never_replaces_a_brief_written_during_staging
 test_receive_refuses_missing_and_empty_reports
 test_path_traversing_id_is_refused
 test_receive_emits_untrusted_input_banner_and_summary
