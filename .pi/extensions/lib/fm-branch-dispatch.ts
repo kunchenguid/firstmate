@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+
 // Shared wake-dispatch handshake between the Pi watcher extension (the
 // dispatcher) and the supervision-branch extension (the handler), carried over
 // pi.events so neither extension imports the other.
@@ -13,6 +15,56 @@
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
+
+export function scopeForUnreadWake(state: string, heartbeat: boolean): { eligible: boolean; projects: string[] } {
+  let queue = "";
+  try {
+    queue = readFileSync(`${state}/.wake-queue`, "utf8");
+  } catch {
+    return { eligible: false, projects: [] };
+  }
+
+  const projects = new Set<string>();
+  const metadata = new Map<string, string>();
+  try {
+    for (const name of readdirSync(state)) {
+      if (!name.endsWith(".meta")) continue;
+      const task = name.slice(0, -5);
+      const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
+      const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
+      const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
+      if (project) {
+        metadata.set(task, project);
+        if (window) metadata.set(window, project);
+      }
+    }
+  } catch {
+    return { eligible: false, projects: [] };
+  }
+
+  let found = false;
+  for (const line of queue.split(/\r?\n/)) {
+    if (!line) continue;
+    const fields = line.split("\t");
+    if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) return { eligible: false, projects: [] };
+    const kind = fields[2];
+    const key = fields[3];
+    found = true;
+    if (kind === "heartbeat") continue;
+    let project = "";
+    if (kind === "signal") {
+      const task = key.replace(/\.(?:status|turn-ended)$/, "");
+      project = metadata.get(task) ?? "";
+    } else if (kind === "stale") {
+      project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
+    } else {
+      return { eligible: false, projects: [] };
+    }
+    if (!project) return { eligible: false, projects: [] };
+    projects.add(project);
+  }
+  return { eligible: found && (heartbeat || projects.size > 0), projects: [...projects] };
+}
 
 export interface BranchDispatchOffer {
   /** The watcher's actionable close message (the wake reason line(s)). */

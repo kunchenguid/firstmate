@@ -59,6 +59,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
@@ -589,6 +590,12 @@ ${context.command}
         const session = await ensureBranch(acceptedGeneration);
         await flushMirror(session, acceptedGeneration);
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+        const heartbeat = /^heartbeat($|:)/.test(message);
+        if (!scopeForUnreadWake(state, heartbeat).eligible) {
+          throw new Error("unread wake queue now contains a main-owned row");
+        }
+        // A row can still arrive between this re-check and the model starting
+        // the drain; that residual is accepted by the confused-agent-grade boundary.
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );

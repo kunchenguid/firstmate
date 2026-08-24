@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -19,6 +19,7 @@ import { Type } from "typebox";
 import {
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -296,59 +297,9 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function scopeForUnreadWake(heartbeat: boolean): { eligible: boolean; projects: string[] } {
-    let queue = "";
-    try {
-      queue = readFileSync(`${state}/.wake-queue`, "utf8");
-    } catch {
-      return { eligible: false, projects: [] };
-    }
-
-    const projects = new Set<string>();
-    const metadata = new Map<string, string>();
-    try {
-      for (const name of readdirSync(state)) {
-        if (!name.endsWith(".meta")) continue;
-        const task = name.slice(0, -5);
-        const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
-        const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
-        const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
-        if (project) {
-          metadata.set(task, project);
-          if (window) metadata.set(window, project);
-        }
-      }
-    } catch {
-      return { eligible: false, projects: [] };
-    }
-
-    let found = false;
-    for (const line of queue.split(/\r?\n/)) {
-      if (!line) continue;
-      const fields = line.split("\t");
-      if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) return { eligible: false, projects: [] };
-      const kind = fields[2];
-      const key = fields[3];
-      found = true;
-      if (kind === "heartbeat") continue;
-      let project = "";
-      if (kind === "signal") {
-        const task = key.replace(/\.(?:status|turn-ended)$/, "");
-        project = metadata.get(task) ?? "";
-      } else if (kind === "stale") {
-        project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
-      } else {
-        return { eligible: false, projects: [] };
-      }
-      if (!project) return { eligible: false, projects: [] };
-      projects.add(project);
-    }
-    return { eligible: found && (heartbeat || projects.size > 0), projects: [...projects] };
-  }
-
   function offerWakeToBranch(message: string): boolean {
     const heartbeat = /^heartbeat($|:)/.test(message);
-    const scope = scopeForUnreadWake(heartbeat);
+    const scope = scopeForUnreadWake(state, heartbeat);
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, scope.eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted;

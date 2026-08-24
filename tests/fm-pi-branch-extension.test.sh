@@ -171,6 +171,7 @@ const approvedProject = `${home}/projects/approved`;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
 mkdirSync(approvedProject, { recursive: true });
+writeFileSync(`${home}/state/branch-driver.meta`, `project=${approvedProject}\nwindow=fm-branch-driver\n`);
 // Supervision is default-on for every task: no captain grant file gates it
 // any more.
 // The branch acts only for the session that owns the fleet lock; drivers own
@@ -231,6 +232,12 @@ function makeOffer(message, projects = [approvedProject], heartbeat = false, eli
 }
 function dispatch(message, projects, heartbeat, eligible) {
   const offer = makeOffer(message, projects, heartbeat, eligible);
+  if (offer.eligible) {
+    const row = offer.heartbeat
+      ? "1\t1\theartbeat\theartbeat\theartbeat\n"
+      : `1\t1\tsignal\tbranch-driver.status\t${message}\n`;
+    writeFileSync(`${home}/state/.wake-queue`, row);
+  }
   bus.emit("fm-branch-supervision:dispatch", offer);
   return offer;
 }
@@ -492,6 +499,7 @@ if (!dispatch("signal: default-on task wake").accepted) {
 if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("default-on activation did not write the diagnostic marker");
 }
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "default-on task wake prompt");
 
 // The real watcher emits a bare heartbeat only after its cheap bash scan has
 // flagged a fleet pass as possibly captain-relevant. The branch accepts that
@@ -601,6 +609,44 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch fallback must return wakes to main: $out"
   pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch falls back to main"
+}
+
+test_branch_predrain_recheck_defers_new_main_owned_row() {
+  local repo home out status
+  repo="$TMP_ROOT/predrain-recheck-root"
+  home="$TMP_ROOT/predrain-recheck-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
+const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+import { appendFileSync, readFileSync } from "node:fs";
+
+fire("session_start", {});
+const offer = dispatch("heartbeat", [], true, true);
+if (!offer.accepted) throw new Error("eligible heartbeat offer was not accepted");
+appendFileSync(`${home}/state/.wake-queue`, "2\t2\tcheck\tx-inbox\tcheck: pending x mention\n");
+for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error("branch prompted after a main-owned row arrived before drain");
+}
+if (mainUserMessages.length !== 1 || !String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
+  throw new Error(`mixed queue did not fall back to main: ${JSON.stringify(mainUserMessages)}`);
+}
+const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (!queue.includes("\theartbeat\t") || !queue.includes("\tcheck\t")) {
+  throw new Error(`pre-drain fallback mutated the queued set: ${queue}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "pre-drain eligibility re-check must defer the whole mixed queue to main: $out"
+  pass "pre-drain eligibility re-check defers a newly main-owned row"
 }
 
 test_branch_mirror_filters_order_and_cursor() {
@@ -960,6 +1006,7 @@ test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home }; })()`);
 const { fire, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // Instance A collects dialog at turn_end while no branch exists yet (nothing
@@ -1002,6 +1049,7 @@ const replacement = await import(`${pathToFileURL(process.env.PLUGIN).href}?rebi
 replacement.default(replacementPi);
 for (const handler of replacementPiHandlers.get("session_start") ?? []) handler({}, ctx);
 for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: after rebind\n");
 const offer = {
   message: "signal: after rebind",
   projects: [`${home}/projects/approved`],
@@ -1034,6 +1082,7 @@ EOF
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
+test_branch_predrain_recheck_defers_new_main_owned_row
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_replacement_activation_cleans_leases_and_retries_failure
