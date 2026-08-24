@@ -220,7 +220,7 @@ SH
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \
     FM_FAKE_GIT_FETCH_SLEEP=0.4 \
-    FM_INHERITABLE_CONFIG= \
+    FM_INHERITABLE_CONFIG='' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
