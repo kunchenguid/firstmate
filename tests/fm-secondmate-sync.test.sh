@@ -51,7 +51,7 @@ new_world() {
   git init -q -b main "$w/main"
   # Mirror the real repo: the gitignored operational dirs never dirty a worktree,
   # so a secondmate home's data/state/projects can never block its fast-forward.
-  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\n' > "$w/main/.gitignore"
+  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\nscratchpad*\n' > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
@@ -186,6 +186,25 @@ test_ff_dirty() {
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty edit was discarded"
   pass "T3 dirty: an uncommitted home is skipped, its edit preserved"
+}
+
+# --- scratchpad2 must not trip the dirty-home sync guard ----------------------
+test_scratchpad2_does_not_dirty_home() {
+  local w c1 base
+  w=$(new_world scratchpad2-clean)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  mkdir -p "$w/sm/scratchpad2"
+  printf 'notes\n' > "$w/sm/scratchpad2/notes.txt"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS' (scratchpad2/ must not dirty the home)"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "home did not fast-forward past an ignored scratchpad2/ directory"
+  grep -q notes "$w/sm/scratchpad2/notes.txt" || fail "scratchpad2 contents were discarded"
+  pass "scratchpad2/ does not mark a secondmate home dirty for the sync guard"
 }
 
 # --- T4: diverged - a home with its own commit is skipped, commit preserved --
@@ -872,6 +891,7 @@ test_seed_marker_does_not_mask_real_dirt() {
 test_ff_updated
 test_ff_current
 test_ff_dirty
+test_scratchpad2_does_not_dirty_home
 test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
