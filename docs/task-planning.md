@@ -1,6 +1,7 @@
 # Firstmate task planning
 
 Firstmate's planning layer is `.agents/skills/task-planning/SKILL.md`.
+For non-Simple requests, `.agents/skills/task-grill/SKILL.md` runs requirements interrogation ahead of it; its `grill.md` artifact lives in the same feature directory.
 
 It is a Firstmate-native adaptation of three ideas from Matt Pocock's engineering skills:
 
