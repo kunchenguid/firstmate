@@ -134,8 +134,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   A bare project name and a projects/<name> argument resolve against this
-#   home's projects dir before a relative path in the caller's cwd is considered.
+#   A bare project name and a projects/<name> argument resolve only against this
+#   home's projects dir. The explicit relative paths . and .. and every other
+#   path containing a slash retain the caller-supplied path semantics.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1485,21 +1486,12 @@ resolved_existing_dir() {
 }
 
 resolve_project_dir_arg() {
-  local path=$1 candidate
+  local path=$1
   case "$path" in
     .|..) printf '%s\n' "$path" ;;
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     */*) printf '%s\n' "$path" ;;
-    *)
-      candidate="$PROJECTS/$path"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-      elif [ -d "$path" ]; then
-        printf '%s\n' "$path"
-      else
-        printf '%s\n' "$candidate"
-      fi
-      ;;
+    *) printf '%s/%s\n' "$PROJECTS" "$path" ;;
   esac
 }
 

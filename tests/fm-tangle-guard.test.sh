@@ -297,6 +297,41 @@ test_spawn_bare_project_name_ignores_cwd_shadow() {
   pass "fm-spawn: the home registry project wins over a caller cwd shadow"
 }
 
+test_spawn_missing_bare_project_refuses_cwd_shadow() {
+  local home caller shadow wt fakebin out status meta
+  home="$TMP_ROOT/missing-bare-home"
+  caller="$TMP_ROOT/missing-bare-caller"
+  shadow="$caller/analytics"
+  wt="$TMP_ROOT/missing-bare-shadow-wt"
+  mkdir -p "$home/projects" "$caller"
+  make_repo "$shadow" >/dev/null
+  git -C "$shadow" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/missing-bare-fake")
+
+  out=$(cd "$caller" && run_scout_spawn "$home" missing-home-bare-project analytics "$wt" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "missing home project should refuse a same-name cwd shadow"
+  assert_contains "$out" "project directory cannot be resolved: analytics" \
+    "missing home project did not report a clear resolution error"
+  assert_contains "$out" "tried '$home/projects/analytics'" \
+    "missing home project diagnostic did not name the home-scoped target"
+  meta="$home/state/missing-home-bare-project.meta"
+  assert_absent "$meta" "missing bare project captured the cwd shadow and published metadata"
+  assert_not_contains "$out" "spawned missing-home-bare-project" \
+    "missing bare project launched from the cwd shadow"
+  pass "fm-spawn: a missing bare project refuses a same-name cwd shadow"
+}
+
+test_spawn_project_argument_help() {
+  local out
+  out=$("$ROOT/bin/fm-spawn.sh" --help)
+  assert_contains "$out" "bare project name and a projects/<name> argument resolve only" \
+    "spawn help did not state that bare names are strictly home-scoped"
+  assert_contains "$out" "explicit relative paths . and .. and every other" \
+    "spawn help did not distinguish caller-supplied path arguments"
+  pass "fm-spawn: help distinguishes home-scoped names from explicit paths"
+}
+
 test_spawn_dot_project_args_remain_caller_relative() {
   local home project subdir dot_wt dotdot_wt fakebin out status meta
   home="$TMP_ROOT/relative-home"
@@ -423,5 +458,7 @@ test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_bare_project_name_reproduces_no_shadow_sequence
 test_spawn_bare_project_name_ignores_cwd_shadow
+test_spawn_missing_bare_project_refuses_cwd_shadow
+test_spawn_project_argument_help
 test_spawn_dot_project_args_remain_caller_relative
 test_spawn_tmux_window_construction
