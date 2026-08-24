@@ -232,6 +232,62 @@ test_status_one_still_dies_on_a_tampered_entry() {
   pass "fm-consult: single-id status still dies loudly on a tampered or invalid query"
 }
 
+test_status_all_refuses_a_symlinked_consult_directory() {
+  local home elsewhere out rc
+  home=$(new_home status-symlinked-dir)
+  elsewhere="$TMP_ROOT/status-symlinked-dir-elsewhere"
+  mkdir -p "$elsewhere"
+  printf 'brief kept elsewhere\n' > "$elsewhere/consult-brief.md"
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold gamma >/dev/null
+  ln -s "$elsewhere" "$home/data/beta"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  assert_contains "$out" "alpha: brief written; still awaiting a report" \
+    "listing dropped the entry before the symlinked directory"
+  assert_contains "$out" "beta: refused (" "listing silently skipped the symlinked consultation directory"
+  assert_contains "$out" "consultation directory must not be a symlink" \
+    "refused line did not name the symlinked-directory reason"
+  assert_contains "$out" "gamma: brief written; still awaiting a report" \
+    "listing dropped the entry after the symlinked directory"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a symlinked consultation directory"
+
+  out=$(run_consult "$home" status beta 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "single status accepted a symlinked consultation directory"
+  assert_contains "$out" "consultation directory must not be a symlink" \
+    "single status refusal did not name the symlinked directory"
+  assert_not_contains "$out" "beta: refused" "single status downgraded a direct query to a listing line"
+  pass "fm-consult: status refuses a symlinked consultation directory without dropping the rest"
+}
+
+test_status_all_refuses_a_hidden_entry_without_dropping_the_rest() {
+  local home out rc
+  home=$(new_home status-hidden)
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold zulu >/dev/null
+  mkdir -p "$home/data/.planted"
+  printf 'brief\n' > "$home/data/.planted/consult-brief.md"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  assert_contains "$out" "alpha: brief written; still awaiting a report" \
+    "listing dropped the entry before the hidden one"
+  assert_contains "$out" ".planted: refused (" "listing silently skipped a hidden consultation entry"
+  assert_contains "$out" "unsafe or absent consult id" "refused line did not name the id rule"
+  assert_contains "$out" "zulu: brief written; still awaiting a report" \
+    "listing dropped the entry after the hidden one"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite a hidden consultation entry"
+  pass "fm-consult: status refuses a hidden consultation entry without dropping the rest"
+}
+
+test_status_all_reports_no_consultations_for_an_empty_data_directory() {
+  local home out rc
+  home=$(new_home status-empty)
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "status on an empty data directory must succeed"
+  assert_contains "$out" "no consultations" "status did not report an empty data directory"
+  pass "fm-consult: status reports no consultations for an empty data directory"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -243,3 +299,6 @@ test_status_reports_awaiting_and_received_consultations
 test_status_all_lists_every_entry_and_refuses_tampered_ones
 test_status_all_refuses_an_invalid_id_directory_without_aborting
 test_status_one_still_dies_on_a_tampered_entry
+test_status_all_refuses_a_symlinked_consult_directory
+test_status_all_refuses_a_hidden_entry_without_dropping_the_rest
+test_status_all_reports_no_consultations_for_an_empty_data_directory

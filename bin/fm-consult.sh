@@ -16,9 +16,10 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
-# status with no id lists every consultation, printing a refused line with a
-# reason for any entry it cannot report safely, and exits nonzero once the whole
-# listing is printed. status with an id refuses such an entry immediately.
+# status with no id lists every consultation, including hidden and symlinked
+# entries, printing a refused line with a reason for any entry it cannot report
+# safely, and exits nonzero once the whole listing is printed. status with an id
+# refuses such an entry immediately.
 #
 # Transport is deliberately absent: this script makes no network calls and
 # assumes no browser, tunnel, API client, or advisor channel.
@@ -253,9 +254,8 @@ status_all() {
     printf '%s\n' 'no consultations'
     return 0
   }
-  for dir in "$DATA"/*; do
-    [ -e "$dir" ] || continue
-    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+  for dir in "$DATA"/* "$DATA"/.[!.]* "$DATA"/..?*; do
+    [ -d "$dir" ] || [ -L "$dir" ] || continue
     if [ -e "$dir/consult-brief.md" ] || [ -L "$dir/consult-brief.md" ] \
       || [ -e "$dir/consult-report.md" ] || [ -L "$dir/consult-report.md" ]; then
       id=${dir##*/}
