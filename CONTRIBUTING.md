@@ -44,7 +44,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
-  Test scripts and helpers in `tests/` are plain bash too.
+  Shell test scripts and helpers in `tests/` are plain bash; the canonical runner also supports its documented narrow Python test convention.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate run its no-argument full-analysis path.
   Its header and `--help` output own the exact local lint modes and flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
@@ -103,9 +103,8 @@ Local no-mistakes Test stays intent-targeted and must not wire `commands.test` t
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
-Shell behavior tests are direct `tests/<subject>.test.sh` files.
-The only supported Python discovery convention is a direct `tests/fm-<subject>.test.py` file; helper modules, packages, and `test_*.py` files are not discovered.
-Pass either supported test path to `bin/fm-test-run.sh` for canonical execution and timing output.
+The runner's `--help` output owns the supported shell and Python discovery conventions, including which Python files remain helpers rather than tests.
+Pass a supported test path to `bin/fm-test-run.sh` for canonical execution and timing output.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.

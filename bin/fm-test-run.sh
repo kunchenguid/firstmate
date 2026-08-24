@@ -12,6 +12,9 @@
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh|tests/fm-<name>.test.py [more tests...]
+# Supported discovery is limited to direct tests/*.test.sh and
+# tests/fm-*.test.py files. Nested files, Python helpers, packages, and
+# conventional test_*.py modules are not discovered.
 #
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
