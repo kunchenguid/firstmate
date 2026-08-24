@@ -14,7 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL,
-#       including a bundled short-option cluster that carries -R
+#       including a bundled short-option cluster that carries -R, while a
+#       bundled cluster carrying lowercase -r (gh/glab's --rebase, not --repo)
+#       is still forwarded on GitHub and GitLab
 #   (i) a GitLab MR URL resolves and merges through glab instead of erroring
 #   (j) glab is addressed by the host from the URL, never an assumed one
 #   (k) no merge method is imposed on GitLab, so the project's own one applies
@@ -532,6 +534,39 @@ test_bundled_repo_override_args_refuse_before_recording() {
   grep -qxF 'pr merge 8 --repo example/repo --squash -d' "$case_dir/gh-axi.log" \
     || fail "bundled-non-repo-cluster: a short flag carrying no repository override was not forwarded"
   pass "fm-pr-merge refuses a bundled short-option repo override and forwards other short flags"
+}
+
+# gh and glab both use lowercase -r for --rebase, not --repo (only tea's -r is
+# --repo), so the repo-override guard must not treat a bundled cluster like -ry
+# as a repository override on those two providers the way it rightly does on
+# Gitea (test_gitea_repo_override_args_refuse_before_recording).
+test_lowercase_r_short_flag_not_treated_as_repo_override() {
+  local case_dir rc merge_line
+  case_dir=$(make_case lowercase-r-github)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" dededededededededededededededededededede
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 -- -ry \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lowercase-r-github: fm-pr-merge refused a bundled -ry rebase flag"
+
+  grep -qxF 'pr merge 9 --repo example/repo --squash -ry' "$case_dir/gh-axi.log" \
+    || fail "lowercase-r-github: bundled -ry rebase flag was not forwarded to gh-axi"
+
+  case_dir=$(make_gitlab_case lowercase-r-gitlab)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" -- -ry \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lowercase-r-gitlab: fm-pr-merge should not refuse a bundled -ry rebase flag"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes -ry" ] \
+    || fail "lowercase-r-gitlab: bundled -ry rebase flag was not forwarded to glab: '$merge_line'"
+  pass "fm-pr-merge forwards a bundled lowercase -r short flag instead of rejecting it as a repo override on GitHub and GitLab"
 }
 
 test_explicit_merge_method_not_overridden() {
@@ -1112,6 +1147,7 @@ test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_bundled_repo_override_args_refuse_before_recording
+test_lowercase_r_short_flag_not_treated_as_repo_override
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi

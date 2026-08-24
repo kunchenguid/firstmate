@@ -102,6 +102,10 @@ caller_has_merge_style() {
 }
 
 reject_repo_overrides() {
+  local provider=$1
+  shift
+  local repo_letter=R
+  [ "$provider" != gitea ] || repo_letter=r
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -111,9 +115,11 @@ reject_repo_overrides() {
         ;;
       --*) ;;
       # A single-dash argument is a short-option cluster, which every supported
-      # CLI expands one character at a time, so -yR or -yr carries --repo
-      # exactly as a bare -R/-r does (gh/glab use -R, tea uses -r).
-      -*[Rr]*)
+      # CLI expands one character at a time, so -yR carries --repo exactly as a
+      # bare -R does for gh/glab, and -yr carries --repo exactly as a bare -r
+      # does for tea. gh/glab use -r for --rebase, so only tea's provider scope
+      # checks the lowercase letter.
+      -*"$repo_letter"*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
@@ -133,7 +139,7 @@ reject_head_overrides() {
   done
 }
 
-reject_repo_overrides "$@" || exit 1
+reject_repo_overrides "$PROVIDER" "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
