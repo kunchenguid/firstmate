@@ -141,6 +141,9 @@ export const Type = {
   Number(options) {
     return { type: "number", ...(options ?? {}) };
   },
+  Boolean(options) {
+    return { type: "boolean", ...(options ?? {}) };
+  },
   Optional(schema) {
     return { ...schema, optional: true };
   },
@@ -213,11 +216,12 @@ const pi = {
 function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
-function makeOffer(message, projects = [approvedProject], heartbeat = false) {
+function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
   const offer = {
     message,
     projects,
     heartbeat,
+    eligible,
     accepted: false,
     accept() {
       offer.accepted = true;
@@ -225,8 +229,8 @@ function makeOffer(message, projects = [approvedProject], heartbeat = false) {
   };
   return offer;
 }
-function dispatch(message, projects, heartbeat) {
-  const offer = makeOffer(message, projects, heartbeat);
+function dispatch(message, projects, heartbeat, eligible) {
+  const offer = makeOffer(message, projects, heartbeat, eligible);
   bus.emit("fm-branch-supervision:dispatch", offer);
   return offer;
 }
@@ -492,8 +496,11 @@ if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
 // The real watcher emits a bare heartbeat only after its cheap bash scan has
 // flagged a fleet pass as possibly captain-relevant. The branch accepts that
 // wake without a resolved project and performs the deeper review.
-if (!dispatch("heartbeat", [], true).accepted) {
-  throw new Error("heartbeat offer was refused");
+if (!dispatch("heartbeat", [], true, true).accepted) {
+  throw new Error("eligible heartbeat offer was refused");
+}
+if (dispatch("heartbeat", [], true, false).accepted) {
+  throw new Error("heartbeat with a main-owned queue row was accepted");
 }
 await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat wake prompt");
 
@@ -503,7 +510,7 @@ const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length 
 const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
 await heartbeatReport.execute(
   "heartbeat-noop",
-  { task: "fleet", verdict: "routine", summary: "fleet reviewed, nothing changed" },
+  { task: "fleet", verdict: "routine", summary: "fleet reviewed, nothing changed", silent: true },
   undefined,
   undefined,
   {},
@@ -518,6 +525,18 @@ const storedNoop = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
   .find((row) => row.task === "fleet" && row.summary === "fleet reviewed, nothing changed");
 if (!storedNoop || storedNoop.verdict !== "routine") {
   throw new Error("the silent no-op heartbeat outcome was not stored durably");
+}
+await heartbeatReport.execute(
+  "fleet-routine-action",
+  { task: "fleet", verdict: "routine", summary: "reconciled the backlog after completed work" },
+  undefined,
+  undefined,
+  {},
+);
+const fleetRoutineMerge = sentToMain[sentToMain.length - 1];
+if (fleetRoutineMerge.message.display !== true) throw new Error("a fleet routine action must render");
+if (!fleetRoutineMerge.message.content.startsWith("⛵ fleet: reconciled the backlog after completed work")) {
+  throw new Error(`fleet routine action note changed: ${fleetRoutineMerge.message.content}`);
 }
 await heartbeatReport.execute(
   "task-routine",
@@ -986,6 +1005,8 @@ for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, c
 const offer = {
   message: "signal: after rebind",
   projects: [`${home}/projects/approved`],
+  heartbeat: false,
+  eligible: true,
   accepted: false,
   accept() {
     offer.accepted = true;

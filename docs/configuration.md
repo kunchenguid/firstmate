@@ -38,13 +38,13 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 On a Pi primary, ordinary actionable fleet wakes that pass the unchanged watcher classifier, plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, are handled by a persistent in-process supervision branch that keeps the captain's conversation clean; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns the architecture.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
-A wake is delegated when every unread queue row is task-local, or when the watcher emits a bare fleet-wide `heartbeat` after that cheap scan; a genuinely no-op heartbeat is absorbed in bash and never reaches Pi, while every other fleet-wide or unresolvable wake and every watcher-failure alarm stays on the captain-facing main path.
+A wake is delegated only when every unread queue row is either a resolvable task-local signal or stale event or a heartbeat; a genuinely no-op heartbeat is absorbed in bash and never reaches Pi, while any drain containing another fleet-wide or unresolvable wake and every watcher-failure alarm stays on the captain-facing main path.
 Away mode still declines every wake offer, and a broken branch still falls back to today's wake-to-main path.
 The branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
 Homes on any other primary harness never load this feature and are entirely unaffected.
 Runtime state lives in `state/branch-outcomes.jsonl` with its `.branch-outcomes-cursor`, the persistent conversation under `state/branch-session/` with its `.branch-session` pointer and `.branch-mirror-cursor`, and per-task `state/.lease-<task>` files; `bin/fm-branch-outcome.sh` and `bin/fm-lease-lib.sh` own those formats.
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
-A routine fleet-wide outcome (`task=fleet`) is delivered silently with no rendered note, while every ordinary task-scoped routine outcome still appends a rendered, sailboat-prefixed note.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

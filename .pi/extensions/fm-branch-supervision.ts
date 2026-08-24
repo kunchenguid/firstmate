@@ -103,14 +103,8 @@ const scriptEnv = {
   FM_CONFIG_OVERRIDE: config,
 };
 
-// Supervision is default-on for every task: no captain grant file gates
-// eligibility any more. A fleet-wide heartbeat is eligible on its own
-// (docs/pi-supervision-branch.md "Heartbeat routing"); every other
-// fleet-wide or unresolvable wake (empty projects, not a heartbeat) still
-// keeps the wake-to-main path, exactly as watcher-failure alarms already do.
 function offerEligible(offer: BranchDispatchOffer): boolean {
-  if (offer.heartbeat) return true;
-  return Array.isArray(offer.projects) && offer.projects.length > 0;
+  return offer.eligible === true;
 }
 
 function afkActive(): boolean {
@@ -328,8 +322,9 @@ export default function (pi: ExtensionAPI) {
   // (queued as a follow-up while main is busy) - that follow-up turn is
   // itself the captain-visible outcome, so the captain-facing note is
   // delivered silently (display: false) rather than printed or rendered a
-  // second time; a routine note stays rendered with its sailboat prefix. The
-  // read cursor advances once the note is handed to Pi; a crash inside Pi's
+  // second time; routine notes stay rendered except an explicitly silent
+  // no-change heartbeat. The read cursor advances once the note is handed to
+  // Pi; a crash inside Pi's
   // own delivery window leaves the outcome durable in the store, where
   // main's fm_branch_outcomes tool still reads it on demand.
   function mergeIntoMain(
@@ -338,13 +333,14 @@ export default function (pi: ExtensionAPI) {
     task: string,
     verdict: Verdict,
     summary: string,
+    silent: boolean,
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
     if (verdict === "captain") {
       const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: task !== "fleet" };
+      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
       if (mainStreaming) {
         pi.sendMessage(message, { deliverAs: "nextTurn" });
       } else {
@@ -363,7 +359,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; verdict routine merges silently.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -374,13 +370,17 @@ export default function (pi: ExtensionAPI) {
             "One or two sentences in captain outcome language; include the full https:// PR URL when a PR is involved",
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
+        silent: Type.Optional(Type.Boolean({
+          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+        })),
       }),
       execute: async (_toolCallId, params) => {
         const task = String((params as { task: unknown }).task || "").trim();
         const verdictRaw = String((params as { verdict: unknown }).verdict || "");
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
+        const silent = (params as { silent?: unknown }).silent === true;
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
             details: undefined,
@@ -405,7 +405,7 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary)) {
+        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
             details: undefined,

@@ -296,18 +296,12 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  // Resolve every unread row that the branch's mandatory fm-wake-drain call
-  // would present. Only task-local signal/stale rows can be delegated: a
-  // fleet-wide check or an unresolvable task stays with main (heartbeat is
-  // separately eligible below, independent of this scoping). This keeps a
-  // delegated wake scoped to what THIS wake actually resolves to, so a
-  // mixed-project drain is never delegated on partial resolution.
-  function projectsForUnreadWake(): string[] {
+  function scopeForUnreadWake(heartbeat: boolean): { eligible: boolean; projects: string[] } {
     let queue = "";
     try {
       queue = readFileSync(`${state}/.wake-queue`, "utf8");
     } catch {
-      return [];
+      return { eligible: false, projects: [] };
     }
 
     const projects = new Set<string>();
@@ -325,16 +319,18 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch {
-      return [];
+      return { eligible: false, projects: [] };
     }
 
     let found = false;
     for (const line of queue.split(/\r?\n/)) {
       if (!line) continue;
       const fields = line.split("\t");
-      if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) continue;
+      if (fields.length < 4 || !/^[0-9]+$/.test(fields[1])) return { eligible: false, projects: [] };
       const kind = fields[2];
       const key = fields[3];
+      found = true;
+      if (kind === "heartbeat") continue;
       let project = "";
       if (kind === "signal") {
         const task = key.replace(/\.(?:status|turn-ended)$/, "");
@@ -342,22 +338,18 @@ export default function (pi: ExtensionAPI) {
       } else if (kind === "stale") {
         project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
       } else {
-        return [];
+        return { eligible: false, projects: [] };
       }
-      if (!project) return [];
-      found = true;
+      if (!project) return { eligible: false, projects: [] };
       projects.add(project);
     }
-    return found ? [...projects] : [];
+    return { eligible: found && (heartbeat || projects.size > 0), projects: [...projects] };
   }
 
-  // Offer an ordinary, project-scoped actionable wake - or a fleet-wide
-  // heartbeat scan - to the supervision branch. A synchronous accept means
-  // the branch now owns delivery and handling; every unsafe or unaccepted
-  // offer keeps today's main path.
   function offerWakeToBranch(message: string): boolean {
     const heartbeat = /^heartbeat($|:)/.test(message);
-    const offer = createBranchDispatchOffer(message, projectsForUnreadWake(), heartbeat);
+    const scope = scopeForUnreadWake(heartbeat);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, scope.eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted;
   }

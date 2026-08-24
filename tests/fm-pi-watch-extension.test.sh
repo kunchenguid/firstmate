@@ -581,7 +581,7 @@ const bus = {
   },
 };
 bus.on("fm-branch-supervision:dispatch", (offer) => {
-  offers.push({ message: offer.message, projects: offer.projects, heartbeat: offer.heartbeat });
+  offers.push({ message: offer.message, projects: offer.projects, heartbeat: offer.heartbeat, eligible: offer.eligible });
   offer.accept();
 });
 let tool = null;
@@ -595,6 +595,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\theartbeat\theartbeat\theartbeat\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-branch-heartbeat", {}, undefined, undefined, {});
@@ -605,7 +606,7 @@ if (offers.length !== 1) throw new Error(`expected one branch offer, got ${offer
 if (offers[0].message !== "heartbeat") {
   throw new Error(`offer changed the bare heartbeat wake reason: ${offers[0].message}`);
 }
-if (offers[0].heartbeat !== true) throw new Error(`heartbeat offer was not flagged: ${JSON.stringify(offers[0])}`);
+if (offers[0].heartbeat !== true || offers[0].eligible !== true) throw new Error(`heartbeat offer was not eligible: ${JSON.stringify(offers[0])}`);
 if (JSON.stringify(offers[0].projects) !== JSON.stringify([])) {
   throw new Error(`heartbeat offer unexpectedly carried scoped projects: ${JSON.stringify(offers[0].projects)}`);
 }
@@ -617,6 +618,89 @@ EOF
   expect_code 0 "$status" "Pi dispatcher must flag a heartbeat offer independent of task scoping"
   [ -z "$out" ] || fail "Pi branch-heartbeat test printed output: $out"
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
+}
+
+test_pi_heartbeat_with_main_owned_queue_row_stays_on_main() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-heartbeat-mixed-queue-root"
+  home="$TMP_ROOT/pi-heartbeat-mixed-queue-home"
+  log="$TMP_ROOT/pi-heartbeat-mixed-queue.log"
+  stop="$TMP_ROOT/pi-heartbeat-mixed-queue.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'heartbeat\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, heartbeat: offer.heartbeat, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\theartbeat\theartbeat\theartbeat\n2\t2\tcheck\tx-inbox\tcheck: pending x mention\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-heartbeat-mixed-queue", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== false) {
+  throw new Error(`mixed heartbeat offer had unsafe eligibility: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
+  throw new Error(`mixed heartbeat wake did not stay on main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "heartbeat with a main-owned queue row must stay on main: $out"
+  [ -z "$out" ] || fail "Pi mixed heartbeat-queue test printed output: $out"
+  pass "heartbeat with a main-owned queue row stays on main"
 }
 
 test_pi_heartbeat_restoration_failure_stays_on_main() {
@@ -2621,6 +2705,7 @@ test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
+test_pi_heartbeat_with_main_owned_queue_row_stays_on_main
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
