@@ -17,6 +17,7 @@ POST_PENDING_DIRECTORY=0
 POST_PENDING_RECREATE=0
 POST_CONFIG_SYMLINK=0
 POST_SNAPSHOT_DIRECTORY_RECREATE=0
+POST_SNAPSHOT_AMBIGUOUS_META=0
 
 # One authority guard is defense in depth against the receipt changing after
 # its exact configuration binding is checked.
@@ -87,6 +88,16 @@ perl() {
     cp -R "$snapshot_path.original/." "$snapshot_path/" || return 1
     POST_SNAPSHOT_DIRECTORY_RECREATE=0
   fi
+  if [ "$operation" = snapshot ] \
+    && [ "$status" -eq 0 ] \
+    && [ "$POST_SNAPSHOT_AMBIGUOUS_META" -eq 1 ]; then
+    {
+      printf 'routing_decision=%s\n' "$TASK_DIR/first.json"
+      printf 'routing_decision=%s\n' "$TASK_DIR/second.json"
+    } > "$HOME_DIR/state/t1.meta" || return 1
+    cp "$HOME_DIR/state/t1.meta" "$LAB/meta.before" || return 1
+    POST_SNAPSHOT_AMBIGUOUS_META=0
+  fi
   printf '%s\n' "$result"
   return "$status"
 }
@@ -113,6 +124,9 @@ RUN_EFFORT_FRAGMENT="--effort 'high' "
 negative_count=0
 counterexample_count=0
 raw_guard_counterexample_count=0
+fresh_spawn_negative_count=0
+fresh_spawn_counterexample_count=0
+committed_handoff_negative_count=0
 PREEXISTING_FINAL=0
 PREEXISTING_META=0
 RUN_CWD=
@@ -122,6 +136,13 @@ RELAUNCH_WT=
 RELAUNCH_PANE_LOG=
 RELAUNCH_ENDPOINT_LOG=
 RELAUNCH_LEASE_LOG=
+FRESH_PROJECT=
+FRESH_WT=
+FRESH_PANE_LOG=
+FRESH_ENDPOINT_LOG=
+FRESH_TEXT_LOG=
+FRESH_LEASE_LOG=
+COMMITTED_HANDOFF_FAULT=
 
 prepare_relaunch_counterexample_root() {
   mkdir -p "$RELAUNCH_COUNTEREXAMPLE_ROOT"
@@ -162,6 +183,8 @@ case "${1:-}" in
       case "$payload" in
         *claude*) printf 'claude' > "$FM_RELAUNCH_TEST_COMMAND" ;;
       esac
+    elif [ -n "${FM_ROUTING_TEST_TEXT_LOG:-}" ]; then
+      printf '%s\n' "$payload" >> "$FM_ROUTING_TEST_TEXT_LOG"
     fi
     exit 0
     ;;
@@ -176,7 +199,10 @@ case "${1:-}" in
     printf 'fakepane\n'
     exit 0
     ;;
-  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  list-windows)
+    [ "${FM_ROUTING_TEST_RELAUNCH:-0}" -eq 0 ] || printf 'fm-t1\n'
+    exit 0
+    ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   new-session|new-window|split-window)
     printf '%s\n' "$*" >> "$FM_RELAUNCH_TEST_ENDPOINT_LOG"
@@ -190,9 +216,177 @@ SH
   cat > "$RAW_HARNESS_BIN/treehouse" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_RELAUNCH_TEST_LEASE_LOG"
-exit 1
+exit "${FM_ROUTING_TEST_TREEHOUSE_STATUS:-1}"
 SH
   chmod +x "$RAW_HARNESS_BIN/treehouse"
+
+  cat > "$RAW_HARNESS_BIN/perl" <<'SH'
+#!/usr/bin/env bash
+set -u
+operation=${2:-}
+task_dir=${3:-}
+
+if [ "$operation" = snapshot ] && [ "${FM_ROUTING_TEST_POST_CONFIG_SYMLINK:-0}" -eq 1 ]; then
+  mv "$FM_ROUTING_TEST_HOME/config/crew-dispatch.json" \
+    "$FM_ROUTING_TEST_HOME/config/crew-dispatch.original.json" || exit 1
+  ln -s "$FM_ROUTING_TEST_LAB/relocated-config/crew-dispatch.json" \
+    "$FM_ROUTING_TEST_HOME/config/crew-dispatch.json" || exit 1
+fi
+if [ "$operation" = publish ] \
+  && { [ "${FM_ROUTING_TEST_POST_PENDING_RECREATE:-0}" -eq 1 ] \
+    || [ "${FM_ROUTING_TEST_POST_PENDING_DIRECTORY:-0}" -eq 1 ]; }; then
+  mv "$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json" \
+    "$FM_ROUTING_TEST_TASK_DIR/routing-decision.original.json" || exit 1
+  mkdir "$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json" || exit 1
+  printf 'replacement directory sentinel\n' \
+    > "$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json/sentinel" || exit 1
+fi
+
+if [ "$operation" = verify-committed-generation ]; then
+  snapshot_path=$4
+  generation=$8
+  case "${FM_ROUTING_TEST_HANDOFF_FAULT:-}" in
+    snapshot-identity)
+      mv "$snapshot_path" "$snapshot_path.identity-original" || exit 1
+      mkdir "$snapshot_path" || exit 1
+      cp -R "$snapshot_path.identity-original/." "$snapshot_path/" || exit 1
+      ;;
+    generation-mismatch)
+      printf '\n' >> "$snapshot_path/data/$7/routing-decision.pending.json" || exit 1
+      ;;
+    ledger-format)
+      printf 'not-a-generation\n' >> "$task_dir/routing-generations.consumed" || exit 1
+      ;;
+    brief-ownership)
+      chmod 0600 "$task_dir/routing-generation.$generation/brief.md" || exit 1
+      ;;
+    receipt-bytes)
+      receipt="$task_dir/routing-generation.$generation/receipt.json"
+      chmod 0600 "$receipt" || exit 1
+      printf '{"tampered":true}\n' > "$receipt" || exit 1
+      chmod 0400 "$receipt" || exit 1
+      ;;
+  esac
+fi
+
+result=$("$FM_TEST_REAL_PERL" "$@" 2>&1)
+status=$?
+
+if [ "$operation" = snapshot ] && [ "$status" -eq 0 ]; then
+  snapshot_name=${result%%$'\t'*}
+  snapshot_path="$task_dir/$snapshot_name"
+  if [ "${FM_ROUTING_TEST_POST_SNAPSHOT_RECREATE:-0}" -eq 1 ]; then
+    mv "$snapshot_path" "$snapshot_path.original" || exit 1
+    mkdir "$snapshot_path" || exit 1
+    cp -R "$snapshot_path.original/." "$snapshot_path/" || exit 1
+  fi
+  if [ "${FM_ROUTING_TEST_POST_AMBIGUOUS_META:-0}" -eq 1 ]; then
+    {
+      printf 'routing_decision=%s\n' "$FM_ROUTING_TEST_TASK_DIR/first.json"
+      printf 'routing_decision=%s\n' "$FM_ROUTING_TEST_TASK_DIR/second.json"
+    } > "$FM_ROUTING_TEST_HOME/state/t1.meta" || exit 1
+    cp "$FM_ROUTING_TEST_HOME/state/t1.meta" "$FM_ROUTING_TEST_META_BEFORE" || exit 1
+  fi
+fi
+
+[ -z "$result" ] || printf '%s\n' "$result"
+exit "$status"
+SH
+
+  cat > "$RAW_HARNESS_BIN/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+tmp=
+rule_filter='.rules[$index].use'
+last=${!#}
+if [ -n "${FM_ROUTING_TEST_POST_SOURCE_FILTER:-}" ] \
+  && [ "$#" -eq 3 ] && [ "$1" = -r ] && [ "$2" = '.matched_profile.source' ]; then
+  tmp="$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json.replacement"
+  "$FM_TEST_REAL_JQ" "$FM_ROUTING_TEST_POST_SOURCE_FILTER" \
+    "$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json" > "$tmp" || exit 1
+  mv "$tmp" "$FM_ROUTING_TEST_TASK_DIR/routing-decision.pending.json" || exit 1
+fi
+if [ -n "${FM_ROUTING_TEST_POST_CONFIG_FILTER:-}" ] \
+  && [ "$last" != "$FM_ROUTING_TEST_HOME/config/crew-dispatch.json" ] \
+  && [[ "$*" == *"$rule_filter"* ]]; then
+  tmp="$FM_ROUTING_TEST_HOME/config/crew-dispatch.json.replacement"
+  "$FM_TEST_REAL_JQ" "$FM_ROUTING_TEST_POST_CONFIG_FILTER" \
+    "$FM_ROUTING_TEST_HOME/config/crew-dispatch.json" > "$tmp" || exit 1
+  mv "$tmp" "$FM_ROUTING_TEST_HOME/config/crew-dispatch.json" || exit 1
+fi
+if [ -n "${FM_ROUTING_TEST_POST_BINDING_FILTER:-}" ] \
+  && [ "$#" -eq 3 ] && [ "$1" = -r ] && [ "$2" = '.matched_profile.source' ]; then
+  tmp="$3.post-binding"
+  "$FM_TEST_REAL_JQ" "$FM_ROUTING_TEST_POST_BINDING_FILTER" "$3" > "$tmp" || exit 1
+  mv "$tmp" "$3" || exit 1
+fi
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$RAW_HARNESS_BIN/perl" "$RAW_HARNESS_BIN/jq"
+}
+
+setup_fresh_spawn_project() {
+  FRESH_PROJECT="$LAB/fresh-project"
+  FRESH_WT="$LAB/fresh-worktree"
+  FRESH_PANE_LOG="$LAB/fresh-pane.log"
+  FRESH_ENDPOINT_LOG="$LAB/fresh-endpoint.log"
+  FRESH_TEXT_LOG="$LAB/fresh-text.log"
+  FRESH_LEASE_LOG="$LAB/fresh-lease.log"
+  fm_git_worktree "$FRESH_PROJECT" "$FRESH_WT" fresh-t1
+  : > "$FRESH_PANE_LOG"
+  : > "$FRESH_ENDPOINT_LOG"
+  : > "$FRESH_TEXT_LOG"
+  : > "$FRESH_LEASE_LOG"
+  printf 'zsh' > "$LAB/fresh-command"
+}
+
+run_fresh_spawn() { # <spawn-path>
+  local spawn=$1 harness_arg=$RUN_HARNESS
+  [ "$RUN_RAW" -eq 0 ] || harness_arg=$RUN_LAUNCH
+  fresh_spawn_command() {
+    env PATH="$RAW_HARNESS_BIN:$PATH" FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+      FM_RELAUNCH_TEST_WT="$FRESH_WT" \
+      FM_RELAUNCH_TEST_PANE_LOG="$FRESH_PANE_LOG" \
+      FM_RELAUNCH_TEST_ENDPOINT_LOG="$FRESH_ENDPOINT_LOG" \
+      FM_RELAUNCH_TEST_LEASE_LOG="$FRESH_LEASE_LOG" \
+      FM_RELAUNCH_TEST_COMMAND="$LAB/fresh-command" \
+      FM_ROUTING_TEST_TEXT_LOG="$FRESH_TEXT_LOG" FM_ROUTING_TEST_RELAUNCH=0 \
+      FM_ROUTING_TEST_TREEHOUSE_STATUS=0 \
+      FM_TEST_REAL_PERL="$REAL_PERL" FM_TEST_REAL_JQ="$REAL_JQ" \
+      FM_ROUTING_TEST_HOME="$HOME_DIR" FM_ROUTING_TEST_TASK_DIR="$TASK_DIR" \
+      FM_ROUTING_TEST_LAB="$LAB" FM_ROUTING_TEST_META_BEFORE="$LAB/meta.before" \
+      FM_ROUTING_TEST_POST_BINDING_FILTER="$POST_BINDING_RECEIPT_FILTER" \
+      FM_ROUTING_TEST_POST_SOURCE_FILTER="$POST_SNAPSHOT_SOURCE_FILTER" \
+      FM_ROUTING_TEST_POST_CONFIG_FILTER="$POST_SNAPSHOT_CONFIG_FILTER" \
+      FM_ROUTING_TEST_POST_PENDING_DIRECTORY="$POST_PENDING_DIRECTORY" \
+      FM_ROUTING_TEST_POST_PENDING_RECREATE="$POST_PENDING_RECREATE" \
+      FM_ROUTING_TEST_POST_CONFIG_SYMLINK="$POST_CONFIG_SYMLINK" \
+      FM_ROUTING_TEST_POST_SNAPSHOT_RECREATE="$POST_SNAPSHOT_DIRECTORY_RECREATE" \
+      FM_ROUTING_TEST_POST_AMBIGUOUS_META="$POST_SNAPSHOT_AMBIGUOUS_META" \
+      "$spawn" t1 "$FRESH_PROJECT" --harness "$harness_arg" \
+        --model "$RUN_MODEL" --effort "$RUN_EFFORT" --mode no-mistakes --yolo off 2>&1
+  }
+  if [ -n "$RUN_CWD" ]; then
+    (cd "$RUN_CWD" && fresh_spawn_command)
+  else
+    fresh_spawn_command
+  fi
+}
+
+assert_no_fresh_spawn_effects() {
+  [ ! -s "$FRESH_TEXT_LOG" ] || fail "routing refusal entered the worktree lease channel"
+  [ ! -s "$FRESH_ENDPOINT_LOG" ] || fail "routing refusal created an endpoint"
+  [ ! -s "$FRESH_PANE_LOG" ] || fail "routing refusal sent pane input"
+  [ ! -s "$FRESH_LEASE_LOG" ] || fail "routing refusal invoked treehouse directly"
+  if [ "$PREEXISTING_META" -eq 0 ]; then
+    assert_absent "$HOME_DIR/state/t1.meta" "routing refusal published task metadata"
+  else
+    cmp -s "$LAB/meta.before" "$HOME_DIR/state/t1.meta" \
+      || fail "routing refusal changed injected task metadata"
+  fi
 }
 
 setup_relaunch_task() {
@@ -267,6 +461,18 @@ run_relaunch_spawn() { # <spawn-path>
     FM_RELAUNCH_TEST_ENDPOINT_LOG="$RELAUNCH_ENDPOINT_LOG" \
     FM_RELAUNCH_TEST_LEASE_LOG="$RELAUNCH_LEASE_LOG" \
     FM_RELAUNCH_TEST_COMMAND="$LAB/relaunch-command" \
+    FM_ROUTING_TEST_RELAUNCH=1 FM_ROUTING_TEST_TREEHOUSE_STATUS=1 \
+    FM_TEST_REAL_PERL="$REAL_PERL" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_ROUTING_TEST_HOME="$HOME_DIR" FM_ROUTING_TEST_TASK_DIR="$TASK_DIR" \
+    FM_ROUTING_TEST_LAB="$LAB" FM_ROUTING_TEST_META_BEFORE="$LAB/relaunch-meta.before" \
+    FM_ROUTING_TEST_POST_BINDING_FILTER="$POST_BINDING_RECEIPT_FILTER" \
+    FM_ROUTING_TEST_POST_SOURCE_FILTER="$POST_SNAPSHOT_SOURCE_FILTER" \
+    FM_ROUTING_TEST_POST_CONFIG_FILTER="$POST_SNAPSHOT_CONFIG_FILTER" \
+    FM_ROUTING_TEST_POST_PENDING_DIRECTORY="$POST_PENDING_DIRECTORY" \
+    FM_ROUTING_TEST_POST_PENDING_RECREATE="$POST_PENDING_RECREATE" \
+    FM_ROUTING_TEST_POST_CONFIG_SYMLINK="$POST_CONFIG_SYMLINK" \
+    FM_ROUTING_TEST_POST_SNAPSHOT_RECREATE="$POST_SNAPSHOT_DIRECTORY_RECREATE" \
+    FM_ROUTING_TEST_POST_AMBIGUOUS_META="$POST_SNAPSHOT_AMBIGUOUS_META" \
     "$spawn" t1 --relaunch --harness "$harness_arg" \
       --model "$RUN_MODEL" --effort "$RUN_EFFORT" 2>&1
 }
@@ -311,6 +517,74 @@ exercise_relaunch_negative() { # <name> <predicate> <setup-function> [detail]
     || fail "$name counterexample leased a second worktree instead of reusing the recorded one"
   counterexample_count=$((counterexample_count + 1))
   pass "$name integration call-site counterexample"
+}
+
+prepare_committed_handoff_generation() {
+  fm_routing_decision_validate_and_prepare \
+    "$HOME_DIR/data" "$HOME_DIR/config" t1 \
+    "$RUN_HARNESS" "$RUN_MODEL" "$RUN_EFFORT" "$HOME_DIR" "$RUN_RAW" "$RUN_LAUNCH" \
+    "$RUN_MODEL_FRAGMENT" "$RUN_EFFORT_FRAGMENT" \
+    || fail "committed-handoff fixture could not prepare its receipt"
+  fm_routing_decision_persist_prepared \
+    || fail "committed-handoff fixture could not publish its receipt"
+  fm_routing_decision_consume_prepared \
+    || fail "committed-handoff fixture could not consume its receipt"
+  fm_routing_decision_seal_prepared \
+    || fail "committed-handoff fixture could not seal its receipt"
+}
+
+run_committed_relaunch_spawn() { # <spawn-path> <output-path>
+  local spawn=$1 output=$2 harness_arg=$RUN_HARNESS
+  [ "$RUN_RAW" -eq 0 ] || harness_arg=$RUN_LAUNCH
+  mkdir -p "$HOME_DIR/state/.control-t1.lock"
+  printf '%s\n' "${BASHPID:-$$}" > "$HOME_DIR/state/.control-t1.lock/pid"
+  env PATH="$RAW_HARNESS_BIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_ROUTING_COMMITTED=1 \
+    FM_RELAUNCH_TEST_WT="$RELAUNCH_WT" \
+    FM_RELAUNCH_TEST_PANE_LOG="$RELAUNCH_PANE_LOG" \
+    FM_RELAUNCH_TEST_ENDPOINT_LOG="$RELAUNCH_ENDPOINT_LOG" \
+    FM_RELAUNCH_TEST_LEASE_LOG="$RELAUNCH_LEASE_LOG" \
+    FM_RELAUNCH_TEST_COMMAND="$LAB/relaunch-command" \
+    FM_ROUTING_TEST_RELAUNCH=1 FM_ROUTING_TEST_TREEHOUSE_STATUS=1 \
+    FM_TEST_REAL_PERL="$REAL_PERL" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_ROUTING_TEST_HOME="$HOME_DIR" FM_ROUTING_TEST_TASK_DIR="$TASK_DIR" \
+    FM_ROUTING_TEST_LAB="$LAB" FM_ROUTING_TEST_META_BEFORE="$LAB/relaunch-meta.before" \
+    FM_ROUTING_TEST_HANDOFF_FAULT="$COMMITTED_HANDOFF_FAULT" \
+    "$spawn" t1 --relaunch --harness "$harness_arg" \
+      --model "$RUN_MODEL" --effort "$RUN_EFFORT" > "$output" 2>&1
+}
+
+exercise_committed_handoff_negative() { # <name> <fault> <detail>
+  local name=$1 fault=$2 detail=$3 out status
+  write_fixture
+  prepare_committed_handoff_generation
+  setup_relaunch_task
+  COMMITTED_HANDOFF_FAULT=$fault
+  run_committed_relaunch_spawn "$SPAWN" "$LAB/committed-handoff.out"
+  status=$?
+  out=$(cat "$LAB/committed-handoff.out")
+  expect_code 1 "$status" "$name should refuse through the committed handoff"
+  assert_contains "$out" "ROUTING_DECISION PERSISTENCE_REFUSED" \
+    "$name named the wrong refusal predicate"
+  assert_contains "$out" "$detail" "$name named the wrong committed-handoff guard"
+  assert_relaunch_refused_before_effects
+  committed_handoff_negative_count=$((committed_handoff_negative_count + 1))
+  pass "$name refuses the committed handoff before replacement effects"
+}
+
+run_committed_handoff_battery() {
+  exercise_committed_handoff_negative \
+    "committed handoff snapshot identity substitution" snapshot-identity SNAPSHOT_IDENTITY
+  exercise_committed_handoff_negative \
+    "committed handoff generation mismatch" generation-mismatch VERIFY_COMMITTED:generation-mismatch
+  exercise_committed_handoff_negative \
+    "committed handoff malformed ledger" ledger-format LEDGER_FORMAT:routing-generations.consumed
+  exercise_committed_handoff_negative \
+    "committed handoff brief ownership mismatch" brief-ownership COLLISION:brief.md:ownership
+  exercise_committed_handoff_negative \
+    "committed handoff receipt byte mismatch" receipt-bytes COMMITTED_RECEIPT_BYTES
 }
 
 sha_file() {
@@ -406,12 +680,15 @@ write_fixture() {
   POST_PENDING_RECREATE=0
   POST_CONFIG_SYMLINK=0
   POST_SNAPSHOT_DIRECTORY_RECREATE=0
+  POST_SNAPSHOT_AMBIGUOUS_META=0
+  COMMITTED_HANDOFF_FAULT=
   RUN_CWD=
 }
 
 update_receipt() {
   local filter=$1 file="$TASK_DIR/routing-decision.pending.json" tmp="$TASK_DIR/routing-decision.pending.json.tmp"
-  jq "$filter" "$file" > "$tmp" || return 1
+  shift
+  jq "$@" "$filter" "$file" > "$tmp" || return 1
   mv "$tmp" "$file"
 }
 
@@ -484,30 +761,35 @@ exercise_negative() { # <name> <predicate> <setup-function> [exact-detail] [post
   local name=$1 predicate=$2 setup=$3 detail=${4:-} post_assertion=${5:-} out status
   write_fixture
   "$setup"
-  out=$(run_validator_then_effects 2>&1)
+  setup_fresh_spawn_project
+  out=$(run_fresh_spawn "$SPAWN")
   status=$?
   expect_code 1 "$status" "$name should refuse"
   assert_contains "$out" "ROUTING_DECISION $predicate" "$name named the wrong predicate"
   [ -z "$detail" ] || assert_contains "$out" "$detail" "$name named the wrong refusal detail"
-  assert_no_effects
+  assert_no_fresh_spawn_effects
   [ -z "$post_assertion" ] || "$post_assertion"
   negative_count=$((negative_count + 1))
-  pass "$name refuses before lease, endpoint, and metadata"
+  fresh_spawn_negative_count=$((fresh_spawn_negative_count + 1))
+  pass "$name refuses in fm-spawn before lease, endpoint, pane input, and metadata"
 
   write_fixture
   "$setup"
-  if (
-    fm_routing_decision_validate_and_persist() { return 0; }
-    run_validator_then_effects >/dev/null 2>&1
-  ); then
-    assert_present "$LAB/worktree.lease" "$name counterexample did not reach a worktree lease"
-    assert_present "$LAB/endpoint" "$name counterexample did not reach an endpoint"
+  setup_fresh_spawn_project
+  if run_fresh_spawn "$RELAUNCH_COUNTEREXAMPLE_ROOT/bin/fm-spawn.sh" >/dev/null 2>&1; then
+    [ -s "$FRESH_TEXT_LOG" ] \
+      || fail "$name counterexample did not reach the worktree lease channel"
+    [ -s "$FRESH_ENDPOINT_LOG" ] \
+      || fail "$name counterexample did not create an endpoint"
+    [ -s "$FRESH_PANE_LOG" ] \
+      || fail "$name counterexample did not send pane input"
     assert_present "$HOME_DIR/state/t1.meta" "$name counterexample did not publish metadata"
   else
-    fail "$name counterexample did not fire after the routing validator was neutered"
+    fail "$name counterexample did not fire after the fm-spawn routing requirement was neutered"
   fi
   counterexample_count=$((counterexample_count + 1))
-  pass "$name integration call-site counterexample"
+  fresh_spawn_counterexample_count=$((fresh_spawn_counterexample_count + 1))
+  pass "$name real fm-spawn integration counterexample"
 }
 
 neuter_raw_guard() { # <literal-words|trailing-environment>
@@ -611,10 +893,17 @@ setup_nonstandard_raw() {
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
 setup_raw_literal() { # <command>
+  local raw_head
   RUN_RAW=1
   RUN_LAUNCH=$1
+  raw_head=${RUN_LAUNCH%%[[:space:]]*}
+  RUN_HARNESS=$(basename -- "$raw_head")
+  # shellcheck disable=SC2016 # jq expands the named argument inside this literal filter.
   update_receipt '.matched_profile = {source: "explicit_override", index: null}
-    | .launch_binding.kind = "raw_launch"'
+    | .harness = $harness
+    | .candidates_considered[0].harness = $harness
+    | .launch_binding.kind = "raw_launch"
+    | .launch_binding.harness = $harness' --arg harness "$RUN_HARNESS"
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
@@ -662,8 +951,13 @@ setup_raw_absolute_harness_impostor() {
   chmod +x "$wrapper"
   setup_raw_literal "$wrapper --model opus --effort high"
 }
-setup_raw_no_executable() { setup_raw_literal '--model opus --effort high'; }
-setup_raw_harness_contradiction() { setup_raw_literal 'codex --model opus -c model_reasoning_effort=high'; }
+setup_raw_unsupported_executable() { setup_raw_literal 'not-a-harness --model opus --effort high'; }
+setup_raw_harness_contradiction() {
+  setup_raw_literal 'codex --model opus -c model_reasoning_effort=high'
+  update_receipt '.harness = "claude"
+    | .candidates_considered[0].harness = "claude"
+    | .launch_binding.harness = "claude"'
+}
 setup_raw_model_contradiction() { setup_raw_literal 'claude --model sonnet --effort high'; }
 setup_raw_effort_contradiction() { setup_raw_literal 'claude --model opus --effort low'; }
 setup_unresolved_raw() {
@@ -737,12 +1031,7 @@ setup_malformed_consumed_ledger() {
   chmod 0600 "$TASK_DIR/routing-generations.consumed"
 }
 setup_ambiguous_routing_pointer() {
-  mkdir -p "$HOME_DIR/state"
-  {
-    printf 'routing_decision=%s\n' "$TASK_DIR/first.json"
-    printf 'routing_decision=%s\n' "$TASK_DIR/second.json"
-  } > "$HOME_DIR/state/t1.meta"
-  cp "$HOME_DIR/state/t1.meta" "$LAB/meta.before"
+  POST_SNAPSHOT_AMBIGUOUS_META=1
   PREEXISTING_META=1
 }
 setup_config_symlink_before_snapshot() {
@@ -986,6 +1275,28 @@ exercise_shell_position_differential() { # <plain|single|double> <mid|start>
   shell_differential_character_count=$((shell_differential_character_count + accepted_count))
 }
 
+case "${FM_ROUTING_TEST_SCOPE:-}" in
+  committed-handoff)
+    write_relaunch_tmux_stub
+    run_committed_handoff_battery
+    [ "$committed_handoff_negative_count" -eq 5 ] \
+      || fail "committed-handoff battery counted $committed_handoff_negative_count guards instead of 5"
+    echo "# all 5/5 committed-handoff guards refused through fm-spawn"
+    exit 0
+    ;;
+  fresh-smoke)
+    prepare_relaunch_counterexample_root
+    write_relaunch_tmux_stub
+    exercise_negative "fresh smoke missing receipt" missing setup_missing_receipt
+    exercise_negative "fresh smoke raw expansion" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw \
+      "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+    exercise_negative "fresh smoke ambiguous metadata" PERSISTENCE_REFUSED setup_ambiguous_routing_pointer \
+      "current routing receipt pointer is ambiguous"
+    echo "# all 3 fresh smoke assertions and counterexamples exercised real fm-spawn"
+    exit 0
+    ;;
+esac
+
 write_shell_differential_probe
 exercise_shell_position_differential plain mid
 exercise_shell_position_differential plain start
@@ -1025,6 +1336,7 @@ exercise_relaunch_negative "route-changing relaunch mismatched receipt" LAUNCH_B
 exercise_relaunch_negative "route-changing relaunch stale receipt" STALE setup_stale
 exercise_relaunch_negative "route-changing relaunch unobserved receipt" RAW_LAUNCH_NOT_VERIFIABLE setup_dynamic_raw \
   "launch syntax contains expansion, substitution, control operators, or unbalanced quoting"
+run_committed_handoff_battery
 
 exercise_negative "01 missing receipt" missing setup_missing_receipt
 exercise_negative "02 missing intent" missing setup_missing_intent
@@ -1146,7 +1458,7 @@ command wrapper xcrun|xcrun claude --model opus --effort high|raw launch command
 claude thinking spelling|claude --model opus --thinking high|effort spelling is not supported by the selected raw harness
 codex effort spelling|codex --model opus --effort high|effort spelling is not supported by the selected raw harness
 opencode effort spelling|opencode --model opus --effort high|effort spelling is not supported by the selected raw harness
-pi effort spelling|pi --model opus --effort high|effort spelling is not supported by the selected raw harness
+pi adapter environment prefix|pi --model opus --effort high|raw launch environment assignments can select an unobserved runtime
 muse thinking spelling|muse --model opus --thinking high|effort spelling is not supported by the selected raw harness
 grok unsupported value|grok --model opus --reasoning-effort xhigh|effort value is not supported by the selected raw harness
 RAW_SHAPES
@@ -1164,10 +1476,10 @@ exercise_negative "raw absolute harness impostor" RAW_LAUNCH_NOT_VERIFIABLE setu
 exercise_negative "raw harness without effort syntax" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_unexpressible_effort \
   "selected raw harness cannot express the required effort axis"
 
-exercise_negative "42 raw launch without executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_no_executable \
-  "launch has no executable harness word"
-exercise_negative "43 raw harness contradiction" RAW_LAUNCH_MISMATCH setup_raw_harness_contradiction \
-  "emitted harness contradicts the selected tuple"
+exercise_negative "42 raw launch with unsupported executable" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_unsupported_executable \
+  "raw launch command head is not a supported harness executable"
+exercise_negative "43 raw receipt harness contradiction" INCAPABLE_CANDIDATE setup_raw_harness_contradiction \
+  "selected spawn tuple is not the attested capable candidate"
 exercise_negative "44 raw model contradiction" RAW_LAUNCH_MISMATCH setup_raw_model_contradiction \
   "emitted model contradicts the selected tuple"
 exercise_negative "45 raw effort contradiction" RAW_LAUNCH_MISMATCH setup_raw_effort_contradiction \
@@ -1410,7 +1722,7 @@ if (
       printf '%s\n' "$3"
       return 0
     fi
-    command perl "$ROOT/bin/fm-routing-fs-boundary.pl" "$@"
+    "$REAL_PERL" "$ROOT/bin/fm-routing-fs-boundary.pl" "$@"
   }
   run_validator_then_effects >/dev/null 2>&1
 ); then
@@ -1432,5 +1744,13 @@ expected_count=$((133 + ${#PLAIN_FORBIDDEN_PUNCT}))
   || fail "negative battery counted $counterexample_count counterexamples instead of $expected_count"
 [ "$raw_guard_counterexample_count" -eq 2 ] \
   || fail "negative battery counted $raw_guard_counterexample_count exact raw-guard counterexamples instead of 2"
-echo "# all $expected_count ROUTING_DECISION negatives refused before effects with $expected_count integration call-site counterexamples"
+[ "$fresh_spawn_negative_count" -eq 147 ] \
+  || fail "negative battery counted $fresh_spawn_negative_count fresh fm-spawn negatives instead of 147"
+[ "$fresh_spawn_counterexample_count" -eq 147 ] \
+  || fail "negative battery counted $fresh_spawn_counterexample_count fresh fm-spawn counterexamples instead of 147"
+[ "$committed_handoff_negative_count" -eq 5 ] \
+  || fail "negative battery counted $committed_handoff_negative_count committed-handoff guards instead of 5"
+echo "# 147 fresh-dispatch negatives and 4 route-changing relaunch negatives refused through real fm-spawn"
+echo "# all 147 fresh-dispatch assertions reached lease, endpoint, pane-input, and metadata effects when the fm-spawn routing requirement was neutered"
 echo "# both 2/2 load-bearing raw-launch assertions went red when their exact guards were neutered"
+echo "# all 5/5 committed-handoff guards refused through fm-spawn; per-guard mutation evidence is recorded by the repair validation"

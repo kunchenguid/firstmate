@@ -206,10 +206,10 @@ The skill's primary path is that default TOON; `--json` is the documented defens
 ## Routing receipt boundary
 
 This section records the generation-specific routing receipt verification contract.
-The executable boundary operations are `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+The executable boundary operations are `identity`, `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
 `snapshot` opens the final task directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies selected inputs relative to held handles.
 `publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies the receipt and brief relative to the held generation handle.
-`hash`, `consume-generation`, and `verify-committed-generation` open their final directory components with `O_NOFOLLOW` and operate on named files or nested directories relative to held handles.
+`identity`, `hash`, `consume-generation`, and `verify-committed-generation` open their final directory components with `O_NOFOLLOW` and operate on the held directory, named files, or nested directories relative to held handles.
 The routing lifecycle as a whole is not handle-based, path-based operations remain, and the boundary does not reject symlinks in intermediate components, including the `FM_HOME/data` root.
 Publication uses per-artifact exclusive creation with `O_NOFOLLOW`, preserves every prior generation, and is not atomic or all-or-none.
 A refused publication may leave partial artifacts, and neither cleanup nor rollback is guaranteed.
@@ -219,9 +219,11 @@ Every accepted deterministic generation is synchronized to the locked append-onl
 The route-changing control launch half does not trust caller-supplied receipt paths or launch bytes; it uses `snapshot` to resnapshot and validate the receipt semantics, derives the generation paths, and uses `verify-committed-generation` to verify the published artifacts plus latest ledger row without re-aging the preflight acceptance.
 This is an audit-trail property rather than authorization against an actor with write access to `FM_HOME`.
 The negative battery's shared-validator mutations prove that the dispatch integration call site is load-bearing, and its two raw-launch guard mutations separately prove that shell-expansion and trailing-environment-assignment assertions go red when their exact guards are neutered.
-The committed [`routing-receipt-guard-sites.tsv`](routing-receipt-guard-sites.tsv) inventory enumerates all 158 refusal-capable sites: 100 `fm_routing_refuse` calls in `bin/fm-routing-decision-lib.sh` and 58 `fail(` calls in `bin/fm-routing-fs-boundary.pl`.
+The committed [`routing-receipt-guard-sites.tsv`](routing-receipt-guard-sites.tsv) inventory is a conservative syntax-derived population of routing-refusal candidates across `bin/fm-routing-decision-lib.sh`, `bin/fm-routing-fs-boundary.pl`, and the routing-gate path in `bin/fm-spawn.sh`.
+It includes every `fm_routing_refuse` call, explicit `return 1`, selected implicit-status predicate in the library, every Perl `fail(` call, and every non-comment `fm-spawn.sh` line naming the routing decision, committed-handoff, or preflight state and operations.
+It does not claim that every candidate is independently load-bearing or that arbitrary semantic predicates, non-routing preflight refusals, or filesystem and syscall failures outside those syntax classes are enumerated.
 Run `bin/fm-routing-guard-inventory.sh --write` to regenerate that inventory and `bin/fm-routing-guard-inventory.sh --check` to compare it with the current sources.
-The committed inventory defines the population reproducibly; it does not claim that every site has an independent firing mutation test.
+`tests/fm-routing-guard-inventory.test.sh` runs that comparison in the repository test surface so source drift fails without relying on a manual regeneration checklist.
 
 The retained lifecycle call-site inventory is `fm_routing_decision_persist_prepared` for pre-effect ledger consumption and generation publication, `fm_routing_decision_consume_prepared` for the published-state assertion, `fm_routing_decision_validate_committed_handoff` for control-handoff receipt validation, and `fm_routing_decision_resolve_inherited` for metadata-authorized same-route inheritance.
 There are no surviving routing-lifecycle removal call sites.

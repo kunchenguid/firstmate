@@ -7,19 +7,52 @@ INVENTORY="$ROOT/docs/verification/routing-receipt-guard-sites.tsv"
 
 emit_inventory() {
   awk '
-    index($0, "fm_routing_refuse") && $0 !~ /^[[:space:]]*fm_routing_refuse\(\)/ {
+    function emit(kind) {
       text = $0
       sub(/^[[:space:]]+/, "", text)
-      printf "%s\t%d\t%s\n", label, FNR, text
+      printf "%s\t%d\t%s\t%s\n", label, FNR, kind, text
+    }
+    /^[[:space:]]*fm_routing_decision_required\(\)/ { predicate_function = "required"; next }
+    /^[[:space:]]*fm_routing_raw_environment_assignment\(\)/ { predicate_function = "environment"; next }
+    /^[[:space:]]*fm_routing_literal_words\(\)/ { predicate_function = "literal-words"; next }
+    predicate_function == "required" && /^[[:space:]]*\[/ { emit("implicit-status-predicate") }
+    predicate_function == "environment" && /^[[:space:]]*\[\[/ { emit("implicit-status-predicate") }
+    predicate_function == "literal-words" && /^[[:space:]]*\[ "\$\{#FM_ROUTING_WORDS\[@\]\}"/ { emit("implicit-status-predicate") }
+    /^[[:space:]]*}/ { predicate_function = "" }
+    index($0, "fm_routing_refuse") && $0 !~ /^[[:space:]]*fm_routing_refuse\(\)/ {
+      emit("refusal-call")
+    }
+    index($0, "return 1") {
+      emit("failure-return")
     }
   ' label=bin/fm-routing-decision-lib.sh "$ROOT/bin/fm-routing-decision-lib.sh"
   awk '
-    index($0, "fail(") {
+    function emit(kind) {
       text = $0
       sub(/^[[:space:]]+/, "", text)
-      printf "%s\t%d\t%s\n", label, FNR, text
+      printf "%s\t%d\t%s\t%s\n", label, FNR, kind, text
+    }
+    index($0, "fail(") {
+      emit("failure-call")
     }
   ' label=bin/fm-routing-fs-boundary.pl "$ROOT/bin/fm-routing-fs-boundary.pl"
+  awk '
+    function emit(kind) {
+      text = $0
+      sub(/^[[:space:]]+/, "", text)
+      printf "%s\t%d\t%s\t%s\n", label, FNR, kind, text
+    }
+    /^[[:space:]]*#/ { next }
+    continuation {
+      if ($0 !~ /^[[:space:]]*$/) emit("dispatch-routing-candidate")
+      if (index($0, "exit 1") || $0 ~ /^[[:space:]]*}/ || $0 ~ /; then[[:space:]]*$/) continuation = 0
+      next
+    }
+    /ROUTING_DECISION_REQUIRED|ROUTING_COMMITTED_HANDOFF|ROUTING_PREFLIGHT_ONLY|fm_routing_decision_(required|validate|persist|consume|seal)|fm_operational_verified_file_input/ {
+      emit("dispatch-routing-candidate")
+      if ($0 ~ /\\[[:space:]]*$/ || $0 ~ /\|\|[[:space:]]*{[[:space:]]*$/) continuation = 1
+    }
+  ' label=bin/fm-spawn.sh "$ROOT/bin/fm-spawn.sh"
 }
 
 case "${1:-}" in

@@ -352,7 +352,8 @@ A multi-candidate route also supplies the exact one-intake `quota-axi --json` ob
 Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `data/<task-id>/brief.md` bytes, and `forbidden_effects` is a non-empty string array.
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
-The executable boundary operations are `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+The executable boundary operations are `identity`, `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+`identity` opens the final directory component with `O_NOFOLLOW` and reports the held directory identity.
 `snapshot` opens the final `data/<task-id>` directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies each selected input relative to a held directory handle.
 `publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies each receipt and brief artifact relative to the held generation handle.
 `hash` opens its final directory component with `O_NOFOLLOW` and reads the named regular file relative to that handle.
@@ -447,7 +448,8 @@ The published artifacts remain even if a later non-routing checkpoint, stop, or 
 Routing refusals always precede worktree lease, worker endpoint, task metadata, pane input, and model-execution effects; the consumed-generation ledger append is the fail-closed safety record at that boundary, while non-routing preflight failures may occur afterward and leave non-authoritative artifacts, including Kimi hook installation after ordinary publication and Muse credential failure after a published control handoff.
 For an ordinary spawn, after fallible preflight succeeds, `fm-spawn.sh` exclusively publishes the generation at the effect boundary, records its exact artifact paths in task metadata, and continues into the established spawn path in the same invocation.
 The pending pathname is retained, and the routing lifecycle performs no path-based deletion of validation snapshots or generation artifacts.
-Once the consumed-generation ledger records a generation, that generation cannot authorize another route-changing attempt even after later generations become authoritative; a fresh route-changing dispatch therefore requires different receipt bytes and a fresh generation.
+While the append-only consumed-generation ledger and generation artifacts remain intact, a recorded generation cannot authorize another route-changing attempt after a later generation becomes authoritative.
+An actor able to rewrite `FM_HOME` can remove those audit artifacts and recreate a byte-identical pending receipt, so this replay resistance is an integrity property of the retained local record rather than an authorization boundary.
 Route-changing relaunches publish a new generation without overwriting prior receipt or brief artifacts, while flag-free same-route relaunches preserve only an existing non-symlink regular receipt whose task-scoped generation matches its bytes.
 Any receipt refusal is terminal and occurs before a worktree lease, worker endpoint, task metadata, pane input, or model execution.
 An existing generation symlink, a directory with the wrong mode, or a conflicting artifact is rejected before publication completes.
