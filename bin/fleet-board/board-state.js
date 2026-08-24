@@ -1,5 +1,10 @@
 "use strict";
 
+const ACTION_OPERATIONS_SCHEMA = "firstmate.fleet-board.action-operations.v1";
+const MAX_ACTION_OPERATIONS = 100;
+const MAX_PERSISTED_BYTES = 1_000_000;
+const OPERATION_ID = /^[A-Za-z0-9._-]{1,160}$/;
+
 function cardFingerprint(card) {
   const decisions = [...(card.decisions || [])]
     .map((decision) => ({
@@ -27,6 +32,61 @@ function beginAction(drafts, cardKey, makeRequestId) {
   draft.inFlight = true;
   drafts.set(cardKey, draft);
   return draft;
+}
+
+function serializeActionOperations(drafts) {
+  const operations = [];
+  for (const [cardKey, draft] of drafts) {
+    if (
+      operations.length >= MAX_ACTION_OPERATIONS
+      || typeof cardKey !== "string"
+      || !draft?.attempted
+      || !OPERATION_ID.test(draft.requestId || "")
+    ) continue;
+    operations.push({
+      cardKey,
+      action: draft.action,
+      text: draft.text,
+      decisionKey: draft.decisionKey ?? null,
+      requestId: draft.requestId,
+      saved: draft.saved === true,
+    });
+  }
+  return JSON.stringify({ schema: ACTION_OPERATIONS_SCHEMA, operations });
+}
+
+function restoreActionOperations(serialized) {
+  const drafts = new Map();
+  if (typeof serialized !== "string" || serialized.length > MAX_PERSISTED_BYTES) return drafts;
+  let value;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return drafts;
+  }
+  if (value?.schema !== ACTION_OPERATIONS_SCHEMA || !Array.isArray(value.operations)) return drafts;
+  for (const operation of value.operations.slice(0, MAX_ACTION_OPERATIONS)) {
+    if (
+      !operation
+      || typeof operation.cardKey !== "string"
+      || operation.cardKey.length > 360
+      || !["answer", "request_details"].includes(operation.action)
+      || typeof operation.text !== "string"
+      || operation.text.length > 8000
+      || !OPERATION_ID.test(operation.requestId || "")
+      || (operation.decisionKey !== null && !OPERATION_ID.test(operation.decisionKey || ""))
+    ) continue;
+    drafts.set(operation.cardKey, {
+      action: operation.action,
+      text: operation.text,
+      decisionKey: operation.decisionKey,
+      requestId: operation.requestId,
+      attempted: true,
+      inFlight: false,
+      saved: operation.saved === true,
+    });
+  }
+  return drafts;
 }
 
 function applyActionObservation(board, result) {
@@ -60,4 +120,6 @@ globalThis.FleetBoardState = Object.freeze({
   cardFingerprint,
   draftIsAvailable,
   reconcileBoardState,
+  restoreActionOperations,
+  serializeActionOperations,
 });

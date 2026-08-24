@@ -125,10 +125,8 @@ def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
         return "needs_you"
     if record.get("deferred_marker"):
         return "waiting"
-    if record.get("state") == "queued":
-        if record.get("hold_reason") or record.get("unresolved_blocker_ids"):
-            return "waiting"
-        return "backlog"
+    # A task's live state is newer than its backlog row. Backlog movement can lag
+    # worker startup, so a still-Queued row must not hide work already underway.
     state = current_state
     source = current.get("source")
     if state == "working" and source == "run-step":
@@ -137,6 +135,10 @@ def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
         return "in_progress"
     if state == "done":
         return "verification"
+    if record.get("state") == "queued":
+        if record.get("hold_reason") or record.get("unresolved_blocker_ids"):
+            return "waiting"
+        return "backlog"
     if state in {"parked", "paused", "blocked", "failed", "unknown"} or task is None:
         return "waiting"
     return "in_progress"
@@ -338,6 +340,10 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         if record.get("state") == "done" and task and task_state != "done":
             warnings.append(
                 f"{task_id}: live primary task state {task_state or 'unknown'} conflicts with its Done backlog row"
+            )
+        elif record.get("state") == "queued" and task_state in {"working", "done"}:
+            warnings.append(
+                f"{task_id}: live primary task state {task_state} conflicts with its Queued backlog row"
             )
 
     for task_id, task in tasks.items():

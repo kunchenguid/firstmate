@@ -48,14 +48,16 @@ cat <<'JSON'
     {"order":5,"structured":true,"id":"waiting-task","title":"Wait for the tide","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"unknown","rationale":null,"source":"absent"},"blocked_reason":"Awaiting vendor approval","captain_actionable":false,"unresolved_blocker_ids":["vendor-approval"],"links":[]},
     {"order":6,"structured":true,"id":"deferred-task","title":"Revisit the harbor plan","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"body_excerpt":"Deferred until the next planning cycle.","deferred_marker":true,"captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
     {"order":7,"structured":true,"id":"done-task","title":"Land the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Documentation only.","source":"task-body"},"captain_actionable":false,"unresolved_blocker_ids":[],"report_path":"data/done-task/report.md","links":[]},
-    {"order":8,"structured":true,"id":"reactivated-task","title":"Reopen the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"The completed task was reactivated.","source":"task-body"},"body_excerpt":"The live worker is canonical.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]}
+    {"order":8,"structured":true,"id":"reactivated-task","title":"Reopen the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"The completed task was reactivated.","source":"task-body"},"body_excerpt":"The live worker is canonical.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
+    {"order":9,"structured":true,"id":"queued-live-task","title":"Start before charting","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Contained live work.","source":"task-body"},"body_excerpt":"The backlog row has not caught up.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]}
   ]},
   "tasks":[
     {"id":"working-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Implementing the board"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"verify-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"run-step","detail":"Running behavior tests"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":"https://github.com/example/repo/pull/7"},"paths":{"report":{"present":false}}},
     {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"},{"key":"rollout","verb":"needs-decision","summary":"Choose the rollout window"}]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"live-only-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Repairing uncharted work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
-    {"id":"reactivated-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Reopening completed work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}}
+    {"id":"reactivated-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Reopening completed work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
+    {"id":"queued-live-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Working before backlog reconciliation"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}}
   ],
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
@@ -204,8 +206,8 @@ pass "one serving process owns the home for its full lifetime"
 board=$(curl -fsS "${url}api/v1/board") || fail "board endpoint failed"
 printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
-  and .counts == {backlog:2,in_progress:4,verification:1,needs_you:2,waiting:3,done:2}
-  and .summary == {open:12,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:2,in_progress:5,verification:1,needs_you:2,waiting:3,done:2}
+  and .summary == {open:13,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
          and ([.decisions[].key] | sort) == ["migration","rollout"])
@@ -217,6 +219,8 @@ printf '%s' "$board" | jq -e '
        | .lane == "in_progress" and .context == "Repairing uncharted work")
   and ([.cards[] | select(.id == "reactivated-task")][0]
        | .lane == "in_progress" and .title == "Reopen the chart")
+  and ([.cards[] | select(.id == "queued-live-task")][0]
+       | .lane == "in_progress" and .status.detail == "Working before backlog reconciliation")
   and ([.cards[] | select(.id == "deferred-task")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "mate-held")][0]
@@ -240,6 +244,7 @@ printf '%s' "$board" | jq -e '
   and (.warnings | index("design-mate: 2 holds omitted by the snapshot bound") != null)
   and (.warnings | index("live-only-task: live primary task has no structured backlog record") != null)
   and (.warnings | index("reactivated-task: live primary task state working conflicts with its Done backlog row") != null)
+  and (.warnings | index("queued-live-task: live primary task state working conflicts with its Queued backlog row") != null)
 ' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
 
@@ -247,7 +252,7 @@ for malformed_snapshot in invalid-utf8 array bad-shape; do
   touch "$HOME_ROOT/snapshot.$malformed_snapshot"
   malformed=$(curl -fsS "${url}api/v1/board?refresh=1") \
     || fail "$malformed_snapshot snapshot escaped the last-good boundary"
-  printf '%s' "$malformed" | jq -e '.health.stale == true and .counts.in_progress == 4' >/dev/null \
+  printf '%s' "$malformed" | jq -e '.health.stale == true and .counts.in_progress == 5' >/dev/null \
     || fail "$malformed_snapshot snapshot did not retain a visibly stale board"
   rm "$HOME_ROOT/snapshot.$malformed_snapshot"
   board=$(curl -fsS "${url}api/v1/board?refresh=1") \
@@ -651,6 +656,8 @@ const {
   beginAction,
   cardFingerprint,
   reconcileBoardState,
+  restoreActionOperations,
+  serializeActionOperations,
 } = globalThis.FleetBoardState;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const card = {
@@ -692,6 +699,15 @@ if (actionDrafts.get(card.key) !== first || !first.inFlight || generated !== 1) 
 first.inFlight = false;
 const retry = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
 if (retry.requestId !== "request-1" || generated !== 1) process.exit(1);
+const restored = restoreActionOperations(serializeActionOperations(actionDrafts));
+const restoredOperation = restored.get(card.key);
+if (
+  restoredOperation?.requestId !== "request-1"
+  || restoredOperation.text !== "Keep the reversible route."
+  || !restoredOperation.attempted
+  || restoredOperation.inFlight
+) process.exit(1);
+if (restoreActionOperations("not json").size !== 0) process.exit(1);
 
 const unsent = new Map([[card.key, {
   action: "answer",

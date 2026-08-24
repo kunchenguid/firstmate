@@ -6,7 +6,19 @@ const {
   cardFingerprint,
   draftIsAvailable,
   reconcileBoardState,
+  restoreActionOperations,
+  serializeActionOperations,
 } = globalThis.FleetBoardState;
+
+const ACTION_STORAGE_KEY = "firstmate.fleet-board.action-operations.v1";
+
+function restoredActionOperations() {
+  try {
+    return restoreActionOperations(localStorage.getItem(ACTION_STORAGE_KEY));
+  } catch {
+    return new Map();
+  }
+}
 
 const state = {
   board: null,
@@ -14,10 +26,23 @@ const state = {
   selectedKey: null,
   dialogOpenerKey: null,
   pending: new Map(),
-  drafts: new Map(),
+  drafts: restoredActionOperations(),
   renderedBoard: "",
   loading: false,
 };
+
+function persistActionOperations() {
+  try {
+    const serialized = serializeActionOperations(state.drafts);
+    if (JSON.parse(serialized).operations.length) {
+      localStorage.setItem(ACTION_STORAGE_KEY, serialized);
+    } else {
+      localStorage.removeItem(ACTION_STORAGE_KEY);
+    }
+  } catch {
+    // Storage can be disabled or full. The durable inbox still owns server-side idempotency.
+  }
+}
 
 const elements = {
   board: document.querySelector("#board"),
@@ -453,6 +478,7 @@ function renderComposer(card, draft, focus) {
       if (selectedDecision) draft.decisionKey = selectedDecision;
     }
     const operation = beginAction(state.drafts, card.key, () => crypto.randomUUID());
+    persistActionOperations();
     renderComposer(card, operation, false);
     try {
       const result = await sendAction(
@@ -470,11 +496,13 @@ function renderComposer(card, draft, focus) {
       if (result.wake === "failed") {
         operation.inFlight = false;
         operation.saved = true;
+        persistActionOperations();
         if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);
         showToast("Instruction saved, but Firstmate was not woken. Retry is safe.", "error");
         return;
       }
       state.drafts.delete(card.key);
+      persistActionOperations();
       const currentCard = state.board.cards.find((item) => item.key === card.key) || card;
       state.pending.set(card.key, { action, fingerprint: cardFingerprint(currentCard) });
       showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
@@ -482,6 +510,7 @@ function renderComposer(card, draft, focus) {
       if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);
     } catch (error) {
       operation.inFlight = false;
+      persistActionOperations();
       if (state.drafts.get(card.key) === operation && state.selectedKey === card.key && elements.dialog.open) {
         openCard(card.key);
       }
@@ -545,6 +574,7 @@ async function loadBoard(force = false) {
       state.selectedKey,
       payload.cards
     );
+    persistActionOperations();
     state.selectedKey = reconciled.selectedKey;
     updateHomeFilter();
     renderSummary();

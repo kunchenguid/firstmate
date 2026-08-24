@@ -116,6 +116,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+SECONDMATE_SNAPSHOT_DEADLINE=0
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -165,6 +166,22 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+
+secondmate_timeout_remaining() {  # <per-operation-maximum>
+  local maximum=$1 remaining
+  if [ "$SECONDMATE_SNAPSHOT_DEADLINE" -eq 0 ]; then
+    printf '%s\n' "$maximum"
+    return 0
+  fi
+  remaining=$((SECONDMATE_SNAPSHOT_DEADLINE - $(date +%s)))
+  if [ "$remaining" -le 0 ]; then
+    printf '0\n'
+  elif [ "$remaining" -lt "$maximum" ]; then
+    printf '%s\n' "$remaining"
+  else
+    printf '%s\n' "$maximum"
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -227,17 +244,30 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
-crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
-  raw=$(
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
+crew_state_json() {  # <id> [timeout-seconds]
+  local id=$1 timeout=${2:-} raw rest state source detail sep
+  if [ -n "$timeout" ] && [ "$timeout" -le 0 ]; then
+    raw=
+  elif [ -n "$timeout" ]; then
+    raw=$(fm_run_timed "$timeout" env \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
-  )
+      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true)
+  else
+    raw=$(
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_HOME="$FM_HOME" \
+        FM_STATE_OVERRIDE="$STATE" \
+        FM_DATA_OVERRIDE="$DATA" \
+        FM_PROJECTS_OVERRIDE="$PROJECTS" \
+        FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+    )
+  fi
   raw=$(printf '%s\n' "$raw" | head -1)
   sep=' · '
   state=unknown
@@ -469,7 +499,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local remote_host remote_root remote_state remote_rc remote_home_present
+  local remote_host remote_root remote_state remote_rc remote_home_present state_timeout remote_timeout
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -510,7 +540,12 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
+    if [ -n "$remote_host" ] && [ "$kind" = secondmate ]; then
+      state_timeout=$(secondmate_timeout_remaining "$FM_SNAPSHOT_SECONDMATE_TIMEOUT")
+      current_json=$(crew_state_json "$id" "$state_timeout")
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -550,7 +585,15 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+      if [ "$kind" = secondmate ]; then
+        remote_timeout=$(secondmate_timeout_remaining "$FM_SNAPSHOT_SECONDMATE_TIMEOUT")
+      else
+        remote_timeout=$FM_SNAPSHOT_SECONDMATE_TIMEOUT
+      fi
+      if [ "$remote_timeout" -le 0 ]; then
+        remote_rc=124
+        remote_state=
+      elif remote_state=$(fm_run_timed "$remote_timeout" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
       else
@@ -1008,8 +1051,8 @@ JQ
     '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
-bounded_parent_activities_json() {  # <status-file>
-  local f=$1 out rc reason script
+bounded_parent_activities_json() {  # <status-file> [timeout-seconds]
+  local f=$1 timeout=${2:-$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT} out rc reason script
   if [ ! -f "$f" ]; then
     jq -n '{records:[],available:true,input_truncated:false,retained_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
@@ -1078,7 +1121,7 @@ bounded_parent_activities_json() {  # <status-file>
          records_in_window:$records_in_window}'
 BASH
   )
-  out=$(fm_run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
+  out=$(fm_run_timed "$timeout" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \
     "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SNAPSHOT_STAT_STYLE" 2>/dev/null)
@@ -1094,8 +1137,8 @@ BASH
     '{records:[],available:false,input_truncated:false,retained_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
-terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradicts>
-  local task=$1 note=$2 evidence_contradicts=$3 backend target exists expected out rc clean bytes lines seen=false contradiction=false reason='' remote_host
+terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradicts> [timeout-seconds]
+  local task=$1 note=$2 evidence_contradicts=$3 timeout=${4:-$FM_SNAPSHOT_TERMINAL_TIMEOUT} backend target exists expected out rc clean bytes lines seen=false contradiction=false reason='' remote_host
   backend=$(printf '%s' "$task" | jq -r '.backend // ""')
   target=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   exists=$(printf '%s' "$task" | jq -r '.endpoint.exists // "unknown"')
@@ -1103,6 +1146,11 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
   if [ -n "$remote_host" ]; then
     jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "remote terminal evidence is not collected by the primary" \
       '{provenance:"remote-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
+    return 0
+  fi
+  if [ "$timeout" -le 0 ]; then
+    jq -n --arg observed "$SNAPSHOT_NOW" --arg reason "not collected after total secondmate budget expired" \
+      '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:$reason,lines:0,bytes:0,event_note_seen:false,contradiction:false}'
     return 0
   fi
   expected=$(printf '%s' "$task" | jq -r '"fm-" + (.id // "")')
@@ -1113,7 +1161,7 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
     return 0
   fi
   # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
-  out=$(fm_run_timed "$FM_SNAPSHOT_TERMINAL_TIMEOUT" bash -c \
+  out=$(fm_run_timed "$timeout" bash -c \
     '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5" | LC_ALL=C head -c "$6"; rc=${PIPESTATUS[0]}; [ "$rc" -eq 141 ] && rc=0; exit "$rc"' \
     fm-terminal-capture "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$FM_SNAPSHOT_TERMINAL_LINES" "$expected" "$FM_SNAPSHOT_TERMINAL_BYTES" 2>/dev/null)
   rc=$?
@@ -1211,8 +1259,8 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local summary_deadline=0 summary_timeout remaining now
+  local activity_scan activity_timeout activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_timeout terminal_contradiction contradiction
+  local summary_deadline=$SECONDMATE_SNAPSHOT_DEADLINE summary_timeout remaining now
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1235,10 +1283,6 @@ secondmate_current_json() {  # <parent-tasks-json>
   rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
-  if [ "$FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT" -gt 0 ]; then
-    summary_deadline=$(($(date +%s) + FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT))
-  fi
-
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     id=$(printf '%s' "$row" | jq -r '.id')
@@ -1251,7 +1295,13 @@ secondmate_current_json() {  # <parent-tasks-json>
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
-    activity_scan=$(bounded_parent_activities_json "$status_file")
+    activity_timeout=$(secondmate_timeout_remaining "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT")
+    if [ "$activity_timeout" -le 0 ]; then
+      activity_scan=$(jq -n \
+        '{records:[],available:false,input_truncated:false,retained_truncated:false,reasons:["total_budget_expired"],lines_in_window:0,records_in_window:0}')
+    else
+      activity_scan=$(bounded_parent_activities_json "$status_file" "$activity_timeout")
+    fi
     activities=$(printf '%s' "$activity_scan" | jq -c '.records')
     decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
     event_epoch=$(file_mtime_epoch "$status_file")
@@ -1365,7 +1415,8 @@ secondmate_current_json() {  # <parent-tasks-json>
       terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" true)
+        terminal_timeout=$(secondmate_timeout_remaining "$FM_SNAPSHOT_TERMINAL_TIMEOUT")
+        terminal=$(terminal_evidence_json "$task" "$event_note" true "$terminal_timeout")
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
@@ -1396,7 +1447,8 @@ secondmate_current_json() {  # <parent-tasks-json>
         freshness=unknown
       fi
       if [ -n "$event_raw" ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" false)
+        terminal_timeout=$(secondmate_timeout_remaining "$FM_SNAPSHOT_TERMINAL_TIMEOUT")
+        terminal=$(terminal_evidence_json "$task" "$event_note" false "$terminal_timeout")
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
@@ -1462,6 +1514,11 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+# Remote secondmate current-state probes happen while tasks[] is built, before
+# structured-home aggregation. Both stages must consume the same absolute budget.
+if [ "$FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT" -gt 0 ]; then
+  SECONDMATE_SNAPSHOT_DEADLINE=$(($(date +%s) + FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT))
+fi
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
@@ -1470,13 +1527,13 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   exit 0
 fi
 
-SCOUT_REPORTS_JSON=$(scout_report_lines)
-MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
-  || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+SCOUT_REPORTS_JSON=$(scout_report_lines)
+MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
+  || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \

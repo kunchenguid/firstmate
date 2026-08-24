@@ -503,7 +503,7 @@ EOF
 }
 
 test_secondmate_reads_respect_one_total_budget() {
-  local home fakebin slow_ssh canonical snapshot_rc id
+  local home fakebin slow_ssh ssh_log canonical snapshot_rc id
   home=$(make_home total-secondmate-budget)
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
@@ -516,11 +516,19 @@ EOF
   for id in remote-a remote-b remote-c; do
     printf -- '- %s - fixture domain (host: %s; root: /srv/firstmate; home: /srv/%s; scope: fixture; projects: sample; added 2026-08-24)\n' \
       "$id" "$id" "$id" >> "$home/data/secondmates.md"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=/srv/$id" "project=sample" \
+      "harness=codex" "kind=secondmate" "mode=secondmate" "home=/srv/$id" \
+      "remote_host=$id" "remote_root=/srv/firstmate" "remote_backend=tmux" \
+      "remote_target=firstmate:fm-$id"
+    printf 'working [key=%s]: fixture remote work\n' "$id" > "$home/state/$id.status"
   done
   fakebin=$(make_fakebin "$home")
   slow_ssh="$fakebin/slow-ssh"
+  ssh_log="$home/slow-ssh.log"
   cat > "$slow_ssh" <<'SH'
 #!/usr/bin/env bash
+printf '.\n' >> "${SLOW_SSH_LOG:?}"
 sleep 30
 SH
   chmod +x "$slow_ssh"
@@ -529,7 +537,8 @@ SH
   canonical=$(fm_run_timed 6 env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
-    FM_SSH_BIN="$slow_ssh" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
+    FM_SSH_BIN="$slow_ssh" SLOW_SSH_LOG="$ssh_log" \
+    FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
     FM_SNAPSHOT_SECONDMATE_TOTAL_TIMEOUT=2 FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   snapshot_rc=$?
@@ -542,6 +551,8 @@ SH
       and ([.secondmate_current.records[].current.reason
             | select(contains("total budget expired"))] | length) >= 1
   ' >/dev/null || fail "total-budgeted secondmate reads lost canonical home records: $canonical"
+  [ "$(wc -l < "$ssh_log" | tr -d ' ')" -eq 1 ] \
+    || fail "remote current-state reads did not share the total budget: $(cat "$ssh_log")"
   pass "registered secondmate reads share one bounded snapshot budget"
 }
 
