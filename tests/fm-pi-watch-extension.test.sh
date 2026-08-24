@@ -621,6 +621,83 @@ EOF
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
 }
 
+test_pi_heartbeat_restoration_failure_stays_on_main() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-heartbeat-restoration-failure-root"
+  home="$TMP_ROOT/pi-heartbeat-restoration-failure-home"
+  log="$TMP_ROOT/pi-heartbeat-restoration-failure.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'heartbeat: synthetic fleet scan\n'
+  exit 0
+fi
+printf 'synthetic successor startup failure\n' >&2
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, heartbeat: offer.heartbeat });
+  offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-heartbeat-restoration-failure", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 0) {
+  throw new Error(`heartbeat restoration failure was offered to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes("heartbeat: synthetic fleet scan")) {
+  throw new Error(`main wake lost the heartbeat reason: ${prompt}`);
+}
+if (!prompt.includes("watcher: FAILED - Pi extension could not restore watcher continuity after 2 retries")) {
+  throw new Error(`main wake lost the restoration failure: ${prompt}`);
+}
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "heartbeat restoration failure must bypass an accepting branch: $out"
+  [ -z "$out" ] || fail "Pi heartbeat restoration-failure test printed output: $out"
+  pass "heartbeat restoration failure stays on main"
+}
+
 test_pi_watcher_failure_never_offered_to_branch() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-watcher-failure-root"
@@ -2546,6 +2623,7 @@ test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
+test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
