@@ -363,10 +363,12 @@ test_collection_timeout_spans_slow_crew_probes() {
   printf 'window=fleet:beta\nbackend=tmux\nworktree=%s\nkind=ship\n' "$home/worktree" > "$home/state/beta.meta"
   printf 'working: beta\n' > "$home/state/beta.status"; printf '1\t2\tsignal\tbeta.status\tsignal: beta.status\n' >> "$home/state/.wake-queue"
   started=$(date +%s)
-  FM_CREW_STATE_ALPHA_SECONDS=3 FM_CREW_STATE_BETA_SECONDS=3 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=4 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+  FM_CREW_STATE_ALPHA_SECONDS=1 FM_CREW_STATE_BETA_SECONDS=5 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=3 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
   finished=$(date +%s); [ "$status" -ne 0 ] || fail "deux sondes lentes ont produit un paquet"
   [ $((finished - started)) -lt 6 ] || fail "les sondes lentes ont dépassé la borne agrégée"
+  grep -Fx 'alpha' "$home/crew-state.calls" >/dev/null && grep -Fx 'beta' "$home/crew-state.calls" >/dev/null \
+    || fail "la borne agrégée n’a pas couvert deux vraies sondes lentes"
   grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback des sondes lentes manque"
   grep -F -- '--ack-through 1 --recovery-generation fixture-1' "$home/err" >/dev/null || fail "le fallback des sondes lentes a perdu l’ACK"
   [ ! -e "$home/state/.wake-context-cache" ] || fail "les sondes lentes ont publié un cache"

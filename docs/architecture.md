@@ -42,10 +42,11 @@ A secondmate retains a durable receipt for its idempotent report through the est
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
 Claude, Codex, and Pi actionable notifications call `fm-wake-context.sh` once to attach a bounded `fm-wake-context.v1` projection of that durable presentation, including its post-handling acknowledgement, so the primary does not reconstruct the same fleet context in later model turns.
-The packet embeds the drain's complete human presentation, replays byte-identically while its queue prefix remains unacknowledged, and advances the unread-status presentation cursor only when the matching acknowledgement is applied.
-A post-presentation fallback keeps a minimal acknowledgement receipt and the same staged cursor, so acknowledging that fallback cannot replay already handled unread status.
+A single aggregate collection deadline covers the initial drain and every crew-state or backend probe rather than resetting for each probe.
+The packet embeds a bounded projection of the drain's human presentation, replays byte-identically while its queue prefix remains unacknowledged, and advances the unread-status presentation cursor only when the matching acknowledgement is applied.
+If collection fails after the durable presentation produced its acknowledgement, the fallback returns that complete human presentation and keeps a minimal acknowledgement receipt with the same staged cursor, so acknowledging that fallback cannot replay already handled unread status.
 Status and queue byte volume is checked before presentation, and a manual drain supersedes any older fallback receipt before it presents current status.
-If the bounded projection cannot be produced before presentation, the adapter directs the primary to the ordinary human drain instead.
+If collection fails before the durable presentation produces an acknowledgement, the adapter directs the primary to the ordinary human drain instead.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait or verified captain-held transfer trades that silence for one bounded recheck per pause window, naming which human the wait is on, so neither a forgotten pause nor a forgotten hold can remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
