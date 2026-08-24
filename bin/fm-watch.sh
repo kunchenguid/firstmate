@@ -311,7 +311,6 @@ window_key() {  # <window>
 cursor_progress_signature() {  # <tail40>
   local tail40=$1 token context
   token=$(printf '%s\n' "$tail40" \
-    | grep -Ei '(^|[[:space:]])(thinking|running|reading)([^[:alnum:]]|$)' \
     | grep -Eo '[0-9]+([.][0-9]+)?[kKmM]?[[:space:]]+tokens' \
     | tail -1 | tr -d '[:space:]' || true)
   context=$(printf '%s\n' "$tail40" \

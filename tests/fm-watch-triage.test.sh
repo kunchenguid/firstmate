@@ -1599,10 +1599,16 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
 # resets its wedge timer, while a spinner-only redraw with unchanged values
 # still escalates.
 test_cursor_progress_resets_busy_turn_wedge_timer() {
-  local dir state fakebin out capture_file window key sig pid
+  local dir state fakebin out capture_file window key sig pid sample verb tokens
+  local -a progress_samples=(
+    'Working|5.12k'
+    'Thinking|66.76k'
+    'Reading|60.16k'
+    'Running|61.16k'
+  )
   dir=$(make_case cursor-progress-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-cursor-progress"
-  printf ' ⠁⠆ Running  59 tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
+  printf ' ⠁⠆ Processing  1.00k tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/cursor-progress.meta"
   record_cursor_busy "$dir" cursor-progress
   printf 'working: setup complete\n' > "$state/cursor-progress.status"
@@ -1623,22 +1629,26 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor baseline watcher stop"
 
   # A changed token count is current liveness even though the turn is over-age.
-  printf ' ⠋⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' > "$capture_file"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "Cursor's advancing token count was reported as a possible wedge: $(cat "$out")"
-  fi
-  [ ! -e "$state/.stale-since-$key" ] || fail "Cursor's advancing token count did not reset the wedge timer"
-  reap "$pid"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor token-progress watcher stop"
+  for sample in "${progress_samples[@]}"; do
+    IFS='|' read -r verb tokens <<< "$sample"
+    printf ' ⠋⠆ %s  %s tokens\n  Cursor Grok 4.5 High · 7%%           Run Everything\n' \
+      "$verb" "$tokens" > "$capture_file"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "Cursor's $verb token progress was reported as a possible wedge: $(cat "$out")"
+    fi
+    [ ! -e "$state/.stale-since-$key" ] || fail "Cursor's $verb token progress did not reset the wedge timer"
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor $verb token-progress watcher stop"
+  done
 
   # Context growth carries the same liveness verdict.
-  printf ' ⠙⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  printf ' ⠙⠆ Running  61.16k tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1653,7 +1663,7 @@ test_cursor_progress_resets_busy_turn_wedge_timer() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the Cursor context-progress watcher stop"
 
   # Rotating only the spinner is generic pane churn and must not hide a wedge.
-  printf ' ⠸⠆ Running  60 tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
+  printf ' ⠸⠆ Running  61.16k tokens\n  Cursor Grok 4.5 High · 8%%           Run Everything\n' > "$capture_file"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
