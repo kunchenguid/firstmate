@@ -785,7 +785,7 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 ## Cursor Agent CLI
 
 Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.
-The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`, and extended on 2026-08-13 with the tmux composer verdict below.
+The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`, extended on 2026-08-13 with the tmux composer verdict below, and refreshed on 2026-08-23 for the authenticated ship/scout launch and delivery path.
 
 - Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
 - Version: `cursor-agent --version` reported `2026.08.11-e8db854`, and `cursor-agent status` reported a logged-in account.
@@ -801,7 +801,8 @@ Resolution prints the STABLE launcher rather than the canonical target, because 
 | --- | --- |
 | `#{pane_current_command}` | `node` |
 | `ps -o comm=` | `/Users/<user>/.local/bin/cursor-agent` |
-| child argv | `.../bin/cursor-agent --use-system-ca .../versions/2026.08.11-e8db854/index.js --trust --yolo` |
+| 2026-08-11 child argv | `.../bin/cursor-agent --use-system-ca .../versions/2026.08.11-e8db854/index.js --trust --yolo` |
+| 2026-08-23 ship/scout child argv | `.../index.js -f --model cursor-grok-4.6-high --workspace <absolute-task-worktree>` |
 
 `node` matches no harness name pattern, so a cursor pane is identified from Cursor's own name or install tree in the path or argv[0].
 An unrelated `node` or `agent` matches neither and classifies `other`, which the liveness callers fold into `ambiguous` rather than `dead`.
@@ -878,26 +879,30 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 | Fact | Observed |
 | --- | --- |
-| Workspace trust | `--trust` suppressed the prompt; `--yolo` alone did NOT, and the prompt blocks a fresh worktree |
-| Autonomy | `--yolo` (alias of `--force`); the footer renders `Run Everything` |
+| Ship/scout credential | The launch sourced `FM_CURSOR_AUTH_ENV`, exported its `CURSOR_API_KEY`, and refused before endpoint launch when the file was absent; the default file is `$HOME/.config/crew-router/env` |
+| Workspace trust | Ship/scout launch omitted `--trust` and `fm-spawn` accepted the one-time `[a] Trust this workspace` dialog before delivering the brief; secondmates retain `--trust` because their project hooks require it |
+| Autonomy | `-f` (alias of `--force` and `--yolo`); the footer renders `Run Everything` |
 | Worktree | `-w/--worktree` allocates a SECOND worktree under `~/.cursor/worktrees` and is never passed |
+| Brief delivery | Ship/scout launch starts without a positional prompt, waits for a verified ready composer after trust handling, and sends the absolute brief pointer through the durable `fm-send` inbox path; secondmates retain positional delivery |
 | Effort | no effort flag exists; requested effort stays in task metadata |
 | Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
-| Exit | `/exit` |
+| Exit | `/exit`; the slash popup closes and one Enter submits |
+| Resume | `cursor-agent --continue` resumes the latest session in the same workspace; bare `--resume` opens a picker, and a chat id selects a specific session |
 | Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 ### End-to-end
 
-A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
+A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion, with the launch and brief-delivery steps refreshed on 2026-08-23:
 
-1. the launch delivered its brief positionally and the agent executed it;
-2. `state/<id>.cursor-session` was written with the task worktree;
-3. the transcript fold read `busy` mid-turn and `idle` after it;
-4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;
-5. `bin/fm-control.sh <id> interrupt` cancelled a running turn;
-6. `bin/fm-control.sh <id> exit` stopped the agent;
-7. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
+1. the launch sourced the crew-router auth file without exposing the credential, accepted the workspace trust dialog, and started the TUI with `-f` and no positional prompt;
+2. `fm-send` durably enqueued and delivered the absolute brief pointer after the ready gate, and the agent executed it;
+3. `state/<id>.cursor-session` was written with the task worktree;
+4. the transcript fold read `busy` mid-turn and `idle` after it;
+5. `bin/fm-send.sh` delivered a later steer through the same durable path and exited 0;
+6. `bin/fm-control.sh <id> interrupt` cancelled a running turn;
+7. `bin/fm-control.sh <id> exit` stopped the agent;
+8. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
 
 ### Herdr backend
 

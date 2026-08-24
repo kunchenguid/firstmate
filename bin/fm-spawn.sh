@@ -122,6 +122,9 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   Cursor ship/scout credential setup is documented in
+#   docs/configuration.md "Environment variables"; secondmate launches keep
+#   their project-hook credential path and do not use that crew credential file.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -1282,6 +1285,7 @@ case "$HARNESS" in
         return
       fi
       (
+        # shellcheck source=/dev/null
         . "$CURSOR_AUTH_ENV" || exit 1
         export CURSOR_API_KEY
         fm_cursor_list_models "$CURSOR_BIN"
