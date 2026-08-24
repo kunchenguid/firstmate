@@ -103,16 +103,19 @@ test_send_literal_adapter_guards_dash_text() {
 }
 
 test_fm_send_dash_message_end_to_end() {
-  local dir fb log home msg rc
+  local dir fb log msg rc got
   dir="$TMP_ROOT/e2e"; mkdir -p "$dir/state"; fb=$(make_stubs "$dir")
-  log="$dir/keys.log"; home="$dir"
-  fm_write_meta "$home/state/senddash.meta" \
-    "window=sess:win" "endpoint_task_id=senddash" "harness=claude"
+  log="$dir/keys.log"
+  # An explicit backend target is the typed-plane path: a task selector would
+  # ride the durable inbox plane since main's two-plane fm-send, and its
+  # message body never crosses send-keys at all. The dash-leading payload
+  # class this regression pins lives on the typed plane, so the e2e drives it
+  # through the explicit target escape hatch.
   msg='--flagged-looking steer body'
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" \
     FM_SEND_KEYS_LOG="$log" FM_SENT_ONCE="$dir/sent-once" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" fm-senddash "$msg" >/dev/null 2>&1
+    "$ROOT/bin/fm-send.sh" sess:win "$msg" >/dev/null 2>"$dir/stderr.log"
   rc=$?
   expect_code 0 "$rc" "end-to-end dash-leading send"
   got=$(sed -n '1,6p' "$log" | tr '\n' '|')

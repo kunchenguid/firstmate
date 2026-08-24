@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--file <path>] [<text...>]
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
+#   --file <path> sends the file's CONTENT as the message instead of positional
+#   text, so a steer drafted under data/steers/ need not survive a shell quoting
+#   round-trip. The content rides the same data planes as positional text: a
+#   multi-line file is welcome on the INBOX plane (records are durable and
+#   newlines are legal) and refused on the TYPED plane, which submits on every
+#   newline; unreadable, blank, positional-text-mixed, or --key-combined uses
+#   are refused loudly before anything is sent, and trailing newlines are
+#   normalized away.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -417,10 +425,12 @@ if [ -n "$TARGET_META" ]; then
   fi
 fi
 
-# Collect --resolve-key flags (answerer-closes; see the header contract). They
-# must precede --key or the message text; everything after the last flag is the
-# message exactly as before, so ordinary sends are byte-identical.
+# Collect --resolve-key flags (answerer-closes; see the header contract) and the
+# --file message source. They must precede --key or the message text; everything
+# after the last flag is the message exactly as before, so ordinary sends are
+# byte-identical.
 RESOLVE_KEYS=
+FILE_MSG_PATH=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -446,6 +456,15 @@ while :; do
       ;;
     --resolve-key=*)
       fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+      shift
+      ;;
+    --file)
+      [ $# -ge 2 ] || { echo "error: --file requires a path argument" >&2; exit 1; }
+      FILE_MSG_PATH=$2
+      shift 2
+      ;;
+    --file=*)
+      FILE_MSG_PATH=${1#--file=}
       shift
       ;;
     *) break ;;
@@ -524,7 +543,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
-  if [ -z "$*" ]; then
+  if [ -z "$*" ] && [ -z "$FILE_MSG_PATH" ]; then
     echo "error: --resolve-key requires a nonempty answer message" >&2
     exit 1
   fi
@@ -610,6 +629,10 @@ if [ "${1:-}" = "--key" ]; then
       exit 1
       ;;
   esac
+  if [ -n "$FILE_MSG_PATH" ]; then
+    echo "error: --file cannot accompany --key; a key send carries no text" >&2
+    exit 1
+  fi
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then
@@ -624,7 +647,33 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
-  MESSAGE=$*
+  if [ -n "$FILE_MSG_PATH" ]; then
+    # --file message source (see the usage header): validated BEFORE any send,
+    # marker, or pending-reply bookkeeping, so a bad file can never half-start
+    # a delivery. $(cat) normalizes trailing newlines away. Multi-line content
+    # is legal here: the inbox planes below record it durably (newlines are
+    # legal), and only the typed plane's own guard refuses it where typing
+    # would garble it into separate partial sends.
+    if [ $# -ne 0 ]; then
+      echo "error: --file cannot be combined with positional message text" >&2
+      exit 1
+    fi
+    if [ ! -r "$FILE_MSG_PATH" ]; then
+      echo "error: --file '$FILE_MSG_PATH' is not a readable file; nothing was sent" >&2
+      exit 1
+    fi
+    file_content=$(cat -- "$FILE_MSG_PATH") || {
+      echo "error: --file '$FILE_MSG_PATH' could not be read; nothing was sent" >&2
+      exit 1
+    }
+    [ -n "${file_content//[[:space:]]/}" ] || {
+      echo "error: --file '$FILE_MSG_PATH' is blank; nothing was sent" >&2
+      exit 1
+    }
+    MESSAGE=$file_content
+  else
+    MESSAGE=$*
+  fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
@@ -863,6 +912,17 @@ else
     esac
     exit 0
   fi
+  # Typed plane only: a multi-line --file would submit early on every newline
+  # and garble into separate partial sends, so it is refused here - after the
+  # inbox planes above had their chance to take it as a durable record.
+  if [ -n "$FILE_MSG_PATH" ]; then
+    case "$MESSAGE" in
+      *$'\n'*)
+        echo "error: --file '$FILE_MSG_PATH' holds multiple lines, and this target rides the typed plane, which submits on every newline and would garble them into separate partial messages. Send each line as its own steer instead." >&2
+        exit 1
+        ;;
+    esac
+  fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
   # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
@@ -871,7 +931,7 @@ else
   # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
   # needlessly slow plain text to claude/opencode/pi. The target backend's
   # verified submit retry still backs the settle up either way.
-  case "$*" in
+  case "$MESSAGE" in
     /*) settle=1.2 ;;
     \$*)
       if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
