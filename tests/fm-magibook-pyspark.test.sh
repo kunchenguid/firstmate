@@ -1,26 +1,21 @@
 #!/usr/bin/env bash
-# tests/fm-magibook-pyspark.test.sh - behavior tests for the magibook-pyspark
-# skill's executable Cell templates (.agents/skills/magibook-pyspark/templates/).
+# tests/fm-magibook-pyspark.test.sh - behavior tests for the executable
+# magibook-pyspark initialization template.
 #
-# These drive the public callable behavior of the init and query templates
-# through a FAKED Spark ops interface: no real cluster, no pyspark import. They
-# assert observable outcomes - live reuse without building, exactly one build
-# when absent, a waiting status (never a second build) while initializing, and a
-# hard refusal on ambiguous/unhealthy state - plus config preservation and the
-# query template's spark.sql-only, no-build contract.
-#
-# They never grep or parse the template source for strings; every assertion runs
-# the imported functions and checks their return values or side effects.
+# These tests import the template and drive its public callable behavior through
+# a faked Spark interface.
+# They assert observable state, build count, probe count, returned status,
+# preserved configuration, and concrete refusal diagnostics.
+# They never inspect or parse implementation source.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required to drive the templates)"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required to drive the template)"; exit 0; }
 
-TEMPLATES="$ROOT/.agents/skills/magibook-pyspark/templates"
-[ -f "$TEMPLATES/ensure_spark.py" ] || fail "ensure_spark.py template missing"
-[ -f "$TEMPLATES/query_cell.py" ] || fail "query_cell.py template missing"
+TEMPLATE="$ROOT/.agents/skills/magibook-pyspark/templates/ensure_spark.py"
+[ -f "$TEMPLATE" ] || fail "ensure_spark.py template missing"
 
 TMP_ROOT=$(fm_test_tmproot fm-magibook-pyspark)
 DRIVER="$TMP_ROOT/driver.py"
@@ -29,237 +24,213 @@ cat >"$DRIVER" <<'PY'
 import importlib.util
 import sys
 
-TEMPLATES = sys.argv[1]
 
-
-def load(name):
-    spec = importlib.util.spec_from_file_location(name, f"{TEMPLATES}/{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    sys.modules[name] = module
-    return module
-
-
-es = load("ensure_spark")
-qc = load("query_cell")
+spec = importlib.util.spec_from_file_location("ensure_spark", sys.argv[1])
+es = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(es)
 
 FULL = {
     "spark.app.name": "test-app",
     "spark.master": "yarn",
-    "spark.hadoop.yarn.cluster.name": "virtual-test",
-    "spark.yarn.queue": "root.test_queue",
-    "spark.dynamicAllocation.maxExecutors": "5000",
+    "spark.hadoop.yarn.cluster.name": "test-cluster",
+    "spark.yarn.queue": "test-queue",
+    "spark.dynamicAllocation.enabled": "true",
+    "spark.shuffle.service.enabled": "true",
+    "spark.dynamicAllocation.maxExecutors": "10",
+    "spark.ui.showConsoleProgress": "false",
 }
 
 
-class Row:
-    def __init__(self, d):
-        self._d = d
-
-    def asDict(self):
-        return self._d
-
-
-class FakeDataFrame:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def collect(self):
-        return [Row(r) for r in self._rows]
-
-
-class FakeSession:
-    def __init__(self, rows):
-        self._rows = rows
-        self.sql_calls = []
-
-    def sql(self, text):
-        self.sql_calls.append(text)
-        return FakeDataFrame(self._rows)
-
-
 class FakeOps:
-    """Fully injected Spark ops. Records build() calls; never touches pyspark."""
+    """Record builds and probes without importing PySpark."""
 
-    def __init__(self, ctx=None, stopped=False, app_id="app-live",
-                 probe_exc=None, id_exc=None, build_id="app-built"):
+    def __init__(
+        self,
+        ctx=None,
+        stopped=False,
+        app_id="app-live",
+        probe_exc=None,
+        id_exc=None,
+        build_id="app-built",
+        build_probe_exc=None,
+    ):
         self._ctx = ctx
         self._stopped = stopped
         self._app_id = app_id
         self._probe_exc = probe_exc
         self._id_exc = id_exc
         self._build_id = build_id
+        self._build_probe_exc = build_probe_exc
         self.builds = 0
+        self.probes = 0
         self.built_conf = None
 
     def active_context(self):
         return self._ctx
 
-    def is_stopped(self, ctx):
+    def is_stopped(self, context):
         return self._stopped
 
-    def application_id(self, ctx):
+    def application_id(self, context):
         if self._id_exc:
             raise self._id_exc
         return self._app_id
 
-    def probe(self, ctx):
+    def probe(self, context):
+        self.probes += 1
         if self._probe_exc:
             raise self._probe_exc
 
     def build(self, conf):
         self.builds += 1
         self.built_conf = conf
-        return self._build_id
+        self._ctx = object()
+        self._stopped = False
+        self._app_id = self._build_id
+        self._id_exc = None
+        self._probe_exc = self._build_probe_exc
+        return self._ctx
 
 
 results = []
 
 
-def check(name, cond):
-    results.append((name, bool(cond)))
+def check(name, condition):
+    results.append((name, bool(condition)))
 
 
-# 1. Live: reuse, never build.
+# Live contexts are proven by an action and reused without a build.
 ops = FakeOps(ctx=object(), app_id="app-live")
 status = es.ensure_spark(FULL, ops=ops)
-check("live_reused", status["action"] == "reused" and status["state"] == es.LIVE)
-check("live_app_id", status["applicationId"] == "app-live")
-check("live_no_build", ops.builds == 0)
+check("live_reused", status["state"] == es.LIVE and status["action"] == "reused")
+check("live_application_id", status["applicationId"] == "app-live")
+check("live_probed", ops.probes == 1)
+check("live_not_built", ops.builds == 0)
 
-# 2. Absent: build exactly once.
+# Absence builds once, probes the returned context, then reports live.
 ops = FakeOps(ctx=None, build_id="app-fresh")
 status = es.ensure_spark(FULL, ops=ops)
 check("absent_initialized", status["action"] == "initialized")
+check("absent_application_id", status["applicationId"] == "app-fresh")
 check("absent_one_build", ops.builds == 1)
-check("absent_app_id", status["applicationId"] == "app-fresh")
+check("new_context_probed", ops.probes == 1)
 
-# 2b. Stopped context is also absent -> single build.
-ops = FakeOps(ctx=object(), stopped=True, build_id="app-restart")
+# A stopped context follows the same single-build path.
+ops = FakeOps(ctx=object(), stopped=True, build_id="app-restarted")
 status = es.ensure_spark(FULL, ops=ops)
-check("stopped_initialized", status["action"] == "initialized" and ops.builds == 1)
+check("stopped_initialized", status["action"] == "initialized")
+check("stopped_one_build", ops.builds == 1)
+check("stopped_replacement_probed", ops.probes == 1)
 
-# 3. Ambiguous probe failures refuse; never build, never stop unknown app.
-for label, exc in [
-    ("auth", RuntimeError("Kerberos authentication failed for principal")),
-    ("authz", RuntimeError("Permission denied: user not allowed on queue")),
-    ("scheduler", RuntimeError("TaskSchedulerImpl lost executor 7")),
-    ("network", RuntimeError("Connection reset by peer to shuffle service")),
-    ("query", RuntimeError("AnalysisException: Table or view not found")),
+# Existing unhealthy contexts preserve their concrete cause and refuse a build.
+for label, message in [
+    ("authentication", "Kerberos authentication failed for principal"),
+    ("authorization", "Permission denied on the authorized queue"),
+    ("scheduler", "TaskScheduler lost executor while probing"),
+    ("network", "Connection reset by peer to shuffle service"),
+    ("query", "AnalysisException: table or view not found"),
 ]:
-    ops = FakeOps(ctx=object(), probe_exc=exc)
-    refused = False
+    ops = FakeOps(ctx=object(), probe_exc=RuntimeError(message))
+    diagnostic = ""
     try:
         es.ensure_spark(FULL, ops=ops)
-    except es.AmbiguousSparkStateError:
-        refused = True
-    check(f"ambiguous_{label}_refused", refused)
+    except es.AmbiguousSparkStateError as exc:
+        diagnostic = str(exc)
+    check(f"ambiguous_{label}_refused", message in diagnostic)
     check(f"ambiguous_{label}_no_build", ops.builds == 0)
 
-# 3b. Mismatched application id is ambiguous, not silent reuse.
+# Ownership mismatch is ambiguous before a query probe or build.
 ops = FakeOps(ctx=object(), app_id="app-other")
 refused = False
 try:
     es.ensure_spark(FULL, ops=ops, expected_app_id="app-expected")
 except es.AmbiguousSparkStateError:
     refused = True
-check("mismatch_refused", refused and ops.builds == 0)
+check("application_mismatch_refused", refused and ops.builds == 0)
 
-# 4. Initializing: a startup-classified id or probe failure -> waiting, no build.
-ops = FakeOps(ctx=object(), id_exc=RuntimeError("Application has not yet been assigned an id"))
-status = es.ensure_spark(FULL, ops=ops, initializing_max_attempts=0)
-check("init_id_waiting", status["state"] == es.INITIALIZING and status["action"] == "waiting")
-check("init_id_no_build", ops.builds == 0)
-
-# 4a. Dead-gateway id failure classifies absent -> rebuild exactly once.
-ops = FakeOps(ctx=object(), id_exc=RuntimeError("Java gateway process exited before sending its port"))
+# Startup evidence waits for the exact task and never initializes again.
+ops = FakeOps(
+    ctx=object(),
+    id_exc=RuntimeError("Application has not yet been assigned an id"),
+)
 status = es.ensure_spark(FULL, ops=ops)
-check("init_id_dead_gateway_rebuilt_once", status["action"] == "initialized" and ops.builds == 1)
+check("initializing_id_waits", status["state"] == es.INITIALIZING)
+check("initializing_id_no_build", ops.builds == 0)
 
-# 4a-b. Unrecognized id failure classifies ambiguous -> refusal, never build or wait.
-ops = FakeOps(ctx=object(), id_exc=RuntimeError("py4j network error while fetching the application id"))
+ops = FakeOps(
+    ctx=object(),
+    probe_exc=RuntimeError("Initial job has not accepted any resources"),
+)
+status = es.ensure_spark(FULL, ops=ops)
+check("initializing_probe_waits", status["action"] == "waiting")
+check("initializing_probe_no_build", ops.builds == 0)
+
+# Explicit dead-gateway evidence is absence and permits one probed replacement.
+ops = FakeOps(
+    ctx=object(),
+    id_exc=RuntimeError("Java gateway process exited before sending its port"),
+    build_id="app-after-gateway",
+)
+status = es.ensure_spark(FULL, ops=ops)
+check("dead_gateway_rebuilt_once", ops.builds == 1)
+check("dead_gateway_replacement_probed", ops.probes == 1)
+check("dead_gateway_live", status["applicationId"] == "app-after-gateway")
+
+# Unrecognized application-id failures stay ambiguous.
+ops = FakeOps(
+    ctx=object(),
+    id_exc=RuntimeError("py4j network error while fetching the application id"),
+)
 refused = False
 try:
     es.ensure_spark(FULL, ops=ops)
 except es.AmbiguousSparkStateError:
     refused = True
-check("init_id_unrecognized_refused", refused and ops.builds == 0)
+check("unrecognized_id_refused", refused and ops.builds == 0)
 
-ops = FakeOps(ctx=object(), probe_exc=RuntimeError("Initial job has not accepted any resources"))
-status = es.ensure_spark(FULL, ops=ops, initializing_max_attempts=0)
-check("init_probe_waiting", status["state"] == es.INITIALIZING and ops.builds == 0)
+# The absent build path cannot claim live when its mandatory probe is unhealthy.
+message = "Kerberos authentication failed during the new-session probe"
+ops = FakeOps(ctx=None, build_probe_exc=RuntimeError(message))
+diagnostic = ""
+try:
+    es.ensure_spark(FULL, ops=ops)
+except es.AmbiguousSparkStateError as exc:
+    diagnostic = str(exc)
+check("new_unhealthy_refused", message in diagnostic)
+check("new_unhealthy_one_build", ops.builds == 1)
+check("new_unhealthy_probed", ops.probes == 1)
 
-# 4b. Initializing then live is polled, not duplicated.
-class FlakyOps(FakeOps):
-    def __init__(self):
-        super().__init__(ctx=object(), app_id="app-slow")
-        self._probe_calls = 0
-
-    def probe(self, ctx):
-        self._probe_calls += 1
-        if self._probe_calls == 1:
-            raise RuntimeError("Initial job has not accepted any resources")
-
-
-slept = []
-ops = FlakyOps()
-status = es.ensure_spark(
-    FULL, ops=ops, initializing_max_attempts=3,
-    initializing_sleep_seconds=0.0, sleep=lambda s: slept.append(s),
+# A newly built context that is still scheduling reports waiting, never live.
+ops = FakeOps(
+    ctx=None,
+    build_probe_exc=RuntimeError("Initial job has not accepted any resources"),
 )
-check("poll_then_live", status["state"] == es.LIVE and status["action"] == "reused")
-check("poll_no_build", ops.builds == 0)
-check("poll_waited", len(slept) == 1)
+status = es.ensure_spark(FULL, ops=ops)
+check("new_initializing_waits", status["state"] == es.INITIALIZING)
+check("new_initializing_action", status["action"] == "initialized-waiting")
+check("new_initializing_one_build", ops.builds == 1)
 
-# 5. Config preservation: caller overrides win verbatim; unfilled placeholder is a hard error.
-conf = es.resolve_config({**FULL, "spark.dynamicAllocation.maxExecutors": "7000",
-                          "spark.yarn.priority": "10"})
-check("override_wins", conf["spark.dynamicAllocation.maxExecutors"] == "7000")
-check("extra_preserved", conf["spark.yarn.priority"] == "10")
-check("default_preserved", conf["spark.ui.showConsoleProgress"] == "false")
+# Caller values and additional settings pass through unchanged.
+conf = es.resolve_config(
+    {
+        **FULL,
+        "spark.dynamicAllocation.maxExecutors": "25",
+        "spark.yarn.priority": "10",
+    }
+)
+check("override_preserved", conf["spark.dynamicAllocation.maxExecutors"] == "25")
+check("additional_preserved", conf["spark.yarn.priority"] == "10")
+
+ops = FakeOps(ctx=None)
+es.ensure_spark({**FULL, "spark.yarn.priority": "10"}, ops=ops)
+check("build_configuration_preserved", ops.built_conf["spark.yarn.priority"] == "10")
 
 placeholder_guarded = False
 try:
     es.resolve_config()
 except es.UnfilledPlaceholderError:
     placeholder_guarded = True
-check("placeholder_guard", placeholder_guarded)
-
-# The build path must pass the exact resolved config through to ops.build.
-ops = FakeOps(ctx=None)
-es.ensure_spark({**FULL, "spark.yarn.priority": "10"}, ops=ops)
-check("build_gets_priority", ops.built_conf.get("spark.yarn.priority") == "10")
-check("build_gets_queue", ops.built_conf.get("spark.yarn.queue") == "root.test_queue")
-
-# 6. Query template: spark.sql only, reuses live session, never builds.
-ops = FakeOps(ctx=object(), app_id="app-query")
-session = FakeSession([{"n": 7}])
-result = qc.run_query("SELECT count(*) AS n FROM range(10)", lambda: session,
-                      ops=ops, expected_app_id="app-query")
-check("query_ok", result["status"] == "OK" and result["applicationId"] == "app-query")
-check("query_used_spark_sql", session.sql_calls == ["SELECT count(*) AS n FROM range(10)"])
-check("query_no_build", ops.builds == 0)
-check("query_rows", result["rowsPreview"] == [{"n": 7}])
-
-# 6b. Query refuses a dead kernel and never builds a second context.
-ops = FakeOps(ctx=None)
-session = FakeSession([{"n": 7}])
-refused = False
-try:
-    qc.run_query("SELECT 1", lambda: session, ops=ops)
-except RuntimeError:
-    refused = True
-check("query_dead_refused", refused and ops.builds == 0 and session.sql_calls == [])
-
-# 6c. Query refuses ambiguous health with the ambiguous error, no sql submitted.
-ops = FakeOps(ctx=object(), probe_exc=RuntimeError("Permission denied on queue"))
-session = FakeSession([{"n": 7}])
-refused = False
-try:
-    qc.run_query("SELECT 1", lambda: session, ops=ops)
-except qc.AmbiguousSparkStateError:
-    refused = True
-check("query_ambiguous_refused", refused and session.sql_calls == [])
+check("unfilled_placeholders_refused", placeholder_guarded)
 
 failed = [name for name, ok in results if not ok]
 for name, ok in results:
@@ -270,10 +241,10 @@ if failed:
 print("ALL_TEMPLATE_CHECKS_PASSED")
 PY
 
-out=$(python3 "$DRIVER" "$TEMPLATES" 2>&1) || {
+out=$(python3 "$DRIVER" "$TEMPLATE" 2>&1) || {
   printf '%s\n' "$out"
   fail "template behavior checks failed"
 }
 assert_contains "$out" "ALL_TEMPLATE_CHECKS_PASSED" "template driver did not report all checks passed"
 
-pass "magibook-pyspark templates: live reuse, single init, poll-not-duplicate, ambiguous refusal, config preservation, spark.sql-only query"
+pass "magibook-pyspark template: live reuse, one probed initialization, waiting, ambiguous refusal, config preservation"

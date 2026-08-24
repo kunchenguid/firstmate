@@ -2,8 +2,8 @@
 name: magibook-pyspark
 description: >-
   Agent-only procedure for running data analysis on MagiBook with PySpark through the official magibook CLI.
-  Use before creating, reusing, checking, initializing, waiting on, or running a MagiBook PySpark/Spark SQL analysis, and before writing an init or query Cell.
-  Owns the inspect-ensure-wait-query lifecycle, the four-state Spark liveness model, single-initialization safety, and copy-ready init and query Cell templates; it does not own region defaults or cluster identifiers, which come from the captain-preference owner.
+  Use before creating, reusing, checking, initializing, waiting on, or running a MagiBook PySpark/Spark SQL analysis, and before writing an init Cell or orchestrating query Cells.
+  Owns the inspect-ensure-wait-query lifecycle, the four-state Spark liveness model, single-initialization safety, the copy-ready init Cell template, and bounded query fan-out; it does not own region defaults or cluster identifiers, which come from the captain-preference owner.
 user-invocable: false
 metadata:
   internal: true
@@ -52,13 +52,65 @@ Run these phases in order for every new analysis run.
    Poll the exact init task with `cell task-status` and allow long bounded waits for first YARN scheduling and Spark startup.
    Never submit a second init Cell or a second SparkContext because scheduling is slow; a duplicate submission is the failure this skill exists to prevent.
 4. Query.
-   Once ensured live, run business logic through `spark.sql("""SELECT ...""")` on the ensured session using the query template.
+   Once ensured live, run business logic from ordinary Python Cells through `spark.sql("""SELECT ...""")` on the ensured session.
+   Hive queries do not need a separate query template.
    Do not use Dorado, TQS, or any direct SQL submission path for query work here.
 5. Persist and reuse (optional).
    When multiple actions read the same filtered or joined base, materialize it once with a purposeful `persist(StorageLevel.MEMORY_AND_DISK)`, reuse that cached DataFrame across the rounds, and `unpersist()` it promptly when the analysis no longer needs it.
 6. Reconcile terminal output.
    Read each submitted Cell's output (`magibook --region <region> cell view <cell_id> --output`) and reconcile the exact task status.
    Confirm the query Cell's reported application id matches the ensured session's, proving session reuse.
+
+## Bounded parallel query execution
+
+Reduce the number of separate queries before adding concurrency.
+Combine compatible metrics over the same scan with shared CTEs, conditional aggregation, or one persisted base DataFrame when doing so preserves semantics.
+For the remaining independent query Cells, set an explicit concurrency bound to the highest parallelism authorized for the queue and submit up to that bound rather than leaving capacity idle.
+Keep Spark initialization single-flight and terminally reconciled before any query fan-out.
+
+Use one `magibook cell run` subprocess per query Cell so every submission retains a distinct Cell identity and returned task identity.
+Build argv arrays, keep `shell=False`, capture the JSON response, and never interpolate a shell command string.
+This reusable submission frame contains only placeholders:
+
+```python
+import concurrent.futures
+import json
+import subprocess
+
+REGION = "<REGION>"
+BOOK_UUID = "<BOOK_UUID>"
+QUERY_CELL_IDS = ["<QUERY_CELL_ID_1>", "<QUERY_CELL_ID_2>"]
+MAX_PARALLEL = int("<MAX_PARALLEL>")
+
+
+def magibook(*args):
+    return subprocess.run(
+        ["magibook", "--region", REGION, *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        shell=False,
+    )
+
+
+def submit(cell_id):
+    payload = json.loads(
+        magibook("cell", "run", BOOK_UUID, str(cell_id)).stdout
+    )
+    return {"cellId": str(cell_id), "taskId": str(payload["batch_task_id"])}
+
+
+worker_count = max(1, min(MAX_PARALLEL, len(QUERY_CELL_IDS)))
+with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+    submissions = list(pool.map(submit, QUERY_CELL_IDS))
+
+print(json.dumps({"submissions": submissions}, sort_keys=True))
+```
+
+Poll every returned task id with a separate argv call equivalent to `magibook("cell", "task-status", task_id)` until that exact task is terminal.
+Aggregate terminal status and bounded Cell output per `{cellId, taskId}` pair so a failure or slow query cannot be mistaken for another submission.
+Never duplicate a query submission merely because its task is pending or executing.
+If observation shows the shared Book or kernel serializes Cell execution, set the bound to one and continue sequentially instead of opening another SparkContext or creating duplicate tasks.
 
 ## Four-state Spark model
 
@@ -72,12 +124,11 @@ A probe failure is classified, not swallowed: authentication, authorization, sch
 
 ## Templates
 
-The two copy-ready templates are safe to paste into persistent MagiBook Cells: no credentials, user identifiers, Book IDs, task IDs, dates, or table names, only clear placeholders.
-Both return and print a bounded machine-readable status carrying the application id so a later Cell can verify session reuse.
+The copy-ready init template is safe to paste into a persistent MagiBook Cell: no credentials, user identifiers, Book IDs, task IDs, dates, or table names, only clear placeholders.
+It returns and prints a bounded machine-readable status carrying the application id so later Cells can verify session reuse.
 Fill every `<...>` placeholder from the captain-preference owner before running, and keep the captain's validated defaults; the init template preserves caller-supplied configuration and never silently rewrites it.
 
 - Init: [`templates/ensure_spark.py`](templates/ensure_spark.py) is the idempotent liveness check plus single initialization.
-- Query: [`templates/query_cell.py`](templates/query_cell.py) obtains the ensured session, re-verifies it is live, and runs business logic through `spark.sql`.
 
 ## Evidence
 
