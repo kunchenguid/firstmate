@@ -503,6 +503,25 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_backend_source_missing_adapter_returns_to_caller() {
+  local test_root out status=0
+  test_root="$TMP_ROOT/source-missing-adapter"
+  mkdir -p "$test_root/bin"
+  cp "$ROOT/bin/fm-backend.sh" "$test_root/bin/fm-backend.sh"
+
+  out=$(bash -c 'set -eu
+    . "$1/bin/fm-backend.sh"
+    trap '\''status=$?; exit "$status"'\'' EXIT
+    if ! fm_backend_source herdr; then
+      printf "%s\n" "missing adapter returned to caller"
+      exit 23
+    fi' fm-backend-missing-adapter "$test_root" 2>&1) || status=$?
+  expect_code 23 "$status" "fm_backend_source should return control with failure when its adapter file is absent"
+  assert_contains "$out" "missing adapter returned to caller" \
+    "fm_backend_source let a missing adapter terminate the shell before its caller could refuse safely"
+  pass "fm_backend_source: a missing adapter returns failure to its caller without terminating the shell"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1126,6 +1145,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_returns_to_caller
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
