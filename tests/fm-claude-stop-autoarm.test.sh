@@ -22,18 +22,8 @@ ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
 
-# Copy the hook and its sourced dependencies into a fixture checkout.
-install_autoarm_scripts() {
+install_autoarm_wake_context_fixture() {
   local dir=$1
-  mkdir -p "$dir/bin"
-  cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
-  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
-  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
-  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
-  cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cat > "$dir/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
@@ -48,8 +38,19 @@ if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
 fi
 printf 'CLAUDE_CONTEXT_PACKET\n'
 SH
-  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-wake-context.sh"
+}
+
+# Copy the hook and its sourced dependencies into a fixture checkout.
+install_autoarm_scripts() {
+  local dir=$1 script
+  mkdir -p "$dir/bin"
+  for script in fm-claude-stop-autoarm.sh fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-lock.sh; do
+    cp "$ROOT/bin/$script" "$dir/bin/$script"
+  done
+  install_autoarm_wake_context_fixture "$dir"
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
 }
 
 make_primary_dir() {

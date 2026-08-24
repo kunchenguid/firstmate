@@ -286,6 +286,69 @@ test_empty_queue_unstageable_status_cursor_withholds_ack() {
   pass "empty queue withholds ACK when status presentation cannot be staged"
 }
 
+retry_manual_drain_without_replay() { # <home> <status-text>
+  local ack generation
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_ROOT_OVERRIDE="$1" "$1/bin/fm-wake-drain.sh" > "$1/retry" 2> "$1/retry.err" \
+    || fail "manual drain retry failed"
+  grep -F "$2" "$1/retry" >/dev/null || fail "manual retry lost the invalidated status"
+  ack=$(sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p' "$1/retry.err")
+  generation=$(sed -n 's/.*--recovery-generation \([^ ]*\).*/\1/p' "$1/retry.err")
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_ROOT_OVERRIDE="$1" "$1/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null \
+    || fail "manual drain retry ACK failed"
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_ROOT_OVERRIDE="$1" "$1/bin/fm-wake-drain.sh" > "$1/replay" 2>/dev/null
+  grep -F "$2" "$1/replay" >/dev/null && fail "manual retry replayed the acknowledged status"
+}
+
+assert_manual_stage_failed_closed() { # <home> <status>
+  [ "$2" -ne 0 ] || fail "manual drain published after status identity changed"
+  grep -F 'WAKE_ACK_REQUIRED' "$1/err" >/dev/null && fail "manual drain exposed an ACK without a durable cursor"
+  cmp -s "$1/cursor.before" "$1/state/.status-presentation-cursor" || fail "manual drain advanced the cursor after staging failed"
+  [ ! -e "$1/state/.wake-context-cache.status-cursor" ] || fail "manual drain left a staged cursor"
+}
+
+test_manual_nonempty_queue_identity_change_withholds_ack() {
+  local home="$TMP_ROOT/manual-nonempty-identity" pid i=0 status=0
+  prepare_real_wake "$home"
+  FM_WAKE_ENRICH_TEST_DELAY=2 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" > "$home/out" 2> "$home/err" & pid=$!
+  while ! process_tree_has_sleep "$pid" && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ "$i" -lt 100 ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "manual nonempty drain missed its staging barrier"; }
+  printf 'note: beta replaced during manual presentation\n' > "$home/state/beta.status.next"
+  mv "$home/state/beta.status.next" "$home/state/beta.status"
+  wait "$pid" || status=$?
+  assert_manual_stage_failed_closed "$home" "$status"
+  [ -s "$home/state/.wake-queue" ] || fail "manual failure consumed the nonempty queue"
+  retry_manual_drain_without_replay "$home" 'beta replaced during manual presentation'
+  pass "manual nonempty queue withholds ACK until cursor staging succeeds"
+}
+
+install_empty_queue_identity_barrier() { # <home>
+  cat > "$1/bin/fm-captain-hold.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = diverged ] || exit 0
+: > "$FM_HOME/divergence.entered"
+while [ -e "$FM_HOME/divergence.hang" ]; do sleep 0.05; done
+SH
+  chmod +x "$1/bin/fm-captain-hold.sh"
+}
+
+test_manual_empty_queue_identity_change_withholds_ack() {
+  local home="$TMP_ROOT/manual-empty-identity" pid i=0 status=0
+  install_real_drain_fixture "$home"; printf 'note: alpha bootstrap\n' > "$home/state/alpha.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" >/dev/null 2>/dev/null
+  cp "$home/state/.status-presentation-cursor" "$home/cursor.before"
+  printf 'note: alpha pending manual recovery\n' >> "$home/state/alpha.status"; : > "$home/state/.wake-queue"
+  printf 'pending:handling:fixture\n' > "$home/state/.watcher-down"; install_empty_queue_identity_barrier "$home"; : > "$home/divergence.hang"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" > "$home/out" 2> "$home/err" & pid=$!
+  while [ ! -e "$home/divergence.entered" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$home/divergence.entered" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "manual empty drain missed its staging barrier"; }
+  printf 'note: alpha replaced during manual recovery\n' > "$home/state/alpha.status.next"
+  mv "$home/state/alpha.status.next" "$home/state/alpha.status"; rm -f "$home/divergence.hang"; wait "$pid" || status=$?
+  assert_manual_stage_failed_closed "$home" "$status"
+  retry_manual_drain_without_replay "$home" 'alpha replaced during manual recovery'
+  pass "manual empty queue withholds ACK until cursor staging succeeds"
+}
+
 test_empty_status_set_stages_empty_cursor() {
   local home="$TMP_ROOT/empty-status-stage" packet
   install_real_drain_fixture "$home"
@@ -556,6 +619,8 @@ test_sigkill_before_cache_publish_keeps_unread_note
 test_status_cursor_is_staged_before_ack
 test_unstageable_status_cursor_withholds_ack
 test_empty_queue_unstageable_status_cursor_withholds_ack
+test_manual_nonempty_queue_identity_change_withholds_ack
+test_manual_empty_queue_identity_change_withholds_ack
 test_empty_status_set_stages_empty_cursor
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task

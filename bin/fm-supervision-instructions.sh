@@ -160,27 +160,13 @@ repair_line() {
 
 ordinary_wake_line() {
   case "$HARNESS" in
-    claude)
-      printf '%s\n' '- Ordinary wake: handle the attached fm-wake-context.v1 packet and run its acknowledgement after handling; the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity, so do not arm another cycle yourself.'
-      ;;
-    codex)
-      printf '%s\n' '- Ordinary wake: handle the checkpoint-attached fm-wake-context.v1 packet and run its acknowledgement after handling, then take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
-      ;;
-    pi|pi-signed)
-      printf '%s\n' '- Ordinary wake: handle the Pi-attached fm-wake-context.v1 packet and run its acknowledgement after handling; the Pi extension already owns watcher continuity, so do not arm another cycle.'
-      ;;
-    opencode)
-      printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
-      ;;
-    grok)
-      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
-      ;;
-    cursor)
-      printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
-      ;;
-    *)
-      printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'
-      ;;
+    claude) printf '%s\n' '- Ordinary wake: handle the attached fm-wake-context.v1 packet and run its acknowledgement after handling; the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity, so do not arm another cycle yourself.' ;;
+    codex) printf '%s\n' '- Ordinary wake: handle the checkpoint-attached fm-wake-context.v1 packet and run its acknowledgement after handling, then take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.' ;;
+    pi|pi-signed) printf '%s\n' '- Ordinary wake: handle the Pi-attached fm-wake-context.v1 packet and run its acknowledgement after handling; the Pi extension already owns watcher continuity, so do not arm another cycle.' ;;
+    opencode) printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.' ;;
+    grok) printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.' ;;
+    cursor) printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.' ;;
+    *) printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.' ;;
   esac
 }
 

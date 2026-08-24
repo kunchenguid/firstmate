@@ -270,13 +270,14 @@ print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
+  status_validate_presentation_snapshot "$STATE" "$snapshot" || return
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
   if [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" = 1 ]; then
     [ -n "${FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE:-}" ] || return 1
-    status_commit_presentation_snapshot "$STATE" "$acknowledged" "$FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE"
+    status_commit_presentation_snapshot "$STATE" "$acknowledged" "$FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE" || return
     return
   fi
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
@@ -300,8 +301,8 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ]; then
-    if [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1
-    else stage_empty_status_cursor || rc=1
+    if [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=$?
+    else stage_empty_status_cursor || rc=$?
     fi
   fi
   fm_lock_release "$lock"
@@ -309,7 +310,10 @@ print_status_presentation() {  # [<deduped-raw-rows>]
 }
 
 print_status_presentation_before_ack() { # <deduped-raw-rows>
-  (print_status_presentation "$1") && return 0
+  local rc=0
+  print_status_presentation "$1" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne 2 ] || return 2
   [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" != 1 ]
 }
 
