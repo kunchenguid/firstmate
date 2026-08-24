@@ -115,7 +115,7 @@ catch-up if present), a tmux status-line flash when applicable, and a configurab
 
 **Escalation alert (delivery, not just failure).**
 A successfully injected escalation digest still only reaches a captain who is looking at the supervisor pane.
-On every successful `escalate_flush`, the daemon additionally attempts a configurable, independently rate-limited `config/escalation-alert` channel (same directive syntax as the wedge alarm), so an away captain can be pinged off-pane the moment a real escalation lands, not only when injection itself wedges.
+On every successful `escalate_flush`, the daemon additionally attempts a configurable, opt-in `config/escalation-alert` channel (same directive syntax as the wedge alarm, off by default, and with no additional rate limiting beyond the natural `escalate_flush` batch window), so an away captain can be pinged off-pane the moment a real escalation lands, not only when injection itself wedges.
 `docs/wedge-alarm.md` "Escalation alert" owns this channel's setup and its relationship to the wedge alarm above.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 

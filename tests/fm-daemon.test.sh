@@ -1653,6 +1653,15 @@ test_escalation_alert_off_disables_alert() {
   pass "escalation-alert off disables the alert while the pane digest still delivers"
 }
 
+test_escalation_alert_defaults_off_when_unconfigured() {
+  local dir out
+  dir=$(mktemp -d)
+  out=$(unset FM_ESCALATION_ALERT_CHANNEL; FM_HOME="$dir" escalation_alert_configured_channels)
+  [ "$out" = off ] \
+    || fail "an absent config/escalation-alert and unset FM_ESCALATION_ALERT_CHANNEL must default to off, not auto (got: $out)"
+  pass "escalation-alert defaults to off (opt-in) when neither the config file nor the env override is set"
+}
+
 test_escalation_alert_osascript_channel_selected() {
   local dir log
   dir=$(make_wedge_case escalation-alert-osascript); log="$dir/alert.log"
@@ -2077,6 +2086,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group
 test_escalation_alert_library_mode_defaults_to_discard
 test_escalation_alert_fires_on_successful_flush
 test_escalation_alert_off_disables_alert
+test_escalation_alert_defaults_off_when_unconfigured
 test_escalation_alert_osascript_channel_selected
 test_escalation_alert_command_channel_receives_summary
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend

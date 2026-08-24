@@ -135,7 +135,9 @@
 #                                   only when injection itself cannot be
 #                                   confirmed), so an away captain can be pinged
 #                                   off-pane the moment something real needs
-#                                   them. An absent file/var means auto. See
+#                                   them. This is opt-in: an absent file/var
+#                                   means off, unlike the wedge alarm's
+#                                   default-on auto. See
 #                                   escalation_alert_notify above escalate_flush
 #                                   and docs/wedge-alarm.md.
 #          FM_ESCALATION_ALERT_EXEC notifier seam for escalation alerts, same
@@ -698,9 +700,10 @@ escalate_flush() {  # <state>
 #
 # Config: config/escalation-alert (local, gitignored), same directive syntax as
 # config/wedge-alarm: off | auto | osascript | herdr | command:<cmd>.
-# FM_ESCALATION_ALERT_CHANNEL overrides the file with a single directive. An
-# absent config means auto (default-on osascript on macOS, otherwise the
-# durable pane digest remains the only signal until a command: is configured).
+# FM_ESCALATION_ALERT_CHANNEL overrides the file with a single directive. This
+# is a new captain-facing notification capability, so an absent config means
+# off (opt-in only) - unlike the wedge alarm's default-on auto, which only
+# ever fires on a rare delivery failure rather than on every escalation.
 
 escalation_alert_configured_channels() {
   local cfg line found=
@@ -719,7 +722,7 @@ escalation_alert_configured_channels() {
       found=1
     done < "$cfg"
   fi
-  [ -n "$found" ] || printf 'auto\n'
+  [ -n "$found" ] || printf 'off\n'
 }
 
 # The execution seam for escalation-alert channels, kept distinct from

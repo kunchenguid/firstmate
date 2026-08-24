@@ -15,7 +15,9 @@
 #   command:<cmd>    run <cmd> via `sh -c`; the escalation summary is passed as
 #                    $1 and on stdin, so it can reach a phone/pager while away
 #
-# An ABSENT config/escalation-alert behaves as `auto` (default-on on macOS).
+# An ABSENT config/escalation-alert behaves as `off`: this is a new
+# captain-facing notification capability, so it is opt-in, unlike
+# config/wedge-alarm's default-on `auto`.
 # Unlike config/wedge-alarm, there is no extra rate limit beyond the natural
 # escalation-batch window: each flushed digest already batches every wake that
 # arrived within that window, so a distinct later escalation still pings.

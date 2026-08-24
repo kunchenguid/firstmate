@@ -35,11 +35,11 @@ It says nothing about the far more common case: a genuine, captain-relevant esca
 
 `escalate_flush` fires a second, independent alert - `escalation_alert_notify` - on every successful delivery of a real escalation digest, so an away captain can be pinged off-pane the moment something actually needs them, not only when delivery breaks.
 
-It shares the wedge alarm's channel syntax and safety machinery (best-effort, process-group bounded, argv-safe `command:` dispatch) but is configured and rate-limited independently:
+It shares the wedge alarm's channel syntax and safety machinery (best-effort, process-group bounded, argv-safe `command:` dispatch) but is configured independently and applies no additional rate limiting of its own:
 
 - `config/escalation-alert` (local, gitignored) takes the same directives as `config/wedge-alarm`: `off`, `auto`/`default`, `osascript`, `herdr`, `command:<cmd>`.
 - `FM_ESCALATION_ALERT_CHANNEL` overrides the file with one directive for focused testing.
-- An absent `config/escalation-alert` behaves as `auto` (default-on `osascript` on macOS).
+- An absent `config/escalation-alert` behaves as `off`: this is a new captain-facing notification capability, so it is opt-in, unlike the wedge alarm's default-on `auto`.
 - Unlike the wedge alarm, there is no additional rate limit beyond the natural `escalate_flush` batch window (`FM_ESCALATE_BATCH_SECS`): each flushed digest already batches every wake that arrived within that window into one message, and a distinct later escalation still pings rather than being throttled.
 
 Configure the two independently: a captain who wants a phone ping for every real escalation but not for the rarer wedge failure (or vice versa) can leave one on `off` and the other on a `command:` directive.
