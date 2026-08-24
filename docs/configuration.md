@@ -353,6 +353,12 @@ Every string is non-empty, `brief_sha256` is the SHA-256 of the exact current `d
 The receipt binds the SHA-256 of this exact intent file rather than trusting an unattached hash.
 The validator recomputes the brief hash against a private snapshot before accepting the intent, so replacing the brief before that snapshot returns `BRIEF_HASH_MISMATCH`.
 The executable boundary operations are `identity`, `snapshot`, `publish`, `hash`, `consume-generation`, and `verify-committed-generation`.
+The committed [`routing-receipt-guard-sites.tsv`](verification/routing-receipt-guard-sites.tsv) inventory is generated from explicit syntax classes rather than a semantic control-flow analysis.
+The library matcher selects non-definition `fm_routing_refuse` calls, literal `return 1` lines, and bracket predicates in `fm_routing_decision_required`, `fm_routing_raw_environment_assignment`, and `fm_routing_literal_words`.
+The Perl matcher selects lines containing `fail(`.
+The spawn matcher selects non-comment lines containing `ROUTING_CONFIG`, `ROUTING_DECISION_REQUIRED`, `ROUTING_COMMITTED_HANDOFF`, `ROUTING_PREFLIGHT_ONLY`, an `FM_ROUTING_*` or `RELAUNCH_PRIOR_ROUTING_*` name, an `fm_routing_decision_*` name, or `fm_operational_verified_file_input`, plus the generator's continuation rows.
+Refusal-capable lines outside these syntax classes are not enumerated.
+The inventory drift test detects changes within the matched syntax classes but cannot prove that the class list is complete.
 `identity` opens the final directory component with `O_NOFOLLOW` and reports the held directory identity.
 `snapshot` opens the final `data/<task-id>` directory component with `O_NOFOLLOW`, creates the private validation directory relative to that held task handle, opens the final canonical config directory component with `O_NOFOLLOW`, and copies each selected input relative to a held directory handle.
 `publish` opens the final task and snapshot directory components with `O_NOFOLLOW`, creates or opens the generation directory relative to the held task handle, and creates or verifies each receipt and brief artifact relative to the held generation handle.

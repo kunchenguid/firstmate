@@ -1317,6 +1317,11 @@ case "$ARG3" in
     ;;
 esac
 
+# A raw receipt binds the command bytes supplied by the caller.
+# Adapter-owned environment added below is derived from the already-observed
+# harness, while a caller-written assignment remains in these bytes and refuses.
+FM_ROUTING_CALLER_LAUNCH=$LAUNCH
+
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -1565,12 +1570,12 @@ if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
   if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
     fm_routing_decision_validate_committed_handoff \
       "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
-      "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
+      "$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
       || exit 1
   else
     fm_routing_decision_validate_and_prepare \
       "$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
-      "$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+      "$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
       || exit 1
   fi
   fm_operational_verified_file_input \

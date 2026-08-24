@@ -48,7 +48,7 @@ emit_inventory() {
       if (index($0, "exit 1") || $0 ~ /^[[:space:]]*}/ || $0 ~ /; then[[:space:]]*$/) continuation = 0
       next
     }
-    /ROUTING_DECISION_REQUIRED|ROUTING_COMMITTED_HANDOFF|ROUTING_PREFLIGHT_ONLY|fm_routing_decision_(required|validate|persist|consume|seal)|fm_operational_verified_file_input/ {
+    /ROUTING_CONFIG|ROUTING_DECISION_REQUIRED|ROUTING_COMMITTED_HANDOFF|ROUTING_PREFLIGHT_ONLY|FM_ROUTING_[[:alnum:]_]+|RELAUNCH_PRIOR_ROUTING_[[:alnum:]_]+|fm_routing_decision_[[:alnum:]_]+|fm_operational_verified_file_input/ {
       emit("dispatch-routing-candidate")
       if ($0 ~ /\\[[:space:]]*$/ || $0 ~ /\|\|[[:space:]]*{[[:space:]]*$/) continuation = 1
     }

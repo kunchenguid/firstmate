@@ -304,61 +304,82 @@ bin/fm-routing-fs-boundary.pl	275	failure-call	read_all($receipt) eq $receipt_by
 bin/fm-routing-fs-boundary.pl	276	failure-call	read_all($brief) eq $brief_bytes or fail("COMMITTED_BRIEF_BYTES");
 bin/fm-routing-fs-boundary.pl	280	failure-call	my $operation = shift(@ARGV) // fail('USAGE');
 bin/fm-routing-fs-boundary.pl	295	failure-call	fail('USAGE');
+bin/fm-spawn.sh	251	dispatch-routing-candidate	ROUTING_CONFIG="$FM_HOME/config"
 bin/fm-spawn.sh	304	dispatch-routing-candidate	ROUTING_PREFLIGHT_ONLY=${FM_CONTROL_ROUTING_PREFLIGHT:-0}
 bin/fm-spawn.sh	305	dispatch-routing-candidate	ROUTING_COMMITTED_HANDOFF=${FM_CONTROL_ROUTING_COMMITTED:-0}
 bin/fm-spawn.sh	355	dispatch-routing-candidate	case "$ROUTING_PREFLIGHT_ONLY" in
 bin/fm-spawn.sh	359	dispatch-routing-candidate	case "$ROUTING_COMMITTED_HANDOFF" in
+bin/fm-spawn.sh	723	dispatch-routing-candidate	if [ -n "${FM_ROUTING_PREPARED_DIR:-}" ]; then
+bin/fm-spawn.sh	724	dispatch-routing-candidate	fm_routing_decision_discard_prepared
+bin/fm-spawn.sh	788	dispatch-routing-candidate	[ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+bin/fm-spawn.sh	789	dispatch-routing-candidate	[ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
+bin/fm-spawn.sh	889	dispatch-routing-candidate	if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
 bin/fm-spawn.sh	950	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
 bin/fm-spawn.sh	964	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
 bin/fm-spawn.sh	965	dispatch-routing-candidate	[ "$RELAUNCH" -eq 1 ] && [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ] || {
 bin/fm-spawn.sh	966	dispatch-routing-candidate	echo "error: the committed control-plane routing handoff applies only to the launch half of --relaunch" >&2
 bin/fm-spawn.sh	967	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1066	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_DECISION=
+bin/fm-spawn.sh	1067	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_BRIEF=
 bin/fm-spawn.sh	1090	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 0 ]; then
-bin/fm-spawn.sh	1538	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=0
-bin/fm-spawn.sh	1539	dispatch-routing-candidate	if fm_routing_decision_required \
-bin/fm-spawn.sh	1540	dispatch-routing-candidate	"$KIND" "$RELAUNCH" "$HARNESS_SET" "$MODEL_SET" "$EFFORT_SET"; then
-bin/fm-spawn.sh	1541	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=1
-bin/fm-spawn.sh	1543	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
-bin/fm-spawn.sh	1544	dispatch-routing-candidate	&& [ "$RELAUNCH" -eq 1 ] \
-bin/fm-spawn.sh	1545	dispatch-routing-candidate	&& [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
-bin/fm-spawn.sh	1546	dispatch-routing-candidate	&& [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
-bin/fm-spawn.sh	1547	dispatch-routing-candidate	&& [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
-bin/fm-spawn.sh	1564	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
-bin/fm-spawn.sh	1565	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
-bin/fm-spawn.sh	1566	dispatch-routing-candidate	fm_routing_decision_validate_committed_handoff \
-bin/fm-spawn.sh	1567	dispatch-routing-candidate	"$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
-bin/fm-spawn.sh	1568	dispatch-routing-candidate	"$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
-bin/fm-spawn.sh	1569	dispatch-routing-candidate	|| exit 1
-bin/fm-spawn.sh	1571	dispatch-routing-candidate	fm_routing_decision_validate_and_prepare \
+bin/fm-spawn.sh	1102	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_DECISION=$(fm_meta_get "$RELAUNCH_META" routing_decision)
+bin/fm-spawn.sh	1103	dispatch-routing-candidate	RELAUNCH_PRIOR_ROUTING_BRIEF=$(fm_meta_get "$RELAUNCH_META" routing_brief)
+bin/fm-spawn.sh	1305	dispatch-routing-candidate	if [ -f "$ROUTING_CONFIG/crew-dispatch.json" ]; then
+bin/fm-spawn.sh	1323	dispatch-routing-candidate	FM_ROUTING_CALLER_LAUNCH=$LAUNCH
+bin/fm-spawn.sh	1543	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=0
+bin/fm-spawn.sh	1544	dispatch-routing-candidate	if fm_routing_decision_required \
+bin/fm-spawn.sh	1545	dispatch-routing-candidate	"$KIND" "$RELAUNCH" "$HARNESS_SET" "$MODEL_SET" "$EFFORT_SET"; then
+bin/fm-spawn.sh	1546	dispatch-routing-candidate	ROUTING_DECISION_REQUIRED=1
+bin/fm-spawn.sh	1548	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+bin/fm-spawn.sh	1549	dispatch-routing-candidate	&& [ "$RELAUNCH" -eq 1 ] \
+bin/fm-spawn.sh	1550	dispatch-routing-candidate	&& [ "$HARNESS" = "$RELAUNCH_PRIOR_HARNESS" ] \
+bin/fm-spawn.sh	1551	dispatch-routing-candidate	&& [ "${MODEL:-default}" = "$RELAUNCH_PRIOR_MODEL" ] \
+bin/fm-spawn.sh	1552	dispatch-routing-candidate	&& [ "${EFFORT:-default}" = "$RELAUNCH_PRIOR_EFFORT" ]; then
+bin/fm-spawn.sh	1553	dispatch-routing-candidate	if fm_routing_decision_resolve_inherited "$RELAUNCH_PRIOR_ROUTING_DECISION" "$DATA/$ID"; then
+bin/fm-spawn.sh	1555	dispatch-routing-candidate	elif [ -n "$RELAUNCH_PRIOR_ROUTING_DECISION" ] || [ -n "$RELAUNCH_PRIOR_ROUTING_BRIEF" ]; then
+bin/fm-spawn.sh	1569	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	1570	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+bin/fm-spawn.sh	1571	dispatch-routing-candidate	fm_routing_decision_validate_committed_handoff \
 bin/fm-spawn.sh	1572	dispatch-routing-candidate	"$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
-bin/fm-spawn.sh	1573	dispatch-routing-candidate	"$RAW_LAUNCH" "$LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+bin/fm-spawn.sh	1573	dispatch-routing-candidate	"$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" "$RELAUNCH_PRIOR_ROUTING_DECISION" \
 bin/fm-spawn.sh	1574	dispatch-routing-candidate	|| exit 1
-bin/fm-spawn.sh	1576	dispatch-routing-candidate	fm_operational_verified_file_input \
-bin/fm-spawn.sh	1577	dispatch-routing-candidate	launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
-bin/fm-spawn.sh	1578	dispatch-routing-candidate	echo "error: validated routing brief changed before launch input construction" >&2
-bin/fm-spawn.sh	1579	dispatch-routing-candidate	exit 1
-bin/fm-spawn.sh	1581	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
-bin/fm-spawn.sh	1582	dispatch-routing-candidate	fm_routing_decision_seal_committed_handoff || {
-bin/fm-spawn.sh	1583	dispatch-routing-candidate	echo "error: validated control-plane routing handoff could not be sealed" >&2
+bin/fm-spawn.sh	1576	dispatch-routing-candidate	fm_routing_decision_validate_and_prepare \
+bin/fm-spawn.sh	1577	dispatch-routing-candidate	"$DATA" "$ROUTING_CONFIG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$FM_HOME" \
+bin/fm-spawn.sh	1578	dispatch-routing-candidate	"$RAW_LAUNCH" "$FM_ROUTING_CALLER_LAUNCH" "$MODELFLAG" "$EFFORTFLAG" \
+bin/fm-spawn.sh	1579	dispatch-routing-candidate	|| exit 1
+bin/fm-spawn.sh	1581	dispatch-routing-candidate	fm_operational_verified_file_input \
+bin/fm-spawn.sh	1582	dispatch-routing-candidate	launch-brief "$FM_ROUTING_BRIEF_HASH" "$FM_ROUTING_BRIEF_FINAL" FM_ROUTING_LAUNCH_INPUT || {
+bin/fm-spawn.sh	1583	dispatch-routing-candidate	echo "error: validated routing brief changed before launch input construction" >&2
 bin/fm-spawn.sh	1584	dispatch-routing-candidate	exit 1
-bin/fm-spawn.sh	1588	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
-bin/fm-spawn.sh	1589	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
-bin/fm-spawn.sh	1590	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
-bin/fm-spawn.sh	1591	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
-bin/fm-spawn.sh	1592	dispatch-routing-candidate	echo "error: validated relaunch routing preflight could not be sealed" >&2
-bin/fm-spawn.sh	1593	dispatch-routing-candidate	exit 1
-bin/fm-spawn.sh	1765	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
-bin/fm-spawn.sh	1981	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
-bin/fm-spawn.sh	1982	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
+bin/fm-spawn.sh	1586	dispatch-routing-candidate	if [ "$ROUTING_COMMITTED_HANDOFF" -eq 1 ]; then
+bin/fm-spawn.sh	1587	dispatch-routing-candidate	fm_routing_decision_seal_committed_handoff || {
+bin/fm-spawn.sh	1588	dispatch-routing-candidate	echo "error: validated control-plane routing handoff could not be sealed" >&2
+bin/fm-spawn.sh	1589	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1593	dispatch-routing-candidate	if [ "$ROUTING_PREFLIGHT_ONLY" -eq 1 ]; then
+bin/fm-spawn.sh	1594	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
+bin/fm-spawn.sh	1595	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
+bin/fm-spawn.sh	1596	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
+bin/fm-spawn.sh	1597	dispatch-routing-candidate	echo "error: validated relaunch routing preflight could not be sealed" >&2
+bin/fm-spawn.sh	1598	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	1770	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	1771	dispatch-routing-candidate	BRIEF=$FM_ROUTING_BRIEF_FINAL
+bin/fm-spawn.sh	1780	dispatch-routing-candidate	BRIEF=${FM_ROUTING_BRIEF_FINAL:-$DATA/$ID/brief.md}
 bin/fm-spawn.sh	1986	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
-bin/fm-spawn.sh	1993	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
-bin/fm-spawn.sh	1994	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
-bin/fm-spawn.sh	1995	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
-bin/fm-spawn.sh	1996	dispatch-routing-candidate	echo "error: validated routing decision could not be sealed" >&2
-bin/fm-spawn.sh	1997	dispatch-routing-candidate	exit 1
-bin/fm-spawn.sh	2913	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
-bin/fm-spawn.sh	2931	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
-bin/fm-spawn.sh	2999	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
-bin/fm-spawn.sh	3000	dispatch-routing-candidate	&& { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } \
-bin/fm-spawn.sh	3001	dispatch-routing-candidate	&& [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
-bin/fm-spawn.sh	3035	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	1987	dispatch-routing-candidate	fm_routing_decision_persist_prepared || exit 1
+bin/fm-spawn.sh	1991	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+bin/fm-spawn.sh	1992	dispatch-routing-candidate	fm_routing_decision_discard_prepared
+bin/fm-spawn.sh	1998	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ] && [ "$ROUTING_COMMITTED_HANDOFF" -eq 0 ]; then
+bin/fm-spawn.sh	1999	dispatch-routing-candidate	fm_routing_decision_consume_prepared || exit 1
+bin/fm-spawn.sh	2000	dispatch-routing-candidate	fm_routing_decision_seal_prepared || {
+bin/fm-spawn.sh	2001	dispatch-routing-candidate	echo "error: validated routing decision could not be sealed" >&2
+bin/fm-spawn.sh	2002	dispatch-routing-candidate	exit 1
+bin/fm-spawn.sh	2854	dispatch-routing-candidate	[ -z "$FM_ROUTING_DECISION_FINAL" ] || echo "routing_decision=$FM_ROUTING_DECISION_FINAL"
+bin/fm-spawn.sh	2855	dispatch-routing-candidate	[ -z "$FM_ROUTING_BRIEF_FINAL" ] || echo "routing_brief=$FM_ROUTING_BRIEF_FINAL"
+bin/fm-spawn.sh	2918	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	2919	dispatch-routing-candidate	sq_launch_input=$(shell_quote "$FM_ROUTING_LAUNCH_INPUT")
+bin/fm-spawn.sh	2936	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	3004	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 0 ] \
+bin/fm-spawn.sh	3005	dispatch-routing-candidate	&& { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; } \
+bin/fm-spawn.sh	3006	dispatch-routing-candidate	&& [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" != kimi ]; then
+bin/fm-spawn.sh	3040	dispatch-routing-candidate	if [ "$ROUTING_DECISION_REQUIRED" -eq 1 ]; then
+bin/fm-spawn.sh	3041	dispatch-routing-candidate	KIMI_INPUT=$FM_ROUTING_LAUNCH_INPUT

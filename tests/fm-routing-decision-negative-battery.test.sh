@@ -127,6 +127,7 @@ raw_guard_counterexample_count=0
 fresh_spawn_negative_count=0
 fresh_spawn_counterexample_count=0
 committed_handoff_negative_count=0
+raw_launch_acceptance_count=0
 PREEXISTING_FINAL=0
 PREEXISTING_META=0
 RUN_CWD=
@@ -338,6 +339,8 @@ setup_fresh_spawn_project() {
   : > "$FRESH_TEXT_LOG"
   : > "$FRESH_LEASE_LOG"
   printf 'zsh' > "$LAB/fresh-command"
+  mkdir -p "$LAB/worker-config/muse"
+  printf '{}\n' > "$LAB/worker-config/muse/auth.json"
 }
 
 run_fresh_spawn() { # <spawn-path>
@@ -345,6 +348,7 @@ run_fresh_spawn() { # <spawn-path>
   [ "$RUN_RAW" -eq 0 ] || harness_arg=$RUN_LAUNCH
   fresh_spawn_command() {
     env PATH="$RAW_HARNESS_BIN:$PATH" FM_HOME="$HOME_DIR" \
+      XDG_CONFIG_HOME="$LAB/worker-config" \
       FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
       FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
@@ -374,6 +378,30 @@ run_fresh_spawn() { # <spawn-path>
   else
     fresh_spawn_command
   fi
+}
+
+exercise_raw_launch_acceptance() { # <harness> <command>
+  local harness=$1 command=$2 out status
+  write_fixture
+  setup_raw_literal "$command"
+  setup_fresh_spawn_project
+  out=$(run_fresh_spawn "$SPAWN")
+  status=$?
+  expect_code 0 "$status" "$harness raw launch should succeed"
+  [ -s "$FRESH_TEXT_LOG" ] || fail "$harness raw launch did not reach the worktree lease channel"
+  [ -s "$FRESH_ENDPOINT_LOG" ] || fail "$harness raw launch did not create an endpoint"
+  [ -s "$FRESH_PANE_LOG" ] || fail "$harness raw launch did not send pane input"
+  assert_present "$HOME_DIR/state/t1.meta" "$harness raw launch did not publish metadata"
+  assert_contains "$(cat "$FRESH_PANE_LOG")" "$command" \
+    "$harness raw launch did not emit the caller command"
+  case "$harness" in
+    pi|pi-signed)
+      assert_contains "$(cat "$FRESH_PANE_LOG")" "FM_PI_HARNESS=$harness" \
+        "$harness raw launch did not emit its adapter environment"
+      ;;
+  esac
+  raw_launch_acceptance_count=$((raw_launch_acceptance_count + 1))
+  pass "$harness raw launch succeeds through fm-spawn with observed route axes"
 }
 
 assert_no_fresh_spawn_effects() {
@@ -907,6 +935,25 @@ setup_raw_literal() { # <command>
   update_intent '.authority = "EXPLICIT_RUNTIME_OVERRIDE"'
   update_receipt ".intent_sha256 = \"$(sha_file "$TASK_DIR/routing-intent.json")\""
 }
+setup_raw_pi_caller_environment() {
+  setup_raw_literal 'pi --model opus --thinking high'
+  RUN_LAUNCH='FOO=bar pi --model opus --thinking high'
+}
+
+run_raw_launch_acceptance_battery() {
+  write_relaunch_tmux_stub
+  while IFS='|' read -r harness command; do
+    [ -n "$harness" ] || continue
+    exercise_raw_launch_acceptance "$harness" "$command"
+  done <<'RAW_LAUNCHES'
+claude|claude --model opus --effort high
+codex|codex --model opus -c model_reasoning_effort=high
+grok|grok --model opus --reasoning-effort high
+muse|muse --model opus --reasoning-effort high
+pi|pi --model opus --thinking high
+pi-signed|pi-signed --model opus --thinking high
+RAW_LAUNCHES
+}
 RAW_PUNCTUATION=
 RAW_SHAPE_COMMAND=
 setup_raw_punctuation() { setup_raw_literal "claude --model a${RAW_PUNCTUATION}b --effort high"; }
@@ -1276,6 +1323,13 @@ exercise_shell_position_differential() { # <plain|single|double> <mid|start>
 }
 
 case "${FM_ROUTING_TEST_SCOPE:-}" in
+  raw-positive)
+    run_raw_launch_acceptance_battery
+    [ "$raw_launch_acceptance_count" -eq 6 ] \
+      || fail "raw launch battery counted $raw_launch_acceptance_count adapters instead of 6"
+    echo "# all 6/6 documented raw harness heads succeeded through fm-spawn"
+    exit 0
+    ;;
   committed-handoff)
     write_relaunch_tmux_stub
     run_committed_handoff_battery
@@ -1311,23 +1365,7 @@ pass "$shell_differential_character_count parser-derived printable ASCII state-p
 run_real_shell_differential separate-option-like-axis \
   "$SHELL_DIFF_PROBE --model -p --effort -q"
 
-assert_raw_effort_binding() { # <harness> <command> <effort>
-  local harness=$1 command=$2 effort=$3
-  fm_routing_parse_command_axes "$command" 1 \
-    || fail "$harness supported raw effort syntax was refused"
-  [ "$FM_ROUTING_COMMAND_HARNESS" = "$harness" ] \
-    || fail "$harness supported raw effort syntax changed harness identity"
-  [ "$FM_ROUTING_COMMAND_EFFORT" = "$effort" ] \
-    || fail "$harness supported raw effort syntax produced '$FM_ROUTING_COMMAND_EFFORT'"
-}
-
-assert_raw_effort_binding claude 'claude --model opus --effort high' high
-assert_raw_effort_binding codex "codex --model opus -c 'model_reasoning_effort=\"high\"'" high
-assert_raw_effort_binding grok 'grok --model opus --reasoning-effort high' high
-assert_raw_effort_binding pi 'pi --model opus --thinking max' max
-assert_raw_effort_binding pi-signed 'pi-signed --model opus --thinking xhigh' xhigh
-assert_raw_effort_binding muse 'muse --model opus --reasoning-effort ultra' ultra
-pass "supported raw effort syntax remains adapter-specific and observable"
+run_raw_launch_acceptance_battery
 
 prepare_relaunch_counterexample_root
 write_relaunch_tmux_stub
@@ -1458,10 +1496,12 @@ command wrapper xcrun|xcrun claude --model opus --effort high|raw launch command
 claude thinking spelling|claude --model opus --thinking high|effort spelling is not supported by the selected raw harness
 codex effort spelling|codex --model opus --effort high|effort spelling is not supported by the selected raw harness
 opencode effort spelling|opencode --model opus --effort high|effort spelling is not supported by the selected raw harness
-pi adapter environment prefix|pi --model opus --effort high|raw launch environment assignments can select an unobserved runtime
 muse thinking spelling|muse --model opus --thinking high|effort spelling is not supported by the selected raw harness
 grok unsupported value|grok --model opus --reasoning-effort xhigh|effort value is not supported by the selected raw harness
 RAW_SHAPES
+
+exercise_negative "pi caller environment prefix" RAW_LAUNCH_NOT_VERIFIABLE setup_raw_pi_caller_environment \
+  "raw launch environment assignments can select an unobserved runtime"
 
 exercise_negative "raw option terminator" RAW_LAUNCH_UNRESOLVED setup_raw_terminator \
   "raw launches must expose fixed literal model and effort selections"
@@ -1750,7 +1790,10 @@ expected_count=$((133 + ${#PLAIN_FORBIDDEN_PUNCT}))
   || fail "negative battery counted $fresh_spawn_counterexample_count fresh fm-spawn counterexamples instead of 147"
 [ "$committed_handoff_negative_count" -eq 5 ] \
   || fail "negative battery counted $committed_handoff_negative_count committed-handoff guards instead of 5"
+[ "$raw_launch_acceptance_count" -eq 6 ] \
+  || fail "negative battery counted $raw_launch_acceptance_count raw harness heads instead of 6"
 echo "# 147 fresh-dispatch negatives and 4 route-changing relaunch negatives refused through real fm-spawn"
 echo "# all 147 fresh-dispatch assertions reached lease, endpoint, pane-input, and metadata effects when the fm-spawn routing requirement was neutered"
 echo "# both 2/2 load-bearing raw-launch assertions went red when their exact guards were neutered"
 echo "# all 5/5 committed-handoff guards refused through fm-spawn; per-guard mutation evidence is recorded by the repair validation"
+echo "# all 6/6 documented raw harness heads succeeded through fm-spawn"
