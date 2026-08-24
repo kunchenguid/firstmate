@@ -5,12 +5,13 @@ This document records the deterministic mechanism, structured surfaces, compatib
 
 ## Mechanism
 
-A decision is not a separate thing in this system: it is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
-`bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
-The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned captain call stays in the secondmate home.
+A decision is not a separate thing in this system: it is a captain-held record with one string identity, the task id every surface and channel uses.
+That record lives in one of two backing stores that `bin/fm-captain-hold.sh` - the only lifecycle command layered on the primitive - dispatches between transparently (story fmops-07 §5).
+A question gating a real work item is a hold on that backlog task (`tasks-axi hold <id> --kind captain`); a question with no work item to gate, the composed `<origin>-decision-<key>` shape scouts mint, lives in a firstmate-private per-file register at `state/decisions/<id>.md` (`bin/fm-decision-register-lib.sh`), so decisions that are not stories never flood the backlog (invariant "backlog task == story").
+The command runs in the active `FM_HOME`, so a secondmate-owned captain call stays in the secondmate home, and `bin/fm-decision-register-lib.sh` renders each register file into the exact shape `tasks-axi show --full` prints so every read and close path reads both stores through one dispatch.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
-The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
+The `hold` subcommand places an existing task under an active captain hold, or creates the record when nothing exists to hold, then verifies it; the mint path splits on the composed `<origin>-decision-<key>` id shape, routing composed questions into the register and leaving the rare direct non-composed captain-hold on `tasks-axi hold <id> --reason <reason> --kind captain`.
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
@@ -49,8 +50,9 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies a captain hold as `captain_actionable` - waiting on the captain now - only when it is queued, unblocked, and due, whatever kind its row carries.
 It also emits a presentation-only `deferred_marker` when a hold's reason or body carries an explicit SUPERSEDED / NOT REQUIRED / DEFERRED marker.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked or deferred captain holds as queued work in the owning home.
+It also reads the decisions register and emits its actionable records as `decisions_register`, so register-backed calls join backlog holds in the same snapshot.
 
-`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
+`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open`, unions the snapshot's `decisions_register` records into the same Captain's Call so a register-backed decision is indistinguishable from a backlog-held one in the view, and leaves blocked captain holds in ordinary queued gates.
 A date-deferred captain hold renders as a gate with its `until <date>:` reason; a prose-deferred one leaves the default views with an `omitted[]` disclosure, revealed by `--all-decisions` / `--all-queued`.
 Recently Landed excludes a record that closed while still held for the captain (surviving `hold-kind: captain` on a Done row), so answered questions do not masquerade as shipped work; a work item released before completion keeps no hold annotations and lands normally.
 The projection remains read-only and does not inspect historical prose beyond the canonical snapshot's marker.
@@ -80,7 +82,8 @@ Older installs created derived `<origin>-decision-<key>` identities through the 
 Those rows are already plain task ids, so they render, answer, verify, and close through the collapsed surfaces with no data migration.
 Three legacy inputs are resolved in place: a `decision_keys=` metadata entry that names no task resolves through `<origin>-decision-<entry>`; a channel key that names no task resolves the same way when the source's binding carries a concrete legacy origin; and resolution records written by the old script are recognized wherever a record is read.
 The shim recognizes an exact replay of a pre-collapse routed resolution by its historical answer digest and routed ids, then finishes any still-recorded dependency-edge cleanup without rewriting the old decision text.
-`bin/fm-decision-hold.sh` itself remains for one release as a thin command-mapping shim over `bin/fm-captain-hold.sh`, so in-flight work briefed before the collapse keeps working; its header owns the exact mapping.
+`bin/fm-decision-hold.sh` itself remains for one release as a thin command-mapping shim over `bin/fm-captain-hold.sh`, so in-flight work briefed before the collapse keeps working; newly-minted composed identities now land in the decisions register rather than the backlog, and its header owns the exact mapping.
+No legacy backlog reader was added: composed rows that already sit in an install's backlog stay there and keep working as plain task ids, and migrating them into the register is separate out-of-scope ops (story fmops-07 §1).
 
 ## Verification record
 
@@ -92,4 +95,5 @@ It proves: the reconstructed silent-divergence case is signalled - a status reso
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
 Projection regressions live in `tests/fm-fleet-snapshot-view.test.sh` (hold-until parsing, the due gate, kind-independent captain actionability, deferred_marker, title stripping) and `tests/fm-bearings-snapshot.test.sh` (Captain's Call membership, the dated-gate rendering, prose-deferral suppression with disclosure, and the landed exclusion by surviving captain-hold annotations).
-The exact commands and their summarized outputs are recorded in the shipping PR's evidence; run the four suites above plus `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, and `bin/fm-lint.sh` to refresh this record.
+The decisions register's own mechanics - dispatch parity with `tasks-axi show --full`, atomic writes, and lossless close - are pinned by `tests/fm-decision-register-lib.test.sh` (story fmops-07 §5).
+The exact commands and their summarized outputs are recorded in the shipping PR's evidence; run the four suites above plus `tests/fm-decision-register-lib.test.sh`, `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, and `bin/fm-lint.sh` to refresh this record.

@@ -70,7 +70,7 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
-config/worker-playbook.md  optional per-home override of the worker SOFT playbook `docs/worker-playbook.md` spliced into every brief; LOCAL layer is SHARED, committed (machine-agnostic working style, section 11); present = full replacement of the default
+config/worker-playbook.md  optional per-home override of the worker SOFT playbook `docs/worker-playbook.md` spliced into every brief; SHARED, committed (machine-agnostic working style, section 11); present = full replacement of the default
 config/firstmate-playbook.md  optional per-home override of the firstmate SOFT dispatch grammar `docs/firstmate-playbook.md` loaded into the session digest; SHARED, committed (machine-agnostic dispatch grammar, section 4); present = full replacement of the default and it can never relax hard rules, merge authority, or the destructive/irreversible/security boundaries
 config/crew-harness  crewmate harness override; LOCAL-SECRET, gitignored (per-machine choice); absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; SHARED, committed (machine-agnostic operating choice); firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
