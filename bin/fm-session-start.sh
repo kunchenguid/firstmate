@@ -95,9 +95,9 @@
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
 #
-# On a Pi primary, the supervision-block step also checks whether Pi's two
-# tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
-# reminder line when one is missing.
+# On a native-extension primary, the supervision-block step checks whether the
+# tracked primary extensions are loaded and prints a harness-specific reminder
+# line when one is missing.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - converging
@@ -204,8 +204,8 @@
 #             session lock records AGENTS.md's SHA-256 baseline only after the
 #             digest completion record is published, keyed to that lock's
 #             harness pid. No resume, clear, reset, compact, or other rebuild
-#             creates or replaces it. Pi and pi-signed compaction are the only
-#             supported stale-cache rebuild pair: a missing baseline, a baseline
+#             creates or replaces it. Pi, pi-signed, and omp compaction are the supported
+#             stale-cache rebuild pairs: a missing baseline, a baseline
 #             for another harness pid, or a changed hash causes the complete
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
@@ -578,7 +578,7 @@ agents_baseline_drifted() {  # <rebuilding-session-pid>
 agents_refresh_required() {  # <rebuilding-session-pid>
   local lock_pid=$1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in
-    pi:compact|pi-signed:compact) ;;
+    pi:compact|pi-signed:compact|omp:compact) ;;
     *) return 1 ;;
   esac
   agents_baseline_drifted "$lock_pid"
@@ -749,11 +749,25 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_LOCK="$STATE/.lock"
   PI_RESTART_COMMAND=$PRIMARY_HARNESS
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
-  PI_WATCH_VERSION=$(fm_pi_extension_version "$PI_EXT" || printf '')
-  PI_TURNEND_VERSION=$(fm_pi_extension_version "$PI_TURNEND_EXT" || printf '')
-  if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
-    || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
+  PI_WATCH_VERSION=$(fm_native_extension_version "$PI_EXT" || printf '')
+  PI_TURNEND_VERSION=$(fm_native_extension_version "$PI_TURNEND_EXT" || printf '')
+  if ! fm_native_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
+    || ! fm_native_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+fi
+
+if [ "$PRIMARY_HARNESS" = omp ]; then
+  OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
+  OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
+  OMP_LOCK="$STATE/.lock"
+  OMP_WATCH_VERSION=$(fm_native_extension_version "$OMP_EXT" || printf '')
+  OMP_TURNEND_VERSION=$(fm_native_extension_version "$OMP_TURNEND_EXT" || printf '')
+  if ! fm_native_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
+    || ! fm_native_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
+    printf 'OMP_WATCH_EXTENSION: not loaded - restart omp so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s if project extension discovery is not active\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

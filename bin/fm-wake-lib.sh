@@ -144,9 +144,9 @@ fm_watcher_healthy() {
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
 #               watcher process is the healthy state.
-#   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
-#               continuity. It tears the watcher down on every actionable wake and
-#               spawns the replacement itself, so a genuinely unheld singleton lock
+#   extension   Pi, pi-signed, and omp native extensions own continuity. They tear
+#               the watcher down on every actionable wake and spawn the replacement
+#               themselves, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
 #   persistent  every other harness (codex foreground checkpoint, opencode/grok
@@ -163,23 +163,22 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
+    pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
 
-# Pi primary supervision evidence. The Pi extensions record, in their state
-# markers, the exact build they loaded and the session process that loaded it, so
-# "a live Pi session owns supervision" is provable from durable state without a
-# watcher process and without reading any vendor-rendered surface.
+# Native extension primary supervision evidence. The Pi and omp extensions record, in
+# their state markers, the exact build they loaded and the session process that loaded it,
+# so native extension ownership is provable from durable state without a watcher process
+# and without reading any vendor-rendered surface.
 #
-# fm_pi_extension_version <file>
-# Print the marker version string the Pi extensions record for <file>. Must stay
-# byte-identical to the "sha256:<hex>" digest .pi/extensions/fm-primary-pi-watch.ts
-# and .pi/extensions/fm-primary-turnend-guard.ts compute for themselves; a host
+# fm_native_extension_version <file>
+# Print the marker version string native extensions record for <file>. Must stay
+# byte-identical to the "sha256:<hex>" digest each extension computes for itself; a host
 # with no SHA-256 tool falls back to a form no marker can match, which keeps every
 # consumer loud rather than silently satisfied.
-fm_pi_extension_version() {
+fm_native_extension_version() {
   local file=$1
   [ -f "$file" ] || return 1
   if command -v shasum >/dev/null 2>&1; then
@@ -191,10 +190,10 @@ fm_pi_extension_version() {
   fi
 }
 
-# fm_pi_extension_loaded <marker> <expected-version> <session-lock>
+# fm_native_extension_loaded <marker> <expected-version> <session-lock>
 # True when <marker> records <expected-version> and names the session process in
 # <session-lock>, i.e. the session holding this home loaded exactly this build.
-fm_pi_extension_loaded() {
+fm_native_extension_loaded() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
@@ -204,23 +203,44 @@ fm_pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
-# fm_pi_extension_owns_supervision <state> <root>
-# True when a LIVE Pi session owns supervision continuity for this home: both
-# primary extensions are loaded at their current on-disk builds by the process
+# fm_native_extension_owns_supervision <state> <root>
+# True when a live Pi or omp session owns supervision continuity for this home: both
+# native primary extensions are loaded at their current on-disk builds by the process
 # recorded in this home's session lock, and that process is still alive.
 # Requiring the turn-end guard extension too is deliberate - it is the structural
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
-fm_pi_extension_owns_supervision() {
-  local state=$1 root=$2 lock session_pid pair source marker version
+fm_native_extension_owns_supervision() {
+  local state=$1 root=$2 lock session_pid pair source marker version family extension_dir pairs
   lock="$state/.lock"
-  for pair in \
-    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
-    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+  family="${FM_NATIVE_EXTENSION_FAMILY:-}"
+  if [ -z "$family" ]; then
+    family=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  fi
+  case "$family" in
+    omp)
+      pairs="fm-primary-omp-watch.ts:.omp-watch-extension-loaded fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
+      extension_dir="$root/.omp/extensions"
+      ;;
+    pi|pi-signed)
+      pairs="fm-primary-pi-watch.ts:.pi-watch-extension-loaded fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
+      extension_dir="$root/.pi/extensions"
+      ;;
+    *)
+      if [ -f "$state/.omp-watch-extension-loaded" ] || [ -f "$state/.omp-turnend-extension-loaded" ]; then
+        pairs="fm-primary-omp-watch.ts:.omp-watch-extension-loaded fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
+        extension_dir="$root/.omp/extensions"
+      else
+        pairs="fm-primary-pi-watch.ts:.pi-watch-extension-loaded fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
+        extension_dir="$root/.pi/extensions"
+      fi
+      ;;
+  esac
+  for pair in $pairs; do
     source=${pair%%:*}
     marker=${pair#*:}
-    version=$(fm_pi_extension_version "$root/.pi/extensions/$source") || return 1
-    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
+    version=$(fm_native_extension_version "$extension_dir/$source") || return 1
+    fm_native_extension_loaded "$state/$marker" "$version" "$lock" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
@@ -239,12 +259,12 @@ fm_pi_extension_owns_supervision() {
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
-# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
+# genuinely unheld lock is also healthy while the beacon is fresh AND a live native
+# extension primary provably owns continuity (fm_native_extension_owns_supervision) - that is the
 # extension's own tear-down-and-respawn hand-off, which it retries and escalates
 # itself. A lock with any recorded pid remains down if the strict health check fails.
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
-# version-drifted, or exited Pi session still alarms immediately, and a cycle the
+# version-drifted, or exited native extension session still alarms immediately, and a cycle the
 # extension never restores still alarms once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
@@ -274,7 +294,7 @@ fm_watcher_supervision_verdict() {
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
+      && fm_native_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else
