@@ -297,13 +297,13 @@ fm_afk_daemon_owns_supervision() {
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
-FM_WATCHER_VERDICT_REASON=stale-beacon
+FM_WATCHER_VERDICT_REASON='stale-beacon'
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
-  FM_WATCHER_VERDICT_REASON=stale-beacon
+  FM_WATCHER_VERDICT_REASON='stale-beacon'
   beat="$state/.last-watcher-beat"
   age=$(fm_path_age "$beat")
   case "$age" in
@@ -377,7 +377,7 @@ fm_lock_owner_dir() {
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   mypid=${BASHPID:-$$}
-  printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
+  printf '%s\n' "$mypid" 2>/dev/null > "$ownerdir/pid" || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
 }
@@ -449,17 +449,21 @@ fm_lock_claim() {
   return 0
 }
 
+# Status 1 means the lock is held or was lost to a racer and retrying can win it;
+# status 2 means this process could not create its own owner record at all
+# (missing or unwritable parent directory), which no amount of waiting fixes.
+# Every caller in this file propagates that distinction rather than spinning.
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 2
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return 2
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -474,6 +478,240 @@ fm_lock_try_create() {
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
+}
+
+# Acquire a stale-recovery mutex without requesting a second mutex. Status 1
+# means contended; status 2 means the parent or owner record could not be
+# created. A dead symlink owner is serialized inside its unique owner directory,
+# so interrupted recovery remains reclaimable without creating .steal.steal.
+fm_lock_try_acquire_steal_mutex() {
+  local steal=$1 rc pid ownerdir expected_owner reclaim
+  case "$steal" in
+    *.steal) : ;;
+    *) return 2 ;;
+  esac
+  rc=0
+  fm_lock_try_create "$steal" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ "$rc" -ne 2 ] || return 2
+  ! fm_lock_legacy_nested_steal_blocks "$steal.steal" || return 1
+  # Compare against ${BASHPID:-$$} inline, never via a command substitution,
+  # and keep the Bash 3 subshell guard the primary path uses: a trap that
+  # abandoned the frame holding this mutex must not deadlock the exit path
+  # against itself, but a child frame must never reclaim its parent's hold.
+  pid=$(cat "$steal/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ] \
+    && { [ -n "${BASHPID:-}" ] || [ "${BASH_SUBSHELL:-0}" -eq 0 ]; }; then
+    fm_lock_remove_path "$steal" || true
+    rc=0
+    fm_lock_try_create "$steal" || rc=$?
+    return "$rc"
+  fi
+  fm_pid_alive "$pid" && return 1
+  fm_lock_mid_acquire_is_fresh "$steal" "$pid" && return 1
+  if [ -L "$steal" ]; then
+    ownerdir=$(fm_lock_link_owner "$steal" 2>/dev/null) || return 1
+    expected_owner=$ownerdir
+    if [ ! -d "$ownerdir" ]; then
+      case "${ownerdir##*/}" in
+        "${steal##*/}".owner.*) : ;;
+        *) return 1 ;;
+      esac
+      if ! mkdir "$ownerdir" 2>/dev/null; then
+        [ -d "$ownerdir" ] || return 1
+      fi
+      if ! fm_lock_points_to_owner "$steal" "$ownerdir"; then
+        rmdir "$ownerdir" 2>/dev/null || true
+        return 1
+      fi
+    fi
+  elif [ -d "$steal" ]; then
+    ownerdir=$steal
+    expected_owner=
+  else
+    return 1
+  fi
+  reclaim="$ownerdir/reclaim"
+  fm_lock_reclaim_marker_claim "$reclaim" || return 1
+  if fm_lock_legacy_nested_steal_blocks "$steal.steal"; then
+    fm_lock_reclaim_marker_release "$reclaim"
+    return 1
+  fi
+  if [ "$ownerdir" = "$steal" ]; then
+    if ! fm_lock_legacy_steal_dir_still_stale "$steal" "$pid"; then
+      fm_lock_reclaim_marker_release "$reclaim"
+      return 1
+    fi
+  elif ! fm_lock_recheck_stale_owner "$steal" "$expected_owner" "$pid"; then
+    fm_lock_reclaim_marker_release "$reclaim"
+    return 1
+  fi
+  fm_lock_reclaim_marker_held "$reclaim" || return 1
+  if [ "$ownerdir" = "$steal" ]; then
+    if ! fm_lock_retire_legacy_steal_dir "$steal"; then
+      fm_lock_reclaim_marker_release "$reclaim"
+      return 1
+    fi
+  else
+    if ! rm -f "$steal" 2>/dev/null; then
+      fm_lock_reclaim_marker_release "$reclaim"
+      return 1
+    fi
+    fm_lock_clean_known_files "$ownerdir"
+    fm_lock_reclaim_marker_release "$reclaim"
+    rmdir "$ownerdir" 2>/dev/null || true
+  fi
+  fm_lock_try_create "$steal"
+}
+
+# The staleness of a legacy directory-shaped steal mutex was already judged on
+# the untouched directory before its reclaim marker was created, so the marker's
+# own mtime must not be re-read here; only the owner record is re-verified.
+fm_lock_legacy_steal_dir_still_stale() {
+  local steal=$1 expected_pid=$2 actual_pid
+  [ -d "$steal" ] && [ ! -L "$steal" ] || return 1
+  actual_pid=$(cat "$steal/pid" 2>/dev/null || true)
+  [ "$actual_pid" = "$expected_pid" ] || return 1
+  ! fm_pid_alive "$actual_pid"
+}
+
+# Replace a proven-stale legacy directory steal mutex by renaming it into a
+# fresh owner-record name and removing it there. The rename is the removal, so
+# the directory's own pid record survives every failure path and the mutex stays
+# reclaimable; unknown content refuses the whole retirement untouched.
+fm_lock_retire_legacy_steal_dir() {
+  local steal=$1 aside entry
+  [ -d "$steal" ] && [ ! -L "$steal" ] || return 1
+  fm_lock_clean_known_debris "$steal"
+  for entry in "$steal"/* "$steal"/.[!.]* "$steal"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in
+      pid|reclaim) ;;
+      *) return 1 ;;
+    esac
+  done
+  aside=$(fm_lock_owner_dir "$steal") || return 1
+  if ! rmdir "$aside" 2>/dev/null; then
+    fm_lock_discard_owner "$aside"
+    return 1
+  fi
+  if [ ! -d "$steal" ] || [ -L "$steal" ]; then
+    rmdir "$aside" 2>/dev/null || true
+    return 1
+  fi
+  mv "$steal" "$aside" 2>/dev/null || return 1
+  rm -f "$aside/pid" "$aside/reclaim/pid" 2>/dev/null || true
+  rmdir "$aside/reclaim" 2>/dev/null || true
+  rmdir "$aside" 2>/dev/null || true
+  return 0
+}
+
+# The reclaim marker serializes stale steal-mutex recovery. It records the
+# reclaimer's pid so a reclaimer killed mid-recovery cannot wedge every later
+# reclaimer: a marker whose pid is dead and whose age passed the stale window is
+# itself reclaimable, exactly like every other stale record in this file.
+fm_lock_reclaim_marker_claim() {
+  local reclaim=$1 mypid retired abandoned_pid retired_pid took_over=0
+  mypid=${BASHPID:-$$}
+  if ! mkdir "$reclaim" 2>/dev/null; then
+    fm_lock_reclaim_marker_is_abandoned "$reclaim" || return 1
+    abandoned_pid=$FM_LOCK_RECLAIM_OBSERVED_PID
+    retired="$reclaim.dead.$mypid"
+    rm -rf "$retired" 2>/dev/null || true
+    mv "$reclaim" "$retired" 2>/dev/null || return 1
+    if ! mkdir "$reclaim" 2>/dev/null; then
+      rm -rf "$retired" 2>/dev/null || true
+      return 1
+    fi
+    took_over=1
+  fi
+  if ! { printf '%s\n' "$mypid" 2>/dev/null > "$reclaim/pid"; } \
+    || [ "$(cat "$reclaim/pid" 2>/dev/null || true)" != "$mypid" ]; then
+    rm -f "$reclaim/pid" 2>/dev/null || true
+    rmdir "$reclaim" 2>/dev/null || true
+    [ "$took_over" -eq 0 ] || rm -rf "$retired" 2>/dev/null || true
+    return 1
+  fi
+  if [ "$took_over" -eq 1 ]; then
+    retired_pid=$(cat "$retired/pid" 2>/dev/null || true)
+    rm -rf "$retired" 2>/dev/null || true
+    if [ "$retired_pid" != "$abandoned_pid" ] \
+      || { [ "$retired_pid" != "$mypid" ] && fm_pid_alive "$retired_pid"; }; then
+      if fm_pid_alive "$retired_pid"; then
+        printf '%s\n' "$retired_pid" 2>/dev/null > "$reclaim/pid" || true
+      else
+        fm_lock_reclaim_marker_release "$reclaim"
+      fi
+      return 1
+    fi
+  fi
+  return 0
+}
+
+FM_LOCK_RECLAIM_OBSERVED_PID=
+
+fm_lock_reclaim_marker_is_abandoned() {
+  local reclaim=$1 pid stale
+  FM_LOCK_RECLAIM_OBSERVED_PID=
+  [ -d "$reclaim" ] || return 1
+  pid=$(cat "$reclaim/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+    FM_LOCK_RECLAIM_OBSERVED_PID=$pid
+    return 0
+  fi
+  fm_pid_alive "$pid" && return 1
+  stale=$FM_LOCK_STALE_AFTER
+  [ "$stale" -lt 2 ] && stale=2
+  [ "$(fm_path_age "$reclaim")" -ge "$stale" ] || return 1
+  FM_LOCK_RECLAIM_OBSERVED_PID=$pid
+  return 0
+}
+
+fm_lock_reclaim_marker_held() {
+  [ "$(cat "$1/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ]
+}
+
+fm_lock_reclaim_marker_release() {
+  local reclaim=$1
+  fm_lock_reclaim_marker_held "$reclaim" || return 1
+  rm -f "$reclaim/pid" 2>/dev/null || true
+  rmdir "$reclaim" 2>/dev/null || true
+  return 0
+}
+
+# A leftover .steal.steal can only come from a pre-upgrade recursive reclaimer.
+# It still blocks while its owner is live or too fresh to judge; once the owner
+# is dead and the residue passed the stale window it is retired here so the
+# non-recursive path can proceed without ever creating a nested mutex.
+fm_lock_legacy_nested_steal_blocks() {
+  local residue=$1 pid stale
+  [ -e "$residue" ] || [ -L "$residue" ] || return 1
+  pid=$(cat "$residue/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" && return 0
+  stale=$FM_LOCK_STALE_AFTER
+  [ "$stale" -lt 2 ] && stale=2
+  [ "$(fm_path_age "$residue")" -lt "$stale" ] && return 0
+  fm_lock_remove_path "$residue" >/dev/null 2>&1 || true
+  [ -e "$residue" ] || [ -L "$residue" ] || return 1
+  return 0
+}
+
+# Retire only debris this lock implementation is known to create inside a lock
+# directory: an interrupted reclaim takeover copy, and a stray owner symlink a
+# racer left behind. Anything else is left in place so the caller's rmdir still
+# fails closed on state this code does not own.
+fm_lock_clean_known_debris() {
+  local lockdir=$1 base entry
+  base=${lockdir##*/}
+  for entry in "$lockdir"/reclaim.dead.*; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    rm -f "$entry/pid" 2>/dev/null || true
+    rmdir "$entry" 2>/dev/null || true
+  done
+  for entry in "$lockdir/$base".owner.*; do
+    [ -L "$entry" ] || continue
+    rm -f "$entry" 2>/dev/null || true
+  done
 }
 
 fm_lock_remove_path() {
@@ -828,20 +1066,29 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# Returns 0 on acquisition, 1 while the lock is legitimately contended, and 2
+# when acquisition can never succeed here (see fm_lock_try_create). A path that
+# already ends in .steal is never stale-recovered through a second mutex: at
+# most one primary-lock-to-.steal transition exists, so no .steal.steal is ever
+# created and stale recovery cannot recurse.
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
-  if fm_lock_try_create "$lockdir"; then
-    return 0
-  fi
+  rc=0
+  fm_lock_try_create "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ "$rc" -ne 2 ] || return 2
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
+  # Bash 3 lacks BASHPID and preserves $$ in subshells, so BASH_SUBSHELL keeps
+  # a child frame from being mistaken for the parent that owns the lock.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ] \
+    && { [ -n "${BASHPID:-}" ] || [ "${BASH_SUBSHELL:-0}" -eq 0 ]; }; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -851,11 +1098,11 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
-      return 0
-    fi
+    rc=0
+    fm_lock_try_create "$lockdir" || rc=$?
+    [ "$rc" -ne 0 ] || return 0
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    return 1
+    return "$rc"
   fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
@@ -866,11 +1113,20 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  case "$lockdir" in
+    *.steal)
+      FM_LOCK_HELD_PID=$pid
+      return 1
+      ;;
+  esac
+
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  rc=0
+  fm_lock_try_acquire_steal_mutex "$steal" || rc=$?
+  if [ "$rc" -ne 0 ]; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
-    return 1
+    return "$rc"
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
@@ -914,9 +1170,9 @@ fm_lock_try_acquire() {
     return 1
   fi
   fm_lock_remove_path "$lockdir" || true
-  rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
-    rc=0
+  rc=0
+  fm_lock_try_create "$lockdir" "$steal_owner" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
   fi
@@ -929,9 +1185,16 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Waits out ordinary contention but is NOT unconditional: a status-2 failure from
+# fm_lock_try_acquire is returned to the caller, so callers must check the result
+# and must not assume the lock is held after this returns.
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    rc=0
+    fm_lock_try_acquire "$lockdir" || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    [ "$rc" -ne 2 ] || return 2
     sleep 0.1
   done
 }
@@ -1437,7 +1700,7 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
-  fm_lock_try_acquire "$steal" || return 1
+  fm_lock_try_acquire_steal_mutex "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
@@ -1506,7 +1769,7 @@ fm_wake_append() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1535,7 +1798,7 @@ fm_wake_queued_keys() {
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }

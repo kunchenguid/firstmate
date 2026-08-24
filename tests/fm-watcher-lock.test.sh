@@ -218,6 +218,620 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+test_lock_missing_parent_returns_typed_failure_with_bounded_launches() {
+  local dir state missing fakebin count pidfile command_name real_command out rc elapsed result wait_result launches attempt_pid
+  local proctable snapfile snapshot_pid leaked
+  dir=$(make_case lock-missing-parent)
+  state="$dir/state"
+  missing="$dir/absent/demo.lock"
+  fakebin="$dir/countbin"
+  count="$dir/helper-launches"
+  pidfile="$dir/attempt-pid"
+  proctable="$dir/live-process-table"
+  snapfile="$dir/snapshot-pid"
+  mkdir -p "$fakebin"
+  for command_name in basename cat date dirname ln mkdir mktemp readlink rm rmdir stat uname; do
+    real_command=$(command -v "$command_name")
+    cat > "$fakebin/$command_name" <<SH
+#!/usr/bin/env bash
+count=0
+read -r count < "\${FM_TEST_LAUNCH_COUNT:?}" 2>/dev/null || true
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$FM_TEST_LAUNCH_COUNT"
+if [ "\$count" -gt "\${FM_TEST_LAUNCH_BUDGET:?}" ]; then
+  kill -TERM "\${FM_TEST_ROOT_PID:?}" 2>/dev/null || true
+  exit 97
+fi
+exec "$real_command" "\$@"
+SH
+    chmod +x "$fakebin/$command_name"
+  done
+
+  rc=0
+  SECONDS=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_LAUNCH_COUNT="$count" \
+    FM_TEST_LAUNCH_BUDGET=18 bash -c '
+      FM_TEST_ROOT_PID=${BASHPID:-$$}
+      export FM_TEST_ROOT_PID
+      . "$1"
+      printf "0\n" > "$3"
+      printf "%s\n" "$FM_TEST_ROOT_PID" > "$4"
+      trap "exit 97" TERM
+      i=0
+      while [ "$i" -lt 5 ]; do
+        fm_lock_try_acquire "$2"
+        result=$?
+        [ "$result" -eq 2 ] || exit 20
+        i=$((i + 1))
+      done
+      fm_lock_acquire_wait "$2"
+      wait_result=$?
+      [ "$wait_result" -eq 2 ] || exit 21
+      read -r launches < "$3"
+      ps -eo pid=,ppid= > "$5" 2>/dev/null &
+      snapshot_pid=$!
+      wait "$snapshot_pid" 2>/dev/null || true
+      printf "%s\n" "$snapshot_pid" > "$6"
+      printf "result=%s wait_result=%s launches=%s\n" "$result" "$wait_result" "$launches"
+    ' _ "$LIB" "$missing" "$count" "$pidfile" "$proctable" "$snapfile" 2>&1) || rc=$?
+  elapsed=$SECONDS
+
+  [ "$rc" -eq 0 ] || fail "missing-parent lock attempt did not return typed invalid-path status within its launch fuse (rc=$rc): $out"
+  result=${out#*result=}; result=${result%% *}
+  wait_result=${out#*wait_result=}; wait_result=${wait_result%% *}
+  launches=${out#*launches=}; launches=${launches%%[!0-9]*}
+  [ "$result" -eq 2 ] || fail "missing-parent lock attempt returned '$result' instead of typed invalid-path status 2: $out"
+  [ "$wait_result" -eq 2 ] || fail "missing-parent lock wait returned '$wait_result' instead of propagating status 2: $out"
+  [ "$launches" -le 18 ] || fail "five missing-parent failures plus one wait exceeded the helper-launch budget ($launches): $out"
+  [ "$elapsed" -lt 10 ] || fail "missing-parent lock attempts did not return promptly (${elapsed}s): $out"
+  attempt_pid=$(cat "$pidfile")
+  snapshot_pid=$(cat "$snapfile")
+  [ -s "$proctable" ] || fail "the live process table was never captured while the lock attempt was running"
+  leaked=$(awk -v parent="$attempt_pid" -v self="$snapshot_pid" \
+    '$2 == parent && $1 != self { print $1 }' "$proctable" | tr '\n' ' ')
+  [ -z "$leaked" ] \
+    || fail "missing-parent lock attempt left a spawned descendant alive: $leaked"
+  pass "missing-parent lock failure is typed, prompt, descendant-free, and launch-bounded"
+}
+
+test_lock_owner_record_failure_returns_typed_failure() {
+  local dir state lockdir fakebin count real_mktemp out rc
+  dir=$(make_case lock-owner-record-failure)
+  state="$dir/state"
+  lockdir="$state/.owner-failure.lock"
+  fakebin="$dir/countbin"
+  count="$dir/mktemp-launches"
+  real_mktemp=$(command -v mktemp)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+count=0
+read -r count < "\${FM_TEST_LAUNCH_COUNT:?}" 2>/dev/null || true
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$FM_TEST_LAUNCH_COUNT"
+if [ "\$count" -gt 4 ]; then
+  kill -TERM "\${FM_TEST_ROOT_PID:?}" 2>/dev/null || true
+  exit 97
+fi
+ownerdir=\$("$real_mktemp" "\$@") || exit \$?
+chmod 0500 "\$ownerdir" || exit 1
+printf '%s\n' "\$ownerdir"
+SH
+  chmod +x "$fakebin/mktemp"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_LAUNCH_COUNT="$count" bash -c '
+    . "$1"
+    printf "0\n" > "$3"
+    FM_TEST_ROOT_PID=${BASHPID:-$$}
+    export FM_TEST_ROOT_PID
+    trap "exit 97" TERM
+    fm_lock_try_acquire "$2"
+    rc=$?
+    printf "rc=%s\n" "$rc"
+    [ "$rc" -eq 2 ]
+  ' _ "$LIB" "$lockdir" "$count" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "owner-record creation failure did not return typed status 2 promptly (rc=$rc): $out"
+  [ "$out" = "rc=2" ] || fail "owner-record creation failure returned an unexpected result: $out"
+  pass "owner-record creation failure returns typed invalid-create status promptly"
+}
+
+test_stale_or_malformed_steal_mutex_never_claims_nested_mutex() {
+  local kind dir state lockdir steal ownerdir fakebin log real_ln dead out rc
+  for kind in stale malformed; do
+    dir=$(make_case "lock-no-nested-steal-$kind")
+    state="$dir/state"
+    lockdir="$state/.contend.lock"
+    steal="$lockdir.steal"
+    fakebin="$dir/logbin"
+    log="$dir/ln-targets"
+    real_ln=$(command -v ln)
+    dead=$(dead_pid)
+    mkdir "$lockdir" "$fakebin"
+    printf '%s\n' "$dead" > "$lockdir/pid"
+    if [ "$kind" = stale ]; then
+      ownerdir="$state/.stale-steal-owner"
+      mkdir "$ownerdir"
+      printf '%s\n' "$dead" > "$ownerdir/pid"
+      ln -s "$ownerdir" "$steal"
+    else
+      ln -s "$steal.owner.gone01" "$steal"
+      touch -h -t 202001010000 "$steal"
+    fi
+    cat > "$fakebin/ln" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do target=\$arg; done
+printf '%s\n' "\$target" >> "\${FM_TEST_LN_LOG:?}"
+exec "$real_ln" "\$@"
+SH
+    chmod +x "$fakebin/ln"
+
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_LN_LOG="$log" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+      printf "rc=%s\n" "$?"
+    ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "$kind steal-mutex fixture shell failed (rc=$rc): $out"
+    [ "$out" = "rc=0" ] \
+      || fail "$kind steal mutex was never reclaimed, so the dead-owner lock stayed unacquirable: $out"
+    ! grep -F "$lockdir.steal.steal" "$log" >/dev/null 2>&1 \
+      || fail "$kind steal mutex attempted a nested .steal.steal claim: $(cat "$log")"
+  done
+  pass "stale and malformed steal mutexes are reclaimed without ever claiming .steal.steal"
+}
+
+test_abandoned_reclaim_marker_does_not_wedge_stale_steal_recovery() {
+  local dir state lockdir steal ownerdir dead out rc
+  dir=$(make_case lock-abandoned-reclaim-marker)
+  state="$dir/state"
+  lockdir="$state/.wedged.lock"
+  steal="$lockdir.steal"
+  ownerdir="$state/.stale-steal-owner"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$ownerdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$ownerdir/pid"
+  ln -s "$ownerdir" "$steal"
+  mkdir "$ownerdir/reclaim"
+  touch -t 202001010000 "$ownerdir/reclaim"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "abandoned-reclaim-marker fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "a reclaim marker left behind by a killed reclaimer permanently blocked stale steal recovery: $out"
+  [ ! -d "$ownerdir/reclaim" ] || fail "the reclaimed marker was not released"
+  pass "a reclaim marker abandoned by a killed reclaimer does not wedge stale steal recovery"
+}
+
+test_legacy_nested_steal_residue_is_retired_only_when_stale() {
+  local dir state lockdir steal residue ownerdir dead out rc
+
+  dir=$(make_case lock-legacy-nested-stale)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  residue="$steal.steal"
+  ownerdir="$steal.owner.legacy"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$ownerdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$ownerdir/pid"
+  ln -s "$ownerdir" "$steal"
+  ln -s "$state/.retired-nested-owner" "$residue"
+  touch -h -t 202001010000 "$residue"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "stale nested-steal residue fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "a pre-upgrade .steal.steal residue permanently blocked stale primary reclaim: $out"
+  [ ! -e "$residue" ] && [ ! -L "$residue" ] \
+    || fail "the retired nested-steal residue was left behind"
+
+  dir=$(make_case lock-legacy-nested-live)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  residue="$steal.steal"
+  ownerdir="$steal.owner.legacy"
+  mkdir "$lockdir" "$ownerdir" "$residue"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$ownerdir/pid"
+  printf '%s\n' "$$" > "$residue/pid"
+  ln -s "$ownerdir" "$steal"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "live nested-steal residue fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=1" ] \
+    || fail "a live pre-upgrade nested-steal holder was overrun instead of being waited out: $out"
+  [ -d "$residue" ] || fail "a live nested-steal residue was destroyed by the upgrade path"
+  [ -L "$steal" ] || fail "the steal mutex was reclaimed while a live nested holder still owned it"
+  pass "a pre-upgrade .steal.steal residue is retired only once its owner is dead and stale"
+}
+
+test_reclaim_marker_is_not_stolen_from_a_live_owner() {
+  local dir state ownerdir reclaim out rc
+  dir=$(make_case lock-reclaim-marker-ownership)
+  state="$dir/state"
+  ownerdir="$state/.owner"
+  reclaim="$ownerdir/reclaim"
+  mkdir -p "$reclaim"
+  printf '%s\n' "$$" > "$reclaim/pid"
+  touch -t 202001010000 "$reclaim"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_reclaim_marker_release "$2"
+    printf "release=%s " "$?"
+    fm_lock_reclaim_marker_claim "$2"
+    printf "claim=%s\n" "$?"
+  ' _ "$LIB" "$reclaim" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "reclaim-marker ownership fixture shell failed (rc=$rc): $out"
+  [ "$out" = "release=1 claim=1" ] \
+    || fail "another process released or took over a reclaim marker held by a live owner: $out"
+  [ -d "$reclaim" ] || fail "the live owner's reclaim marker was removed by a non-owner"
+  [ "$(cat "$reclaim/pid")" = "$$" ] || fail "the live owner's reclaim-marker pid was overwritten"
+  pass "a reclaim marker held by a live owner is neither released nor taken over by another process"
+}
+
+test_dangling_steal_owner_reclaim_yields_one_winner() {
+  local dir state lockdir steal foreign marker dead i pids pid wins out rc
+
+  dir=$(make_case lock-dangling-steal-concurrency)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  marker="$dir/wins"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  ln -s "$steal.owner.gone01" "$steal"
+  touch -h -t 202001010000 "$steal"
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        sleep 1
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -eq 1 ] || fail "expected exactly one dangling-steal reclaimer to win, got $wins"
+
+  dir=$(make_case lock-dangling-steal-foreign)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  foreign="$state/.not-an-owner-record"
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  ln -s "$foreign" "$steal"
+  touch -h -t 202001010000 "$steal"
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "foreign steal-target fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=1" ] || fail "a steal mutex pointing outside the owner-record shape was reclaimed: $out"
+  [ ! -e "$foreign" ] || fail "reclaim created a directory at a path that is not an owner record"
+  pass "dangling steal-owner reclaim is serialized to one winner and refuses foreign targets"
+}
+
+test_reclaim_marker_takeover_is_bound_to_the_marker_it_inspected() {
+  local dir state ownerdir reclaim fakebin real_mv dead out rc
+  dir=$(make_case lock-reclaim-marker-takeover-identity)
+  state="$dir/state"
+  ownerdir="$state/.owner"
+  reclaim="$ownerdir/reclaim"
+  fakebin="$dir/racebin"
+  real_mv=$(command -v mv)
+  dead=$(dead_pid)
+  mkdir -p "$reclaim" "$fakebin"
+  printf '%s\n' "$dead" > "$reclaim/pid"
+  touch -t 202001010000 "$reclaim"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_TEST_RACER_PID:?}" > "\$1/pid" 2>/dev/null || true
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_RACER_PID="$$" bash -c '
+    . "$1"
+    fm_lock_reclaim_marker_claim "$2"
+    printf "claim=%s\n" "$?"
+  ' _ "$LIB" "$reclaim" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "reclaim-marker takeover fixture shell failed (rc=$rc): $out"
+  [ "$out" = "claim=1" ] \
+    || fail "a reclaimer retired a marker another racer had already replaced with its own live one: $out"
+  [ -d "$reclaim" ] || fail "the racer's live reclaim marker was destroyed by the losing takeover"
+  [ "$(cat "$reclaim/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "the racer's live reclaim-marker pid did not survive the losing takeover"
+  pass "a reclaim-marker takeover only retires the abandoned marker it actually inspected"
+}
+
+test_legacy_directory_steal_mutex_is_reclaimed_without_recursion() {
+  local dir state lockdir steal fakebin log real_ln dead out rc
+  dir=$(make_case lock-legacy-steal-dir)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  fakebin="$dir/logbin"
+  log="$dir/ln-targets"
+  real_ln=$(command -v ln)
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$steal" "$fakebin"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$steal/pid"
+  cat > "$fakebin/ln" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do target=\$arg; done
+printf '%s\n' "\$target" >> "\${FM_TEST_LN_LOG:?}"
+exec "$real_ln" "\$@"
+SH
+  chmod +x "$fakebin/ln"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_LN_LOG="$log" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy directory steal-mutex fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "a legacy directory-shaped steal mutex with a dead owner was never reclaimed: $out"
+  ! grep -F "$steal.steal" "$log" >/dev/null 2>&1 \
+    || fail "reclaiming a legacy directory steal mutex created a nested .steal.steal: $(cat "$log")"
+  pass "a legacy directory-shaped steal mutex is reclaimed without any nested steal transition"
+}
+
+test_reclaim_marker_takeover_never_vacates_the_marker_slot() {
+  local dir state ownerdir reclaim fakebin real_cat gaps dead out rc
+  dir=$(make_case lock-reclaim-marker-no-gap)
+  state="$dir/state"
+  ownerdir="$state/.owner"
+  reclaim="$ownerdir/reclaim"
+  fakebin="$dir/gapbin"
+  gaps="$dir/gap-log"
+  real_cat=$(command -v cat)
+  dead=$(dead_pid)
+  mkdir -p "$reclaim" "$fakebin"
+  printf '%s\n' "$dead" > "$reclaim/pid"
+  touch -t 202001010000 "$reclaim"
+  : > "$gaps"
+  cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+if mkdir "\${FM_TEST_RECLAIM:?}" 2>/dev/null; then
+  printf '%s\n' "\${FM_TEST_BYSTANDER_PID:?}" > "\$FM_TEST_RECLAIM/pid" 2>/dev/null || true
+  printf 'claimed\n' >> "\${FM_TEST_GAP_LOG:?}"
+fi
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_RECLAIM="$reclaim" \
+    FM_TEST_GAP_LOG="$gaps" FM_TEST_BYSTANDER_PID="$$" bash -c '
+      . "$1"
+      fm_lock_reclaim_marker_claim "$2"
+      printf "claim=%s\n" "$?"
+    ' _ "$LIB" "$reclaim" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "reclaim-marker gap fixture shell failed (rc=$rc): $out"
+  [ ! -s "$gaps" ] \
+    || fail "a bystander claimed the reclaim marker while a takeover had vacated the slot: $(cat "$gaps")"
+  [ "$out" = "claim=0" ] \
+    || fail "the takeover of a genuinely abandoned marker did not succeed: $out"
+  [ "$(cat "$reclaim/pid" 2>/dev/null || true)" != "$$" ] \
+    || fail "the bystander's pid ended up owning the reclaim marker"
+  pass "a reclaim-marker takeover never leaves the marker slot claimable by a bystander"
+}
+
+test_legacy_directory_steal_mutex_survives_known_recovery_debris() {
+  local dir state lockdir steal dead out rc
+  dir=$(make_case lock-legacy-steal-dir-debris)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$steal" "$steal/reclaim.dead.$dead"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$steal/pid"
+  printf '%s\n' "$dead" > "$steal/reclaim.dead.$dead/pid"
+  ln -s "$state/.gone-owner" "$steal/.contend.lock.steal.owner.abc123"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy steal-dir debris fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "known reclaim debris left the legacy directory steal mutex permanently unreclaimable: $out"
+
+  dir=$(make_case lock-legacy-steal-dir-unknown)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  mkdir "$lockdir" "$steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$steal/pid"
+  printf 'unowned\n' > "$steal/not-a-lock-record"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "unknown steal-dir content fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=1" ] \
+    || fail "reclaim destroyed a steal directory holding content this lock code does not own: $out"
+  [ -f "$steal/not-a-lock-record" ] || fail "unowned content inside the steal directory was deleted"
+  [ "$(cat "$steal/pid" 2>/dev/null || true)" = "$dead" ] \
+    || fail "a refused retirement destroyed the steal mutex's own owner record"
+
+  rm -f "$steal/not-a-lock-record"
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "retry-after-cleanup fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "a legacy steal mutex stayed unreclaimable after its unowned content was removed: $out"
+  pass "legacy steal-dir reclaim retires known debris, fails closed on unowned content, and stays retryable"
+}
+
+test_legacy_directory_steal_mutex_without_owner_record_is_reclaimable_when_aged() {
+  local dir state lockdir steal dead out rc
+  dir=$(make_case lock-legacy-steal-dir-no-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  touch -t 202001010000 "$steal"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "pid-less legacy steal-dir fixture shell failed (rc=$rc): $out"
+  [ "$out" = "rc=0" ] \
+    || fail "an aged legacy steal directory carrying no owner record was permanently unreclaimable: $out"
+  pass "an aged legacy steal directory with no owner record is still reclaimable"
+}
+
+test_legacy_directory_reclaim_never_deletes_a_racer_mutex() {
+  local dir state lockdir steal racer_owner fakebin real_rmdir dead out rc
+  dir=$(make_case lock-legacy-steal-dir-racer)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  steal="$lockdir.steal"
+  racer_owner="$state/.racer-owner"
+  fakebin="$dir/racebin"
+  real_rmdir=$(command -v rmdir)
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$steal" "$fakebin"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$steal/pid"
+  cat > "$fakebin/rmdir" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  */reclaim)
+    "$real_rmdir" "\$@"
+    rc=\$?
+    mkdir -p "\${FM_TEST_RACER_OWNER:?}"
+    printf '%s\n' "\${FM_TEST_RACER_PID:?}" > "\$FM_TEST_RACER_OWNER/pid"
+    ln -s "\$FM_TEST_RACER_OWNER" "\${FM_TEST_STEAL:?}" 2>/dev/null || true
+    exit \$rc
+    ;;
+esac
+exec "$real_rmdir" "\$@"
+SH
+  chmod +x "$fakebin/rmdir"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_STEAL="$steal" FM_TEST_RACER_OWNER="$racer_owner" FM_TEST_RACER_PID="$$" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+      printf "rc=%s\n" "$?"
+    ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy steal-dir racer fixture shell failed (rc=$rc): $out"
+  [ -L "$steal" ] \
+    || fail "the legacy directory reclaim deleted the live steal mutex a racer created: $out"
+  [ "$(readlink "$steal")" = "$racer_owner" ] \
+    || fail "the racer's steal mutex no longer points at its own owner record: $(readlink "$steal")"
+  [ "$out" = "rc=1" ] \
+    || fail "the losing reclaimer reported success after a racer took the steal mutex: $out"
+  pass "legacy directory reclaim never deletes a steal mutex another reclaimer created"
+}
+
+test_self_orphaned_reclaim_marker_is_reclaimable_by_its_owner() {
+  local dir state ownerdir reclaim out rc
+  dir=$(make_case lock-reclaim-marker-self-orphan)
+  state="$dir/state"
+  ownerdir="$state/.owner"
+  reclaim="$ownerdir/reclaim"
+  mkdir -p "$ownerdir"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    mkdir "$2"
+    printf "%s\n" "${BASHPID:-$$}" > "$2/pid"
+    fm_lock_reclaim_marker_claim "$2"
+    claim=$?
+    if [ "$(cat "$2/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ]; then owned=self; else owned=other; fi
+    printf "claim=%s owned=%s\n" "$claim" "$owned"
+  ' _ "$LIB" "$reclaim" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-orphaned marker fixture shell failed (rc=$rc): $out"
+  [ "$out" = "claim=0 owned=self" ] \
+    || fail "a process could not reclaim the marker it orphaned itself, so it would spin forever: $out"
+  pass "a reclaim marker orphaned by the caller itself stays reclaimable by that caller"
+}
+
+test_self_abandoned_steal_mutex_is_reclaimed_only_by_its_own_frame() {
+  local dir state lockdir dead out rc
+  dir=$(make_case lock-self-abandoned-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+
+  rc=0
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    ( fm_lock_try_acquire "$2" >/dev/null 2>&1; printf "sub=%s " "$?" )
+    fm_lock_try_acquire "$2"
+    printf "self=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-abandoned steal-mutex fixture shell failed (rc=$rc): $out"
+  case "$out" in
+    "sub=1 self="*) : ;;
+    *) fail "a child frame reclaimed the steal mutex its live parent still holds: $out" ;;
+  esac
+  [ "$out" = "sub=1 self=0" ] \
+    || fail "a process could not reclaim the steal mutex its own interrupted frame abandoned, so the exit path would spin forever: $out"
+  pass "a self-abandoned steal mutex is reclaimed by its own frame and never by a child frame"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -319,7 +933,8 @@ test_lock_does_not_steal_live_lock() {
   printf '%s\n' "$live" > "$lockdir/pid"
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    rc=0
+    fm_lock_try_acquire "$2" || rc=$?
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$lockdir")
   kill "$live" 2>/dev/null || true
@@ -1111,6 +1726,21 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_missing_parent_returns_typed_failure_with_bounded_launches
+test_lock_owner_record_failure_returns_typed_failure
+test_stale_or_malformed_steal_mutex_never_claims_nested_mutex
+test_abandoned_reclaim_marker_does_not_wedge_stale_steal_recovery
+test_legacy_nested_steal_residue_is_retired_only_when_stale
+test_reclaim_marker_is_not_stolen_from_a_live_owner
+test_dangling_steal_owner_reclaim_yields_one_winner
+test_reclaim_marker_takeover_is_bound_to_the_marker_it_inspected
+test_reclaim_marker_takeover_never_vacates_the_marker_slot
+test_legacy_directory_steal_mutex_is_reclaimed_without_recursion
+test_legacy_directory_steal_mutex_survives_known_recovery_debris
+test_legacy_directory_steal_mutex_without_owner_record_is_reclaimable_when_aged
+test_legacy_directory_reclaim_never_deletes_a_racer_mutex
+test_self_orphaned_reclaim_marker_is_reclaimable_by_its_owner
+test_self_abandoned_steal_mutex_is_reclaimed_only_by_its_own_frame
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
