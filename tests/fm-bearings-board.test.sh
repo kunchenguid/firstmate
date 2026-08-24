@@ -307,7 +307,11 @@ SH
     "$runtime/bin/fm-bearings-board.sh" build "$data" >/dev/null \
     || fail "the order-proof board build failed"
 
-  show=$(cd "$home" && tasks-axi show "$hold" --full) \
+  # Story fmops-07 §5 routes the composed decision into the firstmate-private
+  # register (state/decisions/), so read through fm-captain-hold.sh's
+  # register-aware `show` command, not tasks-axi directly.
+  show=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-captain-hold.sh" show "$hold") \
     || fail "the order-proof captain hold disappeared"
   assert_contains "$show" "state: done" \
     "registration consumed its answer before the any-origin binding existed"

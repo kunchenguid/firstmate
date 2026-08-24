@@ -9,12 +9,23 @@
 # captain actually said, the investigation completion gate, and the one
 # keyed-answer intake every channel feeds.
 #
-# There is no separate decision type. A captain call is an ordinary backlog
-# task held for the captain (`tasks-axi hold <id> --kind captain`), and its
-# identity is simply the task id. Older installs created derived
-# `<origin>-decision-<key>` identities through bin/fm-decision-hold.sh; those
-# rows are already plain task ids, so they keep working here unchanged, and
-# the legacy inputs noted below resolve them without a migration.
+# There is no separate decision type. A captain call is a captain-held record
+# with a single string identity, and this script owns every read and write of
+# that identity. The identity has one of two backing stores, dispatched
+# transparently by task_show below:
+#   1. An existing tasks-axi backlog task (`tasks-axi hold <id> --kind captain`).
+#      Held only when a real work item gates on the answer (the invariant is
+#      `backlog task == story`); the answer either releases that work with
+#      `--release` or completes it.
+#   2. A firstmate-private register entry under `state/decisions/<id>.md`
+#      (see bin/fm-decision-register-lib.sh). Every captain call that has
+#      NO work item to gate lands here, so `<origin>-decision-<key>` calls
+#      stop flooding the backlog (captain, 2026-08-24; story fmops-07 §5).
+# Older installs minted `<origin>-decision-<key>` identities as backlog tasks
+# through bin/fm-decision-hold.sh; those rows are plain task ids, keep working
+# unchanged through the tasks-axi backend, and the legacy inputs noted below
+# resolve them without a migration - migration of legacy rows is a separate
+# ops step (fmops-06 PR-3).
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the call.
 #
@@ -30,6 +41,7 @@
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh epic-slug <task-id>
+#   fm-captain-hold.sh show <task-id>
 #
 # `epic-slug` prints the epic slug the given task belongs to (its `[<slug>]`
 # title tag / `parent:<slug>` edge / plan-dir story file), or nothing when it
@@ -157,6 +169,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-epic-status-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-epic-status-lib.sh"
+# The firstmate-private decisions register (state/decisions/<id>.md) holds every
+# captain-held decision no work item gates, so `<origin>-decision-<key>` calls
+# stop flooding the backlog. task_show below dispatches here first, so every
+# downstream reader in this file (verify_hold_durable, resolve_entry,
+# command_answer, command_answers, command_verify, command_diverged) sees a
+# register-backed id exactly as it sees a real tasks-axi task (captain,
+# 2026-08-24; story fmops-07 §5; invariant "backlog task == story").
+# shellcheck source=bin/fm-decision-register-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-decision-register-lib.sh"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
@@ -242,7 +264,98 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
+  # Register-first dispatch: a decision that lives in the firstmate-private
+  # register renders through fm_decision_register_show in the same shape
+  # `tasks-axi show --full` uses, so every show_field reader below works
+  # without a per-backend branch.
+  if fm_decision_register_exists "$1"; then
+    fm_decision_register_show "$1"
+    return $?
+  fi
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+# Register-aware lifecycle dispatch. A register-backed id closes via the
+# register lib (in-file resolution record + state flip); a tasks-axi id
+# closes via the existing tasks-axi verbs. Never dual-writes.
+id_is_register() {  # <id>
+  fm_decision_register_exists "$1"
+}
+
+# A composed decision identity is `<something>-decision-<something>`, minted
+# by bin/fm-decision-hold.sh from `<origin> <key>`. Story fmops-07 §5 moves
+# THIS mint path off the backlog and into the firstmate-private register
+# because a backlog task must map to a story, and a composed decision names a
+# question, not work. Direct captain-holds with a non-composed id (a plain
+# call about an existing thing, `sample-guard-call` and similar) stay on the
+# tasks-axi backend; they are rare in production because the shim carries the
+# real captain-decision volume, and preserving their storage keeps every
+# existing supervision path (Bearings' captain's-call scan, wake-drain
+# divergence, teardown verify) working unchanged.
+id_is_composed_decision() {  # <id>
+  case "$1" in
+    *-decision-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The pre-fmops-07 mint path: create a fresh backlog task and hold it for the
+# captain. Preserved here for non-composed direct captain-holds (the rare
+# direct path); composed-shape ids route to the register instead.
+tasks_axi_mint_captain_hold() {  # <id> <title> <reason> <repo> <origin> <until>
+  local id=$1 title=$2 reason=$3 repo=$4 origin=$5 until=$6 body='' epic_slug='' show hold_kind
+  [ -n "$title" ] || fail "--title is required to create task $id"
+  validate_one_line title "$title"
+  # The dashboard task-detail route rejects an id longer than 64 chars
+  # (ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/), which silently 400s the page
+  # (report dcen-10). Refuse to MINT such an id rather than create a row the
+  # dashboard cannot open; existing rows are never re-checked here, so this
+  # never breaks holding/answering a pre-existing long id.
+  [ "${#id}" -le 64 ] \
+    || fail "task id exceeds 64 characters and the dashboard would reject it: $id"
+  if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
+    repo=$(meta_value "$STATE/$origin.meta" project)
+    repo=${repo%/}
+    repo=${repo##*/}
+  fi
+  [ -n "$repo" ] || repo=firstmate
+  validate_one_line repo "$repo"
+  # Stamp epic membership at creation so a decision task is born a recognized
+  # epic member (reports dcen-09/dcen-10).
+  if [ -n "$origin" ]; then
+    epic_slug=$(origin_epic_slug "$origin")
+    if [ -n "$epic_slug" ]; then
+      case "$title" in
+        *"[$epic_slug]"*) : ;;
+        *) title="[$epic_slug] $title" ;;
+      esac
+      validate_one_line title "$title"
+    fi
+  fi
+  if [ -n "$origin" ]; then
+    body=$(printf 'Origin: %s' "$origin")
+    if [ -f "$DATA/$origin/report.md" ]; then
+      body=$(printf '%s\nReport: data/%s/report.md' "$body" "$origin")
+    fi
+  fi
+  if [ -n "$body" ]; then
+    tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
+      || fail "could not create task $id"
+  else
+    tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
+      || fail "could not create task $id"
+  fi
+  if [ -n "$until" ]; then
+    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
+      || fail "could not hold task $id for the captain"
+  else
+    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
+      || fail "could not hold task $id for the captain"
+  fi
+  show=$(task_show "$id") || fail "task $id disappeared while holding it"
+  hold_kind=$(show_field_value "$show" hold_kind)
+  [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  printf '%s\n' "$id"
 }
 
 show_field() {  # <show-output> <field>
@@ -359,9 +472,11 @@ resolution_block() {  # <mode>
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
+# Reads through task_show, so a register-backed decision verifies exactly the
+# way a legacy captain-held task does.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "captain-held decision $id is absent from $FM_HOME (neither backlog nor decisions register)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -371,11 +486,12 @@ verify_hold_durable() {  # <task-id>
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  fail "captain-held decision $id is neither held for the captain nor closed with a recorded captain answer"
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
-# exact task id when it exists, else the legacy derived identity.
+# exact task id when it exists (as a real tasks-axi task or as a register
+# entry - task_show dispatches to either), else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
   if task_show "$entry" >/dev/null 2>&1; then
@@ -388,9 +504,9 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
       printf '%s' "$legacy"
       return 0
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no captain-held decision $entry and no legacy identity $legacy in $FM_HOME (neither backlog nor decisions register)"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no captain-held decision $entry in $FM_HOME (neither backlog nor decisions register)"
 }
 
 # The epic slug the origin task belongs to, or empty when it cannot be determined.
@@ -444,6 +560,20 @@ origin_epic_slug() {  # <origin-id>
 # Print the epic slug a task belongs to (empty when none). Read-only reuse of the
 # ONE membership-derivation owner above so teardown does not re-parse (report
 # dcen-10). Best-effort: origin_epic_slug never hard-requires tasks-axi.
+# Read-only accessor for a captain-held record. Dispatches through task_show,
+# so a register-backed decision prints in the same `tasks-axi show --full`
+# shape as a real backlog task and every external reader (tests, wake-drain
+# fold, bearings scans, teardown verify) works without a per-backend branch.
+# Fails when the id is neither in the backlog nor in the register.
+command_show() {
+  local id=${1:-} show
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$id"
+  show=$(task_show "$id") \
+    || fail "captain-held decision $id is absent from $FM_HOME (neither backlog nor decisions register)"
+  printf '%s\n' "$show"
+}
+
 command_epic_slug() {
   local id=${1:-}
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
@@ -480,8 +610,24 @@ command_hold() {
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
   fi
+  # Register-first: if the id already lives in the register, treat as an
+  # idempotent re-hold and update reason/until in place.
+  if id_is_register "$id"; then
+    [ "$(fm_decision_register_field "$id" state)" != "done" ] \
+      || fail "decision register entry $id is already closed; a new captain call needs its own id"
+    body=$(fm_decision_register_body "$id")
+    title=${title:-$(fm_decision_register_field "$id" title)}
+    repo=${repo:-$(fm_decision_register_field "$id" repo)}
+    fm_decision_register_open "$id" "$reason" "$origin" "$until" "$title" "$repo" "$body" \
+      || fail "could not update register entry $id"
+    printf '%s\n' "$id"
+    return 0
+  fi
   require_tasks_axi
-  if show=$(task_show "$id"); then
+  if show=$(task_show "$id") && ! id_is_register "$id"; then
+    # Existing tasks-axi task path: hold an already-existing work item.
+    # Story fmops-07 §5 keeps this legitimate ("prefer holding the work item
+    # the question gates"); only the mint path leaves the backlog.
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
@@ -489,70 +635,69 @@ command_hold() {
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
-  else
-    [ -n "$title" ] || fail "--title is required to create task $id"
-    validate_one_line title "$title"
-    # The dashboard task-detail route rejects an id longer than 64 chars
-    # (ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/), which silently 400s the page
-    # (report dcen-10). Refuse to MINT such an id rather than create a row the
-    # dashboard cannot open; existing rows are never re-checked here, so this
-    # never breaks holding/answering a pre-existing long id. Shorten the origin
-    # or key so the composed id fits.
-    [ "${#id}" -le 64 ] \
-      || fail "task id exceeds 64 characters and the dashboard would reject it: $id"
-    if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
-      repo=$(meta_value "$STATE/$origin.meta" project)
-      repo=${repo%/}
-      repo=${repo##*/}
-    fi
-    [ -n "$repo" ] || repo=firstmate
-    validate_one_line repo "$repo"
-    # Stamp epic membership at creation so a decision task is born a recognized
-    # epic member, not a lint orphan firstmate hand-patches later (report dcen-09).
-    # The `[<slug>]` title tag is the durable, format-stable membership pointer
-    # bin/fm-epic-status-lib.sh reads (it also accepts a `parent:<slug>` edge, but
-    # tasks-axi 0.2.5 has no parent-edge type: the only place such a token could
-    # live in a task line is the title, which would defeat the clean-title goal, so
-    # the tag is the one clean signal we stamp). No epic derivable -> untagged.
-    if [ -n "$origin" ]; then
-      epic_slug=$(origin_epic_slug "$origin")
-      if [ -n "$epic_slug" ]; then
-        case "$title" in
-          *"[$epic_slug]"*) : ;;
-          *) title="[$epic_slug] $title" ;;
-        esac
-        validate_one_line title "$title"
-      fi
-    fi
-    # Provenance and, when it exists, the originating report both go in the BODY.
-    # tasks-axi 0.2.5 stores a --report/--pr link by appending it to the title text
-    # (there is no separate link field in the markdown backend), so --report would
-    # pollute the title and re-orphan the record. A body line keeps the title clean
-    # and is still readable from the decision item via `tasks-axi show --full`.
-    if [ -n "$origin" ]; then
-      body=$(printf 'Origin: %s' "$origin")
-      if [ -f "$DATA/$origin/report.md" ]; then
-        body=$(printf '%s\nReport: data/%s/report.md' "$body" "$origin")
-      fi
-    fi
-    if [ -n "$body" ]; then
-      tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
-        || fail "could not create task $id"
+    if [ -n "$until" ]; then
+      tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
+        || fail "could not hold task $id for the captain"
     else
-      tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
-        || fail "could not create task $id"
+      tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
+        || fail "could not hold task $id for the captain"
+    fi
+    show=$(task_show "$id") || fail "task $id disappeared while holding it"
+    hold_kind=$(show_field_value "$show" hold_kind)
+    [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+    printf '%s\n' "$id"
+    return 0
+  fi
+  # Mint path: no existing work item to gate. For a composed
+  # `<origin>-decision-<key>` id (the shim-minted shape), route to the
+  # firstmate-private register - a backlog task must map to a story, and a
+  # decision names a question, not work (captain, 2026-08-24; story fmops-07
+  # §5; invariant "backlog task == story"). Non-composed direct mints stay on
+  # tasks-axi so the rare direct-captain-hold path keeps every existing
+  # supervision surface working unchanged.
+  if ! id_is_composed_decision "$id"; then
+    tasks_axi_mint_captain_hold "$id" "$title" "$reason" "$repo" "$origin" "$until"
+    return 0
+  fi
+  [ -n "$title" ] || fail "--title is required to open the decision register entry $id"
+  validate_one_line title "$title"
+  # The dashboard task-detail route rejects an id longer than 64 chars
+  # (ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/), which silently 400s the page
+  # (report dcen-10). Refuse to MINT such an id so a legacy pre-collapse
+  # promotion into the backlog can still open the dashboard page.
+  [ "${#id}" -le 64 ] \
+    || fail "id exceeds 64 characters and the dashboard would reject it: $id"
+  if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
+    repo=$(meta_value "$STATE/$origin.meta" project)
+    repo=${repo%/}
+    repo=${repo##*/}
+  fi
+  [ -n "$repo" ] || repo=firstmate
+  validate_one_line repo "$repo"
+  # Stamp epic membership on the register title so Bearings' Captain's Call
+  # groups it under the right epic when scanning the register.
+  if [ -n "$origin" ]; then
+    epic_slug=$(origin_epic_slug "$origin")
+    if [ -n "$epic_slug" ]; then
+      case "$title" in
+        *"[$epic_slug]"*) : ;;
+        *) title="[$epic_slug] $title" ;;
+      esac
+      validate_one_line title "$title"
     fi
   fi
-  if [ -n "$until" ]; then
-    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
-  else
-    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+  # Provenance + optional originating report land in the register body.
+  if [ -n "$origin" ]; then
+    body=$(printf 'Origin: %s' "$origin")
+    if [ -f "$DATA/$origin/report.md" ]; then
+      body=$(printf '%s\nReport: data/%s/report.md' "$body" "$origin")
+    fi
   fi
-  show=$(task_show "$id") || fail "task $id disappeared while holding it"
+  fm_decision_register_open "$id" "$reason" "$origin" "$until" "$title" "$repo" "$body" \
+    || fail "could not open decision register entry $id"
+  show=$(task_show "$id") || fail "register entry $id disappeared after opening"
   hold_kind=$(show_field_value "$show" hold_kind)
-  [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  [ "$hold_kind" = captain ] || fail "register entry $id did not retain its captain hold"
   printf '%s\n' "$id"
 }
 
@@ -566,9 +711,17 @@ remember_decision() {  # <decision-text>
 }
 
 # Record a resolution block at the top of the task body, preserving the
-# previous body below it and archiving the pristine original.
+# previous body below it and archiving the pristine original. Register-backed
+# ids write through fm_decision_register_answer, which does the same in the
+# register file and flips state to done in one atomic write; the tasks-axi
+# path stays byte-identical to the pre-register behavior.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
   local id=$1 mode=$2 body=$3 new_body tmp
+  if id_is_register "$id"; then
+    fm_decision_register_answer "$id" "$mode" "$DECISION_TEXT" "$DECISION_DIGEST" \
+      || fail "could not record the captain decision on register entry $id"
+    return 0
+  fi
   new_body=$(resolution_block "$mode")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
@@ -590,6 +743,18 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
+  if id_is_register "$1"; then
+    # A register-backed decision has no gated work item, so `--release` is a
+    # no-op on it beyond clearing the hold_kind field. The register lib's
+    # `answer` already flipped state to done in the same write, so the close
+    # itself needs nothing more; a release additionally clears hold_kind for
+    # symmetry with tasks-axi's `unhold`.
+    if [ "$2" = 1 ]; then
+      fm_decision_register_release "$1" \
+        || fail "could not release register entry $1"
+    fi
+    return 0
+  fi
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null || fail "could not release captain-held task $1"
   else
@@ -612,7 +777,7 @@ command_answer() {
   validate_slug task-id "$id"
   load_decision "$decision_file"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "captain-held decision $id is absent from $FM_HOME (neither backlog nor decisions register)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -1029,17 +1194,22 @@ EOF
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
 
-# Every still-open task id in this home's backlog, one per line. Only the first
-# two comma-separated listing fields are read - both are slugs that precede any
+# Every still-open captain-call id in this home, one per line. Reads the
+# tasks-axi backlog for legacy captain-held tasks AND the firstmate-private
+# register for the new register-backed decisions. Only the first two
+# comma-separated listing fields are read - both are slugs that precede any
 # quoted title - so a title containing commas or quotes cannot shift them.
 open_task_ids() {
-  tasks_axi list 2>/dev/null | awk -F, '
-    /^  [A-Za-z0-9._-]+,/ {
-      id = $1
-      sub(/^ +/, "", id)
-      if ($2 != "done") print id
-    }
-  '
+  {
+    tasks_axi list 2>/dev/null | awk -F, '
+      /^  [A-Za-z0-9._-]+,/ {
+        id = $1
+        sub(/^ +/, "", id)
+        if ($2 != "done") print id
+      }
+    '
+    fm_decision_register_list queued
+  } | awk '!seen[$0]++'
 }
 
 # Every key token stated anywhere in a status log. A cheap candidate scan: it
@@ -1119,6 +1289,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   epic-slug) shift; command_epic_slug "$@" ;;
+  show) shift; command_show "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

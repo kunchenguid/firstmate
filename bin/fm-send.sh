@@ -224,6 +224,11 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# Story fmops-07 §5 routes the composed `<origin>-decision-<key>` mint into
+# the firstmate-private register (state/decisions/), so --resolve-key must
+# consult the register alongside tasks-axi (fm_send_hold_resolved_id below).
+# shellcheck source=bin/fm-decision-register-lib.sh
+. "$SCRIPT_DIR/fm-decision-register-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -526,9 +531,16 @@ RESOLVE_HOLD_KEYS=
 # preserves even past a hold-until date.
 fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   local show id state hold_kind
-  command -v tasks-axi >/dev/null 2>&1 || return 1
   for id in "$2" "$1-decision-$2"; do
-    show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
+    # Register-first (story fmops-07 §5): composed decisions live under
+    # state/decisions/ and never in tasks-axi; check there before shelling
+    # tasks-axi so we do not miss a captain-held register entry.
+    if fm_decision_register_exists "$id"; then
+      show=$(fm_decision_register_show "$id") || continue
+    else
+      command -v tasks-axi >/dev/null 2>&1 || continue
+      show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
+    fi
     state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
     hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
     [ "$state" != "done" ] || continue

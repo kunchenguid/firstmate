@@ -72,6 +72,14 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+# Backend-agnostic show of a captain-held record: dispatches through
+# fm-captain-hold.sh's `show`, so a register-backed decision (the
+# `<origin>-decision-<key>` shape story fmops-07 §5 moves off the backlog)
+# renders in the same tasks-axi shape as a real backlog task.
+show_captain() {  # <home> <id>
+  run_captain "$1" show "$2"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -91,6 +99,50 @@ write_origin_meta() {  # <home> <id> [kind]
     "harness=codex" \
     "kind=$kind" \
     "mode=$kind"
+}
+
+# Story fmops-07 §5: a composed `<origin>-decision-<key>` hold minted through
+# the shim lives in the firstmate-private register (state/decisions/<id>.md),
+# NOT in data/backlog.md. Preserves the invariant "backlog task == story".
+# Also proves the register-backed decision closes with the captain's answer
+# recorded through the shared `answer` path.
+test_composed_decision_lives_in_register_not_backlog() {
+  local home id hold register_path answer_file show
+  home=$(make_home register-invariant)
+  id=sample-scope-review
+  mkdir -p "$home/data/$id"
+  fm_write_meta "$home/state/$id.meta" "project=$home/projects/sample" "kind=scout"
+
+  hold=$(run_shim "$home" hold "$id" pick-scope \
+    --title "Pick scope A or B" --reason "captain scope choice pending" --repo sample) \
+    || fail "composed shim hold failed"
+  [ "$hold" = "$id-decision-pick-scope" ] || fail "shim did not print composed id: $hold"
+  register_path="$home/state/decisions/$hold.md"
+  [ -f "$register_path" ] || fail "composed decision did not land in register at $register_path"
+  # And it is NOT in the backlog.
+  if grep -q "$hold" "$home/data/backlog.md"; then
+    fail "composed decision leaked into data/backlog.md"
+  fi
+  # Register-backed decision reads through the register-aware show and
+  # verifies as a captain-held record for the completion gate.
+  show=$(show_captain "$home" "$hold")
+  assert_contains "$show" "hold_kind: captain" "register-backed decision is not captain-held"
+  assert_contains "$show" "state: queued" "register-backed decision is not queued"
+
+  # Close through the shared answer path; state flips, resolution block lands
+  # in the register body, no backlog row ever appears.
+  answer_file="$home/scope-decision.txt"
+  printf 'Pick scope A.\n' > "$answer_file"
+  run_captain "$home" answer "$hold" --decision-file "$answer_file" >/dev/null \
+    || fail "answer failed on a register-backed decision"
+  show=$(show_captain "$home" "$hold")
+  assert_contains "$show" "state: done" "register-backed decision did not close"
+  assert_contains "$show" "Resolution mode: answered" "register-backed decision lost its resolution record"
+  assert_contains "$show" "Pick scope A." "register-backed decision lost the captain's answer"
+  if grep -q "$hold" "$home/data/backlog.md"; then
+    fail "closing a register-backed decision leaked into data/backlog.md"
+  fi
+  pass "a composed captain-decision lives in the register, closes through the shared answer path, and never touches the backlog"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
@@ -814,6 +866,16 @@ test_legacy_identities_keep_working() {
 
   hold=$(run_shim "$home" id "$id" pick-one)
   [ "$hold" = "$id-decision-pick-one" ] || fail "the shim identity was not deterministic: $hold"
+  # This block tests pre-collapse behavior end-to-end: shim hold, shim
+  # metadata short-key verify, and shim routed-close. Under story fmops-07 §5
+  # a fresh shim hold routes to the firstmate-private register, but the
+  # routed-close path needs the composed id to be a real backlog blocker so
+  # `tasks-axi add --blocked-by <hold>` and `tasks-axi unblock` still work.
+  # Seed pick-one and keep-two as legacy backlog rows FIRST; command_hold's
+  # existing-task branch then holds them in place, preserving the pre-collapse
+  # storage and routed-close semantics exactly.
+  tasks_in "$home" add "$hold" "Pick one" --kind ship --repo sample >/dev/null
+  tasks_in "$home" add "$id-decision-keep-two" "Keep two" --kind ship --repo sample >/dev/null
   out=$(run_shim "$home" hold "$id" pick-one \
     --title "Pick one" --reason "captain choice pending" --repo sample) \
     || fail "the shim hold path failed"
@@ -821,8 +883,10 @@ test_legacy_identities_keep_working() {
   run_shim "$home" hold "$id" keep-two \
     --title "Keep two" --reason "captain second choice pending" --repo sample >/dev/null \
     || fail "the shim second hold failed"
-  show=$(tasks_in "$home" show "$hold" --full)
-  assert_contains "$show" "hold_kind: captain" "the shim-created row is not a plain captain-held task"
+  # Pre-collapse rows land in tasks-axi via the existing-task branch; read
+  # through show_captain (register-aware dispatch) for consistency.
+  show=$(show_captain "$home" "$hold")
+  assert_contains "$show" "hold_kind: captain" "the shim-created decision is not captain-held"
 
   # A pre-collapse metadata attestation records SHORT keys; verify must resolve
   # them through the legacy composed identity.
@@ -845,19 +909,27 @@ test_legacy_identities_keep_working() {
     --routed-to sample-unrouted-work > "$home/unrouted.out" 2> "$home/unrouted.err"; then
     fail "the shim resolve accepted work not blocked by the legacy decision"
   fi
-  show=$(tasks_in "$home" show "$hold" --full)
+  show=$(show_captain "$home" "$hold")
   assert_contains "$show" "state: queued" "invalid shim routing closed the legacy decision"
   assert_not_contains "$show" "Resolution recorded" "invalid shim routing recorded an answer"
   run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
     --routed-to sample-legacy-work >/dev/null \
     || fail "the shim resolve path failed"
-  show=$(tasks_in "$home" show "$hold" --full)
+  show=$(show_captain "$home" "$hold")
   assert_contains "$show" "state: done" "the shim resolve did not close the row"
   assert_contains "$show" "Use route north." "the shim resolve lost the captain decision"
   assert_contains "$show" "- sample-legacy-work" "the shim resolve lost the routed identities"
   show=$(tasks_in "$home" show sample-legacy-work --full)
   assert_contains "$show" "blocked: no" "the shim resolve did not release the routed work"
 
+  # Pre-collapse legacy simulation: seed the composed id as a real backlog row
+  # BEFORE the shim hold, so command_hold's task_show-first check finds it in
+  # tasks-axi and takes the existing-task branch (preserving the old
+  # storage). Fresh mints in this test file's other blocks land in the
+  # register under the new routing (story fmops-07 §5); THIS block deliberately
+  # tests the pre-collapse row shape kept working through the collapse.
+  tasks_in "$home" add "$id-decision-old-route" "Old routed choice" \
+    --kind ship --repo sample >/dev/null
   old_hold=$(run_shim "$home" hold "$id" old-route \
     --title "Old routed choice" --reason "captain old route pending" --repo sample)
   tasks_in "$home" add sample-old-routed-work "Apply the old routed choice" \
@@ -898,9 +970,14 @@ test_legacy_identities_keep_working() {
     | run_captain "$home" answers "$(run_captain "$home" binding legacy-src)" \
         --source "legacy channel" >/dev/null \
     || fail "a short key did not resolve through the concrete-origin binding"
-  show=$(tasks_in "$home" show "$id-decision-third-choice" --full)
+  show=$(show_captain "$home" "$id-decision-third-choice")
   assert_contains "$show" "state: done" "the legacy-keyed answer did not close its row"
 
+  # Pre-collapse legacy simulation: seed fourth-choice as a real backlog row
+  # BEFORE the shim hold, so the legacy tasks-axi update/done below applies.
+  # See the old-route block above for the same rationale.
+  tasks_in "$home" add "$id-decision-fourth-choice" "Fourth choice" \
+    --kind ship --repo sample >/dev/null
   run_shim "$home" hold "$id" fourth-choice \
     --title "Fourth choice" --reason "captain fourth choice pending" --repo sample >/dev/null
   legacy_text=$(printf 'Captain answered this decision through legacy replay.\nDecision key: fourth-choice\nAnswer: option c\n')
@@ -988,7 +1065,9 @@ SH
   # text while the typed channel carries only the doorbell.
   grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
     || fail "the answer text never reached the worker's durable inbox record"
-  show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
+  # The composed shape lives in the register under story fmops-07 §5, so
+  # read through show_captain (register-aware dispatch).
+  show=$(show_captain "$home" "$id-decision-chat-choice")
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
 
@@ -1268,6 +1347,7 @@ test_scout_completion_links_report_without_polluting_title() {
   pass "a completed scout is closed with its report linked cleanly, not by polluting the title"
 }
 
+test_composed_decision_lives_in_register_not_backlog
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes

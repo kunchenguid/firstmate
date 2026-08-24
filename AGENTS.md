@@ -494,9 +494,11 @@ Mention cost as a courtesy when unusually much work is running, but never block 
 `data/backlog.md` is the durable queue.
 It tracks work items only, never agents; persistent secondmates never appear as backlog items.
 Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
-A decision is simply a task held for the captain: `tasks-axi hold <id> --reason "<reason>" --kind captain`, with `--until <date>` when the captain defers it.
-When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it the same way.
-Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
+The invariant is **backlog task == story**: every backlog row maps to one dispatchable unit of work.
+A captain-decision that gates an existing work item is a hold on that story: `tasks-axi hold <id> --reason "<reason>" --kind captain`, with `--until <date>` when the captain defers it.
+A captain-decision with no work item to gate - the classic scout-minted question - lives in the firstmate-private decisions register (`state/decisions/<id>.md`), not the backlog, so composed `<origin>-decision-<key>` questions never flood the queue with rows that are not stories.
+When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, either file it as its own real work item (a story) and hold that, or open a register entry through `bin/fm-decision-hold.sh`.
+Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules across both storage paths.
 Update the backlog on every dispatch, completion, and decision for a work item.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 

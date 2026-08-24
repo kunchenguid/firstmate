@@ -31,7 +31,15 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
+# Story fmops-07 §5 routes the composed `<origin>-decision-<key>` mint path
+# into the firstmate-private register (state/decisions/). task_show below
+# dispatches to the register first so `resolve` and every other read here
+# transparently finds register-backed decisions and legacy backlog ones.
+# shellcheck source=bin/fm-decision-register-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-decision-register-lib.sh"
 
 usage() {
   awk '
@@ -59,6 +67,10 @@ compose() {  # <origin> <key>
 }
 
 task_show() {
+  if fm_decision_register_exists "$1"; then
+    fm_decision_register_show "$1"
+    return $?
+  fi
   (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
 }
 

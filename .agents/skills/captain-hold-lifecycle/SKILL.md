@@ -10,8 +10,11 @@ metadata:
 
 # Captain-hold lifecycle
 
-A decision is not a separate thing: it is simply a task waiting on the captain.
-The one primitive is an ordinary backlog task held for the captain (`tasks-axi hold <id> --kind captain`), its identity is the task id, and `bin/fm-captain-hold.sh` owns the deterministic mechanics this policy relies on.
+A decision is not a separate thing: it is simply a captain-held record with one string identity.
+Its identity is the task id, and `bin/fm-captain-hold.sh` owns the deterministic mechanics this policy relies on across the two backing stores it dispatches transparently:
+an existing backlog task held for the captain (`tasks-axi hold <id> --kind captain`) when a real work item gates the question, and a firstmate-private register entry under `state/decisions/<id>.md` when it does not (story fmops-07 §5, 2026-08-24; invariant "backlog task == story").
+Composed `<origin>-decision-<key>` questions from `bin/fm-decision-hold.sh` always land in the register so they never flood the backlog with rows that are not stories.
+Every read and close path (`answer`, `answers`, `verify`, `complete`, `diverged`, `show`) sees both stores through the same dispatch, so the completion gate and no-lost-decision guarantee are identical whichever store carries the call.
 The agent performs the semantic inventory because scripts must not infer captain calls from report prose, visual-review artifacts, terminal output, or chat.
 
 ## Policy
