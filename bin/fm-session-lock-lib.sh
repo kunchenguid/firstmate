@@ -435,8 +435,8 @@ EOF
 # and disagree with the classification that already ran about a holder that died
 # in between.
 #
-#   gone          not a live process, or it vanished before its command could be
-#                 read
+#   gone          not a live process, or it vanished before its command NAME
+#                 could be read
 #   unidentified  a live process whose command WAS read and which the identity
 #                 rules above then declined to type as a harness
 #   harness       a live process typed as a harness
@@ -444,16 +444,28 @@ EOF
 # The middle word exists because those first two are not the same event for a
 # pid recorded in a session lock: reclaiming a holder that is simply gone has
 # always been silent, while reclaiming one that is still visibly running has to
-# be able to name itself. A process that disappears between the liveness probe
-# and the read of its command is therefore `gone`, so a holder that merely
-# exited can never produce that line.
+# be able to name itself.
+#
+# The `gone` verdict is NOT complete, and that is stated here rather than left
+# to read as closed. A process that disappears before its command NAME can be
+# read is caught and stays silent, but the argument list is read separately and
+# its status is discarded, so a holder that exits in the window between those
+# two reads is classified from the command name alone - and for the bare
+# interpreter shape this whole distinction exists for, that yields
+# `unidentified` and mislabels an otherwise-silent acquisition line. The window
+# is left open because both available tightenings are worse than a wrong clause:
+# reading a failed argument list as `gone` would SILENTLY reclaim a live harness
+# holder's home wherever `ps -o args=` fails while `ps -o comm=` succeeds, and
+# re-probing liveness after the read is the duplicate liveness question this
+# single classifier exists to prevent. The verdict, the reclaim, and which
+# session wins are identical either way.
 fm_harness_pid_state() {  # <pid>
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || { printf 'gone\n'; return 0; }
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || { printf 'gone\n'; return 0; }
   [ -n "$comm" ] || { printf 'gone\n'; return 0; }
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  if fm_harness_process_matches "$comm" "$args"; then
+  if fm_harness_process_matches "$comm" "$args" >/dev/null; then
     printf 'harness\n'
   else
     printf 'unidentified\n'
