@@ -330,6 +330,8 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
+Never delete anything, here or anywhere else: teardown discards this worktree for you, so a scout has no reason to run rm at all.
+A delete built from a variable reaches outside the worktree the moment that variable is empty, which is why the rule is none rather than careful.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules

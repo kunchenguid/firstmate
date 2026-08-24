@@ -762,6 +762,28 @@ test_scout_and_secondmate_scaffold() {
 # rule "Never add an agent name as a commit co-author"). The prose alone does
 # not enforce it - mechanical enforcement lives in fm-spawn.sh's claude
 # settings.local.json - so this guards the reinforcement text survives.
+# A scout has no reason to delete: its worktree is discarded at teardown, and a
+# delete built from an empty variable escapes the worktree the moment the
+# variable is empty. Measured near-miss 2026-08-24: a scout attempted
+# "rm $D/*.md" with a possibly empty $D, which would have expanded to
+# "rm /*.md"; the operator refused it at the prompt. The scaffold therefore
+# states the rule as none rather than careful, and this guards that text.
+test_scout_never_deletes_rule() {
+  local home id brief
+  home="$TMP_ROOT/scout-no-delete-home"
+  mkdir -p "$home/data"
+
+  id="brief-no-delete-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never delete anything" "$brief" \
+    "scout brief did not carry the never-delete rule"
+  assert_grep "reaches outside the worktree the moment that variable is empty" "$brief" \
+    "scout brief did not explain why the rule is none rather than careful"
+
+  pass "fm-brief.sh: the scout scaffold forbids deleting at all"
+}
+
 test_no_agent_coauthor_rule_in_every_scaffold() {
   local home id brief
   home="$TMP_ROOT/no-coauthor-home"
@@ -811,3 +833,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_no_agent_coauthor_rule_in_every_scaffold
+test_scout_never_deletes_rule
