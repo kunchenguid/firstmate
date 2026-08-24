@@ -273,20 +273,32 @@ fm_pr_sha256() {
 FM_PR_MODE_PROBE_DIR=
 FM_PR_MODE_PROBE_RESULT=
 fm_pr_mode_capable() {
-  local dir=$1 tmp observed
+  local dir=$1 tmp first= second=
   [ "$dir" = "$FM_PR_MODE_PROBE_DIR" ] && return "$FM_PR_MODE_PROBE_RESULT"
   tmp=$(mktemp "$dir/.fm-pr-mode-probe.XXXXXX" 2>/dev/null) || return 0
-  # Probe both directions. Checking a single chmod would be fooled by the
-  # caller's umask already creating the file at the target mode - callers here
-  # run under `umask 077`, so a fresh file reads 600 whether or not chmod works.
-  chmod 0600 "$tmp" 2>/dev/null
-  observed=$(fm_pr_file_mode "$tmp")
-  chmod 0644 "$tmp" 2>/dev/null
-  observed=$observed/$(fm_pr_file_mode "$tmp")
+  # Probe both directions. A single chmod would be fooled by the caller's umask
+  # already creating the file at the target mode - callers here run under
+  # `umask 077`, so a fresh file reads 600 whether or not chmod works.
+  if chmod 0600 "$tmp" 2>/dev/null; then first=$(fm_pr_file_mode "$tmp"); fi
+  if chmod 0644 "$tmp" 2>/dev/null; then second=$(fm_pr_file_mode "$tmp"); fi
   rm -f -- "$tmp"
-  FM_PR_MODE_PROBE_DIR=$dir
-  if [ "$observed" = 600/644 ]; then FM_PR_MODE_PROBE_RESULT=0; else FM_PR_MODE_PROBE_RESULT=1; fi
-  return "$FM_PR_MODE_PROBE_RESULT"
+  # Only a complete, unambiguous observation may relax anything. A capable
+  # filesystem reports both requested modes. An incapable one reports the same
+  # unchanged mode twice, which is chmod demonstrably doing nothing. Every other
+  # outcome - a failed chmod, an unreadable mode, a partial change - is not
+  # understood, so it reports capable, keeps the strict assertion, and is not
+  # cached, so a transient failure cannot be remembered as evidence.
+  if [ "$first" = 600 ] && [ "$second" = 644 ]; then
+    FM_PR_MODE_PROBE_DIR=$dir
+    FM_PR_MODE_PROBE_RESULT=0
+    return 0
+  fi
+  if [ -n "$first" ] && [ "$first" = "$second" ]; then
+    FM_PR_MODE_PROBE_DIR=$dir
+    FM_PR_MODE_PROBE_RESULT=1
+    return 1
+  fi
+  return 0
 }
 
 fm_pr_private_file_valid() {
