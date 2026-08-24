@@ -1704,6 +1704,40 @@ test_cursor_progress_marker_write_failure_fails_closed() {
   pass "an unwritable Cursor progress marker fails closed"
 }
 
+test_cursor_progress_requires_shared_numeric_field() {
+  local fixture name previous pane id dir state fakebin out capture_file window key sig pid marker
+  local -a fixtures=(
+    'field-disappearance|token=60tokens context=7%| ⠋⠆ Working  60 tokens\n'
+    'empty-intersection|token= context=7%| ⠋⠆ Working  60 tokens\n'
+  )
+  for fixture in "${fixtures[@]}"; do
+    IFS='|' read -r name previous pane <<< "$fixture"
+    id="cursor-$name"
+    dir=$(make_case "$id"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$id"
+    printf '%b' "$pane" > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=cursor\n' "$window" > "$state/$id.meta"
+    record_cursor_busy "$dir" "$id"
+    printf 'working: setup complete\n' > "$state/$id.status"
+    sig=$(seen_sig "$state/$id.status")
+    printf '%s' "$sig" > "$state/.seen-${id}_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    marker="$state/.cursor-progress-$key"
+    printf '%s' "$previous" > "$marker"
+    touch -t 200001010000 "$state/$id.meta"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "Cursor $name counted field visibility as numeric progress"
+    grep -F "possible wedge" "$out" >/dev/null \
+      || fail "Cursor $name did not preserve wedge escalation: $(cat "$out")"
+  done
+  pass "Cursor progress requires a changed numeric field shared by consecutive samples"
+}
+
 test_busy_pane_turn_end_touch_resets_age() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2761,6 +2795,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_cursor_progress_resets_busy_turn_wedge_timer
 test_cursor_progress_marker_write_failure_fails_closed
+test_cursor_progress_requires_shared_numeric_field
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s

@@ -317,15 +317,14 @@ cursor_progress_signature() {  # <tail40>
     | grep -Ei 'context|^[[:space:]]*Cursor .* · ' \
     | grep -Eo '[0-9]+([.][0-9]+)?[[:space:]]*%' \
     | tail -1 | tr -d '[:space:]' || true)
-  [ -n "$token" ] || [ -n "$context" ] || return 1
   printf 'token=%s context=%s' "$token" "$context"
 }
 
-# Record Cursor's current numeric progress and return success only when a prior
-# sample exists and the value changed. First sight establishes a baseline; it is
-# not itself proof of movement.
+# Record Cursor's current numeric progress and return success only when a numeric
+# field is present in both consecutive samples and its value changed. First sight,
+# field appearance, and field disappearance are not proof of movement.
 cursor_progress_changed() {  # <window> <tail40> <window-key>
-  local win=$1 tail40=$2 key=$3 marker sig prev harness
+  local win=$1 tail40=$2 key=$3 marker sig prev harness token context prev_token prev_context
   marker="$STATE/.cursor-progress-$key"
   harness=$(window_harness "$win")
   case "$harness" in
@@ -335,7 +334,21 @@ cursor_progress_changed() {  # <window> <tail40> <window-key>
   sig=$(cursor_progress_signature "$tail40") || return 1
   prev=$(cat "$marker" 2>/dev/null || true)
   printf '%s' "$sig" > "$marker" || return 1
-  [ -n "$prev" ] && [ "$sig" != "$prev" ]
+  [ -n "$prev" ] || return 1
+  case "$prev" in
+    token=*' context='*) ;;
+    *) return 1 ;;
+  esac
+  token=${sig#token=}
+  context=${token#* context=}
+  token=${token%% context=*}
+  prev_token=${prev#token=}
+  prev_context=${prev_token#* context=}
+  prev_token=${prev_token%% context=*}
+  if [ -n "$token" ] && [ -n "$prev_token" ] && [ "$token" != "$prev_token" ]; then
+    return 0
+  fi
+  [ -n "$context" ] && [ -n "$prev_context" ] && [ "$context" != "$prev_context" ]
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
