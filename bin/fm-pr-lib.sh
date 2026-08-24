@@ -263,10 +263,40 @@ fm_pr_sha256() {
   fi
 }
 
+# Some filesystems cannot represent POSIX modes at all, so chmod there is a
+# silent no-op and any mode assertion is guaranteed to fail: Git Bash mounts
+# NTFS with `noacl` by default, where `chmod 0600` leaves stat reporting 644.
+# Probe the actual directory rather than guessing from `uname` or mount flags -
+# the same host can hold both mode-capable and mode-incapable filesystems.
+# A probe that cannot complete reports capable, so an unexplained failure keeps
+# the strict assertion instead of silently relaxing it.
+FM_PR_MODE_PROBE_DIR=
+FM_PR_MODE_PROBE_RESULT=
+fm_pr_mode_capable() {
+  local dir=$1 tmp observed
+  [ "$dir" = "$FM_PR_MODE_PROBE_DIR" ] && return "$FM_PR_MODE_PROBE_RESULT"
+  tmp=$(mktemp "$dir/.fm-pr-mode-probe.XXXXXX" 2>/dev/null) || return 0
+  # Probe both directions. Checking a single chmod would be fooled by the
+  # caller's umask already creating the file at the target mode - callers here
+  # run under `umask 077`, so a fresh file reads 600 whether or not chmod works.
+  chmod 0600 "$tmp" 2>/dev/null
+  observed=$(fm_pr_file_mode "$tmp")
+  chmod 0644 "$tmp" 2>/dev/null
+  observed=$observed/$(fm_pr_file_mode "$tmp")
+  rm -f -- "$tmp"
+  FM_PR_MODE_PROBE_DIR=$dir
+  if [ "$observed" = 600/644 ]; then FM_PR_MODE_PROBE_RESULT=0; else FM_PR_MODE_PROBE_RESULT=1; fi
+  return "$FM_PR_MODE_PROBE_RESULT"
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  # The mode assertion is skipped only where the filesystem provably cannot
+  # express modes; the checks below carry the substantive guarantees there.
+  if fm_pr_mode_capable "$(dirname "$path")"; then
+    [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fi
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
