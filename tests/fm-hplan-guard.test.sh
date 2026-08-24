@@ -342,21 +342,68 @@ test_remote_leg_respects_backup_exclusion() {
   local rroot fakebin out
   rroot="$TMP_ROOT/remote-root/volumen-nachbau"
   mkdir -p "$rroot/schutzordner" "$rroot/offen"
-  make_signed_db "$rroot/schutzordner/sicherung-eins.sqlite" 500 no
+  make_signed_db "$rroot/schutzordner/sicherung-eins.sqlite" 150 no
   chmod 0644 "$rroot/schutzordner/sicherung-eins.sqlite"
-  make_signed_db "$rroot/offen/live-kopie.sqlite" 500 no
+  make_signed_db "$rroot/offen/live-kopie.sqlite" 150 no
   fakebin=$(fm_fakebin "$TMP_ROOT/remote-fakebin")
   make_local_ssh "$fakebin"
   out=$(HPLAN_GUARD_SERVER=on HPLAN_GUARD_SCOPES="$TMP_ROOT/empty-nowhere" \
     HPLAN_GUARD_SSH_CMD="$fakebin/hplan-localssh" \
     HPLAN_GUARD_REMOTE_ROOTS="$rroot" \
     HPLAN_GUARD_REMOTE_EXCLUDE="$rroot/schutzordner" \
-    HPLAN_GUARD_BYTE_MIN_BYTES=8192 \
     FM_STATE_OVERRIDE="$TMP_ROOT/remote-state" \
     "$CHECK" check 2>/dev/null)
   expect_code 0 $? "remote leg completes cleanly"
   assert_contains "$out" "live-kopie.sqlite" "world-readable copy outside backups is reported via server leg"
   assert_not_contains "$out" "schutzordner" "excluded backup folder is never reported"
+}
+
+test_server_appears_in_coverage_in_every_case() {
+  local rroot fakebin missing out_ok out_leer out_fail
+  # Ran: COVER with a candidate count.
+  rroot="$TMP_ROOT/cov-root/volumen-nachbau"
+  mkdir -p "$rroot"
+  make_signed_db "$rroot/kleine-kopie.sqlite" 150 no
+  chmod 0644 "$rroot/kleine-kopie.sqlite"
+  fakebin=$(fm_fakebin "$TMP_ROOT/cov-fakebin")
+  make_local_ssh "$fakebin"
+  out_ok=$(HPLAN_GUARD_SERVER=on HPLAN_GUARD_SCOPES="$TMP_ROOT/empty-nowhere" \
+    HPLAN_GUARD_SSH_CMD="$fakebin/hplan-localssh" \
+    HPLAN_GUARD_REMOTE_ROOTS="$rroot" \
+    HPLAN_GUARD_REMOTE_EXCLUDE="" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/cov-state" \
+    "$CHECK" scan 2>/dev/null)
+  assert_contains "$out_ok" $'COVER\tserver:' \
+    "the server appears in coverage when the sweep ran"
+  assert_contains "$out_ok" $'\tok\t1\t0' \
+    "a running server sweep shows up as COVER with its candidate count"
+  assert_contains "$out_ok" "kleine-kopie.sqlite" \
+    "a small signed copy is found remotely without any size floor"
+  # Roots absent: COVER leer, not silence and not a failure.
+  missing="$TMP_ROOT/gibt-es-nicht"
+  out_leer=$(HPLAN_GUARD_SERVER=on HPLAN_GUARD_SCOPES="$TMP_ROOT/empty-nowhere" \
+    HPLAN_GUARD_SSH_CMD="$fakebin/hplan-localssh" \
+    HPLAN_GUARD_REMOTE_ROOTS="$missing" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/cov-state-leer" \
+    "$CHECK" scan 2>/dev/null)
+  assert_contains "$out_leer" $'COVER\tserver:' \
+    "absent roots still name the server in coverage"
+  assert_contains "$out_leer" $'\tleer\t0\t0' \
+    "absent server roots appear as an explicit leer coverage line"
+  assert_not_contains "$out_leer" "PARTIAL" "absent roots are coverage, not a failure"
+  # Unreachable: named PARTIAL instead of a clean COVER.
+  printf '#!/usr/bin/env bash\nexit 255\n' > "$fakebin/hplan-downssh"
+  chmod 0755 "$fakebin/hplan-downssh"
+  out_fail=$(HPLAN_GUARD_SERVER=on HPLAN_GUARD_SCOPES="$TMP_ROOT/empty-nowhere" \
+    HPLAN_GUARD_SSH_CMD="$fakebin/hplan-downssh" \
+    HPLAN_GUARD_REMOTE_ROOTS="$rroot" \
+    FM_STATE_OVERRIDE="$TMP_ROOT/cov-state-fail" \
+    "$CHECK" scan 2>/dev/null)
+  expect_code 0 $? "unreachable server keeps the sweep alive"
+  assert_contains "$out_fail" "PARTIAL	Server" \
+    "an unreachable server is named as a partial state"
+  assert_not_contains "$out_fail" $'COVER\tserver:\tok' \
+    "no ok coverage is claimed when the sweep never ran"
 }
 
 # --- watcher integration ----------------------------------------------------
@@ -468,6 +515,7 @@ for t in test_finds_differently_named_copy \
   test_chaos_run_names_partials_and_stays_bounded \
   test_server_failure_is_not_fatal \
   test_remote_leg_respects_backup_exclusion \
+  test_server_appears_in_coverage_in_every_case \
   test_check_dedupes_and_nag_works \
   test_bad_config_is_named_never_fatal \
   test_pool_covered_each_sweep_and_ledger_silences_repeats \

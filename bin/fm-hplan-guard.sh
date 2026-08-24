@@ -35,6 +35,14 @@
 #   Every sweep scans /tmp, this home, this repo root, and the working-copy
 #   pool under $HOME/.treehouse locally, plus - over ssh, bounded by SSH_SECS -
 #   the running service's Docker volume on the server, WAL companions included.
+#   The server always appears in scan's coverage view: COVER with candidate
+#   counts when the sweep ran, leer when the configured roots are absent, a
+#   named PARTIAL when unreachable or torn - never silence. check mode stays
+#   deviation-driven: clean sweeps print nothing there, so the watcher is not
+#   woken every cycle by an all-clear. The remote leg applies no size floor on
+#   purpose: inside the service's own data location any world-readable
+#   signature carrier is news, however small, and a floor would turn small
+#   extracts into exactly the silence that hides a leak.
 #   Backup folders are excluded: the backup script sets those rights itself and
 #   they are the normal state, not a find - a guardian reporting its own
 #   non-findings gets switched off. Dependency, bytecode, build, and cache
@@ -266,59 +274,79 @@ emit_cover_lines() {
 
 # --- remote leg -------------------------------------------------------------
 
-# Runs on the target over `bash -s`. Pure measurement: find prefilter, one grep
-# pair per candidate. Emits FINDING TSV rows on stdout and nothing else;
-# REMOTE-NOSCOPES says every configured root was absent, which the caller turns
-# into a named partial state rather than reading as a clean no.
+# Runs on the target over `bash -s`. Pure measurement: enumerate world-readable
+# regular files under the roots (backup prefixes skipped), then one grep pair
+# per candidate. No size floor here on purpose: these roots are the service's
+# own data location, where any world-readable carrier of the signature is a
+# find regardless of size - a floor would turn small extracts into silence,
+# which is exactly the failure this leg exists to prevent.
+#
+# Output protocol, parsed below:
+#   FINDING\tpath\tmode\tsize\ttier\tdetail
+#   REMOTE-COVER\t<scanned>\t<unreadable>     always, when any root existed
+#   REMOTE-NOSCOPES                            when every root was absent
 remote_snippet() {
   cat <<'SNIP'
 roots=$1
 exclude=$2
-minbytes=$3
+scanned=0
+unreadable=0
 any_root=0
+ROOTS=()
+EXCL=()
 OLDIFS=$IFS
 IFS=:
 set -- $roots
+ROOTS=("$@")
+set -- ${exclude:-}
+EXCL=("$@")
 IFS=$OLDIFS
-for r in "$@"; do
+for r in "${ROOTS[@]}"; do
   [ -n "$r" ] || continue
   [ -d "$r" ] || continue
   any_root=1
   while IFS= read -r -d '' f; do
     skip=0
-    OLDIFS=$IFS
-    IFS=:
-    set -- ${exclude:-}
-    IFS=$OLDIFS
-    for e in "$@"; do
+    for e in "${EXCL[@]:-}"; do
       [ -n "$e" ] || continue
       case "$f" in
         "$e"|"$e"/*) skip=1; break ;;
       esac
     done
     [ "$skip" = 0 ] || continue
-    m=$(stat -c '%a' -- "$f" 2>/dev/null) || continue
+    m=$(stat -c '%a' -- "$f" 2>/dev/null)
+    s=$(stat -c '%s' -- "$f" 2>/dev/null)
+    if [ -z "$m" ] || [ -z "$s" ]; then
+      unreadable=$((unreadable + 1))
+      continue
+    fi
     # The last octal digit carries the world-read bit; find already filtered,
     # this re-check keeps the snippet honest on its own.
     case ${m: -1} in
       [4567]) ;;
       *) continue ;;
     esac
-    s=$(stat -c '%s' -- "$f" 2>/dev/null) || continue
-    [ "$s" -ge "$minbytes" ] || continue
+    scanned=$((scanned + 1))
     if grep -qa uebungsleiter -- "$f" 2>/dev/null \
       && grep -qa belegung -- "$f" 2>/dev/null; then
       printf 'FINDING\t%s\t%s\t%s\tbyte-signatur\tmarker\n' "$f" "$m" "$s"
     fi
-  done < <(find "$r" -type f -perm -0004 -size +"$((minbytes - 1))"c -print0 2>/dev/null)
+  done < <(find "$r" -type f -perm -0004 -print0 2>/dev/null)
 done
-[ "$any_root" = 1 ] || printf 'REMOTE-NOSCOPES\n'
+if [ "$any_root" = 1 ]; then
+  printf 'REMOTE-COVER\t%s\t%s\n' "$scanned" "$unreadable"
+else
+  printf 'REMOTE-NOSCOPES\n'
+fi
 exit 0
 SNIP
 }
 
-run_remote_leg() { # <remaining-secs>: appends FINDING_ROWS/PARTIALS, never fails
+run_remote_leg() { # <remaining-secs>: fills remote result globals, never fails
   local remaining=$1 bound out status line path mode size tier detail
+  REMOTE_SCANNED=0
+  REMOTE_UNREADABLE=0
+  REMOTE_STATE=
   bound=$SSH_SECS
   [ "$bound" -gt "$remaining" ] && bound=$remaining
   [ "$bound" -ge 1 ] || bound=1
@@ -328,21 +356,19 @@ run_remote_leg() { # <remaining-secs>: appends FINDING_ROWS/PARTIALS, never fail
   # shellcheck disable=SC2086
   out=$(printf '%s\n' "$(remote_snippet)" \
     | fm_run_timed "$bound" $SSH_CMD "$REMOTE_HOST" bash -s -- \
-      "$REMOTE_ROOTS" "$REMOTE_EXCLUDE" "$BYTE_MIN_BYTES") || status=$?
+      "$REMOTE_ROOTS" "$REMOTE_EXCLUDE") || status=$?
   if [ "$status" -eq 124 ]; then
     PARTIALS+=("Server $REMOTE_HOST heute nicht geprueft: Zugriff ueberschritt die Frist")
+    REMOTE_STATE=failed
     return 0
   fi
   if [ "$status" -ne 0 ]; then
     PARTIALS+=("Server $REMOTE_HOST heute nicht geprueft: nicht erreichbar")
+    REMOTE_STATE=failed
     return 0
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if [ "$line" = "REMOTE-NOSCOPES" ]; then
-      PARTIALS+=("Serverpfade fehlen oder sind nicht lesbar: $REMOTE_ROOTS")
-      continue
-    fi
     case "$line" in
       FINDING$'\t'*)
         line=${line#'FINDING'}
@@ -350,8 +376,35 @@ run_remote_leg() { # <remaining-secs>: appends FINDING_ROWS/PARTIALS, never fail
         IFS=$'\t' read -r path mode size tier detail <<< "$line"
         add_finding_row "$path" "$mode" "$size" "$tier" "$detail"
         ;;
+      REMOTE-COVER$'\t'*)
+        line=${line#'REMOTE-COVER'}
+        line=${line#$'\t'}
+        IFS=$'\t' read -r REMOTE_SCANNED REMOTE_UNREADABLE <<< "$line"
+        REMOTE_STATE=ok
+        ;;
+      "REMOTE-NOSCOPES")
+        REMOTE_STATE=leer
+        ;;
     esac
   done <<< "$out"
+  [ -n "$REMOTE_STATE" ] || REMOTE_STATE=failed
+  return 0
+}
+
+# The server always appears in the coverage view: COVER with candidate counts
+# when the sweep ran, leer when the configured roots were absent, and a named
+# PARTIAL (already in PARTIALS) when unreachable or torn.
+emit_server_cover_line() {
+  [ "$SERVER_MODE" = on ] || return 0
+  case "$REMOTE_STATE" in
+    ok)
+      printf 'COVER\tserver:%s:%s\tok\t%s\t%s\n' \
+        "$REMOTE_HOST" "$REMOTE_ROOTS" "$REMOTE_SCANNED" "$REMOTE_UNREADABLE"
+      ;;
+    leer)
+      printf 'COVER\tserver:%s:%s\tleer\t0\t0\n' "$REMOTE_HOST" "$REMOTE_ROOTS"
+      ;;
+  esac
 }
 
 # --- local leg --------------------------------------------------------------
@@ -595,6 +648,7 @@ action_scan() {
     emit_local_json_rows
     emit_cover_lines
   fi
+  emit_server_cover_line
   for p in ${PARTIALS[@]+"${PARTIALS[@]}"}; do
     printf 'PARTIAL\t%s\n' "$p"
   done
