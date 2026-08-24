@@ -282,6 +282,12 @@ print_status_sections() {
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
+stage_empty_status_cursor() {
+  [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" = 1 ] || return 0
+  [ -n "${FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE:-}" ] || return 1
+  status_commit_presentation_snapshot "$STATE" '' "$FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE"
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
@@ -293,9 +299,18 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ]; then
+    if [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1
+    else stage_empty_status_cursor || rc=1
+    fi
+  fi
   fm_lock_release "$lock"
   return "$rc"
+}
+
+print_status_presentation_before_ack() { # <deduped-raw-rows>
+  (print_status_presentation "$1") && return 0
+  [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" != 1 ]
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -443,7 +458,7 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
-(print_status_presentation "$RAW_ROWS") || true
+print_status_presentation_before_ack "$RAW_ROWS" || exit 1
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 

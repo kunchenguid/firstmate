@@ -79,7 +79,8 @@ snapshot_status_cursor() {
 stage_status_cursor() {
   local cursor="$STATE/.status-presentation-cursor"
   [ ! -e "$cursor" ] || { [ -f "$cursor" ] && [ ! -L "$cursor" ]; } || return 1
-  [ ! -f "$TMP_DIR/status-cursor.after" ] || mv -f "$TMP_DIR/status-cursor.after" "$CACHE_CURSOR"
+  [ -f "$TMP_DIR/status-cursor.after" ] && [ ! -L "$TMP_DIR/status-cursor.after" ] || return 1
+  mv -f "$TMP_DIR/status-cursor.after" "$CACHE_CURSOR"
 }
 
 publish_cache() { # <packet>

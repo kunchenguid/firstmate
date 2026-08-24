@@ -12,6 +12,16 @@ trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+process_tree_has_sleep() { # <root-pid>
+  local child command
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    command=$(ps -o comm= -p "$child")
+    case "$command" in */sleep|sleep) return 0 ;; esac
+    process_tree_has_sleep "$child" && return 0
+  done
+  return 1
+}
+
 install_fixture() { # <home>
   local home=$1
   mkdir -p "$home/bin" "$home/state" "$home/data/alpha" "$home/worktree"
@@ -66,6 +76,9 @@ if [ "${FM_DRAIN_MANY_STATUS:-0}" = 1 ]; then
   for n in $(seq 1 10); do printf 'alpha note: status-%s\n' "$n"; done
 fi
 [ "${FM_DRAIN_APPEND_WAKE:-0}" != 1 ] || printf '1\t17\tsignal\talpha.status\tlate wake\n' >> "$FM_STATE_OVERRIDE/.wake-queue"
+if [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" = 1 ]; then
+  : > "$FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE" || exit 1
+fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-1\n' "${FM_DRAIN_ACK_THROUGH:-1}" >&2
 SH
 }
@@ -234,6 +247,39 @@ test_status_cursor_is_staged_before_ack() {
   pass "status cursor is staged before ACK publication and commits without replay"
 }
 
+test_unstageable_status_cursor_withholds_ack() {
+  local home="$TMP_ROOT/unstageable-cursor" pid i=0 status=0
+  prepare_real_wake "$home"
+  FM_WAKE_ENRICH_TEST_DELAY=2 FM_WAKE_CONTEXT_NONMUTATING=1 \
+    FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE="$home/state/.wake-context-cache.status-cursor" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" > "$home/out" 2> "$home/err" & pid=$!
+  while ! process_tree_has_sleep "$pid" && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ "$i" -lt 100 ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "nonmutating drain never reached cursor staging window"; }
+  printf 'note: beta replaced during presentation\n' > "$home/state/beta.status.next"
+  mv "$home/state/beta.status.next" "$home/state/beta.status"
+  wait "$pid" || status=$?
+  [ "$status" -ne 0 ] || fail "unstageable status presentation unexpectedly succeeded"
+  grep -F 'WAKE_ACK_REQUIRED' "$home/err" >/dev/null && fail "unstageable status presentation published an ACK"
+  [ ! -e "$home/state/.wake-context-cache.status-cursor" ] || fail "unstageable status presentation left a cursor stage"
+  pass "nonmutating drain withholds ACK when status presentation cannot be staged"
+}
+
+test_empty_status_set_stages_empty_cursor() {
+  local home="$TMP_ROOT/empty-status-stage" packet
+  install_real_drain_fixture "$home"
+  printf 'window=fleet:alpha\nbackend=tmux\n' > "$home/state/alpha.meta"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_append heartbeat watcher "heartbeat: watcher"' \
+    _ "$home/bin/fm-wake-lib.sh"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || fail "empty status set failed presentation"
+  packet=$(packet_json "$home/out")
+  [ -f "$home/state/.wake-context-cache.status-cursor" ] || fail "empty status set did not stage a cursor"
+  [ ! -s "$home/state/.wake-context-cache.status-cursor" ] || fail "empty status set staged a nonempty cursor"
+  ack_real_packet "$home" "$packet" >/dev/null 2>/dev/null || fail "empty status set ACK failed"
+  pass "empty status set stages an explicit empty cursor before ACK"
+}
+
 test_mktemp_failure_emits_safe_fallback() {
   local home="$TMP_ROOT/mktemp-failure"
   install_fixture "$home"; append_wake "$home" 1
@@ -382,10 +428,10 @@ test_collection_timeout_spans_slow_crew_probes() {
   printf 'window=fleet:beta\nbackend=tmux\nworktree=%s\nkind=ship\n' "$home/worktree" > "$home/state/beta.meta"
   printf 'working: beta\n' > "$home/state/beta.status"; printf '1\t2\tsignal\tbeta.status\tsignal: beta.status\n' >> "$home/state/.wake-queue"
   started=$(date +%s)
-  FM_CREW_STATE_ALPHA_SECONDS=1 FM_CREW_STATE_BETA_SECONDS=5 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=3 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+  FM_CREW_STATE_ALPHA_SECONDS=1 FM_CREW_STATE_BETA_SECONDS=8 FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=5 FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
   finished=$(date +%s); [ "$status" -ne 0 ] || fail "deux sondes lentes ont produit un paquet"
-  [ $((finished - started)) -lt 6 ] || fail "les sondes lentes ont dépassé la borne agrégée"
+  [ $((finished - started)) -lt 8 ] || fail "les sondes lentes ont dépassé la borne agrégée"
   { grep -Fx 'alpha' "$home/crew-state.calls" >/dev/null && grep -Fx 'beta' "$home/crew-state.calls" >/dev/null; } \
     || fail "la borne agrégée n’a pas couvert deux vraies sondes lentes"
   grep -Fx 'Wake context packet could not be built after the durable presentation.' "$home/out" >/dev/null || fail "le fallback des sondes lentes manque"
@@ -479,6 +525,8 @@ test_utf8_packet_uses_true_byte_bound
 test_real_drain_presentation_replays_identically_before_ack
 test_sigkill_before_cache_publish_keeps_unread_note
 test_status_cursor_is_staged_before_ack
+test_unstageable_status_cursor_withholds_ack
+test_empty_status_set_stages_empty_cursor
 test_mktemp_failure_emits_safe_fallback
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task
