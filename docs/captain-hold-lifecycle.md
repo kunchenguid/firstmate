@@ -23,11 +23,12 @@ For example, a real record can be:
 ```
 
 `bin/fm-captain-hold.sh structured --json` is the consumable read surface.
-It returns schema `fm-captain-decisions.v1` with a `generated` timestamp, valid `records`, task ids in `orphaned` when their file survives without a backlog task, and non-fatal `errors` for malformed records.
-Each valid record includes `status` as `active`, `closed`, `linked`, `orphaned`, or `unknown`, plus `task_state` and `hold_kind`.
+It returns schema `fm-captain-decisions.v1` with a `generated` timestamp, valid `records`, task ids in `orphaned` only when the backlog inventory confirms that no corresponding task exists, and non-fatal `errors` for malformed, multiple-value, or unsafe records and paths.
+Each valid record includes `task_state`, `hold_kind`, and a `status` derived from the observed task.
+`active` means an open captain-held task, `closed` means a done task, and `linked` means an existing open task that is not currently captain-held.
+`orphaned` means confirmed absence from the task inventory, while `unknown` means the inventory or the individual task could not be inspected reliably; `task_state` and `hold_kind` are empty when no task observation was available.
 A missing record is normal and does not change the behavior of an older captain hold.
 The file is keyed by the immutable task id rather than a title, so moving a task between backlog files does not change its association.
-If a future operation replaces an id, the old file remains visible as an orphan until it is deliberately removed or associated with the surviving task.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
 It requires a non-empty captain decision file of at most 8192 bytes, writes a resolution block carrying the decision digest and a `Resolution mode:` at the top of the task body (the previous body is preserved below the block and archived through tasks-axi `--archive-body`), then runs `tasks-axi done` - or `tasks-axi unhold` under `--release`, so a captain-gated work item resumes instead of closing.
@@ -106,7 +107,7 @@ Verification date: 2026-08-24.
 
 The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
 It proves: the reconstructed silent-divergence case is signalled - a status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike, while the backlog task, its hold, and the status log all survive the report unchanged and the printed hint names both reconciliation directions; the false-signal boundary holds - a captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent; a report-only unresolved captain call refuses `--none` completion before teardown can erase the source; non-forced scout teardown always requires the durable inventory verification; the recorded-answer guard (a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call); answer-time closure through a bound channel with task-id keys, including the `release` close mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys; the chat channel reaching the same intake; deferral through `--until` leaving `captain_actionable` false until due; and every legacy path (composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding).
-The same suite validates a decision with no structured body, a decision with a valid body, rejection without persistence after malformed input, multiple values, invalid task metadata, or an unavailable backlog, persistence failure before hold mutation, non-fatal malformed stored records, unknown status when backlog inventory is unavailable, orphan reporting only after confirmed absence, and projection beyond the process argument limit.
+The same suite validates a decision with no structured body, a decision with a valid body, rejection without persistence after multiple input values, invalid task metadata, or an unavailable backlog, persistence failure before hold mutation, non-fatal malformed and multiple-value stored records, unknown status when backlog inventory is unavailable, orphan reporting only after confirmed absence, and projection beyond the process argument limit.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
