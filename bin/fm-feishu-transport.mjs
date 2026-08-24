@@ -6,6 +6,8 @@
 // downloads, and the SDK's message APIs for durable outbound delivery.
 // It never starts Pi, imports an Agent SDK, writes a Pi session, evaluates
 // message text, opens a webhook, or invokes an operator command.
+// FM_FEISHU_RECOVERY_TIMEOUT_MS sets the one-episode reconnect deadline in
+// positive integer milliseconds; the default is 300000.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -45,6 +47,7 @@ const HOME = realpathSync(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE ||
 const OFFICIAL_SDK = "@larksuiteoapi/node-sdk";
 const SDK_MODULE = process.env.FM_FEISHU_SDK_MODULE || OFFICIAL_SDK;
 const READY_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_READY_TIMEOUT_MS, 30000);
+const RECOVERY_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_RECOVERY_TIMEOUT_MS, 5 * 60 * 1000);
 const COMMAND_TIMEOUT_MS = positiveInteger(process.env.FM_FEISHU_COMMAND_TIMEOUT_MS, 30000);
 const OUTBOX_POLL_MS = positiveInteger(process.env.FM_FEISHU_OUTBOX_POLL_MS, 500);
 const BINDING_POLL_MS = positiveInteger(process.env.FM_FEISHU_BINDING_POLL_MS, 1000);
@@ -80,16 +83,23 @@ function appFingerprint(appId) {
   return `sha256:${createHash("sha256").update(appId).digest("hex")}`;
 }
 
+function transportError(kind) {
+  if (!/^[a-z0-9-]{1,80}$/.test(kind)) throw new Error("invalid transport error kind");
+  const error = new Error(kind);
+  error.transportErrorKind = kind;
+  return error;
+}
+
 function activeConfiguration() {
   const pairing = readPairing(HOME);
   const binding = readActiveBinding(HOME);
-  if (!pairing || pairing.disabled_at !== null) throw new Error("Feishu pairing is absent or disabled");
-  if (!binding || binding.status !== "active") throw new Error("Feishu binding is absent or disabled");
+  if (!pairing || pairing.disabled_at !== null) throw transportError("pairing-inactive");
+  if (!binding || binding.status !== "active") throw transportError("binding-inactive");
   if (pairing.fm_home_realpath !== HOME || binding.fm_home_realpath !== HOME || pairing.home_id !== binding.home_id) {
-    throw new Error("Feishu pairing or binding belongs to another canonical home");
+    throw transportError("binding-home-mismatch");
   }
   if (pairing.allowed_chats.length !== 1 || pairing.allowed_users.length !== 1 || binding.chat_id !== pairing.allowed_chats[0]) {
-    throw new Error("Feishu MVP requires exactly one allowlisted user and one bound P2P chat");
+    throw transportError("binding-identity-mismatch");
   }
   return { pairing, binding };
 }
@@ -98,9 +108,9 @@ function directAppCredentials(pairing) {
   const appId = String(process.env.FM_FEISHU_APP_ID || "");
   const appSecret = String(process.env.FM_FEISHU_APP_SECRET || "");
   if (!/^cli_[A-Za-z0-9_-]{8,128}$/.test(appId) || !/^[A-Za-z0-9._~+/=-]{8,4096}$/.test(appSecret)) {
-    throw new Error("direct SDK app credentials are unavailable or malformed");
+    throw transportError("sdk-credentials-unavailable");
   }
-  if (appFingerprint(appId) !== pairing.app_id_fingerprint) throw new Error("direct SDK app fingerprint does not match the local pairing");
+  if (appFingerprint(appId) !== pairing.app_id_fingerprint) throw transportError("sdk-app-fingerprint-mismatch");
   return { appId, appSecret };
 }
 
@@ -158,10 +168,10 @@ function assertOwnerAndBinding(binding, ownerFence) {
   const current = activeConfiguration();
   const owner = readTransportOwner(HOME);
   if (current.binding.binding_id !== binding.binding_id || current.binding.generation !== binding.generation) {
-    throw new Error("binding generation changed");
+    throw transportError("binding-generation-changed");
   }
   if (!owner || owner.pid !== ownerFence.ownerPid || owner.nonce !== ownerFence.ownerNonce || owner.process_start_token !== ownerFence.ownerProcessStartToken) {
-    throw new Error("transport owner changed");
+    throw transportError("transport-owner-changed");
   }
   directAppCredentials(current.pairing);
   return current;
@@ -172,9 +182,9 @@ async function verifyP2pChat(client, binding) {
   try {
     result = await client.im.v1.chat.get({ path: { chat_id: binding.chat_id } }, { timeout: COMMAND_TIMEOUT_MS });
   } catch (error) {
-    throw new Error(sdkErrorType(error, "chat-identity-unavailable"));
+    throw transportError(sdkErrorType(error, "chat-identity-unavailable"));
   }
-  if (!result || result.code !== 0 || !result.data || result.data.chat_mode !== "p2p") throw new Error("configured-chat-is-not-p2p");
+  if (!result || result.code !== 0 || !result.data || result.data.chat_mode !== "p2p") throw transportError("configured-chat-is-not-p2p");
   return { chatId: binding.chat_id, chatMode: "p2p" };
 }
 
@@ -260,10 +270,26 @@ function normalizeSdkPostContent(parsed) {
 }
 
 function sdkErrorType(error, fallback = "sdk-error") {
+  if (typeof error?.transportErrorKind === "string" && /^[a-z0-9-]{1,80}$/.test(error.transportErrorKind)) {
+    return error.transportErrorKind;
+  }
   const status = Number(error?.response?.status);
   const code = Number(error?.response?.data?.code ?? error?.code);
   if (Number.isSafeInteger(status) && status >= 100 && status <= 599) return `sdk-http-${status}`;
   if (Number.isSafeInteger(code) && code >= 0) return `sdk-code-${code}`;
+  const structuralCode = typeof error?.code === "string" ? error.code.toUpperCase() : "";
+  const structuralKinds = {
+    ECONNRESET: "sdk-connection-reset",
+    ECONNREFUSED: "sdk-connection-refused",
+    ETIMEDOUT: "sdk-connection-timeout",
+    EPIPE: "sdk-connection-closed",
+    ENOTFOUND: "sdk-dns-unavailable",
+    EAI_AGAIN: "sdk-dns-unavailable",
+    ERR_NETWORK: "sdk-network-error",
+    UND_ERR_CONNECT_TIMEOUT: "sdk-connection-timeout",
+  };
+  if (structuralKinds[structuralCode]) return structuralKinds[structuralCode];
+  if (error?.request && !error?.response) return "sdk-network-no-response";
   return fallback;
 }
 
@@ -286,6 +312,10 @@ function sdkFailureIsAmbiguous(error) {
 function sdkFailureIsAuthentication(error) {
   const status = Number(error?.response?.status);
   return status === 401 || status === 403;
+}
+
+function sdkConnectionFailureIsTerminal(error) {
+  return sdkFailureIsAuthentication(error);
 }
 
 function headerValue(headers, name) {
@@ -357,11 +387,12 @@ async function downloadOneMedia(client, claim, binding, ownerFence) {
     const terminal = new Set(["media-object-overlength", "media-message-overlength", "media-empty-response", "media-signature-unsupported", "media-content-type-mismatch"]).has(kind) || /^sdk-http-4(?!29)/.test(kind);
     failFeishuMediaDownload(HOME, claim, kind, { ownerNonce: ownerFence.ownerNonce }, { terminal, retryAfterMs: retryAfterMilliseconds(error) });
     recordTransportDiagnostic(HOME, "inbound-media-failure", kind);
-    if (sdkFailureIsAuthentication(error)) throw new Error("inbound media SDK authentication failed");
+    if (sdkFailureIsAuthentication(error)) throw transportError("inbound-media-sdk-authentication-failed");
   }
 }
 
 async function drainInboundMedia(client, binding, ownerFence) {
+  if (!transportHealthAllowsDispatch(HOME, binding)) return;
   cleanupFeishuMedia(HOME);
   const claims = pendingFeishuMedia(HOME, {
     ownerNonce: ownerFence.ownerNonce,
@@ -411,7 +442,7 @@ async function sendOneOutbound(client, binding, ownerFence) {
       retryAfterMs: retryAfterMilliseconds(error),
     });
     recordTransportDiagnostic(HOME, "outbound-failure", errorType);
-    if (sdkFailureIsAuthentication(error)) throw new Error("outbound SDK authentication failed");
+    if (sdkFailureIsAuthentication(error)) throw transportError("outbound-sdk-authentication-failed");
     return true;
   }
   if (!response || response.code !== 0) {
@@ -478,44 +509,105 @@ async function runTransport({ once = false, daemon = false } = {}) {
   let bindingTimer = null;
   let senderTimer = null;
   let keepAliveTimer = null;
+  let readyTimer = null;
+  let recoveryTimer = null;
+  let recoveryErrorType = null;
+  let connectionEpoch = 0;
+  let verificationRequestedEpoch = null;
   let verificationTask = null;
 
+  const clearConnectionTimers = () => {
+    if (readyTimer) clearTimeout(readyTimer);
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    readyTimer = null;
+    recoveryTimer = null;
+  };
   const stop = () => {
     if (stopping) return;
     stopping = true;
+    clearConnectionTimers();
     try { wsClient?.close(); } catch {}
     stopped.resolve();
   };
-  const fail = (error) => {
+  const fail = (error, fallback = "sdk-long-connection-failed") => {
     if (fatalSettled) return;
     fatalSettled = true;
-    terminalError = sdkErrorType(error, "sdk-long-connection-failed");
+    terminalError = sdkErrorType(error, fallback);
     try { writeTransportHealth(HOME, { ...healthFence, phase: "degraded", healthy: false, reconnects, lastErrorType: terminalError }); } catch {}
     fatal.resolve(new Error(terminalError));
     stop();
   };
-  const verifyConnectedIdentity = () => {
-    if (verificationTask) return verificationTask;
-    verificationTask = (async () => {
-      const current = assertOwnerAndBinding(initial.binding, ownerFence);
-      await verifyP2pChat(sdkClient, current.binding);
-      assertOwnerAndBinding(initial.binding, ownerFence);
+  const beginRecovery = (errorType) => {
+    if (stopping || fatalSettled) return;
+    connectionEpoch += 1;
+    verificationRequestedEpoch = null;
+    recoveryErrorType = errorType || recoveryErrorType || "sdk-connection-lost";
+    if (readyTimer) {
+      clearTimeout(readyTimer);
+      readyTimer = null;
+    }
+    try {
       writeTransportHealth(HOME, {
         ...healthFence,
-        phase: "healthy",
-        healthy: true,
+        phase: "reconnecting",
+        healthy: false,
         reconnects,
-        lastConnectedAt: new Date().toISOString(),
-        lastIdentityVerifiedAt: new Date().toISOString(),
-        lastErrorType: null,
+        lastErrorType: recoveryErrorType,
       });
-      if (!readySettled) {
-        readySettled = true;
-        ready.resolve();
+    } catch (error) {
+      fail(error, "transport-health-write-failed");
+      return;
+    }
+    if (!recoveryTimer) {
+      recoveryTimer = setTimeout(() => fail(transportError("sdk-recovery-timeout")), RECOVERY_TIMEOUT_MS);
+    }
+  };
+  const handleConnectionError = (error) => {
+    if (stopping || fatalSettled) return;
+    const errorType = sdkErrorType(error, "sdk-long-connection-error");
+    try { recordTransportDiagnostic(HOME, "sdk-connection-error", errorType); } catch (diagnosticError) {
+      fail(diagnosticError, "transport-diagnostic-write-failed");
+      return;
+    }
+    if (sdkConnectionFailureIsTerminal(error)) {
+      fail(transportError(errorType));
+      return;
+    }
+    beginRecovery(errorType);
+  };
+  const verifyConnectedIdentity = () => {
+    verificationRequestedEpoch = connectionEpoch;
+    if (verificationTask) return verificationTask;
+    verificationTask = (async () => {
+      while (verificationRequestedEpoch !== null && !stopping && !fatalSettled) {
+        const verificationEpoch = verificationRequestedEpoch;
+        verificationRequestedEpoch = null;
+        const current = assertOwnerAndBinding(initial.binding, ownerFence);
+        await verifyP2pChat(sdkClient, current.binding);
+        if (verificationEpoch !== connectionEpoch || stopping || fatalSettled) continue;
+        assertOwnerAndBinding(initial.binding, ownerFence);
+        clearConnectionTimers();
+        recoveryErrorType = null;
+        writeTransportHealth(HOME, {
+          ...healthFence,
+          phase: "healthy",
+          healthy: true,
+          reconnects,
+          lastConnectedAt: new Date().toISOString(),
+          lastIdentityVerifiedAt: new Date().toISOString(),
+          lastErrorType: null,
+        });
+        if (!readySettled) {
+          readySettled = true;
+          ready.resolve();
+        }
+        await drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence);
+        await drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence);
       }
-      await drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence);
-      await drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence);
-    })().catch(fail).finally(() => { verificationTask = null; });
+    })().catch((error) => fail(error, "connection-identity-verification-failed")).finally(() => {
+      verificationTask = null;
+      if (verificationRequestedEpoch !== null && !stopping && !fatalSettled) void verifyConnectedIdentity();
+    });
     return verificationTask;
   };
 
@@ -560,7 +652,7 @@ async function runTransport({ once = false, daemon = false } = {}) {
           await drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence);
         } catch (error) {
           try { recordTransportDiagnostic(HOME, "sdk-event-refused", sdkErrorType(error, "sdk-event-handoff-failed")); } catch {}
-          fail(error);
+          fail(error, "sdk-event-handoff-failed");
           throw error;
         }
       },
@@ -571,25 +663,24 @@ async function runTransport({ once = false, daemon = false } = {}) {
       handshakeTimeoutMs: READY_TIMEOUT_MS,
       wsConfig: { pingTimeout: Math.max(1, Math.ceil(READY_TIMEOUT_MS / 1000)) },
       onReady: () => { void verifyConnectedIdentity(); },
-      onError: (error) => fail(error),
+      onError: handleConnectionError,
       onReconnecting: () => {
         reconnects += 1;
-        try { writeTransportHealth(HOME, { ...healthFence, phase: "reconnecting", healthy: false, reconnects, lastErrorType: null }); }
-        catch (error) { fail(error); }
+        beginRecovery(recoveryErrorType || "sdk-connection-lost");
       },
       onReconnected: () => { void verifyConnectedIdentity(); },
     });
     bindingTimer = setInterval(() => {
       try { assertOwnerAndBinding(initial.binding, ownerFence); }
-      catch { stop(); }
+      catch (error) { fail(error, "binding-or-owner-fence-changed"); }
     }, BINDING_POLL_MS);
     bindingTimer.unref();
+    writeTransportHealth(HOME, { ...healthFence, phase: "connecting", healthy: false, reconnects, lastErrorType: null });
+    readyTimer = setTimeout(() => fail(transportError("sdk-ready-timeout")), READY_TIMEOUT_MS);
     await wsClient.start({ eventDispatcher });
-    const readyTimeout = new Promise((_, reject) => {
-      const timer = setTimeout(() => reject(new Error("SDK long connection did not become ready")), READY_TIMEOUT_MS);
-      timer.unref();
-    });
-    await Promise.race([ready.promise, fatalFailure(), readyTimeout]);
+    await Promise.race([ready.promise, fatalFailure(), stopped.promise]);
+    if (fatalSettled) throw transportError(terminalError);
+    if (stopping) return;
     senderTimer = setInterval(() => {
       void drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence).catch(fail);
       void drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence).catch(fail);
@@ -602,13 +693,15 @@ async function runTransport({ once = false, daemon = false } = {}) {
       stop();
     }
     await Promise.race([stopped.promise, fatalFailure()]);
+    if (fatalSettled) throw transportError(terminalError);
   } catch (error) {
     if (!terminalError) terminalError = sdkErrorType(error, "sdk-long-connection-failed");
-    throw new Error(terminalError);
+    throw transportError(terminalError);
   } finally {
     if (bindingTimer) clearInterval(bindingTimer);
     if (senderTimer) clearInterval(senderTimer);
     if (keepAliveTimer) clearInterval(keepAliveTimer);
+    clearConnectionTimers();
     try { wsClient?.close(); } catch {}
     try {
       writeTransportHealth(HOME, {
