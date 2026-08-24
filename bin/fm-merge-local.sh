@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's recorded branch.
-# The recorded name is `Crew branch: branch=<name>` in data/<id>/brief.md
-# (written by bin/fm-brief.sh --branch-name). The last matching line wins,
-# because the generated contract is appended after free-form {TASK} text that
-# may mention the same phrase. When that line is absent, this script still
-# uses fm/<id>, so omitted --branch-name stays identical to today.
-# An invalid recorded name refuses rather than falling back to fm/<id>.
+# landing branch to the crewmate's recorded branch.
+# The crew branch is `Crew branch: branch=<name>` in data/<id>/brief.md
+# (written by bin/fm-brief.sh --branch-name). The landing branch is
+# `Base branch contract: base_branch=<branch>` in that same brief (written by
+# --base-branch). For both lines the last match wins, because the generated
+# contract is appended after free-form {TASK} text that may mention the same
+# phrase. When the crew-branch line is absent, this script still uses fm/<id>.
+# When the base-branch line is absent, it still lands on the project's default
+# branch. Omitted flags therefore stay identical to today. An invalid recorded
+# name refuses rather than falling back.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -69,24 +72,45 @@ fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+TARGET=$DEFAULT
+if [ -f "$BRIEF" ]; then
+  recorded_base=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | tail -n 1)
+  if [ -n "$recorded_base" ]; then
+    git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
+      echo "error: $BRIEF records an invalid base branch: $recorded_base" >&2
+      exit 1
+    }
+    TARGET=$recorded_base
+  fi
+fi
+git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$TARGET" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
 
-# The project's main checkout must be on its default branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
+# The project's main checkout must stay on its default branch unless it is
+# already on the landing target. firstmate never writes here otherwise.
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+if [ "$cur" != "$DEFAULT" ] && [ "$cur" != "$TARGET" ]; then
+  echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT' or landing branch '$TARGET'; cannot merge safely" >&2
+  exit 1
+fi
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
-  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+# Clean fast-forward only: TARGET must be an ancestor of BRANCH.
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET" "$BRANCH"; then
+  echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
+  echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+before=$(git -C "$PROJ" rev-parse --short "$TARGET")
+if [ "$cur" = "$TARGET" ]; then
+  git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
+else
+  # Stay on the default checkout and fast-forward the named base in place.
+  git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
+    "refs/heads/$TARGET" "$(git -C "$PROJ" rev-parse "$BRANCH")" "$(git -C "$PROJ" rev-parse "$TARGET")"
+fi
+after=$(git -C "$PROJ" rev-parse --short "$TARGET")
+echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

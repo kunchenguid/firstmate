@@ -10,7 +10,8 @@
 # the mode; an unknown mode is refused rather than silently rendered as the
 # pipeline contract. An omitted crew-branch keeps `fm/<task-id>`. An omitted
 # base-branch keeps the historical default-branch wording; a named base changes
-# the direct-PR create command and the no-mistakes post-green retarget steps.
+# the direct-PR create command, the local-only landing target, and the
+# no-mistakes post-green retarget steps.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
@@ -54,7 +55,18 @@ EOF
       fi
       ;;
     local-only)
-      cat <<EOF
+      if [ -n "$base_branch" ]; then
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=local-only
+This task ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`$crew_branch\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto \`$base_branch\` - if that base has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch $crew_branch\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`$base_branch\` through the guarded fast-forward path.
+EOF
+      else
+        cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
@@ -63,6 +75,7 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch $crew_branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
+      fi
       ;;
     no-mistakes)
       if [ -n "$base_branch" ]; then

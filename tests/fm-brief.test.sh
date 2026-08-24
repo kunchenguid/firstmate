@@ -771,7 +771,8 @@ test_scout_and_secondmate_scaffold() {
 # --base-branch is the worker-facing form of the spawn header's
 # retarget-after-green sequence. Without the flag, existing DOD wording stays
 # unchanged. With it, no-mistakes retargets after first green and reconfirms CI;
-# direct-PR opens against the named base; scout only records the freshen base.
+# direct-PR opens against the named base; local-only lands on the named base;
+# scout only records the freshen base.
 test_base_branch_worker_steps() {
   local home brief
   home="$TMP_ROOT/base-branch-brief-home"
@@ -822,6 +823,30 @@ test_base_branch_worker_steps() {
     "--base-branch direct-PR brief must open against the named base"
   assert_no_grep "gh-axi pr edit" "$brief" \
     "direct-PR --base-branch must open against the named base instead of retargeting"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-local-omit some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "omitted --base-branch local-only brief should scaffold"
+  brief="$home/data/brief-base-local-omit/brief.md"
+  assert_grep "firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+    "omitted --base-branch must keep the historical local-only landing line"
+  assert_grep "Keep your branch a clean fast-forward onto the current default branch" "$brief" \
+    "omitted --base-branch must keep the historical local-only rebase line"
+  assert_no_grep "Base branch contract: base_branch=" "$brief" \
+    "omitted --base-branch local-only brief must not add a base contract"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-local-on some-proj --mode local-only --base-branch develop >/dev/null 2>&1 \
+    || fail "--base-branch local-only brief should scaffold"
+  brief="$home/data/brief-base-local-on/brief.md"
+  assert_grep "Keep your branch a clean fast-forward onto \`develop\`" "$brief" \
+    "--base-branch local-only brief must rebase onto the named base"
+  assert_grep "firstmate merges it into local \`develop\` through the guarded fast-forward path." "$brief" \
+    "--base-branch local-only brief must land on the named base"
+  assert_grep "Base branch contract: base_branch=develop" "$brief" \
+    "--base-branch local-only brief must record its landing-base contract"
+  assert_no_grep "fast-forward onto the current default branch" "$brief" \
+    "--base-branch local-only brief must not keep the default-branch rebase line"
+  assert_no_grep "merges it into local \`main\`" "$brief" \
+    "--base-branch local-only brief must not keep the default-branch landing line"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-on some-proj --scout --base-branch develop >/dev/null 2>&1 \
     || fail "--base-branch scout brief should scaffold"

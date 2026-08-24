@@ -166,6 +166,8 @@
 #   pre-retarget green as done, and do not treat "0 checks configured" as
 #   green unless that is this repo's trusted no-CI case. A direct-PR ship
 #   opens with `gh-axi pr create --base <branch>` instead of retargeting.
+#   A local-only ship still freshens from that branch; landing against it is
+#   owned by bin/fm-merge-local.sh.
 #   Scaffold the matching brief with the same flag so the worker sees those
 #   steps (bin/fm-brief.sh). When the flag is omitted, freshen and the
 #   generated meta stay identical to today.

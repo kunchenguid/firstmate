@@ -33,7 +33,8 @@
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#                the configured merge authority approves, firstmate merges to the
+#                recorded base or, when none is recorded, to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -46,8 +47,9 @@
 # --base-branch <branch> writes the worker-facing steps for the sequence owned
 # by bin/fm-spawn.sh's header: freshen from that branch, ship normally, retarget
 # a no-mistakes PR after first green, and reconfirm CI. A direct-PR brief opens
-# with gh-axi pr create --base <branch>; a local-only or scout brief only records
-# the freshen base. --secondmate refuses the flag.
+# with gh-axi pr create --base <branch>. A local-only brief records that same
+# base as the landing target that bin/fm-merge-local.sh reads. A scout brief
+# only records the freshen base. --secondmate refuses the flag.
 # --branch-name <name> replaces every generated `fm/<task-id>` crew branch
 # (checkout command, push-rule text, local-only done line) with that name.
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
@@ -453,7 +455,11 @@ case "$MODE" in
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`main\`."
+    if [ -n "$BASE_BRANCH" ]; then
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`$BASE_BRANCH\`."
+    else
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`main\`."
+    fi
     ;;
   *)  # no-mistakes
     SETUP2="
