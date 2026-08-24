@@ -2021,7 +2021,7 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup home_return_rc
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -2037,11 +2037,17 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" "" "$expected_id" \
+      && home_return_rc=0 || home_return_rc=$?
+    if [ "$home_return_rc" -ne 0 ]; then
+      if [ "$home_return_rc" -eq "$TEARDOWN_TREEHOUSE_GUARD_REFUSED" ]; then
+        echo "REFUSED: committed work in $label $abs_home_path could not be certified or rescued; preserving that home - inspect it and recover its commits before retrying teardown" >&2
+      else
+        echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      fi
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
-      return 1
-    }
+      return "$home_return_rc"
+    fi
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -2515,6 +2521,10 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
+      # Orca removes by worktree id while the guard below certifies a path, so
+      # the recorded id must be proven to resolve to that same worktree first;
+      # otherwise the guard could certify one worktree and Orca delete another.
+      require_orca_worktree_path_match_if_present "$child_orca_worktree_id" "$child_wt" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         # Orca deletes this child worktree instead of returning it to a pool, so

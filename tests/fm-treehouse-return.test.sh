@@ -423,14 +423,108 @@ make_child_orca_case() {  # <name>
   printf '%s\n' "$case_dir"
 }
 
-run_child_orca_teardown() {  # <case-dir> <child-worktree>
-  local case_dir=$1 childwt=$2
+# <orca-worktree-path> is what the fake Orca CLI reports for the recorded
+# worktree id, so a case can record one path and have Orca resolve another.
+run_child_orca_teardown() {  # <case-dir> <orca-worktree-path>
+  local case_dir=$1 orca_wt=$2
   FM_HOME="$case_dir/home" \
   FM_TREEHOUSE_RETURN_MARKER="$case_dir/treehouse-return-called" \
-  FM_ORCA_WT_PATH="$childwt" \
+  FM_ORCA_WT_PATH="$orca_wt" \
   FM_ORCA_RM_MARKER="$case_dir/child-orca-worktree-removed" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" domain --force 2>&1
+}
+
+test_child_orca_id_path_mismatch_refuses_removal() {
+  local case_dir childproj childwt other other_head child_head out rc rescue_refs
+  case_dir=$(make_child_orca_case child-orca-mismatch)
+  childproj="$case_dir/projects/alpha"
+  childwt="$case_dir/child-orca-worktree"
+  other="$case_dir/other-orca-worktree"
+  child_head=$(git -C "$childwt" rev-parse HEAD)
+  # The recorded id now resolves to a different worktree than the child record
+  # names - an id reuse or re-provision. Its detached commit is exactly the work
+  # a removal by id would destroy without ever being certified.
+  git -C "$childproj" worktree add -q --detach "$other" HEAD
+  git -C "$other" commit -q --allow-empty -m unnamed-other-orca-work
+  other_head=$(git -C "$other" rev-parse HEAD)
+
+  errexit_off
+  out=$(run_child_orca_teardown "$case_dir" "$other")
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] || fail "forced teardown removed an Orca worktree the guard never certified: $out"
+  [ ! -e "$case_dir/child-orca-worktree-removed" ] \
+    || fail "forced teardown asked Orca to remove a mismatched worktree: $out"
+  [ -d "$other" ] \
+    || fail "the worktree the recorded id resolves to was deleted uncertified: $out"
+  [ "$(git -C "$other" rev-parse HEAD)" = "$other_head" ] \
+    || fail "the mismatched Orca worktree no longer holds its unreferenced commit"
+  [ -d "$childwt" ] || fail "an id/path mismatch deleted the recorded child worktree: $out"
+  [ "$(git -C "$childwt" rev-parse HEAD)" = "$child_head" ] \
+    || fail "the recorded child worktree no longer holds its unreferenced commit"
+  rescue_refs=$(git -C "$childproj" for-each-ref --format='%(refname)' refs/firstmate/rescue)
+  [ -z "$rescue_refs" ] \
+    || fail "an id/path mismatch rescued and then abandoned a worktree: $rescue_refs"
+  assert_present "$case_dir/subhome/state/child-orca.meta" \
+    "an id/path mismatch removed the child Orca task record"
+  assert_contains "$out" 'REFUSED: Orca worktree id' \
+    "an id/path mismatch did not report which worktree the recorded id resolves to"
+  pass "a child Orca id that resolves to another worktree refuses instead of removing it"
+}
+
+# A secondmate home that occupies a Treehouse slot of the firstmate repo, so its
+# teardown goes through the pooled home return rather than a plain removal.
+test_secondmate_home_return_reports_a_guard_refusal_as_one() {
+  local case_dir fmroot home subhome head out rc
+  case_dir="$TMP_ROOT/home-return-guard-refusal"
+  fmroot="$case_dir/fmroot"
+  home="$case_dir/home"
+  subhome="$case_dir/subhome"
+  mkdir -p "$home/state" "$home/data" "$case_dir/fakebin"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+
+  git init -q "$fmroot"
+  mkdir -p "$fmroot/bin"
+  fm_fake_exit0 "$fmroot/bin" fm-guard.sh
+  git -C "$fmroot" commit -q --allow-empty -m baseline
+  git -C "$fmroot" worktree add -q --detach "$subhome" HEAD
+  git -C "$subhome" commit -q --allow-empty -m unnamed-home-work
+  head=$(git -C "$subhome" rev-parse HEAD)
+  # A file at refs/firstmate/rescue/<id> blocks the <id>/<timestamp> ref below
+  # it, so this detached commit can be neither certified nor rescued.
+  mkdir -p "$fmroot/.git/refs/firstmate/rescue"
+  git -C "$fmroot" rev-parse HEAD > "$fmroot/.git/refs/firstmate/rescue/domain"
+  mkdir -p "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' \
+    "- domain - design domain (home: $subhome; scope: design domain; projects: alpha; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+
+  errexit_off
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$fmroot" \
+    FM_TREEHOUSE_RETURN_MARKER="$case_dir/treehouse-return-called" \
+    PATH="$case_dir/fakebin:$PATH" "$TEARDOWN" domain --force 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] || fail "secondmate home return ignored an unrescuable commit: $out"
+  [ "$rc" -eq 5 ] \
+    || fail "a home committed-work guard refusal did not keep its reserved status (got $rc): $out"
+  [ ! -e "$case_dir/treehouse-return-called" ] \
+    || fail "the guard refusal still handed the home to treehouse: $out"
+  [ -d "$subhome" ] || fail "the guard refusal deleted the secondmate home: $out"
+  [ "$(git -C "$subhome" rev-parse HEAD)" = "$head" ] \
+    || fail "the preserved secondmate home no longer holds its unreferenced commit"
+  assert_present "$home/state/domain.meta" "the guard refusal removed the secondmate task record"
+  assert_contains "$out" 'REFUSED: cannot create rescue ref' \
+    "the home guard refusal did not report why the committed work could not be rescued"
+  assert_contains "$out" 'REFUSED: committed work in secondmate home' \
+    "the home guard refusal was not reported as one"
+  assert_not_contains "$out" 'error: treehouse return failed' \
+    "the home guard refusal was mislabeled as a treehouse return failure"
+  pass "a secondmate home guard refusal reports itself and keeps its reserved status"
 }
 
 test_child_orca_detached_commit_is_rescued_before_removal() {
@@ -763,6 +857,8 @@ test_orca_branch_work_is_kept_without_rescue_litter
 test_orca_drops_a_task_branch_whose_work_is_already_contained
 test_child_orca_detached_commit_is_rescued_before_removal
 test_child_orca_guard_refusal_preserves_the_worktree
+test_child_orca_id_path_mismatch_refuses_removal
+test_secondmate_home_return_reports_a_guard_refusal_as_one
 test_child_worktree_without_treehouse_rescues_committed_work
 test_child_worktree_without_treehouse_refuses_unrescuable_work
 
