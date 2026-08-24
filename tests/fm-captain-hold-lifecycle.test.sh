@@ -1124,6 +1124,18 @@ test_structured_decision_body_read_and_errors() {
   "free_response": true
 }
 EOF
+  {
+    cat "$home/structured.json"
+    cat "$home/structured.json"
+  } > "$home/multiple-structured.json"
+  if run_captain "$home" hold sample-multiple-input-call \
+    --title "Escolher rota duplicada" --reason "captain route choice pending" --repo sample \
+    --structured-file "$home/multiple-structured.json" > "$home/multiple.out" 2> "$home/multiple.err"; then
+    fail "hold accepted multiple top-level structured decision values"
+  fi
+  if tasks_in "$home" show sample-multiple-input-call --full >/dev/null 2>&1; then
+    fail "rejected multiple structured decision values still created a task"
+  fi
   run_captain "$home" hold sample-structured-call \
     --title "Escolher rota" --reason "captain route choice pending" --repo sample \
     --structured-file "$home/structured.json" >/dev/null \
@@ -1131,8 +1143,13 @@ EOF
   run_captain "$home" hold sample-plain-call \
     --title "Legacy captain call" --reason "captain choice pending" --repo sample >/dev/null \
     || fail "could not register a legacy captain call"
-  mkdir -p "$home/data/sample-malformed-call" "$home/data/sample-orphan-call"
+  mkdir -p "$home/data/sample-malformed-call" "$home/data/sample-multiple-call" \
+    "$home/data/sample-orphan-call"
   printf '{"project":"sample","options":' > "$home/data/sample-malformed-call/captain-decision.json"
+  {
+    cat "$home/data/sample-structured-call/captain-decision.json"
+    cat "$home/data/sample-structured-call/captain-decision.json"
+  } > "$home/data/sample-multiple-call/captain-decision.json"
   jq '.task_id = "sample-orphan-call"' \
     "$home/data/sample-structured-call/captain-decision.json" \
     > "$home/data/sample-orphan-call/captain-decision.json"
@@ -1150,6 +1167,9 @@ EOF
     and (.orphaned | index("sample-orphan-call"))
     and (.errors | any(.task_id == "sample-malformed-call"
       and .error == "malformed structured decision body"))
+    and (.errors | any(.task_id == "sample-multiple-call"
+      and .error == "malformed structured decision body"))
+    and ((.records | any(.task_id == "sample-multiple-call")) | not)
   ' >/dev/null || fail "structured read did not preserve valid, orphaned, and malformed records: $json"
   printf '%s' "$json" | jq -e '.records | any(.task_id == "sample-plain-call") | not' >/dev/null \
     || fail "a legacy captain call without a body was treated as malformed"

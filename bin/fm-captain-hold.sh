@@ -223,24 +223,28 @@ EOF
 structured_input_valid() {  # <task-id> <path>
   local id=$1 path=$2
   require_jq
-  jq -e --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
-    '((has("schema") | not) or .schema == $schema)
-      and ((has("task_id") | not) or .task_id == $id)
-      and ('"$(structured_body_filter)"')' "$path" >/dev/null 2>&1
+  jq -es --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    'length == 1 and (.[0]
+      | ((has("schema") | not) or .schema == $schema)
+        and ((has("task_id") | not) or .task_id == $id)
+        and ('"$(structured_body_filter)"'))' "$path" >/dev/null 2>&1
 }
 
 structured_record_valid() {  # <task-id> <path>
   local id=$1 path=$2
   require_jq
-  jq -e --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
-    '.schema == $schema and .task_id == $id and ('"$(structured_body_filter)"')' \
+  jq -es --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    'length == 1 and (.[0]
+      | .schema == $schema and .task_id == $id and ('"$(structured_body_filter)"'))' \
     "$path" >/dev/null 2>&1
 }
 
 canonical_structured_record() {  # <task-id> <path>
   local id=$1 path=$2
-  jq -c --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
-    '{schema:$schema, task_id:$id, project, question, options, recommendation, free_response}' \
+  jq -cs --arg id "$id" --arg schema "$STRUCTURED_SCHEMA" \
+    'if length == 1 then
+      .[0] | {schema:$schema, task_id:$id, project, question, options, recommendation, free_response}
+    else error("expected exactly one structured decision body") end' \
     "$path"
 }
 
