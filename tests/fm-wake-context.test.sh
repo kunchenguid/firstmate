@@ -215,6 +215,25 @@ test_sigkill_before_cache_publish_keeps_unread_note() {
   pass "SIGKILL before cache publication leaves the durable wake replayable"
 }
 
+test_status_cursor_is_staged_before_ack() {
+  local home="$TMP_ROOT/cursor-before-ack" pid i=0 ack generation
+  prepare_real_wake "$home"
+  FM_WAKE_ENRICH_TEST_DELAY=2 FM_WAKE_CONTEXT_NONMUTATING=1 \
+    FM_WAKE_CONTEXT_STATUS_CURSOR_STAGE="$home/state/.wake-context-cache.status-cursor" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" > "$home/out" 2> "$home/err" & pid=$!
+  while ! grep -F 'WAKE_ACK_REQUIRED' "$home/err" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$home/state/.wake-context-cache.status-cursor" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "ACK became available before its status cursor stage"; }
+  wait "$pid" || fail "nonmutating drain failed while staging its cursor"
+  ack=$(sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p' "$home/err")
+  generation=$(sed -n 's/.*--recovery-generation \([^ ]*\).*/\1/p' "$home/err")
+  jq -cn --argjson ack "$ack" --arg generation "$generation" '{replay:{ack_through:$ack,recovery_generation:$generation}}' > "$home/state/.wake-context-fallback-receipt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null || fail "staged fallback ACK failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" > "$home/replay" 2>/dev/null
+  grep -F 'beta during alpha wake' "$home/replay" >/dev/null && fail "ACK replayed status staged before its publication"
+  pass "status cursor is staged before ACK publication and commits without replay"
+}
+
 test_mktemp_failure_emits_safe_fallback() {
   local home="$TMP_ROOT/mktemp-failure"
   install_fixture "$home"; append_wake "$home" 1
@@ -457,6 +476,7 @@ test_packet_is_bounded_and_complete
 test_utf8_packet_uses_true_byte_bound
 test_real_drain_presentation_replays_identically_before_ack
 test_sigkill_before_cache_publish_keeps_unread_note
+test_status_cursor_is_staged_before_ack
 test_mktemp_failure_emits_safe_fallback
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task

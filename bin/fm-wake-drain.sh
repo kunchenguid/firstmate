@@ -443,9 +443,9 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+(print_status_presentation "$RAW_ROWS") || true
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(print_status_presentation "$RAW_ROWS") || true
 assert_watcher_liveness
 exit 0
