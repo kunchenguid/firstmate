@@ -380,6 +380,38 @@ test_remote_receiver_rejects_unsafe_held_values() {
   pass "remote unsafe held values are rejected, reported, and converged"
 }
 
+test_remote_receiver_replaces_equal_unsafe_held_values() {
+  local kind home payload payload_bytes payload_hash linked out
+  payload="$TMP_ROOT/remote-equal-unsafe-payload"
+  printf 'herdr\n' > "$payload"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  payload_hash=$(fm_inherit_sha256 "$payload")
+
+  for kind in symlink hardlink; do
+    home="$TMP_ROOT/remote-equal-unsafe-$kind/home"
+    linked="$TMP_ROOT/remote-equal-unsafe-$kind/linked"
+    mkdir -p "$home/config"
+    printf 'herdr\n' > "$linked"
+    if [ "$kind" = symlink ]; then
+      ln -s "$linked" "$home/config/backend"
+    else
+      ln "$linked" "$home/config/backend"
+    fi
+    printf '%s\n' "verified backend pin" > "$home/config/backend.deviation"
+
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-inherit.sh" put config/backend \
+      "$payload_bytes" "$payload_hash" 1 < "$payload") \
+      || fail "remote receiver failed to converge an equal-byte rejected $kind held value"
+
+    assert_contains "$out" "deviation-rejected: config/backend" \
+      "an equal-byte unsafe $kind held value must still be reported as rejected"
+    [ -f "$home/config/backend" ] && [ ! -L "$home/config/backend" ] \
+      && [ "$(fm_inherit_file_link_count "$home/config/backend")" = 1 ] \
+      || fail "remote convergence preserved an equal-byte unsafe $kind held value"
+  done
+  pass "equal-byte remote unsafe held values are replaced with ordinary files"
+}
+
 test_remote_rejected_deviation_failure_does_not_commit_generation() {
   local command home payload payload_bytes payload_hash out status
   payload="$TMP_ROOT/remote-rejected-failure-payload"
@@ -470,6 +502,7 @@ test_remote_receiver_honors_the_record
 test_remote_receiver_agreement_stays_quiet
 test_remote_receiver_reports_primary_absence
 test_remote_receiver_rejects_unsafe_held_values
+test_remote_receiver_replaces_equal_unsafe_held_values
 test_remote_rejected_deviation_failure_does_not_commit_generation
 test_remote_deviation_relay_survives_later_failure
 test_remote_receiver_commits_honored_generation

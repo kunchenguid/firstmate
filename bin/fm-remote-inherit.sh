@@ -209,7 +209,7 @@ case "$COMMAND" in
     if [ "$DESTINATION_UNSAFE" -eq 1 ]; then
       prepare_rejected_deviation_destination
     fi
-    if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
+    if [ "$DESTINATION_UNSAFE" -eq 0 ] && [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
       commit_generation
       printf 'unchanged: %s\n' "$REL"
