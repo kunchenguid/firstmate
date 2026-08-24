@@ -14,6 +14,7 @@ The `hold` subcommand places an existing task under an active captain hold, or c
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
 An optional structured body is supplied with `hold --structured-file <path>` and is stored as `data/<task-id>/captain-decision.json`.
+The body is persisted and validated before the backlog task is created or held, so a persistence failure cannot leave a captain-held task without its requested body.
 The record uses schema `fm-captain-decision.v1` and contains `project`, `question`, `options` with `label` and `consequence`, `recommendation` with `label` and `reason`, and boolean `free_response`.
 For example, a real record can be:
 
@@ -105,7 +106,7 @@ Verification date: 2026-08-24.
 
 The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
 It proves: the reconstructed silent-divergence case is signalled - a status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike, while the backlog task, its hold, and the status log all survive the report unchanged and the printed hint names both reconciliation directions; the false-signal boundary holds - a captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent; a report-only unresolved captain call refuses `--none` completion before teardown can erase the source; non-forced scout teardown always requires the durable inventory verification; the recorded-answer guard (a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call); answer-time closure through a bound channel with task-id keys, including the `release` close mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys; the chat channel reaching the same intake; deferral through `--until` leaving `captain_actionable` false until due; and every legacy path (composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding).
-The same suite validates a decision with no structured body, a decision with a valid body, rejection of malformed and multiple-value inputs before task creation, non-fatal malformed stored records, and orphan reporting through the read projection.
+The same suite validates a decision with no structured body, a decision with a valid body, rejection of malformed and multiple-value inputs before task creation, persistence failure before hold mutation, non-fatal malformed stored records, and orphan reporting through the read projection.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 

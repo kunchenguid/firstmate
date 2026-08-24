@@ -494,6 +494,11 @@ command_hold() {
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
   fi
+  if [ -n "$structured_file" ]; then
+    # Persist the body before any backlog mutation, so a destination failure
+    # cannot leave a captain-held task without the body the caller supplied.
+    write_structured_record "$id" "$structured_file"
+  fi
   if [ -n "$until" ]; then
     case "$until" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
@@ -538,9 +543,6 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  if [ -n "$structured_file" ]; then
-    write_structured_record "$id" "$structured_file"
-  fi
   printf '%s\n' "$id"
 }
 

@@ -1136,6 +1136,17 @@ EOF
   if tasks_in "$home" show sample-multiple-input-call --full >/dev/null 2>&1; then
     fail "rejected multiple structured decision values still created a task"
   fi
+  tasks_in "$home" add sample-write-failure-call "Structured write failure" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the structured write failure fixture"
+  printf 'not-a-directory\n' > "$home/data/sample-write-failure-call"
+  if run_captain "$home" hold sample-write-failure-call \
+    --reason "captain write failure fixture" --repo sample \
+    --structured-file "$home/structured.json" > "$home/write-failure.out" 2> "$home/write-failure.err"; then
+    fail "structured persistence failure was accepted"
+  fi
+  assert_contains "$(tasks_in "$home" show sample-write-failure-call --full)" "held: no" \
+    "structured persistence failure left the task held without a body"
   run_captain "$home" hold sample-structured-call \
     --title "Escolher rota" --reason "captain route choice pending" --repo sample \
     --structured-file "$home/structured.json" >/dev/null \
