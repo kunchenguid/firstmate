@@ -127,6 +127,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -179,6 +181,45 @@ block_stop() {
   } >&2
   exit 2
 }
+
+# --- identity: a home owned by another live session is advisory, not blockable -
+# Mirrors the auto-arm's identity gate (bin/fm-claude-stop-autoarm.sh): when
+# state/.lock names a LIVE harness that is not this session's ancestor, the
+# auto-arm exits 0 without ever claiming this home, so this session is
+# structurally forbidden from arming a watcher for it. Blocking here would
+# demand a repair the session cannot perform and would spin the bounded Stop
+# budget to its cap for a home it does not own.
+# The gap is still real, so this is an advisory naming the owning pid rather
+# than silence: a genuinely unsupervised home stays visible to the operator.
+# A missing, malformed, or dead-owner lock is uncertainty rather than evidence
+# of another live owner, and keeps the unchanged blocking behaviour.
+FOREIGN_HOME_PID=
+foreign_home_owner() {
+  local lock_pid
+  if fm_session_lock_owned_by_self "$STATE"; then
+    return 1
+  fi
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  FOREIGN_HOME_PID=$lock_pid
+  return 0
+}
+
+if foreign_home_owner; then
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    foreign_need="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    foreign_need="$FM_SUP_SOURCES process-event source(s) registered"
+  else
+    foreign_need="X-mode relay polling active"
+  fi
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION ADVISORY (not blocking): %s in this home and no watcher has a fresh beacon (last beat: %s), but pid %s owns state/.lock and this session is not in its harness ancestry. Only the lock-owning session may arm a watcher here, so this turn is NOT blocked. Ask that session to run bin/fm-watch-arm.sh --restart, or take the home over deliberately."}\n' \
+    "$foreign_need" "$FM_SUP_BEACON_DESC" "$FOREIGN_HOME_PID"
+  exit 0
+fi
 
 if [ "$CLAUDE_MODE" -eq 0 ]; then
   block_stop
