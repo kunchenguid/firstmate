@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-bearings-board.sh: fail-closed payload validation,
 # slot-injection round-trip through the built page, bind-before-arm, and
-# idempotent re-arm of the stable board source.
+# idempotent re-arm of the stable board source, plus the built board's
+# full-text tooltip invariant, asserted by running the shipped renderer against
+# a minimal DOM shim so the coverage never depends on a headless browser.
 set -u
 
 # shellcheck source=tests/lib.sh
