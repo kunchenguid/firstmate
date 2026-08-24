@@ -637,7 +637,7 @@ Harnesses whose process name does not carry their registered identity are recogn
 The matcher can only add `live`; it never participates in the agent-free decision, so an unrecognized process stays `unknown` and refuses.
 The shell vocabulary the agent-free decision reads is the same list the tmux classifier recognizes, so a host whose pane login shell is `ash`, `mksh`, `tcsh`, or `csh` is not silently excluded from stale-registration recovery.
 
-Deviation from the original acceptance text. That text asked for `done` to be agent-free on registration alone; the shipped behavior resolves `done` against `pane process-info` exactly as `idle` is, because Herdr's `done` is a per-turn status of a still-attached agent, and registration-only agent-free would license a second harness into a pane that still holds a live one.
+Superseded acceptance clause. An earlier acceptance text asked for `done` to be agent-free on registration alone; that clause was superseded during review, and the governing rule is now that NO registration status alone decides agent-free. `done` is therefore resolved against `pane process-info` exactly as `idle` is, because Herdr's `done` is a per-turn status of a still-attached agent, and registration-only agent-free would license a second harness into a pane that still holds a live one.
 `fm-control relaunch` is unaffected either way — it runs its own exit phase first — so only a direct `bin/fm-spawn.sh <id> --relaunch` against a done-but-still-running agent refuses, which is the intended fail-closed outcome.
 Run this guard after every Herdr upgrade rather than trusting the version above.
 

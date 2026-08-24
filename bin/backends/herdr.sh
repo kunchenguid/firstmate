@@ -1945,19 +1945,20 @@ fm_backend_herdr_pane_registration_state() {  # <session> <pane_id>
 # the foreground process group. A lone login shell proves no agent is running;
 # the registered executable anywhere in the group proves it is live; every
 # other process shape is unknown so lifecycle actions refuse.
-# An idle interactive shell transiently hosts short-lived prompt helpers as a
+# An idle interactive SHELL transiently hosts short-lived prompt helpers as a
 # second foreground process (verified on the real 0.7.5 lab; see
-# fm_backend_herdr_pane_idle_shell_pid), so a multi-process group can be a
-# passing artifact of a redrawing prompt rather than a real answer. ONLY that
-# genuinely transient shape (`ambiguous`) is resampled over a bounded settle
-# window, together with a lone own-shell whose transient child has not yet
-# reaped. A failed CLI call, a malformed or shape-changed response, a clean
-# group that simply is not the agent, and a lone shell that is not the pane's
-# own shell are all permanent within any settle window, so they refuse
-# immediately rather than paying the whole window on every liveness read in
-# the fleet polling loops. The retry never converts uncertainty into
-# agent-free: only a corroborated, childless lone-own-shell sample can print
-# no-agent.
+# fm_backend_herdr_pane_idle_shell_pid), so a multi-process group that still
+# contains a recognized shell can be a passing artifact of a redrawing prompt
+# rather than a real answer. That is the ONE shape (`ambiguous`) resampled
+# over a bounded settle window. Everything else is permanent within any
+# settle window and refuses on the first sample: a failed CLI call, a
+# malformed or shape-changed response, a clean group that simply is not the
+# agent, a multi-process group holding no shell at all (a pager pipeline, a
+# build), a lone shell that is not the pane's own, and an own-shell that
+# still has a child. Paying the whole window on those would multiply through
+# every liveness read in the fleet polling loops and inflate fm-control's own
+# exit budget. The retry never converts uncertainty into agent-free: only a
+# corroborated, childless lone-own-shell sample can print no-agent.
 fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
   local attempt=0 max_attempts=${FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS:-10} state
   while :; do
@@ -1977,7 +1978,9 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 # fm_backend_herdr_pane_foreground_sample: one strict instantaneous
 # observation for fm_backend_herdr_pane_foreground_state, which owns the
 # contract and the settle retry. Prints live, no-agent, `ambiguous` (the one
-# retryable shape), or unknown.
+# retryable shape: a multi-process group that still holds a recognized shell,
+# which is what a prompt helper redrawing over an idle shell looks like), or
+# unknown.
 # live has two routes, in this order. The PRIMARY route is exact equality
 # between Herdr's own registered `agent` value and the basename of a
 # foreground process name or argv0 - the registry and the process table naming
@@ -2013,7 +2016,7 @@ fm_backend_herdr_pane_foreground_state() {  # <session> <pane_id> <agent>
 # settle loop, per window, per fleet poll, forks jq once per sample.
 fm_backend_herdr_pane_foreground_sample() {  # <session> <pane_id> <agent>
   local session=$1 pane_id=$2 agent=$3 info rows head pid_state shell_pid count=0
-  local name argv0 argv agent_name kind lone_kind
+  local name argv0 argv agent_name kind lone_kind saw_shell
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2052,15 +2055,20 @@ EOF
   esac
   agent_name=${agent#-}; agent_name=${agent_name##*/}; agent_name=${agent_name%.exe}
   lone_kind=other
+  saw_shell=0
   while IFS=$'\t' read -r name argv0 argv; do
     [ -n "$name" ] && [ -n "$argv0" ] || { printf 'unknown'; return 0; }
     count=$((count + 1))
     kind=$(fm_backend_herdr_classify_foreground_process "$name" "$argv0" "$argv" "$agent_name")
     [ "$kind" = agent ] && { printf 'live'; return 0; }
+    [ "$kind" = shell ] && saw_shell=1
     lone_kind=$kind
   done < <(printf '%s\n' "$rows")
   [ "$count" -gt 0 ] || { printf 'unknown'; return 0; }
-  [ "$count" = 1 ] || { printf 'ambiguous'; return 0; }
+  if [ "$count" != 1 ]; then
+    [ "$saw_shell" = 1 ] && printf 'ambiguous' || printf 'unknown'
+    return 0
+  fi
   [ "$lone_kind" = shell ] || { printf 'unknown'; return 0; }
   [ "$pid_state" = own-shell ] || { printf 'unknown'; return 0; }
   case "$shell_pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac

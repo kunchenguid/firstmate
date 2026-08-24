@@ -715,6 +715,25 @@ test_foreground_proof_settles_transient_prompt_helpers() {
   [ "$samples" = 1 ] \
     || fail "an unreadable process-info response must not be resampled, saw $samples samples"
 
+  # A multi-process group holding NO shell is not the transient shape the
+  # settle window exists for: `git log | less` in a stale-registration pane is
+  # a settled answer for as long as the operator keeps the pager open, so it
+  # must refuse on the first sample rather than paying the whole window on
+  # every liveness read in the fleet polling loops.
+  dir="$TMP_ROOT/foreground-shell-less-group"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":9001,"foreground_processes":[{"pid":9001,"name":"git","argv0":"git"},{"pid":9002,"name":"less","argv0":"less"}]}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_FOREGROUND_PROOF_POLLS=10 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+  [ "$out" = unknown ] \
+    || fail "a shell-less multi-process group must refuse as unknown, got '$out'"
+  samples=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$samples" = 1 ] \
+    || fail "a shell-less multi-process group must not be resampled, saw $samples samples"
+
   # Likewise a clean group that simply is not the agent: a pager holding the
   # foreground is a settled answer, not a transient one.
   dir="$TMP_ROOT/foreground-permanent-mismatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
