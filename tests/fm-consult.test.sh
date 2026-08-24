@@ -491,6 +491,71 @@ test_status_refuses_an_unreadable_data_directory() {
   pass "fm-consult: an unreadable data directory is refused, not reported as empty"
 }
 
+test_unreadable_consultation_directory_is_refused_by_every_command() {
+  local home out rc before
+  home=$(new_home unreadable-consult)
+  run_consult "$home" scaffold alpha >/dev/null
+  run_consult "$home" scaffold beta >/dev/null
+  run_consult "$home" scaffold gamma >/dev/null
+  before=$(cat "$home/data/beta/consult-brief.md")
+  chmod 000 "$home/data/beta"
+  if [ -r "$home/data/beta" ]; then
+    chmod 700 "$home/data/beta"
+    pass "fm-consult: unreadable consultation directory (skipped: permissions not enforced for this user)"
+    return 0
+  fi
+
+  out=$(run_consult "$home" status 2>/dev/null); rc=$?
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" \
+    || fail "listing dropped the consultation before the unreadable one"
+  has_exact_line "$out" "gamma: brief written; still awaiting a report" \
+    || fail "listing dropped the consultation after the unreadable one"
+  assert_contains "$out" "beta: refused (" "listing silently dropped an unreadable consultation directory"
+  assert_contains "$out" "not readable and searchable" "refused line did not name the permission reason"
+  expect_code 3 "$(stdout_line_count "$out")" "status must emit exactly one line per reported consultation"
+  [ "$rc" -ne 0 ] || fail "status listing exited zero despite an unreadable consultation directory"
+
+  out=$(run_consult "$home" status beta 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "single status mislabeled an unreadable consultation instead of refusing"
+  assert_not_contains "$out" "no brief written" "single status reported a written brief as unwritten"
+  assert_contains "$out" "not readable and searchable" "single status refusal did not name the permission reason"
+
+  out=$(run_consult "$home" receive beta 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "receive accepted an unreadable consultation directory"
+  assert_contains "$out" "fm-consult: " "receive did not fail through fm-consult"
+
+  out=$(run_consult "$home" scaffold beta 2>&1); rc=$?
+  expect_code 2 "$rc" "scaffold must refuse an unreadable consultation directory through fm-consult"
+  assert_contains "$out" "fm-consult: " "scaffold leaked a bare shell permission error"
+  assert_not_contains "$out" "Permission denied" "scaffold leaked a bare shell permission error"
+
+  chmod 700 "$home/data/beta"
+  [ "$(cat "$home/data/beta/consult-brief.md")" = "$before" ] || fail "the refused scaffold clobbered the existing brief"
+  pass "fm-consult: an unreadable consultation directory is refused by every command"
+}
+
+test_status_of_an_absent_consult_id_is_refused() {
+  local home out rc
+  home=$(new_home status-absent-id)
+  run_consult "$home" scaffold alpha >/dev/null
+  mkdir -p "$home/data/started"
+
+  out=$(run_consult "$home" status nope 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status reported an absent consult id as an existing consultation"
+  assert_contains "$out" "no such consultation" "the absent-id refusal was not explicit"
+  assert_not_contains "$out" "no brief written" "an absent consult id reused the empty-consultation label"
+
+  out=$(run_consult "$home" status started 2>&1); rc=$?
+  expect_code 0 "$rc" "an existing consultation directory with no brief must still succeed"
+  has_exact_line "$out" "started: no brief written" "an existing empty consultation lost its own label"
+
+  out=$(run_consult "$home" status 2>&1); rc=$?
+  expect_code 0 "$rc" "the listing must be unchanged by the single-id existence check"
+  has_exact_line "$out" "alpha: brief written; still awaiting a report" || fail "listing dropped a consultation"
+  expect_code 1 "$(stdout_line_count "$out")" "the listing enumerated a directory holding no consult artifacts"
+  pass "fm-consult: an absent consult id is refused while an empty consultation still reports"
+}
+
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
@@ -511,5 +576,7 @@ test_status_refuses_a_data_directory_that_is_a_symlink
 test_status_all_ignores_non_consultation_data_entries
 test_status_all_reports_only_consultations_in_a_seeded_home
 test_status_refuses_an_unreadable_data_directory
+test_unreadable_consultation_directory_is_refused_by_every_command
+test_status_of_an_absent_consult_id_is_refused
 test_status_all_ignores_a_directory_holding_no_consultation
 test_data_override_redirects_every_command

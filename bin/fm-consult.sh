@@ -16,6 +16,7 @@
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
 # status reports consultations with a written brief as awaiting or received.
+# status with an id refuses an id no consultation directory exists for.
 # status with no id lists every consultation on exactly one line each. data/ is
 # shared, so an entry that is not a consultation is passed over; an entry that
 # looks like one but cannot be reported safely gets a refused line with a reason,
@@ -136,6 +137,10 @@ consult_directory_ok() {
     CONSULT_REFUSAL="$label path is not a directory: $(display_name "$dir")"
     return 1
   fi
+  if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
+    CONSULT_REFUSAL="$label directory is not readable and searchable, so its consultations cannot be reported completely; fix its permissions: $(display_name "$dir")"
+    return 1
+  fi
   return 0
 }
 
@@ -159,9 +164,6 @@ validate_consult_id() {
 
 validate_data_directory() {
   consult_directory_ok "$DATA" data || die "$CONSULT_REFUSAL"
-  if [ -d "$DATA" ] && { [ ! -r "$DATA" ] || [ ! -x "$DATA" ]; }; then
-    die "data directory is not readable, so consultations cannot be reported completely; fix its permissions: $(display_name "$DATA")"
-  fi
 }
 
 validate_consult_directory() {
@@ -296,9 +298,12 @@ consult_listing_entry() {
 }
 
 status_one() {
-  local id=$1
+  local id=$1 dir
   validate_consult_id "$id"
   validate_data_directory
+  dir="$DATA/$id"
+  [ -e "$dir" ] || [ -L "$dir" ] \
+    || die "no such consultation: $(display_name "$dir"); scaffold it first"
   consult_state_line "$id" || die "$CONSULT_REFUSAL"
   printf '%s\n' "$CONSULT_LINE"
 }
