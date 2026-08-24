@@ -47,16 +47,7 @@
 # just killed. fm_remote_job_stop_worker_tree owns that stop and refuses to
 # signal a group whose leader is not itself a worker, so a worker inherited
 # from an older build or from launchd's own session is still stopped safely as
-# a single process. Because a Linux supervisor is a per-account singleton that
-# refuses to run beside an incumbent, the start path first waits out whatever
-# supervisor already owns the account: one launched from the same code root is
-# left to finish coming up and reported as already serving, one that cannot
-# serve the requested root is released before a replacement is launched, and a
-# supervisor that neither serves nor releases within that bound is reported as
-# a failure to start rather than replaced. fm_remote_job_start_linux_worker
-# reports which of those outcomes it reached in FM_REMOTE_JOB_WORKER_START, so
-# a refusal can never be mistaken for a start.
-# fm_remote_job_root_is_live is the shared predicate for
+# a single process. fm_remote_job_root_is_live is the shared predicate for
 # whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
@@ -81,9 +72,6 @@ FM_REMOTE_JOB_STDERR=
 FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
-# serving (an already-running worker was kept), started (a supervisor was
-# launched), or empty when the start failed.
-FM_REMOTE_JOB_WORKER_START=
 
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
@@ -709,7 +697,6 @@ fm_remote_job_worker_pid_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.pid
 fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.ready"; }
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
-fm_remote_job_supervisor_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/supervisor.lock"; }
 
 fm_remote_job_process_start() {
   local pid=$1 ps_bin value
@@ -811,10 +798,10 @@ fm_remote_job_read_single_line() {
   printf '%s\n' "$value"
 }
 
-fm_remote_job_lock_owner_matches_process() { # <account-home> [lock-directory]
-  local account_home=$1 lock=${2:-} pid recorded_start actual_start recorded_command actual_command
+fm_remote_job_lock_owner_matches_process() {
+  local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
   fm_remote_job_prepare_state "$account_home" || return 1
-  [ -n "$lock" ] || lock=$(fm_remote_job_worker_lock_path)
+  lock=$(fm_remote_job_worker_lock_path)
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -851,72 +838,6 @@ fm_remote_job_worker_owned_alive() {
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   command=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
   case "$command" in *"$root/bin/fm-remote-job-worker.sh"*) FM_REMOTE_JOB_OWNER_PID=$pid; return 0 ;; esac
-  return 1
-}
-
-# The Linux supervisor that still owns this account, echoed only when the same
-# pid, start time, and command identity the supervisor published under its own
-# lock still name a live process. A released, crashed, or symlink-substituted
-# lock echoes nothing: reclaiming those belongs to the acquiring supervisor,
-# which already owns the staleness and quarantine policy.
-fm_remote_job_supervisor_owner() { # <account-home>
-  local account_home=$1
-  fm_remote_job_prepare_state "$account_home" || return 1
-  fm_remote_job_lock_owner_matches_process "$account_home" "$(fm_remote_job_supervisor_lock_path)" || return 1
-  printf '%s\n' "$FM_REMOTE_JOB_OWNER_PID"
-}
-
-# The code root an owning supervisor was launched from, proven the same way a
-# serving worker is attributed to its root: the supervisor is exec'd as
-# <root>/bin/fm-remote-job-worker.sh, so its own command names the root it can
-# ever serve. A command that cannot be read, or that names another root, is not
-# proof of this root.
-fm_remote_job_supervisor_serves_root() { # <remote-root> <pid>
-  local root=$1 pid=$2 command
-  command=$(fm_remote_job_process_command "$pid") || return 1
-  case "$command" in *"$root/bin/fm-remote-job-worker.sh"*) return 0 ;; esac
-  return 1
-}
-
-# Whether a start may spawn beside the supervisor that currently owns this
-# account, waiting out the states that are still resolving themselves. Returns
-# 0 once no supervisor is provably live, so the spawn proceeds under the
-# acquiring supervisor's own staleness and quarantine policy; 2 once an
-# incumbent launched from this same code root has published a ready worker with
-# matching identity, which is a healthy supervisor that must not be replaced; 3
-# for an incumbent that cannot serve this root, which the caller releases; and
-# 1 when a same-root incumbent neither serves nor releases within the bound.
-fm_remote_job_await_supervisor() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 pid waited=0
-  while [ "$waited" -lt 200 ]; do
-    pid=$(fm_remote_job_supervisor_owner "$account_home") || return 0
-    fm_remote_job_supervisor_serves_root "$root" "$pid" || return 3
-    fm_remote_job_probe "$account_home" &&
-      fm_remote_job_worker_identity_matches "$root" "$account_home" && return 2
-    waited=$((waited + 1))
-    sleep 0.1
-  done
-  return 1
-}
-
-# A live supervisor refuses its replacement as a duplicate, so a replacement
-# may only be launched once no supervisor is provably still serving. Stop the
-# incumbent's tree once, then wait out its shutdown - a supervisor that is
-# already exiting still owns the lock until it releases it. Returns non-zero
-# only while ownership stays provably live, which the caller reports as a
-# failure to start rather than a repair.
-fm_remote_job_release_supervisor() { # <account-home>
-  local account_home=$1 pid stopped=0 waited=0
-  while [ "$waited" -lt 100 ]; do
-    pid=$(fm_remote_job_supervisor_owner "$account_home") || return 0
-    if [ "$stopped" -eq 0 ]; then
-      stopped=1
-      fm_remote_job_stop_worker_tree "$pid" || true
-      continue
-    fi
-    waited=$((waited + 1))
-    sleep 0.1
-  done
   return 1
 }
 
@@ -1023,7 +944,6 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   local root=$1 account_home=$2 worker pid
-  FM_REMOTE_JOB_WORKER_START=
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
@@ -1031,10 +951,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   }
   fm_remote_job_prepare_state "$account_home" || return 1
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
-    if fm_remote_job_worker_identity_matches "$root" "$account_home"; then
-      FM_REMOTE_JOB_WORKER_START=serving
-      return 0
-    fi
+    if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
     # The owner pid is the serving child; its restart supervisor sits above it
     # and would immediately replace a lone process kill, so stop the whole
     # worker tree through its isolated group.
@@ -1046,27 +963,6 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     wait "$pid" 2>/dev/null || true
     FM_REMOTE_JOB_REPAIRED=1
   fi
-  # A supervisor can own this account with no serving worker of its own - one
-  # that outlived the child stopped above, one still bringing its first child
-  # up, or one between children. A replacement launched beside it exits as a
-  # duplicate, so wait out what it is doing: a supervisor for this same root
-  # gets the chance to finish coming up, and only one that cannot serve this
-  # root is released.
-  fm_remote_job_await_supervisor "$root" "$account_home"
-  case $? in
-    0) ;;
-    2) FM_REMOTE_JOB_WORKER_START=serving; return 0 ;;
-    3)
-      fm_remote_job_release_supervisor "$account_home" || {
-        FM_REMOTE_JOB_ERROR="the running remote job worker supervisor did not release ownership"
-        return 1
-      }
-      ;;
-    *)
-      FM_REMOTE_JOB_ERROR="the running remote job worker supervisor neither served nor released this account"
-      return 1
-      ;;
-  esac
   # Job control puts the worker tree in its own process group, so a later stop
   # can signal every descendant at once without ever reaching the caller's own
   # group. Without this the group of a leaked worker is the launching command's.
@@ -1080,7 +976,6 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
-  FM_REMOTE_JOB_WORKER_START=started
   FM_REMOTE_JOB_REPAIRED=1
 }
 
@@ -1088,7 +983,6 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
   local root=$1 account_home=$2 platform uid identity_matches=0
   FM_REMOTE_JOB_ERROR=
   FM_REMOTE_JOB_REPAIRED=0
-  FM_REMOTE_JOB_WORKER_START=
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
     FM_REMOTE_JOB_ERROR="configured remote root is unavailable or unsafe"
     return 1
@@ -1129,12 +1023,12 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
     FM_REMOTE_JOB_REPAIRED=1
     fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
   else
-    # A replaced Linux supervisor can still lose its first ownership race - the
-    # serving lock a stopped worker released can take longer than this probe
-    # window to reclaim. Retry the idempotent start once, matching the bounded
-    # recovery already used above for launchd, before reporting a failure.
+    # A replaced Linux supervisor can lose its first ownership race while the
+    # prior supervisor finishes releasing the shared worker lock. Retry the
+    # idempotent start once, matching the bounded recovery already used above
+    # for launchd, before reporting a startup failure.
     fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
-    [ "$FM_REMOTE_JOB_WORKER_START" = started ] && FM_REMOTE_JOB_REPAIRED=1
+    FM_REMOTE_JOB_REPAIRED=1
     fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
   fi
   # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.

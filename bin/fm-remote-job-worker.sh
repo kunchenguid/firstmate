@@ -28,7 +28,8 @@
 # FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children, since a restart loop
 # only burns CPU and grows its log without bound. A child that stays up for
 # FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the consecutive-failure
-# backoff, but not the total restart guard. fm-on's ensure path restarts a
+# backoff, but not the total restart guard, so a child that dies just past that
+# threshold cannot restart without bound either. fm-on's ensure path restarts a
 # worker that gave up.
 set -u
 
@@ -123,7 +124,7 @@ worker_lock_recent() {
 worker_quarantined_execution_stopped() { # <account-home>
   local account_home=$1 job state kind file pid
   fm_remote_job_regular_bounded "$WORKER_LOCK/quarantine" 256 || return 1
-  fm_remote_job_lock_owner_matches_process "$account_home" "$WORKER_LOCK" && return 1
+  fm_remote_job_lock_owner_matches_process "$account_home" && return 1
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
     state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
@@ -157,7 +158,7 @@ worker_acquire_lock() {
       worker_recover_quarantine "$account_home" || return 3
       continue
     fi
-    if fm_remote_job_lock_owner_matches_process "$account_home" "$WORKER_LOCK"; then return 2; fi
+    if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
     if fm_remote_job_probe "$account_home" || worker_lock_recent; then
       attempt=$((attempt + 1))
       sleep 0.1
@@ -188,7 +189,13 @@ worker_cleanup() {
   local pid_file ready identity owner_pid
   [ "$WORKER_LOCK_HELD" -eq 1 ] && [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] || return 0
   owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
-  [ -n "$owner_pid" ] || { worker_release_lock; return 0; }
+  if [ -z "$owner_pid" ]; then
+    [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
+      rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    rmdir "$WORKER_LOCK" 2>/dev/null || true
+    WORKER_LOCK_HELD=0
+    return 0
+  fi
   [ "$owner_pid" = "${BASHPID:-$$}" ] || return 0
   pid_file=$(fm_remote_job_worker_pid_path)
   ready=$(fm_remote_job_worker_ready_path)
@@ -196,15 +203,6 @@ worker_cleanup() {
   [ ! -L "$pid_file" ] && rm -f -- "$pid_file" 2>/dev/null || true
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
-  worker_release_lock
-}
-
-worker_release_lock() {
-  local owner_pid
-  [ "$WORKER_LOCK_HELD" -eq 1 ] && [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] || return 0
-  owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
-  if [ -n "$owner_pid" ] && [ "$owner_pid" != "${BASHPID:-$$}" ]; then return 0; fi
-  [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 0
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
@@ -746,26 +744,12 @@ worker_supervisor_shutdown() {
   exit 0
 }
 
-worker_supervisor_cleanup() {
-  worker_release_lock
-}
-
 worker_supervise_linux() {
-  local account_home lock_status child_status started failures=0 restarts=0 backoff
+  local account_home child_status started failures=0 restarts=0 backoff
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
-  WORKER_LOCK=$(fm_remote_job_supervisor_lock_path)
-  trap worker_supervisor_cleanup EXIT
-  worker_acquire_lock "$account_home"
-  lock_status=$?
-  case "$lock_status" in
-    0) ;;
-    2) worker_error "remote job worker supervisor is already running"; return 0 ;;
-    3) worker_error "supervisor ownership is quarantined after an unconfirmed shutdown"; return 75 ;;
-    *) worker_error "cannot acquire or safely reclaim supervisor ownership"; return 1 ;;
-  esac
   trap worker_supervisor_shutdown HUP INT TERM
   while :; do
     if worker_code_root_abandoned; then
