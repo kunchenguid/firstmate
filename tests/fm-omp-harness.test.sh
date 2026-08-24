@@ -12,7 +12,7 @@
 # Two of the cases are POLICY MATRICES that report their own row counts rather
 # than a bare pass, so a silently shrinking matrix cannot read as green:
 #   - the model policy matrix, 12 equivalence classes of rejected model value;
-#   - the selection policy matrix, 11 ways omp can be selected or refused.
+#   - the selection policy matrix, 12 ways omp can be selected or refused.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,11 +33,6 @@ TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
 
 # The one release the adapter is pinned to; drift from this must refuse.
 OMP_PINNED_VERSION="omp/17.2.9"
-
-# The INSTALLED omp, resolved here at file scope so it is the real asset and
-# never one of the per-case stub fakebins. Absent on CI and on any machine
-# without omp, which is why the live case below self-skips rather than failing.
-REAL_OMP=$(command -v omp 2>/dev/null || true)
 
 # Every omp launch requires an explicit, fully qualified provider/model. This is
 # a STRUCTURAL fixture string only: no provider is contacted, no model catalog is
@@ -513,12 +508,12 @@ test_ordering_probes_are_live() {
   # Both ordering probes must actually fire on a launch that is ALLOWED to run
   # the whole preamble. Without this control, every "refused before the guard
   # and the lock" assertion below could pass while proving nothing.
-  rec=$(make_omp_case omp-probe-control omp "$id")
+  rec=$(make_omp_case omp-probe-control claude "$id")
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   arm_ordering_probes "$id"
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "the held per-task spawn lock must refuse this spawn: $out"
   assert_contains "$out" "another spawn is already creating task $id" \
@@ -628,12 +623,13 @@ test_omp_model_policy_matrix() {
   pass "omp model policy matrix: $OMP_MODEL_CLASSES/12 rejected-model classes refuse before the watcher guard, the task lock, and every other mutation"
 }
 
-# --- policy matrix 2: selection shapes, 11 rows -----------------------------
+# --- policy matrix 2: selection shapes, 12 rows -----------------------------
 
 test_omp_selection_policy_matrix() {
   local rec out status guard_marker sub_home launch tmux_log rows=0 enforced=0
   local want_model="omp requires an explicit --model"
   local want_second="omp is a candidate crewmate/scout adapter only"
+  local want_explicit="omp is reachable only through an explicit --harness omp selection"
 
   # Row 1: an explicit --harness omp with no model.
   rec=$(make_omp_case omp-sel-explicit claude omp-s1)
@@ -643,26 +639,24 @@ test_omp_selection_policy_matrix() {
   assert_absent "$HOME_DIR/state/omp-s1.meta" "explicit shape published task metadata"
   enforced=$((enforced + 1))
 
-  # Row 2: the back-compat positional harness argument.
+  # Row 2: the back-compat positional argument must not activate this candidate.
   rec=$(make_omp_case omp-sel-positional claude omp-s2)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   rows=$((rows + 1))
   arm_ordering_probes omp-s2
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s2 "$PROJ_DIR" omp --mode no-mistakes --yolo off)
+    omp-s2 "$PROJ_DIR" omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a positional omp with no model must be refused: $out"
-  assert_contains "$out" "$want_model" "positional shape: $out"
+  [ "$status" -ne 0 ] || fail "a positional omp selection must be refused: $out"
+  assert_contains "$out" "$want_explicit" "positional shape: $out"
   assert_not_contains "$out" "another spawn is already creating" "positional shape reached the task lock: $out"
   assert_absent "$guard_marker" "positional shape was refused after the watcher guard wrote state"
   assert_absent "$HOME_DIR/state/omp-s2.meta" "positional shape published task metadata"
   rm -rf "$HOME_DIR/state/.spawn-omp-s2.lock"
   enforced=$((enforced + 1))
 
-  # Row 3: config/crew-harness selects omp, so the launch passes no --harness at
-  # all. A harness configuration file is not a provider decision, and omp's own
-  # default is never consulted.
+  # Row 3: config/crew-harness must not activate this candidate implicitly.
   rec=$(make_omp_case omp-sel-config omp omp-s3)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
@@ -671,23 +665,15 @@ test_omp_selection_policy_matrix() {
   rows=$((rows + 1))
   arm_ordering_probes omp-s3
   out=$(FM_TMUX_LOG="$tmux_log" run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s3 "$PROJ_DIR" --mode no-mistakes --yolo off)
+    omp-s3 "$PROJ_DIR" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a config-resolved omp launch with no model must be refused: $out"
-  assert_contains "$out" "$want_model" "config-resolved refusal did not name the launch pin: $out"
+  [ "$status" -ne 0 ] || fail "a config-resolved omp launch must be refused: $out"
+  assert_contains "$out" "$want_explicit" "config-resolved refusal did not require the explicit selector: $out"
   assert_not_contains "$out" "another spawn is already creating" "config shape reached the task lock: $out"
   assert_absent "$guard_marker" "config shape was refused after the watcher guard wrote state"
   assert_absent "$HOME_DIR/state/omp-s3.meta" "config shape published task metadata"
   [ ! -s "$tmux_log" ] || fail "refused config-resolved omp spawn sent a command to a pane"
   rm -rf "$HOME_DIR/state/.spawn-omp-s3.lock"
-  # The same config-resolved launch proceeds once the flag supplies the model.
-  touch "$HOME_DIR/state/.last-watcher-beat"
-  out=$(FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s3 "$PROJ_DIR" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "a config-resolved omp launch with an explicit model should succeed: $out"
-  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
-  assert_contains "$launch" "--model '$OMP_MODEL'" \
-    "the config-resolved omp launch did not carry the explicit model"
   enforced=$((enforced + 1))
 
   # Row 4: batch dispatch, refused once up front so no pair is ever re-exec'd.
@@ -764,19 +750,17 @@ test_omp_selection_policy_matrix() {
   assert_not_contains "$launch" "--provider" "a non-omp launch must never carry a provider flag"
   enforced=$((enforced + 1))
 
-  # Row 9: a raw launch command whose first non-assignment word is omp. It
-  # claims the omp identity, so it must also meet omp's contract - the same
-  # model-pin refusal, at the same point, before any mutation.
+  # Row 9: a raw launch command must not bypass the canonical adapter template.
   rec=$(make_omp_case omp-sel-raw claude omp-s9)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   rows=$((rows + 1))
   arm_ordering_probes omp-s9
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s9 "$PROJ_DIR" "omp --approval-mode yolo" --mode no-mistakes --yolo off)
+    omp-s9 "$PROJ_DIR" "omp --approval-mode yolo" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a raw launch that names omp with no model must be refused: $out"
-  assert_contains "$out" "$want_model" "raw omp shape: $out"
+  [ "$status" -ne 0 ] || fail "a raw launch that names omp must be refused: $out"
+  assert_contains "$out" "$want_explicit" "raw omp shape: $out"
   assert_not_contains "$out" "another spawn is already creating" "raw omp shape reached the task lock: $out"
   assert_absent "$guard_marker" "raw omp shape was refused after the watcher guard wrote state"
   assert_absent "$HOME_DIR/state/omp-s9.meta" "raw omp shape published task metadata"
@@ -785,19 +769,39 @@ test_omp_selection_policy_matrix() {
   rm -rf "$HOME_DIR/state/.spawn-omp-s9.lock"
   enforced=$((enforced + 1))
 
-  # Row 10: a raw launch that names omp for a secondmate. Refused on adapter
+  # Row 10: an env-wrapped raw launch is still identified as omp and refused.
+  rec=$(make_omp_case omp-sel-raw-env claude omp-s10)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  rows=$((rows + 1))
+  arm_ordering_probes omp-s10
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-s10 "$PROJ_DIR" "env -u TRACEPARENT FM_TEST=1 omp --approval-mode yolo" \
+    --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an env-wrapped raw launch that names omp must be refused: $out"
+  assert_contains "$out" "$want_explicit" "env-wrapped raw omp shape: $out"
+  assert_not_contains "$out" "another spawn is already creating" "env-wrapped raw omp shape reached the task lock: $out"
+  assert_absent "$guard_marker" "env-wrapped raw omp shape was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/omp-s10.meta" "env-wrapped raw omp shape published task metadata"
+  assert_absent "$HOME_DIR/state/omp-s10.omp-ext.ts" "env-wrapped raw omp shape wrote the extension"
+  assert_absent "$HOME_DIR/state/omp-s10.busy-gen" "env-wrapped raw omp shape armed a busy contract"
+  rm -rf "$HOME_DIR/state/.spawn-omp-s10.lock"
+  enforced=$((enforced + 1))
+
+  # Row 11: a raw launch that names omp for a secondmate. Refused on adapter
   # identity alone, the same as --harness omp, because omp has no primary
   # supervision protocol.
-  rec=$(make_omp_case omp-sel-raw-secondmate claude omp-s10)
+  rec=$(make_omp_case omp-sel-raw-secondmate claude omp-s11)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   sub_home="$CASE_DIR/secondmate-home"
   rows=$((rows + 1))
   rm -rf "$sub_home"
   mkdir -p "$sub_home"
-  arm_ordering_probes omp-s10
+  arm_ordering_probes omp-s11
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s10 "$sub_home" "omp --approval-mode yolo" --secondmate)
+    omp-s11 "$sub_home" "omp --approval-mode yolo" --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "a raw --secondmate launch that names omp must be refused: $out"
   assert_contains "$out" "$want_second" "raw omp secondmate refusal missing: $out"
@@ -807,33 +811,33 @@ test_omp_selection_policy_matrix() {
     "the raw omp secondmate refusal must precede task-lock acquisition: $out"
   assert_absent "$guard_marker" \
     "the raw omp secondmate refusal must precede the watcher guard's own state write"
-  assert_absent "$HOME_DIR/state/omp-s10.meta" "raw omp secondmate published task metadata"
-  assert_absent "$HOME_DIR/state/omp-s10.omp-ext.ts" "raw omp secondmate wrote the extension"
-  assert_absent "$HOME_DIR/state/omp-s10.busy-gen" "raw omp secondmate armed a busy contract"
+  assert_absent "$HOME_DIR/state/omp-s11.meta" "raw omp secondmate published task metadata"
+  assert_absent "$HOME_DIR/state/omp-s11.omp-ext.ts" "raw omp secondmate wrote the extension"
+  assert_absent "$HOME_DIR/state/omp-s11.busy-gen" "raw omp secondmate armed a busy contract"
   assert_absent "$HOME_DIR/data/secondmates.md" "raw omp secondmate touched the registry"
   assert_absent "$sub_home/config" "raw omp secondmate mutated the secondmate home config"
   assert_absent "$sub_home/state" "raw omp secondmate mutated the secondmate home state"
-  rm -rf "$HOME_DIR/state/.spawn-omp-s10.lock"
+  rm -rf "$HOME_DIR/state/.spawn-omp-s11.lock"
   enforced=$((enforced + 1))
 
-  # Row 11: the negative control that stops the fix from over-reaching. A raw
+  # Row 12: the negative control that stops the fix from over-reaching. A raw
   # launch naming nothing known must still succeed exactly as today. Without
   # this row, governing omp's raw shape could silently become a blanket
   # refusal of every raw launch.
-  rec=$(make_omp_case omp-sel-raw-unverified claude omp-s11)
+  rec=$(make_omp_case omp-sel-raw-unverified claude omp-s12)
   read_case_record "$rec"
   rows=$((rows + 1))
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s11 "$PROJ_DIR" "someunverifiedagent --flag" --mode no-mistakes --yolo off)
+    omp-s12 "$PROJ_DIR" "someunverifiedagent --flag" --mode no-mistakes --yolo off)
   expect_code 0 $? "a raw launch naming an unverified adapter should succeed: $out"
-  assert_contains "$out" "spawned omp-s11 harness=someunverifiedagent" \
+  assert_contains "$out" "spawned omp-s12 harness=someunverifiedagent" \
     "raw unverified launch did not keep its claimed identity: $out"
   enforced=$((enforced + 1))
 
-  [ "$rows" -eq 11 ] || fail "the omp selection policy matrix must carry 11 rows, found $rows"
+  [ "$rows" -eq 12 ] || fail "the omp selection policy matrix must carry 12 rows, found $rows"
   [ "$enforced" -eq "$rows" ] || fail "omp selection policy matrix: only $enforced/$rows rows enforced"
   printf 'omp selection-policy matrix: %d/%d rows enforced before any mutation\n' "$enforced" "$rows"
-  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, the non-omp control, raw omp, raw omp secondmate, and the raw unverified control - enforce the pin before any mutation"
+  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, the non-omp control, raw omp, env-wrapped raw omp, raw omp secondmate, and the raw unverified control - enforce the candidate boundary before any mutation"
 }
 
 # --- relaunch ---------------------------------------------------------------
@@ -1118,72 +1122,6 @@ test_omp_trusts_only_its_own_semantic_source() {
 }
 
 
-# The one case in this file that EXECUTES the installed omp asset. It is an
-# argument-validation-only invocation: no prompt, no session, no TUI, no
-# provider call, no model turn. omp rejects the list and exits before any of
-# that, because the probe always carries a deliberately invalid sentinel name.
-#
-# This case exists because a hardcoded expected string cannot catch the failure
-# it guards against. The pins above prove the adapter still ships the allowlist
-# firstmate INTENDED; only the installed binary can say whether that allowlist
-# is one it will actually accept. Before this case existed, `ls` and a comment
-# claiming static verification sat here together while every omp spawn died on
-# "Unknown tool in --tools: ls".
-test_omp_tool_allowlist_is_accepted_by_the_installed_binary() {
-  local rec id=omp-tools-live out launch tmux_log tools version probe unknown
-  local sentinel=__fm_not_a_tool__
-
-  if [ -z "$REAL_OMP" ]; then
-    echo "skip: omp not installed; cannot verify the tool allowlist against the real binary"
-    return 0
-  fi
-  version=$("$REAL_OMP" --version 2>/dev/null | tr -d '[:space:]')
-  if [ "$version" != "$OMP_PINNED_VERSION" ]; then
-    echo "skip: installed omp is '$version', not the pinned $OMP_PINNED_VERSION"
-    return 0
-  fi
-
-  # The allowlist comes from a REAL fm-spawn launch, read back off the pane, so
-  # this asserts what the adapter actually delivers rather than what the source
-  # file says.
-  rec=$(make_omp_case omp-tools-live claude "$id")
-  read_case_record "$rec"
-  tmux_log="$CASE_DIR/tmux-sends"
-  : > "$tmux_log"
-  out=$(FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  expect_code 0 $? "omp spawn should succeed: $out"
-  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
-  [ -n "$launch" ] || fail "no omp launch command was delivered to the pane"
-  tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')
-  [ -n "$tools" ] || fail "the omp launch carried no --tools allowlist to verify"
-
-  # omp reports the unknown names between "--tools: " and the sentence stop.
-  omp_unknown_names() {  # <comma-list> -> echoes the names omp rejected
-    timeout 30 "$REAL_OMP" --tools "$1" </dev/null 2>&1 \
-      | sed -n 's/.*Unknown tools\{0,1\} in --tools: \([^.]*\)\..*/\1/p' \
-      | head -1
-  }
-
-  # Positive control FIRST. If omp ever changes this diagnostic, the parser
-  # above would silently return empty for every input and the real assertion
-  # would pass while checking nothing. Proving a known-bad name IS reported is
-  # what keeps this case from going vacuous.
-  unknown=$(omp_unknown_names "$sentinel")
-  [ "$unknown" = "$sentinel" ] \
-    || fail "the omp rejection probe is no longer readable: asked about '$sentinel', parsed '$unknown'"
-
-  # The real assertion: append the sentinel so the launch never starts, then
-  # require that the ONLY name omp rejects is the sentinel. Any adapter name it
-  # also rejects shows up here by name.
-  probe="$tools,$sentinel"
-  unknown=$(omp_unknown_names "$probe")
-  [ "$unknown" = "$sentinel" ] \
-    || fail "installed $version refuses names in the omp allowlist '$tools': rejected '$unknown'"
-
-  pass "installed $version accepts every name in the omp allowlist '$tools'"
-}
-
 test_omp_token_is_not_normalized_to_pi
 test_omp_is_unreachable_without_explicit_selection
 test_omp_accepts_only_the_exact_pinned_version
@@ -1191,7 +1129,6 @@ test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_launch_argv_is_contained
-test_omp_tool_allowlist_is_accepted_by_the_installed_binary
 test_omp_records_exact_task_metadata
 test_omp_accepts_a_scout_launch
 test_omp_launch_carries_exactly_one_qualified_model_flag

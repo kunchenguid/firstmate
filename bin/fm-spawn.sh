@@ -107,9 +107,10 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. When that command's first non-assignment word is omp, omp's
-#   secondmate refusal, model pin, and Orca backend gate still apply; the hatch
-#   does not bypass them. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. A raw command whose effective command is omp, including one
+#   behind ordinary assignment or env prefixes, is refused before mutation;
+#   OMP is candidate-only and requires the canonical --harness omp template.
+#   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -635,19 +636,42 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# Identity a raw launch command claims: the basename of its first
-# non-assignment word. spawn_selection_is_omp and the raw-launch branch
-# share this so a command that claims omp is classified the same way both
-# before the watcher guard and when the launch string is adopted.
+# Identity a raw launch command claims: the basename of its effective command.
+# spawn_selection_is_omp and the raw-launch branch share this so assignments
+# and a leading env wrapper cannot disguise omp before the early policy gate.
 spawn_raw_launch_identity() {
-  local word
-  # Unquoted split matches the raw-launch branch: IFS words, skipping
-  # leading KEY=value assignments, then the first remaining token's basename.
+  local word base env_mode=0 skip_env_arg=0
+  # Unquoted split matches the raw-launch branch. This is an identity check,
+  # not a shell parser; it recognizes the ordinary assignment/env prefixes
+  # accepted by the escape hatch and leaves execution semantics unchanged.
   # shellcheck disable=SC2086
   for word in $1; do
+    if [ "$skip_env_arg" -eq 1 ]; then
+      skip_env_arg=0
+      continue
+    fi
+    if [ "$env_mode" -eq 1 ]; then
+      case "$word" in
+        --) env_mode=2; continue ;;
+        -u|--unset|-C|--chdir|-S|--split-string) skip_env_arg=1; continue ;;
+        --unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
+        -*) continue ;;
+        [A-Za-z_]*=*) continue ;;
+      esac
+      basename "$word"
+      return 0
+    fi
     case "$word" in
       [A-Za-z_]*=*) continue ;;
-      *) basename "$word"; return 0 ;;
+      *)
+        base=$(basename "$word")
+        if [ "$base" = env ]; then
+          env_mode=1
+          continue
+        fi
+        printf '%s\n' "$base"
+        return 0
+        ;;
     esac
   done
   return 1
@@ -656,8 +680,8 @@ spawn_raw_launch_identity() {
 # Does this invocation select omp? Read exactly the way the launch path resolves
 # the harness below - an explicit --harness, then the back-compat positional
 # argument, then this home's configured crew/secondmate harness - without copying
-# any adapter table. A raw launch command claims omp when its first
-# non-assignment word's basename is omp, so claiming the identity applies the
+# any adapter table. A raw launch command claims omp when its effective command
+# resolves to omp, so ordinary assignment and env wrappers cannot evade the
 # same guards.
 spawn_selection_is_omp() {
   local configured=
@@ -693,14 +717,17 @@ spawn_selection_is_omp() {
 # Every omp refusal for a fresh spawn lands here: before the watcher guard, before
 # the batch re-exec, before the per-task spawn lock, and before every endpoint,
 # worktree, state, configuration, registry, metadata, and extension mutation. It
-# covers an explicit --harness omp, the back-compat positional token, a configured
-# crew or secondmate harness, a batch carrying any of those, and a raw launch
-# command whose first non-assignment word is omp.
+# recognizes explicit, positional, configured, batch, and raw selections so every
+# disallowed spelling is stopped at the same pre-mutation boundary.
 if spawn_selection_is_omp; then
   # A secondmate selection is refused first and unconditionally - its model is
   # never even consulted, because the refusal is on adapter identity alone.
   if [ "$KIND" = secondmate ]; then
     refuse_omp_secondmate
+    exit 1
+  fi
+  if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" != omp ]; then
+    echo "error: omp is reachable only through an explicit --harness omp selection; positional, configured, and raw omp launches are not allowed" >&2
     exit 1
   fi
   require_omp_launch_model || exit 1
@@ -1510,16 +1537,9 @@ launch_template() {
     # rather than inherited. Narrowing this list is always safe; widening it is
     # a captain decision.
     # omp rejects an unknown --tools name with a usage error and refuses the
-    # whole launch rather than narrowing silently, so an invalid name here kills
-    # every omp spawn before the agent starts. Every name is therefore verified
-    # against the INSTALLED binary, not against source or documentation: the
-    # pinned v17.2.9 asset was asked directly, by appending a deliberately
-    # invalid sentinel to the list and reading which names it reports back as
-    # unknown. An earlier claim of "static inspection" here was wrong and named
-    # `ls`, which this build does not accept. The build does accept `find`, but
-    # does not list it among its own valid tools, so this adapter does not
-    # depend on that unenumerated alias.
-    # tests/fm-omp-harness.test.sh re-asks the installed binary on every run.
+    # whole launch rather than narrowing silently. The portable suite pins this
+    # exact string; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check
+    # against the installed pinned binary.
     # __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
     # above refuses the spawn unless this exact launch was given a fully qualified
     # provider/model, so omp never selects a provider for itself. No

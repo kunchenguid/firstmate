@@ -223,12 +223,12 @@ EOF
 
 test_omp_extension_semantic_lifecycle() {
   local rec id=busy-omp-1 out state ext
-  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  rec=$(make_spawn_case omp-lifecycle claude "$id")
   read_case_record "$rec"
   # Every omp launch requires an explicit --model flag. It is a structural fixture
   # string here: no provider is contacted and no model catalog is queried.
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
-    --model anthropic/claude-sonnet-4-5 --backend orca)
+    --harness omp --model anthropic/claude-sonnet-4-5 --backend orca)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
@@ -263,10 +263,10 @@ test_omp_extension_semantic_lifecycle() {
 
 test_omp_extension_stale_incarnation_rejected() {
   local rec id=busy-omp-2 out state ext
-  rec=$(make_spawn_case omp-stale omp "$id")
+  rec=$(make_spawn_case omp-stale claude "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
-    --model anthropic/claude-sonnet-4-5 --backend orca)
+    --harness omp --model anthropic/claude-sonnet-4-5 --backend orca)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"

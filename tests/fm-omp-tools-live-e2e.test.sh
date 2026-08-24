@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# tests/fm-omp-tools-live-e2e.test.sh - opt-in installed-binary guard for the
+# candidate OMP adapter's narrow tool allowlist.
+#
+# The deliberately invalid sentinel makes OMP exit during argument validation.
+# This test submits no prompt, creates no session, starts no TUI, and makes no
+# provider call. It is still classified as live-harness-optin because only the
+# installed pinned binary can prove the accepted vendor tool names.
+set -u
+
+if [ "${FM_OMP_TOOLS_LIVE_E2E:-0}" != 1 ]; then
+  echo "skip: set FM_OMP_TOOLS_LIVE_E2E=1 to run the installed OMP tool-name guard"
+  exit 0
+fi
+
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+pass() { printf 'ok - %s\n' "$1"; }
+
+command -v timeout >/dev/null 2>&1 || fail "FM_OMP_TOOLS_LIVE_E2E=1 but timeout is not installed"
+OMP_BIN=$(command -v omp) || fail "FM_OMP_TOOLS_LIVE_E2E=1 but omp is not installed"
+VERSION=$("$OMP_BIN" --version 2>/dev/null | tr -d '[:space:]')
+PINNED_VERSION=omp/17.2.9
+[ "$VERSION" = "$PINNED_VERSION" ] \
+  || fail "installed omp is '$VERSION', expected '$PINNED_VERSION'"
+
+TOOLS=read,write,edit,glob,grep
+SENTINEL=__fm_not_a_tool__
+
+omp_unknown_names() {
+  timeout 30 "$OMP_BIN" --tools "$1" </dev/null 2>&1 \
+    | sed -n 's/.*Unknown tools\{0,1\} in --tools: \([^.]*\)\..*/\1/p' \
+    | head -1
+}
+
+UNKNOWN=$(omp_unknown_names "$SENTINEL")
+[ "$UNKNOWN" = "$SENTINEL" ] \
+  || fail "OMP's unknown-tool diagnostic changed: asked about '$SENTINEL', parsed '$UNKNOWN'"
+
+UNKNOWN=$(omp_unknown_names "$TOOLS,$SENTINEL")
+[ "$UNKNOWN" = "$SENTINEL" ] \
+  || fail "installed $VERSION rejects the adapter allowlist '$TOOLS': rejected '$UNKNOWN'"
+
+pass "installed $VERSION accepts the candidate adapter allowlist '$TOOLS'; validation stopped before session startup"
