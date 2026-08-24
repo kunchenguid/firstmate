@@ -183,6 +183,20 @@ secondmate_timeout_remaining() {  # <per-operation-maximum>
   fi
 }
 
+bounded_timed_capture() {  # <timeout-seconds> <max-bytes> <command...>
+  local timeout=$1 max_bytes=$2 producer_status consumer_status
+  local -a pipeline_status
+  shift 2
+  fm_run_timed "$timeout" "$@" | LC_ALL=C head -c "$((max_bytes + 1))"
+  pipeline_status=("${PIPESTATUS[@]}")
+  producer_status=${pipeline_status[0]}
+  consumer_status=${pipeline_status[1]}
+  printf '\036'
+  [ "$consumer_status" -eq 0 ] || return "$consumer_status"
+  [ "$producer_status" -eq 141 ] && return 0
+  return "$producer_status"
+}
+
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
@@ -1352,11 +1366,11 @@ secondmate_current_json() {  # <parent-tasks-json>
       if [ -n "$reason" ]; then
         :
       elif [ "$remote" = true ]; then
-        summary=$(fm_run_timed "$summary_timeout" \
+        summary=$(bounded_timed_capture "$summary_timeout" "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" \
           "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
         summary_rc=$?
       else
-        summary=$(fm_run_timed "$summary_timeout" env \
+        summary=$(bounded_timed_capture "$summary_timeout" "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" \
           FM_HOME="$home" \
           FM_STATE_OVERRIDE="$home/state" \
@@ -1372,15 +1386,22 @@ secondmate_current_json() {  # <parent-tasks-json>
           "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
         summary_rc=$?
       fi
+      case "$summary" in
+        *$'\036') summary=${summary%$'\036'} ;;
+        *) [ "${summary_rc:-1}" -ne 0 ] || summary_rc=1 ;;
+      esac
       if [ -n "$reason" ]; then
         :
-      elif [ "$summary_rc" -ne 0 ]; then
-        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
-        if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
-          reason="structured home snapshot exceeded byte limit"
-        elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
+      fi
+      if [ -n "$reason" ]; then
+        :
+      elif [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
+        reason="structured home snapshot exceeded byte limit"
+      elif [ "$summary_rc" -ne 0 ]; then
+        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
+      elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
           .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
           and (.valid | type) == "boolean" and (.state | type) == "string"
@@ -1390,15 +1411,14 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.landed | type) == "array" and (.endpoints | type) == "array"
           and (.counts | type) == "object" and (.omitted | type) == "array"
         ' >/dev/null 2>&1; then
-          reason="structured home snapshot was malformed or stale"
-        else
-          summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
-          if [ "$summary_valid" != true ]; then
-            summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
-            summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
-            if [ "$summary_invalidity" != child_current_unavailable ]; then
-              reason="structured home state invalid: $summary_reason"
-            fi
+        reason="structured home snapshot was malformed or stale"
+      else
+        summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
+        if [ "$summary_valid" != true ]; then
+          summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
+          summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
+          if [ "$summary_invalidity" != child_current_unavailable ]; then
+            reason="structured home state invalid: $summary_reason"
           fi
         fi
       fi

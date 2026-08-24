@@ -35,7 +35,14 @@ if [ -f "${FM_HOME:?}/snapshot.bad-shape" ]; then
   printf '{"schema":"fm-fleet-snapshot.v1","backlog":{"records":[null]}}\n'
   exit 0
 fi
-cat <<'JSON'
+filter_snapshot() {
+  if [ -f "${FM_HOME:?}/snapshot.closed-rollout" ]; then
+    jq '(.tasks[] | select(.id == "captain-task") | .hints.open_decisions) |= map(select(.key != "rollout"))'
+  else
+    cat
+  fi
+}
+cat <<'JSON' | filter_snapshot
 {
   "schema":"fm-fleet-snapshot.v1",
   "generated":"2026-08-24T11:00:00Z",
@@ -57,7 +64,8 @@ cat <<'JSON'
     {"id":"captain-task","project":"firstmate","kind":"ship","current_state":{"state":"parked","source":"status-log","detail":"Choose the migration strategy"},"hints":{"pending_decision":true,"blocked_event":false,"open_decisions":[{"key":"migration","verb":"needs-decision","summary":"Choose the migration strategy"},{"key":"rollout","verb":"needs-decision","summary":"Choose the rollout window"}]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"live-only-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Repairing uncharted work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
     {"id":"reactivated-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Reopening completed work"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
-    {"id":"queued-live-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Working before backlog reconciliation"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}}
+    {"id":"queued-live-task","project":"firstmate","kind":"ship","current_state":{"state":"working","source":"pane","detail":"Working before backlog reconciliation"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}},
+    {"id":"design-mate","project":"firstmate","kind":"secondmate","current_state":{"state":"working","source":"pane","detail":"Supervising its own home"},"hints":{"pending_decision":false,"blocked_event":false,"open_decisions":[]},"pr":{"url":null},"paths":{"report":{"present":false}}}
   ],
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
@@ -67,6 +75,11 @@ cat <<'JSON'
     "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]}],
     "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
     "counts":{"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
+  },{
+    "id":"primary","remote":false,"current":{"state":"ready","reason":null},
+    "queued":[{"id":"ready-task","title":"Secondmate task with a reserved id","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Namespace fixture.","source":"task-body"},"context":"Secondmate namespace context.","captain_actionable":false,"unresolved_blocker_ids":[]}],
+    "active_children":[],"decisions_open":[],"holds":[],"landed":[],"endpoints":[],
+    "counts":{"active_children":0,"decisions_open":0,"holds":0,"queued":1,"landed":0,"endpoints":0},"omitted":[]
   }],"truncated":0},
   "secondmate_landed":{"records":[]}
 }
@@ -80,10 +93,12 @@ set -eu
 shift
 request_id=
 json=0
+classify=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --request-id) request_id=$2; shift 2 ;;
     --json) json=1; shift ;;
+    --classify) classify=1; shift ;;
     -) shift; break ;;
     *) exit 2 ;;
   esac
@@ -92,6 +107,18 @@ done
 body=$(cat)
 note="${FM_HOME:?}/request-$request_id.note"
 duplicate=false
+if [ "$classify" -eq 1 ]; then
+  if [ ! -f "$note" ]; then
+    printf '{"schema":"fm-inbox-note.v1","request_id":"%s","saved":false,"duplicate":false,"wake":"not-attempted","error":"request-id-absent"}\n' "$request_id"
+    exit 0
+  fi
+  if [ "$(cat "$note")" != "$body" ]; then
+    printf '{"schema":"fm-inbox-note.v1","request_id":"%s","saved":false,"duplicate":true,"wake":"not-attempted","error":"request-id-conflict"}\n' "$request_id"
+    exit 3
+  fi
+  printf '{"schema":"fm-inbox-note.v1","request_id":"%s","saved":true,"duplicate":true,"wake":"pending"}\n' "$request_id"
+  exit 0
+fi
 if [ -f "$note" ]; then
   if [ "$(cat "$note")" != "$body" ]; then
     printf '{"schema":"fm-inbox-note.v1","request_id":"%s","saved":false,"duplicate":true,"wake":"not-attempted","error":"request-id-conflict"}\n' "$request_id"
@@ -204,17 +231,28 @@ curl -fsS "${url}healthz" >/dev/null || fail "a refused second server disrupted 
 pass "one serving process owns the home for its full lifetime"
 
 board=$(curl -fsS "${url}api/v1/board") || fail "board endpoint failed"
+initial_url=$url
+initial_operation_scope=$(printf '%s' "$board" | jq -r '.actions.operation_scope')
 printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
-  and .counts == {backlog:2,in_progress:5,verification:1,needs_you:2,waiting:3,done:2}
-  and .summary == {open:13,needs_you:2,high_risk_open:2}
+  and (.actions.operation_scope | test("^[a-f0-9]{64}$"))
+  and .actions.max_text_bytes == 8192
+  and .counts == {backlog:3,in_progress:5,verification:1,needs_you:2,waiting:3,done:2}
+  and .summary == {open:14,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
+         and .home.namespace == "primary"
          and ([.decisions[].key] | sort) == ["migration","rollout"])
   and ([.cards[] | select(.id == "verify-task")][0]
        | .lane == "verification" and (.evidence | map(.kind) | index("pull_request") != null))
   and ([.cards[] | select(.id == "mate-working")][0]
-       | .lane == "in_progress" and .home.id == "design-mate")
+       | .lane == "in_progress" and .home.namespace == "secondmate" and .home.id == "design-mate")
+  and ([.cards[] | select(.id == "ready-task")]
+       | length == 2
+         and ([.[].home.namespace] | sort) == ["primary","secondmate"]
+         and ([.[].key] | unique | length) == 2)
+  and ([.cards[] | select(.id == "design-mate")] | length) == 0
+  and ([.homes[].key] | sort) == ["primary:primary","secondmate:design-mate","secondmate:primary"]
   and ([.cards[] | select(.id == "live-only-task")][0]
        | .lane == "in_progress" and .context == "Repairing uncharted work")
   and ([.cards[] | select(.id == "reactivated-task")][0]
@@ -245,7 +283,7 @@ printf '%s' "$board" | jq -e '
   and (.warnings | index("live-only-task: live primary task has no structured backlog record") != null)
   and (.warnings | index("reactivated-task: live primary task state working conflicts with its Done backlog row") != null)
   and (.warnings | index("queued-live-task: live primary task state working conflicts with its Queued backlog row") != null)
-' >/dev/null || fail "Kanban projection did not preserve lifecycle, risk, evidence, or secondmate work"
+' >/dev/null || fail "Kanban projection did not preserve lifecycle, ownership, identity, risk, evidence, or secondmate work"
 pass "canonical fleet state maps into the six truthful Kanban lanes"
 
 for malformed_snapshot in invalid-utf8 array bad-shape; do
@@ -263,7 +301,7 @@ done
 pass "malformed snapshot bytes and shapes stay inside the last-good boundary"
 
 csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
-payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
+payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"migration","text":"Use the reversible route and preserve rollback evidence.","request_id":"request-1"}'
 code=$(curl -sS -o "$HOME_ROOT/no-csrf.json" -w '%{http_code}' \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions")
 [ "$code" = 403 ] || fail "action without CSRF token returned $code"
@@ -271,12 +309,12 @@ code=$(curl -sS -o "$HOME_ROOT/bad-origin.json" -w '%{http_code}' \
   -H "X-Firstmate-CSRF: $csrf" -H 'Origin: https://example.com' \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions")
 [ "$code" = 403 ] || fail "cross-origin action returned $code"
-invalid_payload='{"action":"answer","task_id":"ready-task","home_id":"primary","text":"Answer a non-decision.","request_id":"request-invalid"}'
+invalid_payload='{"action":"answer","task_id":"ready-task","home_namespace":"primary","home_id":"primary","text":"Answer a non-decision.","request_id":"request-invalid"}'
 code=$(curl -sS -o "$HOME_ROOT/invalid-state.json" -w '%{http_code}' \
   -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$invalid_payload" "${url}api/v1/actions")
 [ "$code" = 400 ] || fail "answer on a non-decision task returned $code"
-closed_decision_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"closed-key","text":"Answer a closed decision.","request_id":"request-closed"}'
+closed_decision_payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"closed-key","text":"Answer a closed decision.","request_id":"request-closed"}'
 code=$(curl -sS -o "$HOME_ROOT/closed-decision.json" -w '%{http_code}' \
   -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$closed_decision_payload" "${url}api/v1/actions")
@@ -317,6 +355,9 @@ done
 [ -s "$runtime" ] || fail "fleet board did not restart for durable retry verification"
 url=$(jq -r '.url' "$runtime")
 board=$(curl -fsS "${url}api/v1/board") || fail "restarted board endpoint failed"
+[ "$url" = "$initial_url" ] || fail "default-port restart changed the browser origin"
+[ "$(printf '%s' "$board" | jq -r '.actions.operation_scope')" = "$initial_operation_scope" ] \
+  || fail "server restart changed the home-scoped browser operation identity"
 csrf=$(printf '%s' "$board" | jq -r '.actions.csrf_token')
 response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$payload" "${url}api/v1/actions") \
@@ -325,10 +366,10 @@ printf '%s' "$response" | jq -e '.queued == true and .duplicate == true' >/dev/n
   || fail "server restart forgot the durable action request id"
 [ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 1 ] \
   || fail "server restart duplicated a durable inbox instruction"
-pass "action idempotency survives the board process lifetime"
+pass "action identity and browser recovery survive the board process lifetime"
 
 touch "$HOME_ROOT/wake.fail"
-wake_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"rollout","text":"Use the morning rollout window.","request_id":"request-wake-failure"}'
+wake_payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"rollout","text":"Use the morning rollout window.","request_id":"request-wake-failure"}'
 response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$wake_payload" "${url}api/v1/actions") \
   || fail "a saved action was rejected when only its wake failed"
@@ -341,13 +382,19 @@ printf '%s' "$response" | jq -e '.queued == true and .duplicate == true and .wak
   || fail "wake-failure retry was not durably deduplicated"
 [ "$(grep -c '^--- action ---$' "$HOME_ROOT/inbox.log")" -eq 2 ] \
   || fail "wake-failure retry duplicated the durable inbox note"
+touch "$HOME_ROOT/snapshot.closed-rollout"
+curl -fsS "${url}api/v1/board?refresh=1" >/dev/null \
+  || fail "board could not observe the closed decision before durable retry"
 rm "$HOME_ROOT/wake.fail"
 response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$wake_payload" "${url}api/v1/actions") \
-  || fail "saved action could not retry its failed wake"
+  || fail "saved action could not retry its failed wake after canonical advancement"
 printf '%s' "$response" | jq -e '.queued == true and .duplicate == true and .wake == "announced"' >/dev/null \
   || fail "saved action did not recover its failed wake without duplication"
-pass "wake failure preserves one action and remains recoverable"
+rm "$HOME_ROOT/snapshot.closed-rollout"
+curl -fsS "${url}api/v1/board?refresh=1" >/dev/null \
+  || fail "board did not recover the open-decision fixture"
+pass "wake failure preserves one action across canonical advancement"
 
 touch "$HOME_ROOT/snapshot.fail"
 sleep 1.1
@@ -370,7 +417,7 @@ done
 pass "failed refreshes remain stale without repeated snapshot work"
 
 stale_csrf=$(printf '%s' "$stale" | jq -r '.actions.csrf_token')
-stale_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
+stale_payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"migration","text":"Revalidate, then use the reversible route.","request_id":"request-stale"}'
 response=$(curl -fsS -H "X-Firstmate-CSRF: $stale_csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$stale_payload" "${url}api/v1/actions") \
   || fail "captain action on a stale last-good card was refused"
@@ -403,7 +450,7 @@ printf '%s' "$response" | jq -e \
   || fail "freshness-changing retry duplicated the durable inbox note"
 pass "durable action content is stable across snapshot freshness changes"
 touch "$HOME_ROOT/snapshot.fail"
-forced_payload='{"action":"answer","task_id":"captain-task","home_id":"primary","decision_key":"migration","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
+forced_payload='{"action":"answer","task_id":"captain-task","home_namespace":"primary","home_id":"primary","decision_key":"migration","text":"Keep the cached card guarded.","request_id":"request-forced-stale"}'
 curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
   -H 'Content-Type: application/json' -d "$forced_payload" "${url}api/v1/actions" >/dev/null \
   || fail "forced stale revalidation refused the guarded action"
@@ -411,6 +458,16 @@ forced_stale=$(curl -fsS "${url}api/v1/board") || fail "board disappeared after 
 printf '%s' "$forced_stale" | jq -e '.health.stale == true' >/dev/null \
   || fail "an ordinary cache hit hid the latest forced refresh failure"
 pass "the latest failed refresh stays visible inside the cache window"
+
+namespaced_payload='{"action":"request_details","task_id":"ready-task","home_namespace":"secondmate","home_id":"primary","text":"Report from the secondmate home only.","request_id":"request-namespaced-home"}'
+response=$(curl -fsS -H "X-Firstmate-CSRF: $fresh_csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$namespaced_payload" "${url}api/v1/actions") \
+  || fail "action could not target a secondmate whose id matches the primary namespace"
+printf '%s' "$response" | jq -e '.queued == true and .duplicate == false' >/dev/null \
+  || fail "namespaced secondmate action was not durably queued"
+assert_contains "$(cat "$HOME_ROOT/request-request-namespaced-home.note")" "Home: secondmate:primary" \
+  "namespaced action routed to the reserved primary home"
+pass "card and action identities keep primary and secondmate homes disjoint"
 
 foreground_instance=$(jq -r '.instance' "$runtime")
 kill -STOP "$SERVER_PID" 2>/dev/null || fail "could not suspend the foreground server identity fixture"
@@ -438,6 +495,10 @@ status_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --status) \
   || fail "background lifecycle status failed"
 assert_contains "$status_out" "running: $start_url" "status did not verify the started instance"
+life_operation_scope=$(curl -fsS "${start_url}api/v1/board" | jq -r '.actions.operation_scope') \
+  || fail "background lifecycle board did not expose its operation scope"
+[ "$life_operation_scope" != "$initial_operation_scope" ] \
+  || fail "different Firstmate homes shared one browser operation scope"
 stop_out=$(FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_HOME="$LIFE_HOME" \
   FM_STATE_OVERRIDE="$LIFE_HOME/state" python3 "$SERVER" --stop) \
   || fail "background lifecycle stop failed"
@@ -594,6 +655,14 @@ pass "stale runtime records recover safely when their PID belongs to another pro
 
 INBOX_HOME="$TMP_ROOT/inbox-home"
 mkdir -p "$INBOX_HOME/state" "$INBOX_HOME/data"
+classification=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  "$ROOT/bin/fm-inbox.sh" note --request-id durable-action --json --classify -)
+printf '%s' "$classification" | jq -e \
+  '.saved == false and .duplicate == false and .error == "request-id-absent"' >/dev/null \
+  || fail "inbox did not classify an unused request id without creating it"
+[ ! -d "$INBOX_HOME/state/inbox" ] \
+  || fail "inbox request classification created durable state"
 inbox_out=$(printf '%s' 'Persist this captain action.' | \
   FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
   FM_WAKE_QUEUE="$INBOX_HOME/state" "$ROOT/bin/fm-inbox.sh" \
@@ -605,6 +674,12 @@ printf '%s' "$inbox_out" | jq -e \
   || fail "inbox did not report that the note survived its wake failure"
 [ "$(find "$INBOX_HOME/state/inbox" -maxdepth 1 -name '*.note' | wc -l | tr -d ' ')" -eq 1 ] \
   || fail "failed wake did not leave exactly one durable inbox note"
+classification=$(printf '%s' 'Persist this captain action.' | \
+  FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
+  "$ROOT/bin/fm-inbox.sh" note --request-id durable-action --json --classify -)
+printf '%s' "$classification" | jq -e \
+  '.saved == true and .duplicate == true and .wake == "pending"' >/dev/null \
+  || fail "inbox did not classify the exact saved action before retry"
 retry_out=$(printf '%s' 'Persist this captain action.' | \
   FM_HOME="$INBOX_HOME" FM_STATE_OVERRIDE="$INBOX_HOME/state" \
   FM_WAKE_QUEUE="$INBOX_HOME/state" "$ROOT/bin/fm-inbox.sh" \
@@ -652,16 +727,21 @@ if command -v node >/dev/null 2>&1; then
   if ! node - "$ROOT/bin/fleet-board/board-state.js" <<'JS'
 require(process.argv[2]);
 const {
+  actionStorageKey,
+  actionTextError,
   applyActionObservation,
   beginAction,
   cardFingerprint,
   reconcileBoardState,
+  recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  updateLiveStatus,
+  updateValue,
 } = globalThis.FleetBoardState;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const card = {
-  key: "primary:captain-task",
+  key: "primary:primary:captain-task",
   lane: "needs_you",
   status: { label: "Waiting for you", source: "status-log" },
   decisions: [{ key: "migration", verb: "needs-decision", summary: "Choose migration", reason: null }],
@@ -677,6 +757,11 @@ moved.status = { label: "Completed", source: "backlog" };
 moved.actions = { answer: false, request_details: false };
 result = reconcileBoardState(pending, drafts, card.key, [moved]);
 if (pending.size !== 0 || result.selectedKey !== card.key) process.exit(1);
+const completedDuringPost = new Map();
+if (recordPendingAction(completedDuringPost, card.key, "answer", cardFingerprint(card), moved)) process.exit(1);
+if (completedDuringPost.size !== 0) process.exit(1);
+if (!recordPendingAction(completedDuringPost, card.key, "answer", cardFingerprint(card), clone(card))) process.exit(1);
+if (completedDuringPost.size !== 1) process.exit(1);
 const decisionPending = new Map([[card.key, { fingerprint: cardFingerprint(card) }]]);
 const nextDecision = clone(card);
 nextDecision.decisions = [{ key: "rollout", verb: "needs-decision", summary: "Choose rollout", reason: null }];
@@ -699,7 +784,7 @@ if (actionDrafts.get(card.key) !== first || !first.inFlight || generated !== 1) 
 first.inFlight = false;
 const retry = beginAction(actionDrafts, card.key, () => `request-${++generated}`);
 if (retry.requestId !== "request-1" || generated !== 1) process.exit(1);
-const restored = restoreActionOperations(serializeActionOperations(actionDrafts));
+const restored = restoreActionOperations(serializeActionOperations(actionDrafts, 8192), 8192);
 const restoredOperation = restored.get(card.key);
 if (
   restoredOperation?.requestId !== "request-1"
@@ -707,7 +792,24 @@ if (
   || !restoredOperation.attempted
   || restoredOperation.inFlight
 ) process.exit(1);
-if (restoreActionOperations("not json").size !== 0) process.exit(1);
+if (restoreActionOperations("not json", 8192).size !== 0) process.exit(1);
+if (actionTextError("😀".repeat(2048), 8192) !== null) process.exit(1);
+if (!actionTextError("😀".repeat(2049), 8192)) process.exit(1);
+if (actionStorageKey("a".repeat(64)) === actionStorageKey("b".repeat(64))) process.exit(1);
+
+let liveWrites = 0;
+const liveRegion = {
+  value: "",
+  get textContent() { return this.value; },
+  set textContent(value) { this.value = value; liveWrites += 1; },
+};
+if (!updateValue(liveRegion, "textContent", "Updated just now")) process.exit(1);
+if (updateValue(liveRegion, "textContent", "Updated just now")) process.exit(1);
+if (liveWrites !== 1) process.exit(1);
+const liveState = {};
+if (!updateLiveStatus(liveState, liveRegion, "fresh", "Updated just now")) process.exit(1);
+if (updateLiveStatus(liveState, liveRegion, "fresh", "Updated 10s ago")) process.exit(1);
+if (liveRegion.textContent !== "Updated just now" || liveWrites !== 1) process.exit(1);
 
 const unsent = new Map([[card.key, {
   action: "answer",

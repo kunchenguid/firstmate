@@ -556,6 +556,44 @@ SH
   pass "registered secondmate reads share one bounded snapshot budget"
 }
 
+test_streaming_secondmate_summary_is_capped_while_reading() {
+  local home fakebin streaming_ssh canonical snapshot_rc
+  home=$(make_home streaming-secondmate-summary)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  printf '%s\n' \
+    '- streaming - fixture domain (host: streaming-host; root: /srv/firstmate; home: /srv/streaming; scope: fixture; projects: sample; added 2026-08-24)' \
+    > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  streaming_ssh="$fakebin/streaming-ssh"
+  cat > "$streaming_ssh" <<'SH'
+#!/usr/bin/env bash
+exec yes '{"padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}'
+SH
+  chmod +x "$streaming_ssh"
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  canonical=$(fm_run_timed 4 env PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_SSH_BIN="$streaming_ssh" FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 FM_SNAPSHOT_NOW=2026-08-24T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  snapshot_rc=$?
+  [ "$snapshot_rc" -eq 0 ] \
+    || fail "streaming secondmate output escaped the read-time byte bound with $snapshot_rc"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records
+    | any(.id == "streaming" and .current.state == "unknown"
+      and (.current.reason | contains("exceeded byte limit")))
+  ' >/dev/null || fail "streaming secondmate output was not classified at the byte boundary: $canonical"
+  pass "streaming secondmate summaries terminate at the read-time byte bound"
+}
+
 append_landed_row() {  # <secondmate-home> <id> <title> <date>
   printf -- '- [x] %s - %s (repo: firstmate) (kind: ship) (merged %s)\n' \
     "$2" "$3" "$4" >> "$1/data/backlog.md"
@@ -2130,6 +2168,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_secondmate_task_evidence_is_self_contained
 test_secondmate_reads_respect_one_total_budget
+test_streaming_secondmate_summary_is_capped_while_reading
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity

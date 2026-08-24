@@ -56,6 +56,7 @@ The application binds only to `127.0.0.1` and is not a remote collaboration serv
 It serves bundled assets without third-party scripts, fonts, analytics, or network dependencies.
 State-changing HTTP requests require a per-process action token and a matching loopback origin.
 The Firstmate inbox owns durable action request ids, so retries after wake failures, process restarts, or later replays resolve to the same note instead of creating another instruction.
+The default port is selected once per Firstmate home and then retained so browser-side in-flight recovery survives server restarts, while a home-scoped storage key prevents one home from restoring another home's operation on an explicitly shared port.
 
 The board keeps a short in-memory snapshot cache so multiple browser requests do not fan out into duplicate fleet reads.
 If a refresh fails after a successful read, it keeps the last good board visible and marks it stale with the failure reason.

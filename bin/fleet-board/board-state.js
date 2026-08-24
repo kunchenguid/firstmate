@@ -4,6 +4,23 @@ const ACTION_OPERATIONS_SCHEMA = "firstmate.fleet-board.action-operations.v1";
 const MAX_ACTION_OPERATIONS = 100;
 const MAX_PERSISTED_BYTES = 1_000_000;
 const OPERATION_ID = /^[A-Za-z0-9._-]{1,160}$/;
+const UTF8_ENCODER = new TextEncoder();
+
+function actionStorageKey(scope) {
+  if (!OPERATION_ID.test(scope || "")) throw new Error("Fleet board operation scope is invalid");
+  return `${ACTION_OPERATIONS_SCHEMA}:${scope}`;
+}
+
+function actionTextError(text, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("Fleet board action limit is invalid");
+  }
+  if (typeof text !== "string" || !text.trim()) return "Action text is required";
+  if (UTF8_ENCODER.encode(text.trim()).byteLength > maxBytes) {
+    return `Keep the instruction at or below ${maxBytes.toLocaleString()} UTF-8 bytes`;
+  }
+  return null;
+}
 
 function cardFingerprint(card) {
   const decisions = [...(card.decisions || [])]
@@ -34,13 +51,35 @@ function beginAction(drafts, cardKey, makeRequestId) {
   return draft;
 }
 
-function serializeActionOperations(drafts) {
+function recordPendingAction(pending, cardKey, action, submissionFingerprint, currentCard) {
+  if (!currentCard || cardFingerprint(currentCard) !== submissionFingerprint) {
+    pending.delete(cardKey);
+    return false;
+  }
+  pending.set(cardKey, { action, fingerprint: submissionFingerprint });
+  return true;
+}
+
+function updateValue(target, key, value) {
+  if (target[key] === value) return false;
+  target[key] = value;
+  return true;
+}
+
+function updateLiveStatus(stateTarget, labelTarget, status, label) {
+  if (!updateValue(stateTarget, "state", status)) return false;
+  updateValue(labelTarget, "textContent", label);
+  return true;
+}
+
+function serializeActionOperations(drafts, maxBytes) {
   const operations = [];
   for (const [cardKey, draft] of drafts) {
     if (
       operations.length >= MAX_ACTION_OPERATIONS
       || typeof cardKey !== "string"
       || !draft?.attempted
+      || actionTextError(draft.text, maxBytes) !== null
       || !OPERATION_ID.test(draft.requestId || "")
     ) continue;
     operations.push({
@@ -55,7 +94,7 @@ function serializeActionOperations(drafts) {
   return JSON.stringify({ schema: ACTION_OPERATIONS_SCHEMA, operations });
 }
 
-function restoreActionOperations(serialized) {
+function restoreActionOperations(serialized, maxBytes) {
   const drafts = new Map();
   if (typeof serialized !== "string" || serialized.length > MAX_PERSISTED_BYTES) return drafts;
   let value;
@@ -72,7 +111,7 @@ function restoreActionOperations(serialized) {
       || operation.cardKey.length > 360
       || !["answer", "request_details"].includes(operation.action)
       || typeof operation.text !== "string"
-      || operation.text.length > 8000
+      || actionTextError(operation.text, maxBytes) !== null
       || !OPERATION_ID.test(operation.requestId || "")
       || (operation.decisionKey !== null && !OPERATION_ID.test(operation.decisionKey || ""))
     ) continue;
@@ -115,11 +154,16 @@ function reconcileBoardState(pending, drafts, selectedKey, cards) {
 }
 
 globalThis.FleetBoardState = Object.freeze({
+  actionStorageKey,
+  actionTextError,
   applyActionObservation,
   beginAction,
   cardFingerprint,
   draftIsAvailable,
   reconcileBoardState,
+  recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  updateLiveStatus,
+  updateValue,
 });

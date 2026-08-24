@@ -1,20 +1,23 @@
 "use strict";
 
 const {
+  actionStorageKey,
+  actionTextError,
   applyActionObservation,
   beginAction,
   cardFingerprint,
   draftIsAvailable,
   reconcileBoardState,
+  recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
+  updateLiveStatus,
+  updateValue,
 } = globalThis.FleetBoardState;
 
-const ACTION_STORAGE_KEY = "firstmate.fleet-board.action-operations.v1";
-
-function restoredActionOperations() {
+function restoredActionOperations(storageKey, maxActionBytes) {
   try {
-    return restoreActionOperations(localStorage.getItem(ACTION_STORAGE_KEY));
+    return restoreActionOperations(localStorage.getItem(storageKey), maxActionBytes);
   } catch {
     return new Map();
   }
@@ -26,22 +29,36 @@ const state = {
   selectedKey: null,
   dialogOpenerKey: null,
   pending: new Map(),
-  drafts: restoredActionOperations(),
+  drafts: new Map(),
+  operationStorageKey: null,
+  maxActionBytes: null,
   renderedBoard: "",
   loading: false,
 };
 
 function persistActionOperations() {
+  if (!state.operationStorageKey) return;
   try {
-    const serialized = serializeActionOperations(state.drafts);
+    const serialized = serializeActionOperations(state.drafts, state.maxActionBytes);
     if (JSON.parse(serialized).operations.length) {
-      localStorage.setItem(ACTION_STORAGE_KEY, serialized);
+      localStorage.setItem(state.operationStorageKey, serialized);
     } else {
-      localStorage.removeItem(ACTION_STORAGE_KEY);
+      localStorage.removeItem(state.operationStorageKey);
     }
   } catch {
     // Storage can be disabled or full. The durable inbox still owns server-side idempotency.
   }
+}
+
+function configureActionStorage(scope, maxActionBytes) {
+  const storageKey = actionStorageKey(scope);
+  if (!Number.isSafeInteger(maxActionBytes) || maxActionBytes <= 0) {
+    throw new Error("Fleet board action limit is invalid");
+  }
+  if (storageKey === state.operationStorageKey && maxActionBytes === state.maxActionBytes) return;
+  state.operationStorageKey = storageKey;
+  state.maxActionBytes = maxActionBytes;
+  state.drafts = restoredActionOperations(storageKey, maxActionBytes);
 }
 
 const elements = {
@@ -91,6 +108,10 @@ function riskLabel(risk) {
   return risk.level === "unknown" ? "Unassessed" : `${risk.level} risk`;
 }
 
+function homeLabel(home) {
+  return home.namespace === "secondmate" ? `${home.label} · secondmate` : home.label;
+}
+
 function relativeTime(value) {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "just now";
@@ -121,7 +142,7 @@ function visibleCards() {
   const home = elements.homeFilter.value;
   const risk = elements.riskFilter.value;
   return state.board.cards.filter((card) => {
-    if (home !== "all" && card.home.id !== home) return false;
+    if (home !== "all" && card.home.key !== home) return false;
     if (risk !== "all" && card.risk.level !== risk) return false;
     if (!query) return true;
     const haystack = [
@@ -151,8 +172,8 @@ function updateHomeFilter() {
   all.value = "all";
   fragment.append(all);
   for (const home of state.board.homes) {
-    const option = node("option", "", `${home.label}${home.remote ? " · remote" : ""}`);
-    option.value = home.id;
+    const option = node("option", "", `${homeLabel(home)}${home.remote ? " · remote" : ""}`);
+    option.value = home.key;
     fragment.append(option);
   }
   elements.homeFilter.replaceChildren(fragment);
@@ -171,7 +192,7 @@ function cardNode(card) {
   article.dataset.key = card.key;
   risk.dataset.risk = card.risk.level;
   risk.textContent = riskLabel(card.risk);
-  home.textContent = card.home.label;
+  home.textContent = homeLabel(card.home);
   fragment.querySelector(".card-title").textContent = card.title;
   fragment.querySelector(".card-status").textContent = pending
     ? "Sent to Firstmate"
@@ -233,6 +254,7 @@ function renderWarnings() {
   if (state.board.health?.stale && state.board.health.error) {
     messages.unshift(`Showing the last good snapshot: ${state.board.health.error}`);
   }
+  if (!updateValue(elements.warnings.dataset, "fingerprint", JSON.stringify(messages))) return;
   elements.warnings.hidden = messages.length === 0;
   elements.warnings.replaceChildren(...messages.map((message) => node("p", "", message)));
 }
@@ -312,7 +334,7 @@ function openCard(key) {
   }
   const focusKey = focusedKey(elements.dialog);
   state.selectedKey = key;
-  elements.dialogHome.textContent = `${card.home.label} · ${card.lane.replaceAll("_", " ")}`;
+  elements.dialogHome.textContent = `${homeLabel(card.home)} · ${card.lane.replaceAll("_", " ")}`;
   elements.dialogTitle.textContent = card.title;
 
   const lead = node("section", "detail-lead");
@@ -411,7 +433,6 @@ function renderComposer(card, draft, focus) {
   const textarea = node("textarea");
   textarea.id = id;
   textarea.name = "text";
-  textarea.maxLength = 8000;
   textarea.required = true;
   textarea.dataset.focusKey = "dialog:composer-text";
   textarea.placeholder = action === "answer"
@@ -421,6 +442,7 @@ function renderComposer(card, draft, focus) {
   textarea.disabled = draft.attempted;
   textarea.addEventListener("input", () => {
     draft.text = textarea.value;
+    if (!actionTextError(draft.text, state.maxActionBytes)) textarea.setCustomValidity("");
   });
   if (action === "answer") {
     const choices = node("fieldset", "decision-choices");
@@ -477,6 +499,13 @@ function renderComposer(card, draft, focus) {
       const selectedDecision = new FormData(composer).get("decision_key");
       if (selectedDecision) draft.decisionKey = selectedDecision;
     }
+    const validationError = actionTextError(draft.text, state.maxActionBytes);
+    if (validationError) {
+      textarea.setCustomValidity(validationError);
+      textarea.reportValidity();
+      return;
+    }
+    const submissionFingerprint = cardFingerprint(card);
     const operation = beginAction(state.drafts, card.key, () => crypto.randomUUID());
     persistActionOperations();
     renderComposer(card, operation, false);
@@ -503,8 +532,14 @@ function renderComposer(card, draft, focus) {
       }
       state.drafts.delete(card.key);
       persistActionOperations();
-      const currentCard = state.board.cards.find((item) => item.key === card.key) || card;
-      state.pending.set(card.key, { action, fingerprint: cardFingerprint(currentCard) });
+      const currentCard = state.board.cards.find((item) => item.key === card.key);
+      recordPendingAction(
+        state.pending,
+        card.key,
+        action,
+        submissionFingerprint,
+        currentCard
+      );
       showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
       renderBoard();
       if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);
@@ -531,6 +566,7 @@ async function sendAction(card, action, text, requestId, decisionKey) {
     body: JSON.stringify({
       action,
       task_id: card.id,
+      home_namespace: card.home.namespace,
       home_id: card.home.id,
       text,
       request_id: requestId,
@@ -552,19 +588,20 @@ function showToast(message, kind = "success") {
 }
 
 function setFreshness(status, label) {
-  elements.freshnessDot.dataset.state = status;
-  elements.freshnessLabel.textContent = label;
+  updateLiveStatus(elements.freshnessDot.dataset, elements.freshnessLabel, status, label);
 }
 
 async function loadBoard(force = false) {
   if (state.loading) return;
+  const hadBoard = Boolean(state.board);
   state.loading = true;
   elements.refresh.disabled = true;
-  setFreshness("loading", "Reading the fleet…");
+  if (force) setFreshness("loading", "Reading the fleet…");
   try {
     const response = await fetch(`/api/v1/board${force ? "?refresh=1" : ""}`, { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `Firstmate returned ${response.status}`);
+    configureActionStorage(payload.actions.operation_scope, payload.actions.max_text_bytes);
     state.board = payload;
     state.csrf = payload.actions.csrf_token;
     const previousSelectedKey = state.selectedKey;
@@ -592,7 +629,7 @@ async function loadBoard(force = false) {
     }
   } catch (error) {
     setFreshness("error", error.message || "Fleet unavailable");
-    showToast(error.message || "The fleet could not be loaded.", "error");
+    if (force || !hadBoard) showToast(error.message || "The fleet could not be loaded.", "error");
   } finally {
     state.loading = false;
     elements.refresh.disabled = false;

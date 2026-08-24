@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -72,6 +73,18 @@ def compact(value: Any, limit: int = 240) -> str | None:
     if not text:
         return None
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def home_key(namespace: str, home_id: str) -> str:
+    return f"{namespace}:{home_id}"
+
+
+def card_key(namespace: str, home_id: str, task_id: str) -> str:
+    return f"{home_key(namespace, home_id)}:{task_id}"
+
+
+def operation_scope(home: pathlib.Path) -> str:
+    return hashlib.sha256(str(home).encode("utf-8")).hexdigest()
 
 
 def safe_risk(value: Any) -> dict[str, Any]:
@@ -222,6 +235,7 @@ def base_card(
     task_id: str | None,
     title: str,
     lane: str,
+    home_namespace: str,
     home_id: str,
     home_label: str,
     remote: bool,
@@ -236,7 +250,13 @@ def base_card(
         "id": task_id,
         "title": compact(title, 180) or "Untitled task",
         "lane": lane,
-        "home": {"id": home_id, "label": home_label, "remote": remote},
+        "home": {
+            "key": home_key(home_namespace, home_id),
+            "namespace": home_namespace,
+            "id": home_id,
+            "label": home_label,
+            "remote": remote,
+        },
         "repo": compact(record.get("repo") or (task or {}).get("project"), 120),
         "kind": compact(record.get("kind") or (task or {}).get("kind"), 40),
         "risk": safe_risk(record.get("risk")),
@@ -249,7 +269,7 @@ def base_card(
             "answer": bool(task_id and lane == "needs_you" and decisions),
             "request_details": bool(task_id and is_open),
         },
-        "provenance": "registered-secondmate" if home_id != "primary" else "primary-home",
+        "provenance": "registered-secondmate" if home_namespace == "secondmate" else "primary-home",
         "observed_at": generated,
     }
 
@@ -294,7 +314,11 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
     generated = snapshot.get("generated") or ""
     home_path = snapshot.get("fm_home") or ""
     home_label = pathlib.Path(home_path).name or "Firstmate"
-    tasks = {row.get("id"): row for row in snapshot.get("tasks") or [] if row.get("id")}
+    tasks = {
+        row.get("id"): row
+        for row in snapshot.get("tasks") or []
+        if row.get("id") and row.get("kind") != "secondmate"
+    }
     cards: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
 
@@ -303,12 +327,13 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         if not record.get("structured"):
             if record.get("state") == "done":
                 continue
-            key = f"primary:unstructured:{record.get('order', len(cards))}"
+            key = card_key("primary", "primary", f"unstructured:{record.get('order', len(cards))}")
             card = base_card(
                 key=key,
                 task_id=None,
                 title=record.get("raw") or "Unstructured backlog item",
                 lane="backlog" if record.get("state") == "queued" else "waiting",
+                home_namespace="primary",
                 home_id="primary",
                 home_label=home_label,
                 remote=False,
@@ -324,10 +349,11 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         task = tasks.get(task_id)
         lane = main_lane(record, task)
         card = base_card(
-            key=f"primary:{task_id}",
+            key=card_key("primary", "primary", str(task_id)),
             task_id=task_id,
             title=record.get("title") or task_id,
             lane=lane,
+            home_namespace="primary",
             home_id="primary",
             home_label=home_label,
             remote=False,
@@ -361,10 +387,11 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
         merge_card(
             cards,
             base_card(
-                key=f"primary:{task_id}",
+                key=card_key("primary", "primary", task_id),
                 task_id=task_id if SLUG.fullmatch(task_id) else None,
                 title=task_id,
                 lane=lane,
+                home_namespace="primary",
                 home_id="primary",
                 home_label=home_label,
                 remote=False,
@@ -450,10 +477,11 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
                 },
             }
             return base_card(
-                key=f"{mate_id}:{task_id}",
+                key=card_key("secondmate", mate_id, task_id),
                 task_id=task_id if SLUG.fullmatch(task_id) else None,
                 title=title or item.get("title") or item.get("summary") or task_id,
                 lane=lane,
+                home_namespace="secondmate",
                 home_id=mate_id,
                 home_label=mate_label,
                 remote=remote,
@@ -490,8 +518,8 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
     )
     counts = {lane["id"]: sum(card["lane"] == lane["id"] for card in rows) for lane in LANES}
     homes = sorted(
-        {card["home"]["id"]: card["home"] for card in rows}.values(),
-        key=lambda home: (home["id"] != "primary", home["label"].casefold()),
+        {card["home"]["key"]: card["home"] for card in rows}.values(),
+        key=lambda home: (home["namespace"] != "primary", home["label"].casefold()),
     )
     return {
         "schema": "fm-fleet-board.v1",
@@ -584,6 +612,10 @@ class SnapshotCache:
         }
         return result
 
+    def peek(self) -> dict[str, Any] | None:
+        with self.lock:
+            return self._response() if self.board is not None else None
+
 
 class FleetBoardServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -602,6 +634,7 @@ class FleetBoardServer(ThreadingHTTPServer):
         self.root = root
         self.home = home
         self.instance = instance
+        self.operation_scope = operation_scope(home)
         self.csrf = secrets.token_urlsafe(32)
         self.cache = SnapshotCache(root, home)
         self.actions_lock = threading.Lock()
@@ -680,7 +713,11 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/board":
             try:
                 board = self.server.cache.get(force="refresh=1" in self.path)
-                board["actions"] = {"csrf_token": self.server.csrf}
+                board["actions"] = {
+                    "csrf_token": self.server.csrf,
+                    "max_text_bytes": MAX_ACTION_BYTES,
+                    "operation_scope": self.server.operation_scope,
+                }
                 self.json_response(HTTPStatus.OK, board)
             except BoardError as error:
                 self.json_response(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
@@ -739,6 +776,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             raise BoardError("Action body must be an object")
         action = payload.get("action")
         task_id = payload.get("task_id")
+        home_namespace = payload.get("home_namespace")
         home_id = payload.get("home_id")
         text = payload.get("text")
         request_id = payload.get("request_id")
@@ -747,6 +785,8 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             raise BoardError("Unknown action")
         if not isinstance(task_id, str) or not SLUG.fullmatch(task_id):
             raise BoardError("Task id is invalid")
+        if home_namespace not in {"primary", "secondmate"}:
+            raise BoardError("Home namespace is invalid")
         if not isinstance(home_id, str) or not SLUG.fullmatch(home_id):
             raise BoardError("Home id is invalid")
         if not isinstance(request_id, str) or not SLUG.fullmatch(request_id):
@@ -758,34 +798,16 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             raise BoardError("Action text is required")
         if len(text.encode("utf-8")) > MAX_ACTION_BYTES:
             raise BoardError("Action text is too long")
-        board = self.server.cache.get(force=True)
-        observation = "stale-last-good" if (board.get("health") or {}).get("stale") else "fresh"
-        card = next(
-            (
-                item
-                for item in board.get("cards") or []
-                if item.get("id") == task_id and (item.get("home") or {}).get("id") == home_id
-            ),
-            None,
-        )
-        if not card:
-            raise BoardError("Task is no longer present in the current fleet board")
-        permission = "answer" if action == "answer" else "request_details"
-        if not (card.get("actions") or {}).get(permission):
-            raise BoardError("This action is no longer available for the task's current state")
-        if action == "answer":
-            if not isinstance(decision_key, str) or not SLUG.fullmatch(decision_key):
-                raise BoardError("Select the captain decision being answered")
-            if decision_key not in {
-                decision.get("key") for decision in card.get("decisions") or []
-            }:
-                raise BoardError("That captain decision is no longer open")
+        if action == "answer" and (
+            not isinstance(decision_key, str) or not SLUG.fullmatch(decision_key)
+        ):
+            raise BoardError("Select the captain decision being answered")
         with self.server.actions_lock:
             label = "Captain answer" if action == "answer" else "Captain request for more details"
             decision_line = f"Decision: {decision_key}\n" if action == "answer" else ""
             note = (
                 "Fleet board instruction.\n"
-                f"Home: {home_id}\n"
+                f"Home: {home_namespace}:{home_id}\n"
                 f"Task: {task_id}\n"
                 f"Action: {action}\n"
                 f"{decision_line}"
@@ -793,36 +815,51 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 f"{label}:\n{text}\n"
                 "Revalidate the canonical task and its authority before acting, then update canonical state."
             )
-            env = os.environ.copy()
-            env["FM_HOME"] = str(self.server.home)
-            try:
-                completed = subprocess.run(
-                    [
-                        str(self.server.root / "bin" / "fm-inbox.sh"),
-                        "note",
-                        "--request-id",
-                        request_id,
-                        "--json",
-                        "-",
-                    ],
-                    input=note,
-                    text=True,
-                    capture_output=True,
-                    timeout=10,
-                    env=env,
-                    check=False,
+            classification, classified = self.call_inbox(request_id, note, classify=True)
+            existing = classification.get("saved") is True and classification.get("duplicate") is True
+            absent = (
+                classification.get("saved") is False
+                and classification.get("duplicate") is False
+                and classification.get("error") == "request-id-absent"
+            )
+            if not existing and not absent:
+                detail = compact(classification.get("error"), 240) or compact(classified.stderr, 240)
+                raise BoardError(f"Firstmate did not accept the action identity: {detail or 'unknown error'}")
+
+            if existing:
+                board = self.server.cache.peek()
+                observation = (
+                    "stale-last-good"
+                    if board and (board.get("health") or {}).get("stale")
+                    else "fresh" if board else "persisted-action"
                 )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise BoardError(f"Could not reach the Firstmate inbox: {compact(error, 180)}") from error
-            try:
-                inbox_result = json.loads(completed.stdout)
-            except json.JSONDecodeError:
-                inbox_result = None
+            else:
+                board = self.server.cache.get(force=True)
+                observation = "stale-last-good" if (board.get("health") or {}).get("stale") else "fresh"
+                card = next(
+                    (
+                        item
+                        for item in board.get("cards") or []
+                        if item.get("id") == task_id
+                        and (item.get("home") or {}).get("namespace") == home_namespace
+                        and (item.get("home") or {}).get("id") == home_id
+                    ),
+                    None,
+                )
+                if not card:
+                    raise BoardError("Task is no longer present in the current fleet board")
+                permission = "answer" if action == "answer" else "request_details"
+                if not (card.get("actions") or {}).get(permission):
+                    raise BoardError("This action is no longer available for the task's current state")
+                if action == "answer":
+                    if decision_key not in {
+                        decision.get("key") for decision in card.get("decisions") or []
+                    }:
+                        raise BoardError("That captain decision is no longer open")
+
+            inbox_result, completed = self.call_inbox(request_id, note)
             if (
-                not isinstance(inbox_result, dict)
-                or inbox_result.get("schema") != "fm-inbox-note.v1"
-                or inbox_result.get("request_id") != request_id
-                or inbox_result.get("saved") is not True
+                inbox_result.get("saved") is not True
             ):
                 detail = (
                     compact((inbox_result or {}).get("error"), 240)
@@ -835,15 +872,74 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
                 "duplicate": bool(inbox_result.get("duplicate")),
                 "request_id": request_id,
                 "observation": observation,
-                "health": board.get("health"),
+                "health": (board or {}).get("health"),
                 "wake": inbox_result.get("wake"),
             }
+
+    def call_inbox(
+        self, request_id: str, note: str, *, classify: bool = False
+    ) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
+        env = os.environ.copy()
+        env["FM_HOME"] = str(self.server.home)
+        command = [
+            str(self.server.root / "bin" / "fm-inbox.sh"),
+            "note",
+            "--request-id",
+            request_id,
+            "--json",
+        ]
+        if classify:
+            command.append("--classify")
+        command.append("-")
+        try:
+            completed = subprocess.run(
+                command,
+                input=note,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise BoardError(f"Could not reach the Firstmate inbox: {compact(error, 180)}") from error
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise BoardError(
+                f"Firstmate returned an invalid inbox response: {compact(completed.stderr, 180) or 'invalid JSON'}"
+            ) from error
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "fm-inbox-note.v1"
+            or result.get("request_id") != request_id
+        ):
+            raise BoardError("Firstmate returned an invalid inbox response")
+        return result, completed
 
 
 def runtime_paths(home: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     state = pathlib.Path(os.environ.get("FM_STATE_OVERRIDE", str(home / "state")))
     directory = state / "fleet-board"
     return directory, directory / "runtime.json", directory / "lifecycle.lock"
+
+
+def read_origin_port(path: pathlib.Path) -> int | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as error:
+        raise BoardError(f"Fleet board origin record is unreadable: {path}") from error
+    port = value.get("port") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "fm-fleet-board-origin.v1"
+        or not isinstance(port, int)
+        or not 0 < port <= 65535
+    ):
+        raise BoardError(f"Fleet board origin record is invalid: {path}")
+    return port
 
 
 def read_runtime(path: pathlib.Path) -> dict[str, Any] | None:
@@ -957,8 +1053,26 @@ def serve(root: pathlib.Path, home: pathlib.Path, port: int, instance: str) -> i
         ownership.close()
         raise BoardError("Fleet board is already serving this Firstmate home") from error
     try:
-        server = FleetBoardServer(
-            ("127.0.0.1", port), FleetBoardHandler, root=root, home=home, instance=instance
+        origin_path = directory / "origin.json"
+        selected_port = read_origin_port(origin_path) if port == 0 else port
+        try:
+            server = FleetBoardServer(
+                ("127.0.0.1", selected_port or 0),
+                FleetBoardHandler,
+                root=root,
+                home=home,
+                instance=instance,
+            )
+        except OSError as error:
+            if port == 0 and selected_port:
+                raise BoardError(
+                    f"Fleet board cannot reclaim its saved loopback port {selected_port}; "
+                    "set FM_FLEET_BOARD_PORT to choose a new origin"
+                ) from error
+            raise BoardError(f"Fleet board could not bind its loopback port: {error}") from error
+        atomic_runtime(
+            origin_path,
+            {"schema": "fm-fleet-board-origin.v1", "port": server.server_port},
         )
         payload = {
             "schema": "fm-fleet-board-runtime.v1",

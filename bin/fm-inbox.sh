@@ -19,13 +19,16 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note [--request-id <id>] [--json] <text>...
-#   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
+#   fm-inbox.sh note [--request-id <id>] [--json] [--classify] <text>...
+#   fm-inbox.sh note [--request-id <id>] [--json] [--classify] -
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
 #   fm-inbox.sh drain [--ack <id>...]
+#
+# `note --classify --request-id <id> --json -` reports whether the exact stdin
+# body is absent, pending, handled, or conflicting without writing or waking.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
@@ -215,6 +218,37 @@ finish_requested_note() {  # <path> <id> <request-id> <body> <json-mode> <handle
   return 1
 }
 
+classify_requested_note() {  # <path> <id> <request-id> <body> <json-mode> <handled>
+  local path=$1 id=$2 request_id=$3 body=$4 json_mode=$5 handled=$6
+  if ! stored_note_matches "$path" "$request_id" "$body"; then
+    emit_note_result "$json_mode" "$id" "$request_id" false true not-attempted request-id-conflict
+    return 1
+  fi
+  if [ "$handled" -eq 1 ]; then
+    emit_note_result "$json_mode" "$id" "$request_id" true true handled
+  else
+    emit_note_result "$json_mode" "$id" "$request_id" true true pending
+  fi
+}
+
+classify_requested_body() {  # <request-id> <body> <json-mode>
+  local request_id=$1 body=$2 json_mode=$3 id="request-$request_id"
+  if [ -f "$INBOX/handled/$id.note" ]; then
+    classify_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
+  elif [ -f "$INBOX/$id.note" ]; then
+    classify_requested_note "$INBOX/$id.note" "$id" "$request_id" "$body" "$json_mode" 0
+  else
+    emit_note_result "$json_mode" "$id" "$request_id" false false not-attempted request-id-absent
+  fi
+}
+
+validate_request_id() {  # <request-id>
+  case "$1" in
+    *[!A-Za-z0-9._-]*|'') die "request id must contain only letters, numbers, dot, underscore, or hyphen" ;;
+  esac
+  [ "${#1}" -le 160 ] || die "request id is too long"
+}
+
 queue_note() {
   local source=$1 body=$2 extra=${3:-} request_id=${4:-} json_mode=${5:-0}
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
@@ -222,10 +256,7 @@ queue_note() {
 
   local tmp id summary staging_name target
   if [ -n "$request_id" ]; then
-    case "$request_id" in
-      *[!A-Za-z0-9._-]*|'') die "request id must contain only letters, numbers, dot, underscore, or hyphen" ;;
-    esac
-    [ "${#request_id}" -le 160 ] || die "request id is too long"
+    validate_request_id "$request_id"
     id="request-$request_id"
     if [ -f "$INBOX/handled/$id.note" ]; then
       finish_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
@@ -290,7 +321,7 @@ queue_note() {
 }
 
 cmd_note() {
-  local body request_id= json_mode=0
+  local body request_id= json_mode=0 classify_only=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --request-id)
@@ -299,6 +330,7 @@ cmd_note() {
         shift 2
         ;;
       --json) json_mode=1; shift ;;
+      --classify) classify_only=1; shift ;;
       --) shift; break ;;
       *) break ;;
     esac
@@ -309,6 +341,12 @@ cmd_note() {
     body=$(cat)
   else
     body="$*"
+  fi
+  if [ "$classify_only" -eq 1 ]; then
+    [ -n "$request_id" ] || die "--classify requires --request-id"
+    validate_request_id "$request_id"
+    classify_requested_body "$request_id" "$body" "$json_mode"
+    return
   fi
   queue_note text "$body" "" "$request_id" "$json_mode"
 }

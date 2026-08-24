@@ -11,7 +11,7 @@
 #
 # Environment:
 #   FM_HOME                         Operational home projected by the board.
-#   FM_FLEET_BOARD_PORT             Fixed loopback port, or 0 for an available port.
+#   FM_FLEET_BOARD_PORT             Fixed loopback port, or 0 for the home's saved port.
 #   FM_FLEET_BOARD_CACHE_SECONDS    Snapshot cache lifetime, default 3 seconds.
 #   FM_FLEET_BOARD_SNAPSHOT_TIMEOUT Snapshot command timeout, default 18 seconds.
 #
