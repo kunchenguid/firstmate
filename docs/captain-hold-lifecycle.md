@@ -22,8 +22,8 @@ For example, a real record can be:
 ```
 
 `bin/fm-captain-hold.sh structured --json` is the consumable read surface.
-It returns schema `fm-captain-decisions.v1` with valid `records`, task ids in `orphaned` when their file survives without a backlog task, and non-fatal `errors` for malformed records.
-Each valid record includes `status`, `task_state`, and `hold_kind` so a consumer can distinguish an active captain hold from a closed or merely linked task.
+It returns schema `fm-captain-decisions.v1` with a `generated` timestamp, valid `records`, task ids in `orphaned` when their file survives without a backlog task, and non-fatal `errors` for malformed records.
+Each valid record includes `status` as `active`, `closed`, `linked`, `orphaned`, or `unknown`, plus `task_state` and `hold_kind`.
 A missing record is normal and does not change the behavior of an older captain hold.
 The file is keyed by the immutable task id rather than a title, so moving a task between backlog files does not change its association.
 If a future operation replaces an id, the old file remains visible as an orphan until it is deliberately removed or associated with the surviving task.
@@ -60,8 +60,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 
 ## Structured read surfaces
 
-`bin/fm-captain-hold.sh structured --json` is the authoritative projection for optional decision bodies.
-Its output is read-only and reports malformed or orphaned files without preventing valid records from being returned.
+The optional decision-body projection is defined under [Mechanism](#mechanism); the other read surfaces below continue to project task and hold state.
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies a captain hold as `captain_actionable` - waiting on the captain now - only when it is queued, unblocked, and due, whatever kind its row carries.
@@ -102,10 +101,11 @@ The shim recognizes an exact replay of a pre-collapse routed resolution by its h
 
 ## Verification record
 
-Verification date: 2026-08-21.
+Verification date: 2026-08-24.
 
 The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
 It proves: the reconstructed silent-divergence case is signalled - a status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike, while the backlog task, its hold, and the status log all survive the report unchanged and the printed hint names both reconciliation directions; the false-signal boundary holds - a captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent; a report-only unresolved captain call refuses `--none` completion before teardown can erase the source; non-forced scout teardown always requires the durable inventory verification; the recorded-answer guard (a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call); answer-time closure through a bound channel with task-id keys, including the `release` close mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys; the chat channel reaching the same intake; deferral through `--until` leaving `captain_actionable` false until due; and every legacy path (composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding).
+The same suite validates a decision with no structured body, a decision with a valid body, rejection of malformed and multiple-value inputs before task creation, non-fatal malformed stored records, and orphan reporting through the read projection.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
