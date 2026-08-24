@@ -23,7 +23,7 @@ A card's lane is a direct projection of current Firstmate state, so manual movem
 The browser refreshes automatically and exposes a manual Refresh control when an immediate read is useful.
 
 Each card shows the task title, home, risk, current status, concise context, and evidence count.
-Opening a card reveals the risk rationale, repository, work type, status source, full projected context, and linked pull request or report evidence.
+Opening a card reveals the risk rationale, repository, work type, status source, full projected context, and recorded pull request, report, activity, blocker, or link evidence.
 Search and home or risk filters narrow the view without mutating it.
 
 ## Captain actions
@@ -32,7 +32,7 @@ Needs You cards expose **Answer Firstmate**.
 Every open structured card exposes **Request more details**.
 When one task has several open captain decisions, the card shows every key and the answer composer requires the captain to select the decision being answered.
 
-Both actions create a durable instruction in Firstmate's existing inbox and wake the normal Firstmate session.
+Both actions create a durable instruction in Firstmate's existing inbox and attempt to wake the normal Firstmate session.
 If the note is saved but its wake fails, the composer keeps the same request id and offers a safe wake retry.
 The server does not release a hold, close a task, steer a worker, or change a lane directly.
 The card remains in its canonical lane with a sent confirmation until Firstmate processes the instruction and the next snapshot observes the resulting state.
@@ -53,14 +53,14 @@ An invalid risk record also stays unknown rather than being guessed.
 ## Availability and safety
 
 The application binds only to `127.0.0.1` and is not a remote collaboration server.
-It serves bundled assets without third-party scripts, fonts, analytics, or network dependencies.
-State-changing HTTP requests require a per-process action token and a matching loopback origin.
+The browser loads only bundled assets and calls the same loopback origin, with no third-party scripts, fonts, or analytics; registered remote-secondmate reads still follow the existing [remote secondmate](remote-secondmates.md) path.
+HTTP requests require a loopback Host, while state-changing requests also require a per-process action token and reject any supplied non-loopback Origin.
 The Firstmate inbox owns durable action request ids, so retries after wake failures, process restarts, or later replays resolve to the same note instead of creating another instruction.
 The default port is selected once per Firstmate home and then retained so browser-side in-flight recovery survives server restarts, while a home-scoped storage key prevents one home from restoring another home's operation on an explicitly shared port.
 
 The board keeps a short in-memory snapshot cache so multiple browser requests do not fan out into duplicate fleet reads.
 If a refresh fails after a successful read, it keeps the last good board visible and marks it stale with the failure reason.
-Actions remain available on those stale cards because they only queue an instruction, and the instruction records its stale provenance and requires Firstmate to revalidate canonical task state before acting.
+Actions remain available on those stale cards because they only queue an instruction; submission revalidates against a forced current read or the visibly stale last-good card, and the instruction requires Firstmate to revalidate canonical task state before acting.
 Registered-home bounds and omissions remain visible as warnings rather than silently hiding work.
 
 Runtime identity and logs live under `state/fleet-board` in the selected Firstmate home.

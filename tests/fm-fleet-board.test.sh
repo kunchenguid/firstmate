@@ -779,6 +779,56 @@ printf '%s' "$conflict_out" | jq -e \
 pass "the inbox durably owns action idempotency and wake recovery"
 
 if command -v node >/dev/null 2>&1; then
+  if ! node - "$ROOT/bin/fleet-board/board-state.js" "$ROOT/bin/fleet-board/app.js" <<'JS'
+const fs = require("fs");
+const vm = require("vm");
+
+const element = {
+  dataset: {},
+  options: [],
+  value: "all",
+  open: false,
+  hidden: false,
+  disabled: false,
+  textContent: "",
+  addEventListener() {},
+  append() {},
+  close() {},
+  contains() { return false; },
+  focus() {},
+  querySelector() { return element; },
+  replaceChildren() {},
+  setAttribute() {},
+};
+const context = vm.createContext({
+  console,
+  TextEncoder,
+  document: {
+    hidden: false,
+    querySelector() { return element; },
+    querySelectorAll() { return []; },
+  },
+  fetch() { return new Promise(() => {}); },
+  localStorage: {
+    getItem() { return null; },
+    removeItem() {},
+    setItem() {},
+  },
+  window: {
+    setInterval() { return 0; },
+    setTimeout() { return 0; },
+  },
+});
+for (const script of process.argv.slice(2)) {
+  vm.runInContext(fs.readFileSync(script, "utf8"), context, { filename: script });
+}
+if (!context.FleetBoardState) process.exit(1);
+JS
+  then
+    fail "fleet board browser scripts could not execute together"
+  fi
+  pass "fleet board browser scripts execute in one document scope"
+
   node --check "$ROOT/bin/fleet-board/app.js" >/dev/null \
     || fail "fleet board client script did not parse"
   if ! node - "$ROOT/bin/fleet-board/board-state.js" <<'JS'

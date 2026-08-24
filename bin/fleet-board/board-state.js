@@ -1,3 +1,4 @@
+(() => {
 "use strict";
 
 const ACTION_OPERATIONS_SCHEMA = "firstmate.fleet-board.action-operations.v1";
@@ -195,3 +196,4 @@ globalThis.FleetBoardState = Object.freeze({
   updateLiveStatus,
   updateValue,
 });
+})();
