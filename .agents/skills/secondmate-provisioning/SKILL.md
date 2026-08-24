@@ -115,7 +115,9 @@ That primary authority has exactly one sanctioned, opt-in escape: a home may hol
 The deviating value stays in the config item itself, where every consumer already reads it, so the record only states that this home holds its own value there.
 The record must carry evidence: its first non-blank line is the reason, and a record with no such line is refused.
 Where the two values actually differ, convergence leaves the home's value alone and reports the divergence to the primary as one `SECONDMATE_SYNC:` line naming the home, the item, the local and primary values, and that evidence, on every sync rather than only the first.
-A record that cannot be honored - a non-deviable item, no evidence line, a symlinked, non-ordinary, hardlinked, or oversized file - is reported with its concrete reason and the item converges to the primary value, so neither honoring nor reverting is ever silent.
+A record for a non-deviable item, without an evidence line, or stored as a symlinked, non-ordinary, hardlinked, or oversized file is refused with its concrete reason.
+A record is also refused when the held value is symlinked, non-ordinary, or hardlinked; the item then converges to the primary value, so neither honoring nor reverting is ever silent.
+Reported local and primary values and evidence are bounded and stripped of control characters before they reach the primary.
 A record whose value already agrees with the primary diverges from nothing and reports nothing.
 The primary revokes a deviation by removing that record, after which the next convergence restores the primary value as an ordinary push.
 Remote homes behave identically: their own receiver honors the record, reports it as `deviation:` or `deviation-rejected:`, and the pushing primary relays that as the same `SECONDMATE_SYNC:` divergence line.
