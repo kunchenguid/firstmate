@@ -232,7 +232,8 @@ classify_requested_note() {  # <path> <id> <request-id> <body> <json-mode> <hand
 }
 
 classify_requested_body() {  # <request-id> <body> <json-mode>
-  local request_id=$1 body=$2 json_mode=$3 id="request-$request_id"
+  local request_id=$1 body=$2 json_mode=$3
+  local id="request-$request_id"
   if [ -f "$INBOX/handled/$id.note" ]; then
     classify_requested_note "$INBOX/handled/$id.note" "$id" "$request_id" "$body" "$json_mode" 1
   elif [ -f "$INBOX/$id.note" ]; then
@@ -321,7 +322,7 @@ queue_note() {
 }
 
 cmd_note() {
-  local body request_id= json_mode=0 classify_only=0
+  local body request_id='' json_mode=0 classify_only=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --request-id)
