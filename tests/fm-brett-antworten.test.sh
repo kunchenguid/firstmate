@@ -66,9 +66,9 @@ ts_offset() {  # <date-d-arg> -> ISO timestamp with colon offset
   date -d "$1" '+%Y-%m-%dT%H:%M:%S%z' | sed -E 's/([+-][0-9]{2})([0-9]{2})$/\1:\2/'
 }
 
-write_card() {  # <home> <antwort-id> <entscheid> <wort> [ersetz-id] [art] [schonfrist]
+write_card() {  # <home> <antwort-id> <entscheid> <wort> [ersetz-id] [art] [schonfrist] [bemerkung]
   local home=$1 id=$2 entscheid=$3 wort=$4
-  local repl=${5:--} art=${6:-wahl} grace=${7:-}
+  local repl=${5:--} art=${6:-wahl} grace=${7:-} bem=${8:-}
   [ -n "$grace" ] || grace=$(ts_offset '-120 seconds')
   {
     printf '# Captain-Antwort %s — test\n' "$entscheid"
@@ -87,6 +87,12 @@ write_card() {  # <home> <antwort-id> <entscheid> <wort> [ersetz-id] [art] [scho
     printf '\n'
     printf '%s\n' "$wort"
     printf '\n'
+    if [ -n "$bem" ]; then
+      printf '## Bemerkung\n'
+      printf '\n'
+      printf '%s\n' "$bem"
+      printf '\n'
+    fi
     printf '## Zustellnachweis\n'
   } > "$home/data/brett-antworten/$id.md"
 }
@@ -296,6 +302,149 @@ case $out in
 esac
 grep -q "^- \[ \] rueckzug-posten " "$H7/data/backlog.md" \
   || fail "a withdrawn answer changed the held task"
+
+# --- captain remark (O-0054): booked, marked loudly, never silently done ------
+# The captain's free text is often more important than the clicked answer.
+# A non-empty "## Bemerkung" must land verbatim in the booking, stand loudly
+# in the wake line, and keep a durable routing marker until a hand retires it.
+
+HB=$(make_home hb)
+install_quittung_stub "$HB"
+hold_task "$HB" bemerkung-posten
+IDB=20260824T115000-bemerkung-posten-mmmm33
+BEM_TEXT="A und C, wenn wir Quellen finden dann nutzen sonst leer lassen, quelle: https://example.test/kalender reicht das?"
+write_card "$HB" "$IDB" bemerkung-posten "Option C - so lassen" - wahl '' "$BEM_TEXT"
+
+out=$(run_check "$HB")
+case $out in
+  *"bemerkung-vorhanden($IDB)"*) pass "ok - non-empty remark marked loudly in the wake line" ;;
+  *) fail "expected bemerkung-vorhanden token, got: $out" ;;
+esac
+case $out in
+  *"1 verbucht($IDB"*) pass "ok - remark card still recorded" ;;
+  *) fail "expected verbucht alongside the remark token, got: $out" ;;
+esac
+grep -qF "Bemerkung des Captains: $BEM_TEXT" "$HB/data/backlog.md" \
+  || fail "the captain's remark is missing from the booking"
+grep -qF "Option C - so lassen" "$HB/data/backlog.md" \
+  || fail "the clicked answer is missing from the booking"
+MARKER="$HB/state/brett-bemerkungen/$IDB.md"
+[ -f "$MARKER" ] || fail "no durable remark marker under state/"
+grep -q "^verbleib: verbucht$" "$MARKER" || fail "marker does not record where the answer went"
+grep -qF "bemerkung: $BEM_TEXT" "$MARKER" || fail "marker does not carry the remark text"
+
+# The marker survives the sweep that consumed its card (and any restart, being
+# a plain file under state/): the wake line keeps standing until a hand routes
+# the remark, even though the card itself is receipted and quiet.
+out=$(run_check "$HB")
+case $out in
+  *"bemerkung-vorhanden($IDB)"*) pass "ok - unrouted remark keeps standing on the next sweep" ;;
+  *) fail "expected the remark to keep standing, got: $out" ;;
+esac
+case $out in
+  *verbucht*) fail "a receipted remark card was recorded again: $out" ;;
+  *) : ;;
+esac
+
+# Crash window: replaying the fed-but-unreceipted card keeps the digest stable
+# (single resolution block) and does not duplicate the remark.
+rm -f "$HB/data/brett-antworten/quittungen/$IDB.json"
+out=$(run_check "$HB")
+case $out in
+  *"1 verbucht($IDB"*) pass "ok - remark-card crash replay re-receipted" ;;
+  *) fail "remark replay sweep did not report verbucht, got: $out" ;;
+esac
+[ "$(grep -cF "Bemerkung des Captains: $BEM_TEXT" "$HB/data/backlog.md")" = 1 ] \
+  || fail "the remark replay wrote a second resolution block"
+
+# Routing the remark is an explicit hand act with a mandatory note; the marker
+# retires into erledigt/ as durable evidence and the wake line falls silent.
+FM_HOME="$HB" FM_STATE_OVERRIDE="$HB/state" "$CHECK" bemerkung-erledigt "$IDB" >/dev/null 2>&1 \
+  && fail "bemerkung-erledigt accepted a resolution without a note"
+out=$(FM_HOME="$HB" FM_STATE_OVERRIDE="$HB/state" "$CHECK" bemerkungen)
+case $out in
+  *"$IDB"*) pass "ok - bemerkungen lists the open remark" ;;
+  *) fail "bemerkungen does not list the open remark: $out" ;;
+esac
+out=$(FM_HOME="$HB" FM_STATE_OVERRIDE="$HB/state" "$CHECK" bemerkung-erledigt "$IDB" --vermerk "an Testoffizier weitergegeben")
+[ "$out" = "erledigt: $IDB" ] || fail "unexpected bemerkung-erledigt output: $out"
+[ ! -f "$MARKER" ] || fail "resolved marker still open"
+grep -qF "vermerk: an Testoffizier weitergegeben" "$HB/state/brett-bemerkungen/erledigt/$IDB.md" \
+  || fail "retired marker lost the routing note"
+out=$(run_check "$HB")
+[ -z "$out" ] || fail "a routed remark still wakes: $out"
+out=$(FM_HOME="$HB" FM_STATE_OVERRIDE="$HB/state" "$CHECK" bemerkung-erledigt "$IDB" --vermerk "nochmal")
+[ "$out" = "schon erledigt: $IDB" ] || fail "re-resolution was not idempotent: $out"
+FM_HOME="$HB" FM_STATE_OVERRIDE="$HB/state" "$CHECK" bemerkung-erledigt 20260824T120500-nie-gesehen-zzzz99 --vermerk x >/dev/null 2>&1 \
+  && fail "resolving an unknown remark id succeeded"
+pass "ok - remark routing retires the marker with its note"
+
+# Officer-home post with a remark: the forwarding evidence must carry it too.
+HBO=$(make_home hbo)
+OBO=$(make_home obo)
+install_quittung_stub "$HBO"
+install_quittung_stub "$OBO"
+hold_task "$OBO" bemerkung-offizier-posten
+register_officer "$HBO" sm-test "$OBO"
+IDBO=20260824T121000-bemerkung-offizier-posten-nnnn44
+write_card "$HBO" "$IDBO" bemerkung-offizier-posten "Option B - Offizierswort" - wahl '' \
+  "Der Offizier soll die Quelle direkt einbauen."
+out=$(run_check "$HBO")
+case $out in
+  *"offizier-nicht-verbucht(bemerkung-offizier-posten@sm-test)"*) : ;;
+  *) fail "expected officer meldung for the remark card, got: $out" ;;
+esac
+case $out in
+  *"bemerkung-vorhanden($IDBO)"*) pass "ok - officer-post remark marked loudly" ;;
+  *) fail "expected the officer-post remark marked, got: $out" ;;
+esac
+grep -q "^verbleib: offizier:sm-test$" "$HBO/state/brett-bemerkungen/$IDBO.md" \
+  || fail "officer-post marker does not name the routed home"
+grep -q "Der Offizier soll die Quelle direkt einbauen." "$OBO/data/backlog.md" \
+  && fail "the remark was recorded in the foreign home"
+
+# Negative case: a card without a remark behaves exactly as before - no token,
+# no marker, no remark line in the booking.
+HBN=$(make_home hbn)
+install_quittung_stub "$HBN"
+hold_task "$HBN" ohne-vermerk-posten
+IDBN=20260824T122000-ohne-vermerk-posten-oooo55
+write_card "$HBN" "$IDBN" ohne-vermerk-posten "Option A - schlichtes Wort"
+out=$(run_check "$HBN")
+case $out in
+  *bemerkung*) fail "a remark-less card produced a remark finding: $out" ;;
+  *"1 verbucht($IDBN"*) pass "ok - remark-less card recorded unchanged" ;;
+  *) fail "expected plain verbucht for the remark-less card, got: $out" ;;
+esac
+grep -q "Bemerkung des Captains:" "$HBN/data/backlog.md" \
+  && fail "a remark-less booking grew a remark line"
+[ -e "$HBN/state/brett-bemerkungen" ] && fail "a remark-less sweep created marker state"
+
+# A lone dash body means "no remark", like the board's other empty fields.
+hold_task "$HBN" strich-vermerk-posten
+IDBS=20260824T122500-strich-vermerk-posten-pppp66
+write_card "$HBN" "$IDBS" strich-vermerk-posten "Option A - Wort mit Strich" - wahl '' "-"
+out=$(run_check "$HBN")
+case $out in
+  *bemerkung*) fail "a dash remark produced a remark finding: $out" ;;
+  *"1 verbucht($IDBS"*) pass "ok - dash remark treated as empty" ;;
+  *) fail "expected plain verbucht for the dash remark, got: $out" ;;
+esac
+
+# An oversize remark is refused loudly rather than truncated; the card stays
+# pending and the held task is untouched.
+hold_task "$HBN" lang-vermerk-posten
+IDBL=20260824T123000-lang-vermerk-posten-qqqq77
+write_card "$HBN" "$IDBL" lang-vermerk-posten "Option A - Wort mit Riesenvermerk" - wahl '' \
+  "$(printf 'y%.0s' $(seq 1 4001))"
+out=$(run_check "$HBN")
+case $out in
+  *"FEHLER($IDBL:bemerkung-zu-lang)"*) pass "ok - oversize remark refused loudly" ;;
+  *) fail "expected bemerkung-zu-lang finding, got: $out" ;;
+esac
+receipt_exists "$HBN" "$IDBL" && fail "an oversize-remark card was receipted anyway"
+grep -q "^- \[ \] lang-vermerk-posten " "$HBN/data/backlog.md" \
+  || fail "an oversize remark consumed the held task"
 
 # --- arm, disarm, shim bytes, selftest -----------------------------------------
 

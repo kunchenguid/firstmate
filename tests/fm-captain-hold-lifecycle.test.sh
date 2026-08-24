@@ -1469,6 +1469,52 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# The keyed intake's optional fifth field is the captain's free-text remark
+# (order O-0054): a non-empty remark lands verbatim as its own line in the
+# durable decision, a remark-less line keeps the exact pre-remark record and
+# digest, and an oversize remark is refused loudly instead of truncated.
+test_keyed_answer_carries_the_bemerkung() {
+  local home out show long
+  home=$(make_home bemerkung-intake)
+  run_captain "$home" hold sample-bemerkung-call --title "Choose with remark" \
+    --reason "captain remark call pending" --repo sample >/dev/null \
+    || fail "could not register the remark call"
+  out=$(printf 'sample-bemerkung-call\tOption C\tKarte 1\t\tErst messen, Idee im Hinterkopf behalten.\n' \
+    | run_captain "$home" answers --source "bemerkung fixture") \
+    || fail "a remark-carrying keyed answer was refused: $out"
+  assert_contains "$out" "closed: sample-bemerkung-call" "the remark answer did not close its task"
+  show=$(tasks_in "$home" show sample-bemerkung-call --full)
+  assert_contains "$show" "Answer: Option C" "the remark answer lost the clicked answer"
+  assert_contains "$show" "Bemerkung des Captains: Erst messen, Idee im Hinterkopf behalten." \
+    "the captain's remark is missing from the booked decision"
+  out=$(printf 'sample-bemerkung-call\tOption C\tKarte 1\t\tErst messen, Idee im Hinterkopf behalten.\n' \
+    | run_captain "$home" answers --source "bemerkung fixture") \
+    || fail "an identical remark-answer replay was not idempotent: $out"
+  assert_contains "$out" "closed: sample-bemerkung-call" "the replayed remark answer did not report closed"
+
+  run_captain "$home" hold sample-oversize-call --title "Choose with oversize remark" \
+    --reason "captain oversize remark pending" --repo sample >/dev/null \
+    || fail "could not register the oversize-remark call"
+  long=$(printf 'x%.0s' $(seq 1 4001))
+  if out=$(printf 'sample-oversize-call\tOption A\tKarte 2\t\t%s\n' "$long" \
+    | run_captain "$home" answers --source "bemerkung fixture"); then
+    fail "an oversize remark was accepted instead of refused: $out"
+  fi
+  assert_contains "$out" "bemerkung longer than 4000 bytes" "the oversize refusal did not name its reason"
+  show=$(tasks_in "$home" show sample-oversize-call --full)
+  assert_contains "$show" "held: yes" "an oversize remark consumed the held task anyway"
+
+  out=$(printf 'sample-oversize-call\tOption A\tKarte 2\n' \
+    | run_captain "$home" answers --source "bemerkung fixture") \
+    || fail "a remark-less keyed answer was refused: $out"
+  show=$(tasks_in "$home" show sample-oversize-call --full)
+  assert_contains "$show" "Answer: Option A" "the remark-less answer lost the clicked answer"
+  if printf '%s' "$show" | grep -F 'Bemerkung des Captains:' >/dev/null; then
+    fail "a remark-less answer grew a remark line"
+  fi
+  pass "the keyed intake carries the captain's remark mandatorily and refuses oversize remarks loudly"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1487,6 +1533,7 @@ test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_keyed_answer_carries_the_bemerkung
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

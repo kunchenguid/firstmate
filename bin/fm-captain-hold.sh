@@ -58,12 +58,19 @@
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer closes its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and closes each named
-# task through the very same `answer` path above, so every guard applies
-# identically no matter which channel the answer arrived on. The key IS the
-# task id - no identity arithmetic. The optional fourth field selects the close:
-# empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A key that names no task, a task that is
+# `<task-id>\t<answer>\t<label>[\t<mode>[\t<bemerkung>]]` lines on stdin and
+# closes each named task through the very same `answer` path above, so every
+# guard applies identically no matter which channel the answer arrived on. The
+# key IS the task id - no identity arithmetic. The optional fourth field selects
+# the close: empty or `done` completes the task, `release` lifts the hold so
+# held work resumes; anything else is skipped. The optional fifth field is the
+# captain's free-text remark (Bemerkung); when non-empty it is recorded in the
+# durable decision as its own "Bemerkung des Captains:" line, because the
+# captain's free text is often more important than the clicked answer (order
+# O-0054) and must never be dropped from the booking. A remark longer than
+# 4000 bytes is skipped loudly rather than truncated. An empty fifth field
+# leaves the decision text - and therefore every existing digest - unchanged.
+# A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
@@ -718,11 +725,12 @@ command_binding() {
 # The durable captain decision one keyed answer records. Pure function of its
 # inputs, so the same answer delivered twice is idempotent rather than a
 # conflicting decision.
-keyed_decision_text() {  # <source> <task-id> <answer> <label>
+keyed_decision_text() {  # <source> <task-id> <answer> <label> [bemerkung]
   printf 'Captain answered this call through %s.\n' "$1"
   printf 'Task: %s\n' "$2"
   printf 'Answer: %s\n' "$3"
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
+  [ -z "${5:-}" ] || printf 'Bemerkung des Captains: %s\n' "$5"
 }
 
 legacy_keyed_decision_text() {  # <source> <key> <answer> <label>
@@ -736,8 +744,15 @@ sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
 
+# The captain's remark travels uncut: a truncated remark is exactly the silent
+# loss O-0054 forbids, so the length guard in command_answers refuses loudly
+# instead and this only strips what the record format cannot carry.
+sanitize_bemerkung() {  # <text>
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177'
+}
+
 command_answers() {
-  local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
+  local origin='' source='' row rest key answer label mode bem id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -767,13 +782,21 @@ command_answers() {
     answer=${rest%%"$tab"*}
     case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
     label=${rest%%"$tab"*}
-    case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    mode=${rest%%"$tab"*}
+    case "$rest" in *"$tab"*) bem=${rest#*"$tab"} ;; *) bem='' ;; esac
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
+    bem=$(sanitize_bemerkung "${bem:-}")
+    if [ "$(printf '%s' "$bem" | LC_ALL=C wc -c | tr -d ' ')" -gt 4000 ]; then
+      printf 'skipped: %s (bemerkung longer than 4000 bytes)\n' "$key"
+      skipped=$((skipped + 1))
+      continue
+    fi
     release_flag=''
     case "${mode:-}" in
       ''|done) : ;;
@@ -789,7 +812,7 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
-    keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
+    keyed_decision_text "$source" "$id" "$answer" "$label" "$bem" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
     legacy_digest=''
