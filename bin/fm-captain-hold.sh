@@ -186,6 +186,17 @@ validate_slug() {  # <label> <value>
   esac
 }
 
+task_id_valid() {
+  case "$1" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+validate_task_id() {
+  task_id_valid "$1" \
+    || fail "task-id must be a non-empty privacy-safe slug starting with an alphanumeric: $1"
+}
+
 validate_one_line() {  # <label> <value>
   local label=$1 value=$2
   [ -n "$value" ] || fail "$label must not be empty"
@@ -498,7 +509,7 @@ command_hold() {
     esac
     shift
   done
-  validate_slug task-id "$id"
+  validate_task_id "$id"
   validate_one_line reason "$reason"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   if [ -n "$structured_file" ]; then
@@ -748,7 +759,7 @@ command_structured() {
   done
   require_jq
   if [ -n "$id" ]; then
-    validate_slug task-id "$id"
+    validate_task_id "$id"
   fi
   records=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-structured-decisions.XXXXXX") \
     || fail "cannot stage structured decision results"
@@ -768,13 +779,11 @@ command_structured() {
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       id=$(basename "$(dirname "$path")")
-      case "$id" in
-        ''|*[!A-Za-z0-9._-]*)
-          jq -nc --arg path "$path" --arg error 'structured decision path has an invalid task id' \
-            '{path:$path,error:$error}' >> "$errors"
-          continue
-          ;;
-      esac
+      if ! task_id_valid "$id"; then
+        jq -nc --arg path "$path" --arg error 'structured decision path has an invalid task id' \
+          '{path:$path,error:$error}' >> "$errors"
+        continue
+      fi
       append_structured_record "$id" "$path" "$inventory" "$inventory_known" "$records" "$errors"
     done < <(find "$DATA" -mindepth 2 -maxdepth 2 -name "$STRUCTURED_FILENAME" -print 2>/dev/null | LC_ALL=C sort)
   fi

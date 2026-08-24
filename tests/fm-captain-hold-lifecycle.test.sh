@@ -1110,7 +1110,7 @@ EOF
 # primitive, so a valid record, a legacy hold, an orphan, and malformed input
 # must be distinguishable without making the reader fail as a whole.
 test_structured_decision_body_read_and_errors() {
-  local home json large_bytes
+  local home json large_bytes unsafe
   home=$(make_home structured-decision)
   cat > "$home/structured.json" <<'EOF'
 {
@@ -1124,6 +1124,25 @@ test_structured_decision_body_read_and_errors() {
   "free_response": true
 }
 EOF
+  printf '%s\n' sentinel > "$home/captain-decision.json"
+  for unsafe in .foo -foo ..; do
+    if run_captain "$home" hold "$unsafe" \
+      --title "Unsafe task identity" --reason "captain unsafe identity fixture" --repo sample \
+      --structured-file "$home/structured.json" \
+      > "$home/unsafe.out" 2> "$home/unsafe.err"; then
+      fail "structured hold accepted unsafe task id $unsafe"
+    fi
+  done
+  [ "$(cat "$home/captain-decision.json")" = sentinel ] \
+    || fail "an unsafe task id escaped the per-task decision directory"
+  assert_absent "$home/data/.foo/captain-decision.json" \
+    "a dot-prefixed task id persisted an orphaned structured body"
+  assert_absent "$home/data/-foo/captain-decision.json" \
+    "a dash-prefixed task id persisted an orphaned structured body"
+  if run_captain "$home" structured .. --json \
+    > "$home/unsafe-read.out" 2> "$home/unsafe-read.err"; then
+    fail "structured read accepted a path-escaping task id"
+  fi
   jq '.question = "Qual rota alternativa deve ser usada?"' \
     "$home/structured.json" > "$home/alternate-structured.json"
   {
