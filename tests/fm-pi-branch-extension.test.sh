@@ -489,15 +489,16 @@ if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("default-on activation did not write the diagnostic marker");
 }
 
-// A fleet-wide heartbeat is separately eligible even with no resolved
-// project, per the heartbeat-routing exception (docs/pi-supervision-branch.md).
-if (!dispatch("heartbeat: fleet reviewed, nothing to report", [], true).accepted) {
+// The real watcher emits a bare heartbeat only after its cheap bash scan has
+// flagged a fleet pass as possibly captain-relevant. The branch accepts that
+// wake without a resolved project and performs the deeper review.
+if (!dispatch("heartbeat", [], true).accepted) {
   throw new Error("heartbeat offer was refused");
 }
 await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat wake prompt");
 
-// A no-op heartbeat pass reports verdict routine and stays silent (no main
-// turn); only a captain-worthy finding opens one.
+// The branch can downgrade its deeper review to a silent routine outcome or
+// escalate a captain-worthy finding into one main turn.
 const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
 const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
 await heartbeatReport.execute(

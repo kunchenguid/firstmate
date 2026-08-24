@@ -554,7 +554,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'heartbeat: fleet reviewed, nothing to report\n'
+  printf 'heartbeat\n'
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
@@ -562,11 +562,9 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  # A fleet-wide heartbeat has no task-scoped wake-queue row (no
-  # state/.wake-queue at all), so projectsForUnreadWake() would ordinarily
-  # bail to an empty list; the heartbeat flag must still make the offer
-  # eligible independent of that scoping (docs/pi-supervision-branch.md
-  # "Heartbeat routing").
+  # A bare heartbeat is the real wake emitted after the cheap bash scan flags
+  # a fleet pass as possibly captain-relevant. It has no task-scoped queue row,
+  # so branch eligibility must remain independent of project resolution.
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -604,8 +602,8 @@ for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (offers.length !== 1) throw new Error(`expected one branch offer, got ${offers.length}`);
-if (!offers[0].message.includes("heartbeat: fleet reviewed, nothing to report")) {
-  throw new Error(`offer lost the heartbeat wake reason: ${offers[0].message}`);
+if (offers[0].message !== "heartbeat") {
+  throw new Error(`offer changed the bare heartbeat wake reason: ${offers[0].message}`);
 }
 if (offers[0].heartbeat !== true) throw new Error(`heartbeat offer was not flagged: ${JSON.stringify(offers[0])}`);
 if (JSON.stringify(offers[0].projects) !== JSON.stringify([])) {
@@ -635,7 +633,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'heartbeat: synthetic fleet scan\n'
+  printf 'heartbeat\n'
   exit 0
 fi
 printf 'synthetic successor startup failure\n' >&2
@@ -684,8 +682,8 @@ for (let i = 0; i < 500 && !prompt; i += 1) {
 if (offers.length !== 0) {
   throw new Error(`heartbeat restoration failure was offered to the branch: ${JSON.stringify(offers)}`);
 }
-if (!prompt.includes("heartbeat: synthetic fleet scan")) {
-  throw new Error(`main wake lost the heartbeat reason: ${prompt}`);
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: heartbeat\n\nwatcher: FAILED")) {
+  throw new Error(`main wake lost the bare heartbeat reason: ${prompt}`);
 }
 if (!prompt.includes("watcher: FAILED - Pi extension could not restore watcher continuity after 2 retries")) {
   throw new Error(`main wake lost the restoration failure: ${prompt}`);
