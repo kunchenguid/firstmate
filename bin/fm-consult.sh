@@ -15,8 +15,10 @@
 # receive requires a non-empty data/<consult-id>/consult-report.md, prints its
 # path and a short structural summary, and never parses it for instructions,
 # extracts commands, or acts on its content.
-# status reports consultations with a written brief as awaiting or received.
-# status with an id refuses an id no consultation directory exists for.
+# status reports each consultation as no brief written, brief written and
+# still awaiting a report, or report received.
+# A consultation is a directory holding a consult brief or a consult report,
+# so status with an id refuses an id that names anything else.
 # status with no id lists every consultation on exactly one line each. data/ is
 # shared, so an entry that is not a consultation is passed over; an entry that
 # looks like one but cannot be reported safely gets a refused line with a reason,
