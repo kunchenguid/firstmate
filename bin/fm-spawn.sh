@@ -198,9 +198,10 @@
 # refuses at that same early gate.
 # omp forces effective trace propagation off and strips TRACEPARENT from the
 # child; it does not inherit the home's frozen trace-context decision.
-# A --relaunch binds one read-only regular-file metadata snapshot before every
-# lock so omp's model and backend gates, and any unsafe relaunch record, refuse
-# before mutation. The locked endpoint validation below remains authoritative.
+# A --relaunch acquires the task lifecycle and metadata locks, binds one stable
+# regular-file metadata snapshot, and applies omp's model and backend gates plus
+# final endpoint validation before watcher, endpoint, worktree, task-state, or
+# config mutation.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -480,7 +481,7 @@ require_omp_orca_backend() {
 # binds one stable identity and content snapshot. Two independent read-only
 # descriptors must name the same regular inode and yield the same complete byte
 # sequence; the still-nonsymlink path must then name that inode and content too.
-# Downstream pre-lock consumers read the in-memory snapshot, never the path.
+# Downstream policy consumers read the in-memory snapshot, never the path.
 RELAUNCH_PREFLIGHT_ID=
 RELAUNCH_PREFLIGHT_META=
 RELAUNCH_PREFLIGHT_META_CONTENT=
@@ -1073,6 +1074,40 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_render_orca_recovery_meta() {
+  echo "window=$W" || return 1
+  echo "endpoint_task_id=$ID" || return 1
+  echo "worktree=${WT:-}" || return 1
+  echo "project=$PROJ_ABS" || return 1
+  echo "harness=$HARNESS" || return 1
+  echo "kind=$KIND" || return 1
+  if [ -n "${MODE:-}" ]; then echo "mode=$MODE" || return 1; fi
+  if [ -n "${YOLO:-}" ]; then echo "yolo=$YOLO" || return 1; fi
+  echo "tasktmp=${TASK_TMP:-}" || return 1
+  echo "model=${MODEL:-default}" || return 1
+  echo "effort=${EFFORT:-default}" || return 1
+  echo "backend=orca" || return 1
+  echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
+  if [ -n "${ORCA_TERMINAL:-}" ]; then echo "terminal=$ORCA_TERMINAL" || return 1; fi
+}
+
+spawn_publish_orca_recovery_meta() {
+  local recovery_path="$STATE/$ID.meta"
+  local recovery_tmp="$STATE/.$ID.meta.recovery.${BASHPID:-$$}"
+  mkdir -p "$STATE" || return 1
+  if [ -d "$recovery_path" ] || [ -L "$recovery_path" ]; then
+    return 1
+  fi
+  if ! spawn_render_orca_recovery_meta > "$recovery_tmp"; then
+    rm -f "$recovery_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$recovery_tmp" "$recovery_path"; then
+    rm -f "$recovery_tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -1124,23 +1159,8 @@ spawn_abort_cleanup() {
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+        if ! spawn_publish_orca_recovery_meta; then
+          echo "error: could not publish recovery metadata for stranded Orca worktree $ORCA_WORKTREE_ID" >&2
         fi
       fi
     fi

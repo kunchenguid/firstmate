@@ -698,6 +698,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"repo":{"id":"repo-meta-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
+  printf '1\n' > "$RESP/6.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -705,6 +706,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
   assert_contains "$out" "failed to publish Orca metadata" "spawn should fail at metadata publication"
+  assert_contains "$out" "could not publish recovery metadata" "spawn should report an unwritable recovery record"
   log_text=$(cat "$LOG")
   assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
@@ -720,8 +722,8 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 
-test_spawn_rejects_partial_orca_metadata_render() {
-  local proj wt data state config id out status log_text
+test_spawn_recovers_from_partial_orca_metadata_render() {
+  local proj wt data state config id out status log_text validated_target
   id="orcapartialmetaz3"
   proj="$TMP_ROOT/partial-meta-project"
   wt="$TMP_ROOT/partial-meta-wt"
@@ -735,12 +737,24 @@ test_spawn_rejects_partial_orca_metadata_render() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-partial-meta"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-meta","path":"%s"},"terminal":{"handle":"term-partial-meta"}}}\n' "$wt" > "$RESP/3.out"
+  printf '1\n' > "$RESP/5.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     bash -c '
+      FM_FAIL_ORCA_META_ONCE=1
+      FM_FAIL_ORCA_META_OWNER=$$
+      export FM_FAIL_ORCA_META_ONCE FM_FAIL_ORCA_META_OWNER
       echo() {
-        case "${1:-}" in orca_worktree_id=*) return 1 ;; esac
+        case "${1:-}" in
+          orca_worktree_id=*)
+            if [ "${FM_FAIL_ORCA_META_OWNER:-}" = "$$" ] \
+               && [ "${FM_FAIL_ORCA_META_ONCE:-0}" = 1 ]; then
+              FM_FAIL_ORCA_META_ONCE=0
+              return 1
+            fi
+            ;;
+        esac
         builtin echo "$@"
       }
       export -f echo
@@ -756,8 +770,12 @@ test_spawn_rejects_partial_orca_metadata_render() {
     "partial metadata render should remove the Orca worktree"
   assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''send' \
     "partial metadata render must abort before launch delivery"
-  assert_absent "$state/$id.meta" "partial metadata render must publish no task record"
-  pass "fm-spawn.sh --backend orca: partial metadata render aborts before publication"
+  assert_present "$state/$id.meta" "failed Orca cleanup should publish a recovery record"
+  validated_target=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"; printf "%s" "$FM_BACKEND_VALIDATED_TARGET"' \
+    "$ROOT" "$state/$id.meta" "$id")
+  [ "$validated_target" = "term-partial-meta" ] \
+    || fail "recovery metadata should validate the stranded terminal, got '$validated_target'"
+  pass "fm-spawn.sh --backend orca: partial metadata failure preserves a valid recovery record"
 }
 
 test_spawn_launches_omp_through_the_orca_backend() {
@@ -1539,7 +1557,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_launches_omp_through_the_orca_backend
 test_teardown_removes_the_orca_omp_endpoint
 test_spawn_releases_orca_resources_when_metadata_write_fails
-test_spawn_rejects_partial_orca_metadata_render
+test_spawn_recovers_from_partial_orca_metadata_render
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json

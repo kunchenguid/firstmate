@@ -246,7 +246,7 @@ Every omp launch is also pinned to one model: each spawn must carry an explicit 
 `fm-spawn.sh` reads no omp default, writes no configuration, and never passes omp's legacy `--provider` flag, so no fuzzy match, provider cycle, or fallback is reachable from the launch; omp would otherwise do all three itself.
 It cannot see where a caller obtained that flag's value and claims nothing about it - firstmate resolves the identifier at intake, and no model catalog is queried on the spawn path.
 An absent, unqualified, malformed, or ambiguous model value refuses an explicitly selected launch before mutation.
-A `--relaunch` binds one read-only regular-file metadata snapshot before every lock so those same model and backend gates, plus any unsafe relaunch record, refuse before mutation; the locked endpoint validation remains authoritative.
+A `--relaunch` acquires the task lifecycle and metadata locks, binds one stable regular-file metadata snapshot, and applies those same model and backend gates plus final endpoint validation before watcher, endpoint, worktree, task-state, or config mutation.
 omp forces effective trace propagation off and strips `TRACEPARENT` from the child, even when the home session froze trace on.
 The launch strips foreign harness and trace markers, isolates extensions and skills, and limits tools to a narrow non-execution coding surface.
 `bin/fm-spawn.sh` owns the exact launch mechanics and `tests/fm-omp-tools-live-e2e.test.sh` owns the opt-in installed-binary compatibility check.

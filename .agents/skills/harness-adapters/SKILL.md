@@ -544,7 +544,7 @@ Until then it is dormant and reachable only through an explicit `--harness omp`;
 omp is never a coordinator, a backend, or an implicit default; Orca stays the execution backend and firstmate stays the sole coding supervisor.
 `bin/fm-spawn.sh` refuses `--secondmate` on omp on adapter identity alone, whatever its model, before the watcher guard runs and before any lock, endpoint, worktree, state, or config mutation, and omp has no supervision protocol under `docs/supervision-protocols/`.
 The same early gate refuses any resolved backend other than `orca`, retaining that read-only resolution so the refusal and endpoint creation cannot drift.
-A `--relaunch` binds one read-only regular-file metadata snapshot before every lock so those same model and backend gates, plus any unsafe relaunch record, refuse before mutation.
+A `--relaunch` acquires the task lifecycle and metadata locks, binds one stable regular-file metadata snapshot, and applies those same model and backend gates plus final endpoint validation before watcher, endpoint, worktree, task-state, or config mutation.
 omp also forces effective trace propagation off and strips `TRACEPARENT` from the child; it does not inherit the home's frozen trace-context decision.
 
 The facts below come from deterministic adapter proof plus a no-session installed-binary argument guard, NOT from a live agent session, which is exactly why the pilot is still required.

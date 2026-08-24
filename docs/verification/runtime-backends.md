@@ -666,7 +666,7 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real readiness was refreshed against `/opt/homebrew/bin/orca` with `/Applications/Orca.app` bundle version 1.4.188.
 
 ```sh
 orca status --json
@@ -677,6 +677,26 @@ Observed fields:
 ```text
 result.runtime.reachable=true
 result.runtime.state=ready
+```
+
+The active 1.4.188 profile returned this sanitized composite worktree handle from the exact read-only query below:
+
+```sh
+orca worktree list --repo 'path:<registered-firstmate-project>' --limit 1 --json | jq -r '.result.worktrees[0] | [.id, .path] | @tsv'
+```
+
+```text
+8764824d-2f62-4fe5-b755-2c5ea87ea61e::<absolute-worktree-path>    <absolute-worktree-path>
+```
+
+The earlier 1.4.116 profile used a repository-identity prefix containing both a colon and a slash; its sanitized read-only capture was:
+
+```sh
+orca worktree list --repo 'id:github:kunchenguid/firstmate' --json | jq -r '.result.worktrees[] | select(.path == "<absolute-worktree-path>") | .id'
+```
+
+```text
+github:kunchenguid/firstmate::<absolute-worktree-path>
 ```
 
 `orca terminal create --json` returned `result.terminal.handle`.
@@ -964,6 +984,8 @@ On 2026-08-23 in the local control environment, the opt-in argument-validation g
 FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 ```
 
-It reported that the candidate adapter's five non-execution tool names were accepted and that validation stopped before session startup.
+```text
+ok - installed omp/17.2.9 accepts the candidate adapter allowlist 'read,write,edit,glob,grep'; validation stopped before session startup
+```
 The guard appends a deliberately invalid tool name, so OMP exits during argument parsing without a prompt, TUI, session, provider call, or model turn.
 This is installed-binary compatibility evidence, not a live First Mate pilot; OMP remains candidate-only until that separately approved pilot passes.

@@ -16,7 +16,8 @@ fi
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v timeout >/dev/null 2>&1 || fail "FM_OMP_TOOLS_LIVE_E2E=1 but timeout is not installed"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/bin/fm-timeout-lib.sh"
 OMP_BIN=$(command -v omp) || fail "FM_OMP_TOOLS_LIVE_E2E=1 but omp is not installed"
 VERSION=$("$OMP_BIN" --version 2>/dev/null | tr -d '[:space:]')
 PINNED_VERSION=omp/17.2.9
@@ -27,7 +28,7 @@ TOOLS=read,write,edit,glob,grep
 SENTINEL=__fm_not_a_tool__
 
 omp_unknown_names() {
-  timeout 30 "$OMP_BIN" --tools "$1" </dev/null 2>&1 \
+  fm_run_timed 30 "$OMP_BIN" --tools "$1" </dev/null 2>&1 \
     | sed -n 's/.*Unknown tools\{0,1\} in --tools: \([^.]*\)\..*/\1/p' \
     | head -1
 }
