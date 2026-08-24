@@ -45,9 +45,10 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
-# Every scaffold's status protocol distinguishes the configured
-# declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
-# "blocked:": pause for a known external wait expected to clear on its own,
+# Every scaffold's status protocol distinguishes a declared external wait from
+# "blocked:": a known external wait expected to clear on its own is declared
+# through bin/fm-wait.sh (the machine wait field with reason and deadline,
+# which also appends the configured FM_CLASSIFY_PAUSED_VERB status line),
 # blocked when firstmate must act.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
@@ -57,6 +58,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs both carry a fixed budget note right after {TASK}: any
+# money or usage frame stated there for image, model, or measurement calls must
+# also name its invocation path (which gateway alias, the house channel, or
+# local with which key), so a worker never mistakes a deliberately absent local
+# key for a defect. It applies only when {TASK} actually states a budget.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -233,9 +239,18 @@ You are in an isolated firstmate home. The local \`AGENTS.md\` is your job descr
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
+Never add an agent name as a commit co-author or Co-authored-by footer in any commit you or your crewmates make; commit as the repository's configured user only.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+
+# Plan approval before an implementation
+Investigation and analysis are free: scout work, reading, reproduction, and diagnosis need no permission.
+Starting an IMPLEMENTATION does not.
+Before every implementation, write the plan - goal, which agreement it implements, steps, acceptance - into that task's brief in this home, then route that brief's path to the main firstmate through the STATUS/ESCALATION path below and wait for its approval.
+This is enforced, not remembered: a ship spawn and a scout promotion in this home both refuse until the main firstmate has signed an approval for that exact task and those exact brief bytes, and this home cannot produce that signature itself.
+Editing the brief after approval invalidates it, so route the changed plan back for a fresh approval instead of starting on the old one.
+Run \`bin/fm-plan-approval.sh verify <task-id>\` from this home when you want to see whether a task is cleared to start; that script's header owns the rest of the contract.
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -257,7 +272,7 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+For a deliberate domain-wide wait on a known external event you expect to clear on its own, declare it as a machine wait with \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\` - it appends the \`$PAUSED_VERB:\` event for you and records the deadline - and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
@@ -318,6 +333,8 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+BUDGET_NOTE='**Budget note:** if the task above states a money or usage frame for image, model, or measurement calls, it must also name the invocation path - a gateway alias (which one), the house channel, or local with a key (which variable/source). A budget without a stated path sends the worker hunting for a key that may not exist.'
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -325,34 +342,42 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$BUDGET_NOTE
+
 $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
+Never delete anything, here or anywhere else: teardown discards this worktree for you, so a scout has no reason to run rm at all.
+A delete built from a variable reaches outside the worktree the moment that variable is empty, which is why the rule is none rather than careful.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
+2. Never add an agent name as a commit co-author or Co-authored-by footer; commit as the repository's configured user only.
+3. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and your own wait record via the fm-wait.sh command in rule 5.
+4. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+5. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs to a human (product choices, destructive actions),
+   For a deliberate wait on a known external event you expect to clear on its own (an upstream
+   release, a rate-limit reset), do NOT hand-write a \`$PAUSED_VERB:\` line: declare the wait as a
+   machine field with \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\`
+   (accepts +<seconds>, a unix epoch, or an ISO date). It appends the status line for you and
+   silences firstmate's liveness checks until that deadline; refresh it the same way if the wait
+   extends, and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early.
+   Use \`blocked:\` when you are stuck and need help.
+6. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+7. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+8. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
@@ -417,7 +442,7 @@ When starting no-mistakes, make \`--intent\` preserve all relevant content from 
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+- ask-user findings are never yours to answer: escalate to firstmate (rule 7) and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
@@ -438,6 +463,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$BUDGET_NOTE
+
 $HERDR_SECTION
 
 # Setup
@@ -451,9 +478,10 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-4. Report status by appending one line:
+2. Never add an agent name as a commit co-author or Co-authored-by footer; commit as the repository's configured user only.
+3. Stay inside this worktree; modify nothing outside it.
+4. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+5. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
@@ -462,16 +490,20 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
+   For a deliberate wait on a known external event you expect to clear on its own (an upstream
+   release, a rate-limit reset, a scheduled window), do NOT hand-write a \`$PAUSED_VERB:\` line:
+   declare the wait as a machine field with
+   \`$FM_ROOT/bin/fm-wait.sh declare $ID --reason '{why}' --until '{when}'\`
+   (accepts +<seconds>, a unix epoch, or an ISO date). It appends the status line for you and
+   silences firstmate's liveness checks until that deadline; refresh it the same way if the wait
+   extends, and run \`$FM_ROOT/bin/fm-wait.sh clear $ID\` when it ends early.
+   Use \`blocked:\` when you are stuck and need help.
+6. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+7. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+8. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
@@ -482,7 +514,7 @@ If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durab
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+Record durable project knowledge however small the change; skip it however large the change if there is none.
 
 $DOD
 EOF

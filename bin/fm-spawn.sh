@@ -16,6 +16,11 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   In a home carrying the .fm-secondmate-home marker, a fresh ship spawn also
+#   refuses unless bin/fm-plan-approval.sh verifies the primary firstmate's
+#   signed approval for this task id and the exact current brief bytes; that
+#   script's header owns the whole plan-gate contract, including which spawns
+#   stay ungated.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -104,7 +109,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|claude-ox|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -161,6 +166,20 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#   For a positional-prompt harness, the launch command reads __BRIEF__ whole
+#   (`$(fm-operational-input.sh encode launch-brief < __BRIEF__)`), so a
+#   relaunch's launch text is exactly whatever bin/fm-control.sh left on disk
+#   at that path - the progress note it records is PREPENDED to the brief
+#   there, never appended, so the composed text a fresh incarnation reads is
+#   note, blank line, then the full original brief, the same order a fresh
+#   spawn's brief would carry after its own note line. kimi is a pointer
+#   harness instead: its launch text is one literal sentence pointing at
+#   __BRIEF__ rather than that file's content, so on a relaunch with a
+#   recorded note this script reads it back from
+#   FM_CONTROL_RELAUNCH_NOTE_FILE and leads the pointer sentence with
+#   it, collapsed to one line first (an embedded newline sent via a literal
+#   composer keystroke is unsafe - see the newline-collapse comment at its use
+#   site) so the note precedes rather than replaces the pointer.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -260,9 +279,28 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# Fail closed while a captain-ordered fleet stop is active (file contract:
+# bin/fm-fleet-stop.sh header): no agent start of any kind, no override here -
+# lifting the stop is a captain-word operation on that script.
+if [ -f "$STATE/.fleet-stop" ]; then
+  echo "error: fleet stop active ($STATE/.fleet-stop) - launch refused; inspect: bin/fm-fleet-stop.sh status" >&2
+  exit 1
+fi
+# Day-close pre-warning zone (file contract: bin/fm-tagesschluss.sh header):
+# from 19:30 no NEW launches tonight; running work winds down to a safe halt.
+# The marker binds only on its own date; a stale one is cleaned, not obeyed.
+if [ -f "$STATE/.tagesschluss-vorwarn" ]; then
+  if [ "$(sed -n '1s/^date=//p' "$STATE/.tagesschluss-vorwarn")" = "$(date +%F)" ]; then
+    echo "error: day-close pre-warning zone active (19:30) - no new launches tonight; the morning check reopens the fleet" >&2
+    exit 1
+  fi
+  rm -f "$STATE/.tagesschluss-vorwarn"
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1127,6 +1165,14 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # claude-ox: the claude family's Ox Alpha launch profile (stealth/ox-alpha
+    # via OpenRouter), matching config/crew-dispatch.json rule 1's wrapper
+    # verbatim. __MODELFLAG__ is kept as a placeholder for template-shape
+    # parity with `claude`, but deliberately resolves to nothing: claude-ox is
+    # absent from model_flag_for_harness's case below on purpose, because the
+    # wrapper pins stealth/ox-alpha and a `--model` flag would be billed on
+    # OpenRouter instead of routed free. Never add claude-ox there.
+    claude-ox) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude1 --ox --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1376,6 +1422,9 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
+    # claude-ox is deliberately absent: its wrapper pins stealth/ox-alpha, and
+    # a --model flag would be billed on OpenRouter instead of routed free
+    # (config/crew-dispatch.json rule 1). Never add it here.
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
@@ -1386,7 +1435,7 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
-    claude)
+    claude|claude-ox)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -1689,6 +1738,22 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Plan gate (bin/fm-plan-approval.sh owns the whole contract). A secondmate home
+# may not START an implementation without the primary firstmate's signed approval
+# for this exact task and the exact bytes of the brief about to be handed to the
+# worker. Scout spawns and secondmate launches stay ungated because investigation
+# is free and a launch is not an implementation, and --relaunch stays ungated
+# because it reuses metadata only a gated fresh spawn could have written.
+if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ] && fm_root_is_secondmate_home "$FM_HOME"; then
+  if ! PLAN_GATE_OUT=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-plan-approval.sh" verify "$ID" --plan-file "$BRIEF" 2>&1); then
+    [ -z "$PLAN_GATE_OUT" ] || printf '%s\n' "$PLAN_GATE_OUT" >&2
+    echo "error: $ID cannot start here without the main firstmate's plan approval; submit the plan for this task and start only after it approves (bin/fm-plan-approval.sh, and the plan-gate section of the secondmate-provisioning skill)" >&2
+    exit 1
   fi
 fi
 
@@ -2209,6 +2274,26 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# kimi_relaunch_note_prefix: the relaunch progress note, collapsed to one
+# line, to lead kimi's pointer sentence. kimi's launch text is submitted as
+# literal composer keystrokes (fm_backend_send_text_submit -> tmux send-keys
+# -l), not evaluated as a shell command line the way a positional-prompt
+# harness's `$(... < __BRIEF__)` is, so an embedded newline in the payload is
+# an unverified raw keystroke a TUI composer may treat as its own Enter -
+# exactly the risk bin/fm-supervise-daemon.sh's away-mode injector already
+# collapses newlines to avoid. Only trusted from FM_CONTROL_RELAUNCH_TX's
+# own parent (SPAWN_CONTROL_PARENT): an unrelated caller's env cannot lead
+# this launch's pointer.
+kimi_relaunch_note_prefix() {
+  local note_file=${FM_CONTROL_RELAUNCH_NOTE_FILE:-} note
+  [ "$RELAUNCH" -eq 1 ] || return 0
+  [ "$SPAWN_CONTROL_PARENT" = 1 ] || return 0
+  case "$KIND" in ship|scout) ;; *) return 0 ;; esac
+  [ -n "$note_file" ] && [ -s "$note_file" ] || return 0
+  note=$(cat "$note_file") || return 0
+  printf '%s\n\n' "${note//$'\n'/ - }"
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2363,6 +2448,11 @@ if [ "$KIND" != secondmate ]; then
       # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
+      # includeCoAuthoredBy and the newer attribution object both suppress the
+      # Claude-authored commit/PR footer (AGENTS.md: never an agent co-author);
+      # both are set because upstream deprecated includeCoAuthoredBy in favor
+      # of attribution but attribution.commit="" alone has a known upstream
+      # bug that leaves the footer in place (anthropics/claude-code#45137).
       mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
@@ -2371,7 +2461,7 @@ if [ "$KIND" != secondmate ]; then
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -2833,7 +2923,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER="$(kimi_relaunch_note_prefix)Read the brief at $BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}

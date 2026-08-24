@@ -27,14 +27,27 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
+#   1b. An ACTIVE declared machine wait (state/<id>.wait, bin/fm-wait-lib.sh)
+#      reports paused · wait-field with the declared reason, deadline, and
+#      declaration age, and deliberately outranks the run-step and pane reads
+#      below: the old precedence of run-step/pane busy-ness over the worker's
+#      own declaration is abolished (plan v3 U1.4). Expired or malformed
+#      fields decide nothing.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      fallback)? For a TERMINAL run, branch name alone is not enough: a
+#      historical run on a reused branch whose head was rewritten or diverged
+#      must not be attributed. Such a run matches when its head equals the
+#      worktree HEAD, or the worktree HEAD is an ancestor of the run head
+#      (pipeline fix commits advanced the run on the same line of history).
+#      Local work that advanced past the run head, or diverged from it,
+#      invalidates attribution. An EXECUTING run on this crew's branch is
+#      attributed with no head condition, because a run the pipeline is running
+#      right now cannot be history, and it also outranks any older terminal run
+#      for the branch - a cancelled or failed run that a newer running one
+#      replaced is never the current state (see nm_runs_status_for_branch for
+#      the evidence). A run parked at a gate is waiting, not executing, and
+#      still needs its head to bind.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -46,16 +59,39 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
+#      For harness=claude, a pane parked on Claude Code's account/usage-limit
+#      banner (claude_limit_scan below, over bin/fm-busy-lib.sh's
+#      fm_busy_claude_limit_banner) never overrides an attributed run's own
+#      state: a parked or actively running/fixing/ci run keeps its state and
+#      gate detail and only gains an appended `worker pane limit-blocked` note,
+#      and a terminal done/failed run is left alone. The pane's paused verdict
+#      applies only when no run is attributed (case 4 below) or the attributed
+#      run is in none of those states.
+#   4. No run for this crew (pre-validation, or kind=scout): first the
+#      process-evidence liveness read (fm_backend_agent_state) - an endpoint
+#      that is open but confidently agent-free reports unknown · agent-gone
+#      instead of trusting a stale busy record (the empty-shell shape) - then
+#      the recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. For harness=claude, a
+#      busy pane verdict is overridden when the pane's composer region shows
+#      Claude Code's blocking account/usage-limit widget (see bin/fm-busy-
+#      lib.sh's fm_busy_claude_limit_banner for the verified wordings, the
+#      anchoring, the widget-to-state mapping, and why a bare limit notice is
+#      deliberately NOT a pause): the worker is stalled, not taking a working
+#      turn, even though its UserPromptSubmit hook already opened one. A widget
+#      that resolves itself reports paused; Claude Code's give-up widget, which
+#      never resumes without a human, reports blocked. A bare notice instead
+#      annotates the working detail with `limit notice visible in pane`.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# Read-only towards the crew, its worktree and its pipeline: nothing here can
+# start, resume, answer or abort a run. The one write is the bounded negative
+# cache state/.run-superseded-<id> described at nm_supersession_absent_cached.
+# Always exits 0 on a successful read regardless of state; exit 2 only on a
+# usage error (no id).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,6 +107,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-wait-lib.sh
+. "$SCRIPT_DIR/fm-wait-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
@@ -87,6 +125,8 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+FM_RUN_SUPERSEDED_TTL=${FM_RUN_SUPERSEDED_TTL:-120}
+case "$FM_RUN_SUPERSEDED_TTL" in ''|*[!0-9]*) FM_RUN_SUPERSEDED_TTL=120 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -187,10 +227,28 @@ if [ -n "$REMOTE_HOST" ]; then
   esac
 fi
 
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
+# --- declared machine wait (bin/fm-wait-lib.sh) ------------------------------
+# An ACTIVE declared wait is the worker's own authoritative self-report and
+# outranks run-step and pane busy-ness - the old precedence rule, under which
+# surface or run-step occupation overrode the self-declaration, is abolished
+# (plan v3 U1.4). The worker owns refreshing or clearing its declaration, so
+# the wait stands until its deadline or an explicit clear; an expired or
+# malformed field decides nothing here and resolution continues normally.
+if fm_wait_read "$STATE" "$ID" && [ "$FM_WAIT_STATE" = active ]; then
+  WAIT_ISO=$(date -u -d "@$FM_WAIT_UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+    || WAIT_ISO=$(date -u -r "$FM_WAIT_UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) \
+    || WAIT_ISO="epoch $FM_WAIT_UNTIL"
+  emit paused wait-field "waiting: $FM_WAIT_REASON${SEP}until $WAIT_ISO${SEP}declared $(( $(date +%s) - FM_WAIT_TS ))s ago"
+fi
+
+# pane_readable has two callers: the no-run fallback below, and claude_limit_scan
+# right beneath it (which the run-step path also consults for a harness=claude
+# crew, costing that path one liveness probe plus one 40-line capture per read).
+# Neither makes the pane authoritative for a crew WITH a run: the run-step path
+# still judges by the run-step, not the shell - an unreadable pane merely makes
+# claude_limit_scan return non-zero and the run state is emitted unchanged - so a
+# finished crew whose endpoint has closed still reports its run-step state
+# (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
@@ -202,6 +260,42 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
+# claude_limit_scan: the pane-derived Claude account/usage-limit override's one
+# reader, captured once per resolution. For a harness=claude crew with a
+# readable pane it sets, from that single capture:
+#   LIMIT_STATE  - paused or blocked, the state the matched blocking widget
+#                  means (a give-up widget is blocked, an armed or
+#                  reset-awaiting one is paused); empty when no widget matched.
+#   LIMIT_DETAIL - that widget's detail; the only signal that overrides the
+#                  busy verdict, emitted under LIMIT_STATE.
+#   LIMIT_NOTICE - a limit name merely visible in that region with no blocking
+#                  widget; annotates a working verdict, never changes it.
+# Both empty (and non-zero) for any other harness, an unreadable pane, or a
+# pane with neither signal. bin/fm-busy-lib.sh's fm_busy_claude_limit_banner
+# header owns the verified wordings, the composer-region anchoring, and the
+# deliberate limitation that a bare notice is not a pause; every path below
+# consults this one helper so the override cannot drift between them.
+claude_limit_scan() {
+  local tail_text widget
+  LIMIT_STATE=''
+  LIMIT_DETAIL=''
+  LIMIT_NOTICE=''
+  case "$HARNESS" in claude*) ;; *) return 1 ;; esac
+  [ -n "$BACKEND_TARGET" ] || return 1
+  pane_readable "$BACKEND_TARGET" || return 1
+  tail_text=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+  widget=$(printf '%s' "$tail_text" | fm_busy_claude_limit_banner) || widget=''
+  if [ -n "$widget" ]; then
+    LIMIT_STATE=${widget%%$'\t'*}
+    LIMIT_DETAIL=${widget#*$'\t'}
+    return 0
+  fi
+  if printf '%s' "$tail_text" | fm_busy_claude_limit_notice; then
+    LIMIT_NOTICE='limit notice visible in pane'
+  fi
+  [ -n "$LIMIT_NOTICE" ]
+}
+
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
 # adapter answers from its own lifecycle record; Grok answers from its
@@ -261,7 +355,7 @@ nm_gate_status() {
   [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
 }
 nm_has_gate() {
-  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
+  fm_nm_run_has_gate "$RUN_OUT"
 }
 nm_gate_line_name() {
   local gate step
@@ -370,23 +464,60 @@ nm_ci_checks_state() {
 # status` answer was not this crew's own branch, attribution always failed and
 # the caller fell straight through to the pane/log fallback below. (The
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
+# a separate precedence bug in bin/fm-watch.sh's since-removed stale path -
+# see that file's history - but this cross-branch path was independently
+# confirmed dead code and is worth having actually work.)
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
-# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
+# `no-mistakes --help` lists it separately from `axi`; both halves of this split
+# re-confirmed on v1.48.0, 2026-08-16). It is plain, human-
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the matched row's status
+# word (running/completed/cancelled/failed), or empty when the branch has no
+# usable run within FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# Rows are newest-first, and the precedence among them is ONE rule, stated here
+# and nowhere else. A still-running row wins if and only if the branch's NEWEST
+# row is itself running, and such a row needs no head match. Otherwise the answer
+# is the first row that binds to this worktree, by its own status word. Otherwise
+# the answer is empty.
+#
+# Why a running newest row needs no head match: the head rule exists to stop a
+# HISTORICAL run on a reused branch from being attributed, and a run that is
+# still executing cannot be history. A pipeline that rebased or rewrote its head
+# (what `no-mistakes rerun` from a preserved head does) is exactly the case that
+# must still be attributed to the crew whose branch it holds. A terminal or
+# parked row still has to bind, exactly as before.
+#
+# Why the newest row decides: without running-wins, a crew whose cancelled or
+# failed run was immediately replaced by a fresh one kept reporting the dead run
+# as its current state (2026-08-16: snacksuite run 01M03RWN cancelled and
+# replaced by 01M0492M running still read as "failed: run cancelled"; lensclash
+# run 01M0490J failed and replaced by 01M04KJJ still read as "failed: run
+# failed" while `axi status` showed running/fixing), and the watcher turned that
+# into an inactive-crew false alarm. In both cases the branch's newest row IS the
+# running replacement. Without the newest-row condition, an OLDER row left stuck
+# at running would suppress a newer real terminal verdict, and a genuinely dead
+# crew would read as working forever.
+#
+# Accepted residual risk: a row stuck at running at the TOP of the list is still
+# read as working. The counterweight is the wedge-escalation progress probe
+# (crew_run_progressed in bin/fm-classify-lib.sh), which goes through `axi
+# status` and absorbs only on actual movement.
+#
+# Exit status separates "the listing answered" (0) from "the listing produced
+# nothing at all" (1), because nm_run is fail-open: a timed-out or erroring CLI
+# is indistinguishable from a clean answer by the printed word alone. Callers
+# that only need the word can keep ignoring the status - an unanswered listing
+# prints nothing either way - but a caller that would REMEMBER the answer must
+# not remember a non-answer.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha newest=1
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
-  [ -n "$out" ] || return 0
+  [ -n "$out" ] || return 1
   while IFS= read -r row; do
     row=$(trim "$row")
     [ -n "$row" ] || continue
@@ -397,16 +528,72 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
+    [ "$br" = "$branch" ] || continue
+    if [ "$newest" = 1 ]; then
+      newest=0
+      if [ "$st" = running ]; then
+        printf 'running'
+        return 0
       fi
+    fi
+    if nm_coarse_head_matches_worktree "$sha"; then
       printf '%s' "$st"
       return 0
     fi
   done <<< "$out"
+  return 0
+}
+
+# Damping for the terminal-run supersession probe in the run-step path below. A
+# terminal run that nothing ever
+# replaces answers "not superseded" forever, and without a memory every single
+# state read would pay another bounded `no-mistakes runs` call - worst for
+# bin/fm-inactive-reconcile.sh, which calls this helper on exactly the done and
+# failed children it exists to report, under a shared scan budget.
+#
+# Only the NEGATIVE answer is remembered, in state/.run-superseded-<id> holding
+# the worktree head and the epoch it was written; a positive supersession is
+# never served from cache. A recorded head other than the current one
+# invalidates the entry outright, and an entry older than
+# FM_RUN_SUPERSEDED_TTL is re-probed, so a real replacement is still detected
+# well inside a heartbeat.
+nm_supersession_cache_file() {
+  printf '%s/.run-superseded-%s' "$STATE" "$ID"
+}
+
+# 0 when a still-valid "not superseded" answer is on record for this worktree head.
+nm_supersession_absent_cached() {
+  local file head recorded_head recorded_epoch now
+  file=$(nm_supersession_cache_file)
+  [ -f "$file" ] || return 1
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  [ -n "$head" ] || return 1
+  read -r recorded_head recorded_epoch < "$file" || return 1
+  [ "$recorded_head" = "$head" ] || return 1
+  case "${recorded_epoch:-}" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s 2>/dev/null) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(( now - recorded_epoch ))" -lt "$FM_RUN_SUPERSEDED_TTL" ]
+}
+
+nm_supersession_record_absent() {
+  local file head now tmp
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 0
+  [ -n "$head" ] || return 0
+  now=$(date +%s 2>/dev/null) || return 0
+  file=$(nm_supersession_cache_file)
+  # Fixed temp name, not mktemp: a random suffix would force teardown to sweep
+  # "$file".* to catch an orphan, and a task id may itself contain a dot
+  # (fm_task_id_path_safe allows it), so that glob would delete a live sibling
+  # task's records. There is no concurrent writer for one task - the watcher and
+  # the away daemon are mutually exclusive by mode - and the rename below is
+  # atomic regardless, so the deterministic name is safe. Do not restore mktemp.
+  tmp="$file.tmp"
+  if ( umask 077; printf '%s %s\n' "$head" "$now" > "$tmp" ); then
+    mv -f -- "$tmp" "$file" || rm -f -- "$tmp"
+  else
+    rm -f -- "$tmp"
+  fi
   return 0
 }
 
@@ -437,6 +624,10 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# 1 when the attributed run is this crew's branch but its head has moved off the
+# local line of history. Recorded in the detail so a reader can tell an ordinary
+# attribution from this one; see the branch that sets it below.
+RUN_HEAD_DIVERGED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -445,10 +636,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+    elif [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_executing "$RUN_OUT"; then
+      # Same branch, executing right now, head off this line of history. A
+      # pipeline that rebased its work or resumed from a preserved head leaves
+      # exactly this shape, and the run still owns the crew's branch, so it IS
+      # the current state. Attributing it here (rather than falling through to
+      # the coarse list) keeps the run's own step detail instead of a bare
+      # "validating". A parked or terminal run earns no such relaxation
+      # (fm_nm_run_is_executing owns that boundary).
+      HAVE_RUN=1
+      RUN_HEAD_DIVERGED=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # a rewritten/diverged head on an already-terminal run (the CLI is alive
+      # and answered; only the attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
@@ -470,14 +671,18 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  # 1 only when the run OBJECT itself reported a terminal verdict, which the
+  # supersession probe below needs to tell apart from the ci-green override -
+  # that one reads done off a run that is still executing.
+  RUN_TERMINAL=0
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
     # gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
+    # needs-decision/blocked status-log append is surfaced through the content
+    # wake rule (status_span_wake_class in fm-classify-lib.sh) regardless of
+    # this coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
@@ -496,10 +701,10 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"; RUN_TERMINAL=1 ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"; RUN_TERMINAL=1 ;;
+        failed)        RUN_STATE=failed; RUN_DETAIL="run failed"; RUN_TERMINAL=1 ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_TERMINAL=1 ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -521,9 +726,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        completed)      RUN_STATE="done"; RUN_DETAIL="run completed"; RUN_TERMINAL=1 ;;
+        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed"; RUN_TERMINAL=1 ;;
+        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL=1 ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -562,6 +767,41 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  # A terminal run is the crew's current state only while nothing has replaced
+  # it. The worker's own supersession sequence (abort or crash, recover custody,
+  # start again) leaves the dead run as the most recent record for a while, and
+  # reporting it as current is what produced the 2026-08-16 inactive-crew false
+  # alarms documented on nm_runs_status_for_branch. That function is the ONE
+  # owner of the newer-active-run-wins rule; consult it before letting a
+  # terminal verdict stand. Both the failed and the done half are checked,
+  # because bin/fm-inactive-reconcile.sh raises its inactive-terminal-outcome
+  # record off either one (evidence 2026-08-16 10:35, lensclash-datenschutz-
+  # loeschung: state=failed surfaced while `axi status` showed running). The
+  # ci-green override is deliberately excluded via RUN_TERMINAL - that run is
+  # still executing and is its own newest row. The coarse path already applied
+  # the same rule when it resolved, and nm_supersession_absent_cached damps the
+  # repeat cost for a terminal run nothing ever replaces. Only a listing that
+  # actually ANSWERED may be remembered - a timed-out one leaves the cache alone
+  # and costs just this read, rather than pinning the terminal verdict for a
+  # whole TTL and handing bin/fm-inactive-reconcile.sh the false record this
+  # exists to prevent.
+  if [ "$RUN_TERMINAL" = 1 ] && [ "$RUN_SOURCE" = full ] \
+     && { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = "done" ]; } \
+     && ! nm_supersession_absent_cached; then
+    if REPLACEMENT_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH"); then
+      if [ "$REPLACEMENT_STATUS" = running ]; then
+        RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
+        RUN_STATE=working
+      else
+        nm_supersession_record_absent
+      fi
+    fi
+  fi
+
+  if [ "$RUN_HEAD_DIVERGED" = 1 ]; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}run head diverged from local copy"
+  fi
+
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
@@ -573,6 +813,33 @@ if [ "$HAVE_RUN" = 1 ]; then
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
         fi
+      fi
+      ;;
+  esac
+
+  # A limit-blocked Claude pane is an external wait on the worker's side, but a
+  # run attributed to this crew stays authoritative: a parked run is waiting on
+  # a CAPTAIN decision the worker's quota block does not prevent, and an active
+  # step may progress independently of the pane, so both keep their own state
+  # and detail and only carry the pane's block as an appended note. A terminal
+  # outcome (done/failed) is more informative than paused and is left alone.
+  # Only a run whose state is neither parked, active, nor terminal falls
+  # through to the pane's paused verdict.
+  case "$RUN_STATE" in
+    parked|working)
+      if claude_limit_scan; then
+        if [ -n "$LIMIT_DETAIL" ]; then
+          RUN_DETAIL="$RUN_DETAIL${SEP}worker pane limit-blocked ($LIMIT_DETAIL)"
+        else
+          RUN_DETAIL="$RUN_DETAIL${SEP}$LIMIT_NOTICE"
+        fi
+      fi
+      ;;
+    done|failed)
+      ;;
+    *)
+      if claude_limit_scan && [ -n "$LIMIT_DETAIL" ]; then
+        emit "$LIMIT_STATE" pane "account limit: $LIMIT_DETAIL"
       fi
       ;;
   esac
@@ -594,9 +861,33 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
+  # Process-evidence liveness (plan v3 U1.4): an endpoint that is open but
+  # confidently agent-free is the empty-shell shape the 2026-08-23 incidents
+  # documented - an agent killed mid-turn leaves a stale busy record behind,
+  # and trusting it would report a dead crew as working. Only a confident
+  # negative overrides; ambiguous, unreadable, and unverified reads fall
+  # through to the semantic verdict unchanged.
+  case "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")" in
+    dead|missing)
+      emit unknown agent-gone "endpoint open but its process family holds no live agent (empty shell) - inspect or recover"
+      ;;
+  esac
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      # A Claude worker parked on its own account/usage-limit banner is an
+      # external wait, not a working turn - report paused instead of the
+      # generic hook-derived busy, per fm_busy_claude_limit_banner's contract
+      # (bin/fm-busy-lib.sh). Scoped to harness=claude only; every other
+      # harness keeps the plain busy -> working mapping below.
+      if claude_limit_scan; then
+        if [ -n "$LIMIT_DETAIL" ]; then
+          emit "$LIMIT_STATE" pane "account limit: $LIMIT_DETAIL"
+        fi
+        emit working pane "harness busy (${BUSY_VERDICT#* })${SEP}$LIMIT_NOTICE"
+      fi
+      emit working pane "harness busy (${BUSY_VERDICT#* })"
+      ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac

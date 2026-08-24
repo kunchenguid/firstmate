@@ -1,0 +1,10 @@
+[Unit]
+Description=Claude-Konten 1-4: OAuth-Auth automatisch frisch halten (Refresh ohne Modellaufruf)
+# Kanonische Kopie: firstmate-Arbeitszweig ops/systemd/ (2026-08-23).
+# Installationsort: ~/.config/systemd/user/fm-konto-auth.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/fm-konto-auth-refresh
+# Ein Lauf ist kurz (ein HTTP-POST je kappem Konto); trotzdem begrenzen:
+TimeoutStartSec=300

@@ -53,6 +53,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=tests/plan-approval-helpers.sh
+. "$ROOT/tests/plan-approval-helpers.sh"
 
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
@@ -169,6 +171,11 @@ pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMAT
 
 # --- 3. a crewmate spawned FROM the secondmate-shaped home lands in the SAME
 # secondmate workspace (this exact path has never run before this test) -----
+
+# A ship spawn from a secondmate home needs the primary's signed plan approval
+# before it may start (bin/fm-plan-approval.sh).
+fm_test_plan_approval "$PRIMARY_HOME" "$SM_HOME" cm2 \
+  || fail "could not approve the plan for the secondmate-owned crewmate cm2"
 
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" \

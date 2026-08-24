@@ -34,7 +34,7 @@
 # In a secondmate home, that receipt is an idempotent parent-channel status
 # append.
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
-# only after its corresponding inactive-outcome wake is handled.
+# in the invocation that presents and consumes its inactive-outcome wake.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,

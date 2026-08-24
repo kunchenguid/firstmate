@@ -15,6 +15,8 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-proctree-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-proctree-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
@@ -106,23 +108,25 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+_fm_lock_ancestry_visit() { # climb visitor: print the contiguous verified run
+  local pid=$1 comm args
+  comm=$(fm_proctree_comm "$pid") || return 2
+  args=$(fm_proctree_args "$pid")
+  if fm_harness_process_matches "$comm" "$args"; then
+    printf '%s\n' "$pid"
+    FM_LOCK_ANCESTRY_PRINTED=1
+    [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 0
+    FM_LOCK_ANCESTRY_EXTENDING=1
+    return 1
+  fi
+  [ "$FM_LOCK_ANCESTRY_EXTENDING" -eq 1 ] && return 0
+  return 1
+}
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
-      printf '%s\n' "$pid"
-      printed=1
-      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
-      extending=1
-    elif [ "$extending" -eq 1 ]; then
-      break
-    fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
-  done
-  [ "$printed" -eq 1 ]
+  FM_LOCK_ANCESTRY_PRINTED=0
+  FM_LOCK_ANCESTRY_EXTENDING=0
+  fm_proctree_climb "$$" 16 _fm_lock_ancestry_visit || true
+  [ "$FM_LOCK_ANCESTRY_PRINTED" -eq 1 ]
 }
 
 # Print the one pid that identifies this session when the session lock is being

@@ -261,7 +261,47 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/away-selfheal-command",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/Containerfile",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/README.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/entrypoint.sh",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner-supervise.sh",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner-token-relay.service",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner-token-relay.sh",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner-token-relay.timer",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner.slice",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/gex-ci-runner/gh-runner@.service",
       "audience": "operator-example"
     },
     {
@@ -279,6 +319,14 @@
     {
       "path": "docs/fm-test-portable-shards.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/gex-ci-laeufer.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/gex-ci-uebergabe-phase2.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/gitlab-merge-watch.md",
@@ -339,6 +387,10 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/telegram-miniapp.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/tmux-backend.md",

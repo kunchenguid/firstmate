@@ -58,12 +58,15 @@ fm_control_verb_allowed() {  # <verb>
   return 1
 }
 
-# The harnesses whose control mechanics are verified. Mirrors AGENTS.md
-# section 4's verified-adapter list; an unverified adapter is refused rather
-# than guessed at, exactly as a spawn on it would be.
+# The harnesses whose control mechanics are verified; an unverified adapter
+# is refused rather than guessed at, exactly as a spawn on it would be.
+# claude-ox is a distinct verified control-plane value for the claude
+# family's Ox Alpha launch profile (config/crew-dispatch.json rule 1's
+# `claude1 --ox` wrapper) - the same family-variant pattern as pi-signed
+# alongside pi.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|claude-ox|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
   esac
   return 1
 }

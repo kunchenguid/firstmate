@@ -258,9 +258,9 @@ test_queued_wake_warning_stays_independent() {
   out2=$(run_guard_case "$dir")
   assert_contains "$out2" "full banner already printed this episode" \
     "same-episode stale call should still print its concise reminder"
-  assert_contains "$out2" "queued wakes pending" \
-    "queued wake warning must not be suppressed by stale-banner deduplication"
-  pass "fm-guard stale banner: queued-wake warning remains independent"
+  assert_not_contains "$out2" "queued wakes pending" \
+    "queued rows must no longer produce a standing guard warning (U1.3)"
+  pass "fm-guard stale banner: queued rows produce no standing warning"
 }
 
 test_read_only_before_writable_does_not_consume_full_banner() {
@@ -603,11 +603,11 @@ test_extension_handoff_keeps_queued_wake_warning() {
   out=$(run_guard_case_extension "$dir")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  assert_contains "$out" "queued wakes pending" \
-    "the queued-wake warning must still fire during an extension-owned hand-off"
+  assert_not_contains "$out" "queued wakes pending" \
+    "queued rows must no longer produce a standing guard warning (U1.3)"
   assert_not_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
     "a queued wake must not resurrect the watcher-down banner for a healthy hand-off"
-  pass "fm-guard stale banner: queued-wake warning survives the extension hand-off tolerance"
+  pass "fm-guard stale banner: a healthy extension hand-off stays silent about queued rows"
 }
 
 # The tolerance is scoped to the extension model alone. Every persistent-watcher

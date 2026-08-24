@@ -14,6 +14,7 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 - `off` disables every active alert while retaining the durable marker and tmux flash.
 - `auto` or `default` resolves to `osascript` on macOS.
   Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
+  On Linux that configuration is the only active alert there is; the example file carries copyable push, desktop, and syslog directives.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.

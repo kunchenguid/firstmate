@@ -264,7 +264,7 @@ test_interrupt_sends_each_harness_verified_key() {
 # are reached through one prefix rule rather than an exact string match.
 test_harness_family_resolution() {
   local pair recorded want got
-  for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
+  for pair in claude:claude claude-latest:claude claude-ox:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
       pi-signed:pi-signed; do

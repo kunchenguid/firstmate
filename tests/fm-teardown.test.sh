@@ -1326,6 +1326,46 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+# A task id may contain a dot (fm_task_id_path_safe rejects only a LEADING one),
+# so the per-task supervision records of a live task "<id>.v2" sit exactly where
+# a "$STATE/.run-progress-<id>".* sweep would match them. Deleting a live
+# sibling's progress baseline is data loss on work in progress: the next probe
+# of that crew becomes the first of its series and absorbs unconditionally, so a
+# genuinely wedged sibling silently loses a full wedge-detection window.
+# Teardown therefore removes only exact paths, which the deterministic ".tmp"
+# temp name (see crew_run_progressed) makes sufficient.
+test_teardown_keeps_dotted_sibling_task_supervision_records() {
+  local case_dir rc
+  case_dir=$(make_case dotted-sibling-records)
+  write_meta "$case_dir" local-only ship
+  printf 'own\n' > "$case_dir/state/.run-progress-task-x1"
+  printf 'own\n' > "$case_dir/state/.run-superseded-task-x1"
+  printf 'own\n' > "$case_dir/state/.run-progress-task-x1.tmp"
+  printf 'own\n' > "$case_dir/state/.run-superseded-task-x1.tmp"
+  printf 'sibling\n' > "$case_dir/state/.run-progress-task-x1.v2"
+  printf 'sibling\n' > "$case_dir/state/.run-superseded-task-x1.v2"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "dotted-sibling-records: teardown should complete"
+  assert_absent "$case_dir/state/.run-progress-task-x1" \
+    "dotted-sibling-records: teardown left its own progress baseline"
+  assert_absent "$case_dir/state/.run-superseded-task-x1" \
+    "dotted-sibling-records: teardown left its own supersession cache"
+  assert_absent "$case_dir/state/.run-progress-task-x1.tmp" \
+    "dotted-sibling-records: teardown left an orphaned progress temp file"
+  assert_absent "$case_dir/state/.run-superseded-task-x1.tmp" \
+    "dotted-sibling-records: teardown left an orphaned supersession temp file"
+  assert_present "$case_dir/state/.run-progress-task-x1.v2" \
+    "dotted-sibling-records: teardown deleted a live sibling task's progress baseline"
+  assert_present "$case_dir/state/.run-superseded-task-x1.v2" \
+    "dotted-sibling-records: teardown deleted a live sibling task's supersession cache"
+  pass "teardown removes only its own supervision records, never a dotted sibling task's"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2600,6 +2640,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_keeps_dotted_sibling_task_supervision_records
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

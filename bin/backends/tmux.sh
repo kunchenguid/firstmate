@@ -58,6 +58,13 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_send_text_max_bytes: this backend's one-send payload ceiling.
+# Re-exports fm_tmux_send_text_max_bytes (bin/fm-tmux-lib.sh), which owns the
+# imsg-budget fact and the reasoning behind it.
+fm_backend_tmux_send_text_max_bytes() {  # <target> -> positive byte budget
+  fm_tmux_send_text_max_bytes "$@"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
@@ -354,4 +361,33 @@ fm_backend_tmux_agent_alive() {  # <target>
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# fm_backend_tmux_pane_cputime: total accumulated CPU seconds of every process
+# on <target>'s pane tty, foreground and background alike, printed as one
+# integer. This is the raw sample behind the liveness probe's CPU-progress
+# evidence (bin/fm-busy-lib.sh's fm_busy_cpu_progress owns the delta
+# semantics); tty scoping mirrors fm_backend_tmux_foreground_comms above, so
+# the measured set is exactly the pane's own process family with no walk.
+# Fails (non-zero, no output) when the pane or its tty cannot be read, so a
+# caller can distinguish "no CPU source" from a genuine zero. tmux silently
+# resolves an ABSENT target to the active window (the same fallback
+# fm_backend_tmux_agent_state documents), so a caller must have verified the
+# exact window through that agent-state probe before trusting this sample.
+fm_backend_tmux_pane_cputime() {  # <target>
+  local target=$1 tty out
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  [ -n "$tty" ] || return 1
+  out=$(LC_ALL=C ps -t "${tty#/dev/}" -o time= 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk '
+    NF {
+      t = $1; d = 0
+      if (split(t, dp, "-") == 2) { d = dp[1]; t = dp[2] }
+      n = split(t, p, ":")
+      if (n == 3)      s = (p[1] * 60 + p[2]) * 60 + p[3]
+      else if (n == 2) s = p[1] * 60 + p[2]
+      else             s = p[1]
+      total += d * 86400 + s
+    }
+    END { printf "%d\n", total }'
 }

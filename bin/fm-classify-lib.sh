@@ -18,14 +18,17 @@
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
-# and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
+# and the liveness probe's flat split, never on every wake, so the per-wake triage
+# stays cheap. crew_run_progressed (see its own header) makes one bounded
+# read-only run read and persists the run's progress fingerprint, and runs only
+# at due probe moments. crew_worktree_written_since reads the task's meta
+# file and walks a bounded slice of its worktree instead of a status file, so
+# callers run it only at due probe moments.
+# status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time. crew_worktree_written_since reads the task's meta file and walks
-# a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# log every time.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -36,6 +39,10 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+
+# Run-object attribution and progress primitives, for crew_run_progressed below.
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
 
 # fm_run_timed, the shared hard bound the worktree write probe below puts around
 # its one filesystem walk. bin/fm-timeout-lib.sh owns bounded execution for this
@@ -67,20 +74,24 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 #   paused: <reason>
 # to declare it is intentionally idling on a KNOWN external dependency - an
 # upstream release, a vendor rate-limit reset, a scheduled window. Unlike
-# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED, so
-# the stale path absorbs it instead of escalating a possible wedge. It is
+# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED.
+# The verb is the human-readable EVENT; alarm damping itself belongs to the
+# machine wait field (bin/fm-wait-lib.sh, whose CLI appends this verb line
+# alongside the field). It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop
-# wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
+# nagging this idle pane" signal, not work to keep surfacing. This constant
 # is the ONE definition of the verb; both the watcher and the daemon read it here
 # (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a verified captain hold.
-# Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
+# Bounded re-surface cadence for anything a supervisor deliberately keeps
+# quiet - the daemon's declared pauses and verified captain holds, and the
+# watcher probe's unrefuted alarms and vendor-derived waits. Far longer than
+# the probe interval (FM_PROBE_INTERVAL_SECS, default 240s), it avoids nagging
+# a deliberate wait while ensuring nothing quiet can rot invisibly - it
+# re-surfaces once for a recheck every window. One hour by default; every
+# consumer reads FM_PAUSE_RESURFACE_SECS with this default so the cadence has
 # one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
@@ -161,11 +172,12 @@ status_is_captain_held() {  # <status-line>
 
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
-# Both declarations can intentionally leave a crew's endpoint idle, so both
-# supervisors give them one cadence: the away-mode daemon defers the wedge and
-# ages a pause marker instead, and the watcher applies its bounded pause cadence
-# once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
-# evidence each kind of crew must supply for that).
+# Both declarations can intentionally leave a crew's endpoint idle. The
+# away-mode daemon defers the wedge and ages a pause marker off this
+# predicate; the always-on watcher's liveness probe deliberately does NOT
+# read it - only the machine wait field (bin/fm-wait-lib.sh) silences the
+# probe, so a prose declaration alone no longer damps alarms there. This
+# predicate only reports the declaration.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
@@ -184,7 +196,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
-# rule 6), so closure never depends on a busy worker's discipline.
+# rule 7), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented
@@ -1163,22 +1175,88 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
-# 0 (actionable) if ANY status file listed in a "signal:" wake carries a
-# captain-relevant last line; 1 otherwise. Pass the space-separated file list that
-# follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
-# which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
-signal_reason_is_actionable() {  # <file> ...
-  local f last
-  for f in "$@"; do
-    [ -e "$f" ] || continue
-    case "$f" in *.status) ;; *) continue ;; esac
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    status_is_captain_relevant "$last" && return 0
+# --- the content wake rule (U1.3: wake on content, never on the last line) ---
+#
+# A signal used to wake on the LAST status line's verb alone, which had two
+# failure shapes: a decision buried under a quick routine append never woke at
+# all, and a stale terminal leftover kept re-reading as current. The rule below
+# replaces that prefix test: a span of NEWLY APPENDED status lines wakes the
+# supervisor iff it carries actionable content. Decision lines go through the
+# same _fm_decision_fold_line rule status_open_decisions owns, so a decision
+# opened and closed inside one span is routine while one still open at span end
+# always wakes - the two consumers can never disagree on what is open. Routine
+# lines (working:, paused:, note:, resolutions of older decisions) never wake;
+# they bundle into the next presentation, whose UNREAD STATUS / OPEN DECISIONS
+# folds carry the delivery guarantee. Callers own their span cursor mechanics
+# (the watcher uses its .seen-* signature size, the heartbeat backstop the same);
+# this rule is pure text classification.
+
+# Print every non-blank line of <status-file> starting at byte <offset>. An
+# invalid or beyond-EOF offset reads the whole current file from byte 0 (the
+# recreated-file case must classify fresh content, never silently skip it).
+# Prints nothing on a missing, unreadable, or symlinked file, or on I/O failure.
+status_lines_from_offset() {  # <status-file> <offset>
+  local f=$1 offset=$2 size chunk_file line rc=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  size=$(_fm_status_file_size "$f") || return 0
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  [ "$offset" -le "$size" ] || offset=0
+  [ "$offset" -lt "$size" ] || return 0
+  chunk_file=$(mktemp "${TMPDIR:-/tmp}/fm-status-span.XXXXXX") || return 1
+  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
+    esac
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  return "$rc"
+}
+
+# Classify a span of newly appended status lines (stdin) for <kind>. Prints one
+# token:
+#   wake   - the span carries actionable content: a decision opened and still
+#            open at span end, a terminal or legacy captain-relevant line, or
+#            ANY non-blank line on a kind=secondmate stream (that stream is the
+#            mate's parent-directed reply channel, so every append is content
+#            the supervisor must read);
+#   bundle - only routine lines; present them at the next drain, no wake;
+#   none   - the span has no non-blank line at all.
+status_span_wake_class() {  # <kind>; span lines on stdin
+  local kind=${1:-} line verb open='' resolve held any=0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    any=1
+    if [ "$kind" = secondmate ]; then
+      printf 'wake'
+      return 0
+    fi
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+        ;;
+      *)
+        if status_is_captain_relevant "$line"; then
+          printf 'wake'
+          return 0
+        fi
+        ;;
+    esac
   done
-  return 1
+  if [ -n "$open" ]; then
+    printf 'wake'
+    return 0
+  fi
+  if [ "$any" -eq 1 ]; then printf 'bundle'; else printf 'none'; fi
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
@@ -1187,15 +1265,23 @@ signal_reason_is_actionable() {  # <file> ...
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#   paused  - the crew's authoritative current state is an external wait, which
+#             is EXPECTED to idle: an active declared machine wait
+#             (state/<id>.wait, bin/fm-wait-lib.sh), a declared pause line
+#             (paused:), or fm-crew-state.sh's pane-derived Claude
+#             account-limit-banner override (see its state-resolution
+#             docstring);
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# authoritatively (not the status log) keeps a stale prose line from deciding: a
+# crew that appended paused: but then STARTED a run reports working - while an
+# ACTIVE machine wait field deliberately reports paused even over a run, per
+# fm-crew-state.sh's wait-field precedence (plan v3 U1.4).
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# run it only on no-verb signal and probe flat-split paths, never every wake.
+# The pause-liveness path (crew_pause_still_live below) keeps that budget by
+# throttling its own re-probe to the PAUSE_RESURFACE_SECS cadence.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
@@ -1211,22 +1297,143 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+# 0 if crew <id>'s pause is STILL REAL according to its authoritative current
+# state, even though its status log carries no paused: line. This is the one
+# owner of "may a pause marker be kept?" for the pane-derived pauses that
+# fm-crew-state.sh reports without a declared status-log line (its Claude
+# account/usage-limit-banner override). The supervise daemon
+# (bin/fm-supervise-daemon.sh reconcile_pause_tracking) consults it before
+# clearing a pause marker it would otherwise treat as stale; without it the
+# daemon wipes the re-surface throttle every housekeeping cycle. The always-on
+# watcher's liveness probe no longer keeps pause markers, so it has no call
+# site here.
+#
+# THROTTLED, to keep crew_absorb_class's "never every wake" cost contract true:
+# a confirmed pause is re-probed at most once per PAUSE_RESURFACE_SECS - the
+# same cadence the pause itself re-surfaces on - recorded in
+# <state>/.paused-livecheck-<key>. Inside that window the pause is taken as
+# still live with no read at all, so a sustained account limit across N
+# crewmates costs N bounded reads per cadence window, not per poll. Callers
+# additionally gate it on marker presence, so an unpaused crew never probes.
+if [ "$(uname)" = Darwin ]; then
+  crew_pause_livecheck_mtime() { stat -f %m "$1" 2>/dev/null; }  # <file>
+else
+  crew_pause_livecheck_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
+
+crew_pause_still_live() {  # <id> <state-dir> <key>
+  local id=${1:-} state=${2:-} key=${3:-} probe='' mtime age secs
+  [ -n "$id" ] || return 1
+  secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  if [ -n "$state" ] && [ -n "$key" ]; then
+    probe="$state/.paused-livecheck-$key"
+    mtime=$(crew_pause_livecheck_mtime "$probe")
+    case "$mtime" in
+      ''|*[!0-9]*) ;;
+      *)
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$secs" ] && return 0
+        ;;
+    esac
+  fi
+  if [ "$(crew_absorb_class "$id")" = paused ]; then
+    [ -n "$probe" ] && : > "$probe"
+    return 0
+  fi
+  [ -n "$probe" ] && rm -f "$probe"
+  return 1
+}
+
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
-# absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed
+# absorb-only-when-provably-working: a no-verb turn-end wake is absorbed
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
-# on a decision, or wedged). For stale panes it is checked before trusting the
-# status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# on a decision, or wedged). See crew_absorb_class for the exact
+# working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
+# Supervisors keep such a crew quiet (on the long re-surface cadence) instead of
+# alarming on its expected idleness.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# Bounded timeout for the read-only run probe below. Its whole cost model rests
+# on running at due probe moments only, so a hung CLI must never hold a
+# supervision cycle open.
+FM_RUN_PROGRESS_TIMEOUT="${FM_RUN_PROGRESS_TIMEOUT:-10}"
+
+_fm_run_progress_path() {  # <state> <id>
+  printf '%s/.run-progress-%s' "$1" "$2"
+}
+
+# 0 when crew <id> has a no-mistakes run that is BOTH executing right now AND
+# further along than the last time this was asked; 1 otherwise, including every
+# case it cannot prove. Records the run's current progress fingerprint as the
+# new baseline whenever it reads one.
+#
+# Why the liveness probe needs this. A crew whose no-mistakes run is executing
+# has nothing to render and burns no local CPU: it is blocked on the pipeline
+# agent, so a quiet endpoint for many minutes is the NORMAL shape of a healthy
+# validation, not a wedge. On 2026-08-16 that produced repeated "stale
+# persisted / possible wedge" escalations against a lensclash run that was
+# demonstrably advancing (moving head, fixing step, freshly parked gate), in
+# normal mode and again in away mode. Both supervisors therefore ask this
+# before alarming, and treat pipeline movement as progress evidence.
+#
+# Three properties keep it honest:
+#   - cheap: ONE bounded read-only `axi status`, at due probe moments only
+#     (at most once per FM_PROBE_INTERVAL_SECS per window), never per poll;
+#   - read-only: it can start, resume, answer, or abort nothing;
+#   - never blinding: absorbing requires MOVEMENT, so a run that is executing
+#     but frozen stops absorbing after one cycle, and a crew with no executing
+#     run of its own - a crew parked at a gate, and the whole no-mistakes-less
+#     population - is unaffected and alarms exactly as before. The
+#     fingerprint owner (fm_nm_run_progress_fingerprint) excludes elapsed
+#     timers for the same reason.
+# The first probe of a series has no baseline to compare and absorbs once,
+# which delays a genuinely frozen active run's no-progress alarm by one cycle
+# and costs nothing else.
+crew_run_progressed() {  # <id> <state>
+  local id=$1 state=$2 meta kind wt branch out fingerprint previous file tmp
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || return 1
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  # Scouts and secondmates never drive a no-mistakes run of their own worktree.
+  [ "${kind:-ship}" = ship ] || return 1
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 1
+  out=$(fm_nm_run "$wt" "$FM_RUN_PROGRESS_TIMEOUT" axi status)
+  [ -n "$out" ] || return 1
+  # Attribution is deliberately narrower than fm-crew-state.sh's: only the run
+  # `axi status` itself reports for this exact branch may absorb an escalation.
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")" = "$branch" ] || return 1
+  fm_nm_run_is_executing "$out" || return 1
+  fingerprint=$(fm_nm_run_progress_fingerprint "$out")
+  [ -n "$fingerprint" ] || return 1
+  file=$(_fm_run_progress_path "$state" "$id")
+  previous=$(cat "$file" 2>/dev/null || true)
+  # Atomic replace: the two supervisors and a test harness may read this while
+  # it is rewritten, and a torn baseline would fake movement on the next probe.
+  # The temp name is deterministic rather than mktemp-random so teardown can
+  # remove it by exact path; a "$file".* sweep would delete a live sibling
+  # task's records, because a task id may itself contain a dot. There is no
+  # concurrent writer for one task - the watcher and the away daemon are
+  # mutually exclusive by mode - and the rename stays atomic either way, so the
+  # fixed name is safe. Do not restore mktemp.
+  tmp="$file.tmp"
+  if ! ( umask 077; printf '%s\n' "$fingerprint" > "$tmp" ) || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ "$fingerprint" != "$previous" ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.
@@ -1236,8 +1443,8 @@ crew_is_paused() {  # <id>
 # large generated trees that would make the walk expensive. Both are overridable so
 # a home with an unusual layout can widen or narrow the probe. The list is a skip
 # list, so clearing it skips nothing and widens the walk to the whole depth-bounded
-# tree; it never disables the probe, which would quietly cost the wedge detector a
-# liveness input on a home that meant to widen it. Defaulted with the plain form so
+# tree; it never disables the probe, which would quietly cost the liveness probe a
+# progress input on a home that meant to widen it. Defaulted with the plain form so
 # an explicitly empty value stays empty: clearing the knob in the environment is the
 # documented way to ask for that wider walk, and treating empty as unset would hand
 # the default skip list back to exactly the home that asked for more coverage.
@@ -1245,13 +1452,12 @@ FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE-'.git node_modules .venv venv 
 FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 
 # Wall-clock seconds the probe's single walk may take. The walk runs synchronously
-# inside the caller's poll loop at the exact moment an escalation would otherwise
-# fire, and -xdev keeps it out of a nested mount but cannot help when the worktree
+# inside the caller's poll loop at due probe moments, and -xdev keeps it out of a nested mount but cannot help when the worktree
 # root ITSELF sits on a hung network or container mount; unbounded, such a walk
 # would wedge the very supervisor that exists to notice a wedge, stalling its
-# heartbeat instead of escalating. Hitting the bound is a negative outcome like
-# every other: it reads as no evidence, so the caller's escalation schedule is
-# untouched and a stall that writes nothing still escalates on the existing
+# heartbeat instead of alarming. Hitting the bound is a negative outcome like
+# every other: it reads as no evidence, so the caller's alarm schedule is
+# untouched and a stall that writes nothing still alarms on the existing
 # schedule. A value that is not a positive integer is not a bound at all (`timeout
 # 0` and the perl fallback's `alarm 0` both disable the deadline), so the default
 # applies instead; the check lives at the point of use so an in-process override
@@ -1260,16 +1466,17 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 
 # 0 when some regular file under <id>'s recorded worktree is newer than
 # <anchor-file>: positive evidence the crew is still producing work even though its
-# rendered pane has gone quiet. This is the third liveness input the wedge detector
-# has, after pane quietness and the run step, and it exists because neither of
-# those can see a crew that is writing source, then tests, then documentation
-# behind a static pane - the 2026-08-14 case of eight consecutive possible-wedge
-# escalations against a crew that was demonstrably working the whole time.
+# rendered pane has gone quiet. This is one of the liveness probe's progress
+# inputs, beside the CPU delta and the run step, and it exists because neither
+# of those can see a crew that is writing source, then tests, then documentation
+# through a filesystem-only phase - the 2026-08-14 case of eight consecutive
+# possible-wedge escalations against a crew that was demonstrably working the
+# whole time.
 #
 # 1 for every other outcome, including an id with no recorded worktree, a worktree
 # that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of
-# evidence therefore always leaves the caller's existing escalation schedule
-# untouched, so a crew that writes nothing still escalates exactly as before.
+# evidence therefore always leaves the caller's existing alarm schedule
+# untouched, so a crew that writes nothing still alarms exactly as before.
 #
 # A kind=secondmate task records a provisioned firstmate home, not a code tree, and
 # such a home runs its OWN supervision inside it: its state/ directory churns a
@@ -1277,16 +1484,16 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # anything, so a walk there would report liveness for a mate that has done nothing.
 # Those homes are excluded outright rather than by pruning "state", which would also
 # hide a legitimate source directory of that name in an ordinary worktree. The
-# exclusion is a negative outcome like any other, so an unproductive mate keeps
-# escalating on the caller's unchanged schedule.
+# exclusion is a negative outcome like any other, and the probe skips mates
+# entirely anyway (an idle mate endpoint is healthy by design).
 #
-# The anchor is the caller's own idle-window timer file, whose mtime already marks
-# when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
+# The anchor is the caller's own probe-schedule file, whose mtime already marks
+# when the measured window opened, so `-newer` needs no clock arithmetic, no temp
 # file, and no portable mtime-setting. Not a pure status-file read (see the header):
 # one pruned, depth-bounded, wall-clock-bounded walk per call, which callers must
-# reach only when they are otherwise about to escalate, never on every poll. A walk
+# reach only at due probe moments, never on every poll. A walk
 # that outlives FM_WORKTREE_WRITE_TIMEOUT is killed and reported as no evidence, so
-# a hung mount costs the escalation nothing but the bound. -xdev holds that walk to the
+# a hung mount costs the probe nothing but the bound. -xdev holds that walk to the
 # worktree's own filesystem rather than descending into a nested network or container
 # mount, so a write that lands only under such a mount is one more negative outcome.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
@@ -1354,16 +1561,6 @@ signal_crew_provably_working() {  # <file> ...
   done
   [ -n "$seen" ] || return 1
   return 0
-}
-
-# 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
-stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
 # Print "<file>\t<task>\t<last-line>" for every state/*.status whose last line is

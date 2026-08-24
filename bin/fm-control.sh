@@ -43,7 +43,11 @@
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
-#              standing charter is never rewritten.
+#              standing charter is never rewritten. The note PRECEDES the
+#              existing instructions rather than replacing or trailing them -
+#              it is prepended to the brief every positional-prompt harness
+#              reads whole, and it leads the pointer sentence a pointer-style
+#              harness (kimi) submits instead.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -503,6 +507,7 @@ do_exit() {
 JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
+BRIEF_NEW="$JOURNAL.brief-new"
 NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
@@ -747,33 +752,44 @@ safe_checkpoint() {
 
 # record_note: put the required progress note somewhere durable, and - for a
 # ship or scout, whose only record of the interrupted reasoning is the
-# conversation about to be discarded - into the instructions the replacement
-# actually reads. A secondmate's charter is a durable standing document and is
-# never rewritten: a secondmate reconciles its own home's records at startup,
-# so the note stays parent-side audit evidence.
+# conversation about to be discarded - PRECEDING the instructions the
+# replacement actually reads, never replacing them: the note is written to
+# NOTE_FILE first (fm-spawn.sh --relaunch reads it back through
+# FM_CONTROL_RELAUNCH_NOTE_FILE to lead a pointer-style harness's own launch
+# text the same way), then that same formatted block is prepended to the
+# brief so every harness that reads the brief file directly - the positional-
+# prompt adapters - sees note, blank line, full original brief, exactly the
+# order a fresh spawn's brief would read after the note line. A secondmate's
+# charter is a durable standing document and is never rewritten: a secondmate
+# reconciles its own home's records at startup, so the note stays parent-side
+# audit evidence.
 record_note() {
   local stamp
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  printf '%s\n' "$NOTE" > "$NOTE_FILE"
+  {
+    echo "## Progress note ($stamp)"
+    echo
+    echo "This task was relaunched. Continue from here; the local copy and every"
+    echo "uncommitted change are exactly as the previous worker left them."
+    echo
+    printf '%s\n' "$NOTE"
+  } > "$NOTE_FILE" \
+    || die "could not record task $ID's progress note"
   case "$KIND" in
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
-      {
-        echo
-        echo "## Progress note ($stamp)"
-        echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
-        echo "uncommitted change are exactly as the previous worker left them."
-        echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
-        echo
-        printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
-        || die "could not append the progress note to task $ID's instructions"
+      if ! { cat "$NOTE_FILE";
+             echo;
+             echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on";
+             echo "each message in numeric order, then mv each handled file into";
+             echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there.";
+             echo;
+             cat "$BRIEF_PRIOR"; } > "$BRIEF_NEW" \
+         || ! mv -f "$BRIEF_NEW" "$RELAUNCH_BRIEF"; then
+        die "could not prepend the progress note to task $ID's instructions"
+      fi
       ;;
   esac
 }
@@ -827,7 +843,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_CONTROL_RELAUNCH_NOTE_FILE="$NOTE_FILE" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

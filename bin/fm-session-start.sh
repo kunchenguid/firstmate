@@ -193,7 +193,7 @@
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
-#             handle and acknowledge them. Lock acquisition still runs, because
+#             handle them. Lock acquisition still runs, because
 #             ownership must be re-verified rather than assumed: fm-lock.sh already treats a lock
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
@@ -363,12 +363,35 @@ subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 # repo built-in defaults, projects.md absent = rebuild from clones, etc. -
 # AGENTS.md section 3) and must never be confused with an empty-but-present
 # file, so the two cases print differently.
+#
+# Diff cursor (plan v3 U1.8): a file whose sha is unchanged since the last
+# LOCKED session start prints one compact line naming its sha and path instead
+# of its full text - context tokens are paid for changes, not for repetition.
+# The cursor state/.context-presentation-cursor ("<name>\t<sha16>" per line,
+# owned by this script) advances only on a locked run and only after the
+# context section actually printed; a truncated or read-only run leaves it
+# untouched, so the failure direction is always "print in full again", never
+# "silently skip". Read-only runs and --reemit runs always print in full:
+# the re-emit exists to re-anchor a drifted session (its AGENTS.md
+# re-injection is deliberately never diffed away either).
 print_file_or_absent() {
-  local path=$1 label=$2
+  local path=$1 label=$2 key sha prev
   subsection "$label"
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
-      cat "$path"
+      if [ "$READ_ONLY" -eq 0 ]; then
+        key=${path##*/}
+        sha=$(sha256sum "$path" 2>/dev/null | cut -c1-16)
+        prev=$(awk -v k="$key" -F'\t' '$1==k{print $2}' "$CONTEXT_CURSOR" 2>/dev/null | tail -1)
+        if [ "$REEMIT" -eq 0 ] && [ -n "$sha" ] && [ "$prev" = "$sha" ]; then
+          printf '(unchanged since the last locked session start - sha %s; full text: %s)\n' "$sha" "$path"
+        else
+          cat "$path"
+        fi
+        [ -n "$sha" ] && printf '%s\t%s\n' "$key" "$sha" >> "$CONTEXT_CURSOR_NEXT"
+      else
+        cat "$path"
+      fi
     else
       printf '(present, empty)\n'
     fi
@@ -690,9 +713,9 @@ fi
 # The existing locked session-start path runs the same local inactive-outcome
 # reconciliation as the watcher poll before it presents the resulting durable
 # wake, without adding a daemon or external-network call.
-# Presented records are this turn's first work queue and remain durable until
-# post-handling acknowledgement. The drain's separate OPEN DECISIONS section
-# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
+# Presented records are this turn's first work queue; the drain consumes them
+# at presentation, and a still-open decision re-appears in its OPEN DECISIONS
+# section on every drain until answered (AGENTS.md sections 3 and 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation
@@ -734,6 +757,25 @@ else
   fi
 fi
 
+# --- 3b. active captain orders: constraint pin + recitation duty -------------
+# The pin re-injects every active order verbatim at each window rebuild, and
+# the session recites the listed ids before acting, so a restart can never
+# again cost an order (plan v3 U1.1, hardening 1; failure patterns L10/L45).
+# Reading the order book needs no lock, so the read-only path prints it too.
+# A tool failure prints loudly instead of masquerading as an empty book (L13).
+stage order-pin
+subsection "ACTIVE ORDERS (PIN)"
+if ORDER_PIN_OUT=$("$SCRIPT_DIR/fm-order.sh" pin 2>&1); then
+  if printf '%s\n' "$ORDER_PIN_OUT" | grep -q '^O-'; then
+    printf '%s\n' "$ORDER_PIN_OUT"
+    printf 'RECITE FIRST: before any other action this session, recite the ids above with the printed command; a failed recitation means re-read the order book before acting.\n'
+  else
+    printf '(no active orders in the order book yet - standing orders may still live in data/captain.md until the U2 memory rebuild)\n'
+  fi
+else
+  printf 'ORDER_PIN: FAILED - %s\n' "$ORDER_PIN_OUT"
+fi
+
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
@@ -771,10 +813,12 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
+Everything below is printed for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md. A context file that is byte-identical to what the last
+locked session start already presented prints one "(unchanged ...)" line naming
+its sha and path instead of repeating its full text.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -789,6 +833,8 @@ Go to a source directly only when:
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),
+  - a context file printed as "(unchanged ...)" and this turn genuinely needs
+    its full text again (the compact line names the exact path),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
     which case that stage's sources were never emitted and must be reconciled.
 EOF
@@ -813,13 +859,15 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
+    # Agent-grade liveness, not window presence: an open window with a bare
+    # shell is NOT alive (plan v3 U1.4 - liveness claims from window lists are
+    # abolished; the 2026-08-23 empty-shell incidents are the evidence). The
+    # richer state vocabulary is fm_backend_agent_state's; anything that is
+    # not a confident alive prints as what it is.
+    printf 'agent: %s (backend=%s window=%s)\n' \
+      "$(fm_backend_agent_state "$backend" "${target:-$window}")" "$backend" "$window"
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    printf 'agent: unknown (no window recorded)\n'
   fi
 
   status="$STATE/$id.status"
@@ -894,11 +942,19 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
+CONTEXT_CURSOR="$STATE/.context-presentation-cursor"
+CONTEXT_CURSOR_NEXT="$CONTEXT_CURSOR.next.$$"
+rm -f "$CONTEXT_CURSOR_NEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ "$READ_ONLY" -eq 0 ] && [ -f "$CONTEXT_CURSOR_NEXT" ]; then
+  mv -f "$CONTEXT_CURSOR_NEXT" "$CONTEXT_CURSOR"
+else
+  rm -f "$CONTEXT_CURSOR_NEXT"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

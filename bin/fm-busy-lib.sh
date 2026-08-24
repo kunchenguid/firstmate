@@ -2,14 +2,20 @@
 # fm-busy-lib.sh - the ONE owner of firstmate's semantic busy-state contract.
 #
 # Design source: the captain-approved semantic busy-state redesign
-# (2026-07-28): each harness adapter reports turn lifecycle through a
+# (2026-07-28), extended by the captain-approved liveness redesign (plan v3
+# U1.4, 2026-08-23): each harness adapter reports turn lifecycle through a
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
-# owned by the watcher, not current-state truth.
+# unverified semantic data is UNKNOWN - never idle. Beside that TURN layer
+# sits the process-evidence LIVENESS layer, which this file also owns: a gone
+# endpoint and an endpoint whose process family confidently holds no agent
+# (fm_backend_agent_state) both override every record as dead, never busy,
+# and accumulated CPU time across a probe interval (fm_busy_cpu_progress
+# below) is positive progress evidence for the watcher's liveness probe.
+# Rendered pane stillness, process sleep state, marker mtimes, and the old
+# global UI-regex OR remain non-signals for turn state; state/<id>.turn-ended
+# files remain wake NOTIFICATIONS owned by the watcher, not current-state
+# truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
@@ -45,7 +51,8 @@
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
-#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
+#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone;
+#      endpoint open but confidently agent-free -> dead agent-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
@@ -60,6 +67,17 @@
 # another adapter. The delivery guards in bin/fm-composer-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
+#
+# fm_busy_claude_limit_banner is a SEPARATE, narrower rendered-text helper: it
+# does not classify busy/idle and fm_busy_classify never calls it, so
+# claude-hook's busy verdict is untouched here. It only recognizes Claude
+# Code's own account/usage-limit banner text so the crew-state resolution
+# layer (bin/fm-crew-state.sh) can apply a higher-priority override on top of
+# an already-busy claude-hook verdict: a worker parked on its own account
+# limit is an external wait (paused), not a working turn, even though the
+# UserPromptSubmit hook already opened a turn that no Stop/StopFailure will
+# close until the limit clears. See that function's own header for the
+# verified wordings and bin/fm-crew-state.sh for where the override applies.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -831,6 +849,170 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_claude_limit_banner: recognize Claude Code's own rendered
+# account/usage-limit banner in a captured pane tail (read on stdin). See the
+# header note above this helper's contract; it is consulted only by
+# bin/fm-crew-state.sh, as a higher-priority override on top of an already-
+# busy claude-hook verdict, never by fm_busy_classify itself.
+#
+# Verified against claude-cli 2.1.234 (2026-08-18) by extracting strings from
+# its installed compiled bundle (~/.local/share/claude/versions/2.1.234). The
+# limit windows and their rendered names come from one source map,
+# `wLt = {five_hour:"session limit", seven_day:"weekly limit",
+# seven_day_opus:"Opus limit", seven_day_sonnet:"Sonnet limit",
+# seven_day_overage_included:"Fable 5 limit", overage:"usage credit limit"}`,
+# and a rejected turn renders "You've hit your <name> \xB7 resets <time>"
+# (functions Y4b/MYe - the \xB7 is a literal middot separator). All six names
+# are matched here, because any of them blocks the worker the same way. The
+# companion auto-continue widget renders "Usage limit reached \xB7 continuing
+# automatically at <time> \xB7 esc to cancel" while armed, "Your usage limit
+# has reset \xB7 press enter to continue" once stale and awaiting a keypress,
+# and "Automatic continue stopped after repeated usage-limit hits" once it
+# gives up (function meo). This is SOURCE verification (decompiled strings),
+# not a live-triggered pane capture - reaching the weekly banner live would
+# require actually exhausting a 7-day quota window, which was not done here.
+# A secondmate fleet note independently observed the rendered pane pairing
+# "session limit ... Press Enter" at the 5-hour reset marks
+# (data/learnings.md, 2026-08-17), corroborating the session-limit wording
+# above from a real stuck pane.
+#
+# Matching is anchored to the COMPOSER REGION of the captured tail, and that
+# region is EXACTLY: at most FM_BUSY_CLAUDE_LIMIT_REGION_LINES lines
+# immediately above the composer box's top border, the box's own rows (top
+# border through bottom border), and at most the same number of lines
+# immediately below its bottom border. The below-box budget is a budget, not a
+# single line, because a real pane renders BOTH the status/hint line (e.g.
+# "? for shortcuts") AND the limit widget down there, in either order. That is
+# where Claude Code renders the limit widget and nothing else. Transcript lines
+# further up are NEVER consulted, so scrollback, a diff, a transcript, or this
+# very file's comments can never trigger the override no matter what they
+# contain. A tail with no composer box in it has no region at all and simply
+# does not match.
+#
+# Inside the region a BLOCKING auto-continue widget phrase is REQUIRED for any
+# verdict: "press enter to continue", "continuing automatically", or
+# "Automatic continue stopped after repeated usage-limit hits". That phrase
+# must sit on a line that also carries the widget's own "usage limit" /
+# "usage-limit" token, exactly as all three verified renderings do ("Your
+# usage limit has reset \xB7 press enter to continue", "Usage limit reached
+# \xB7 continuing automatically at <time>", "Automatic continue stopped after
+# repeated usage-limit hits"). Without that token a bare prose line that
+# happens to say "press enter to continue" - a grep hit, a diff, this file's
+# own comments scrolling one line above the composer - would still qualify
+# inside the region, so the token is what makes the match provably the widget.
+#
+# The three renderings do NOT mean the same thing, so the matcher prints
+# "<state>\t<detail>" and bin/fm-crew-state.sh emits that state verbatim:
+#   continuing automatically at <time>  -> paused  (self-resolving external
+#                                         wait: the agent resumes by itself)
+#   press enter to continue             -> paused  (the reset already landed
+#                                         and only a keypress is outstanding)
+#   Automatic continue stopped after    -> blocked (Claude Code's own give-up
+#   repeated usage-limit hits                     state: the agent will NEVER
+#                                         resume on its own, so it must keep
+#                                         the watcher's wedge/escalation path
+#                                         instead of being absorbed as a wait)
+# A give-up line anywhere in the region wins over an armed/reset widget. For
+# the two paused renderings the limit NAME enriches the detail - the name line
+# NEAREST the widget anywhere in the region is printed (it carries the reset
+# hint), otherwise the detail reports the limit type as unspecified.
+#
+# DELIBERATE, CAPTAIN-ACCEPTED LIMITATION (one owner: this header): a named
+# limit notice ALONE never reports paused. Claude Code renders the same
+# "<name> limit ... resets <time>" wording both when the account is merely
+# APPROACHING a limit ("Approaching <name>", "You've used NN% of your <name>",
+# status allowed_warning at utilization >= 70%) and when it is blocked, so the
+# wording cannot separate the two and a worker that is genuinely still working
+# must not be reported as an external wait. fm_busy_claude_limit_notice below
+# reports that weaker "a limit notice is on screen" signal instead, which
+# bin/fm-crew-state.sh appends to its working detail. A truly blocked worker
+# whose pane shows no widget is therefore not reported paused immediately - it
+# is still caught by the existing stale/idle pane detection in bin/fm-watch.sh,
+# just on that path's cadence rather than at once.
+FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-2}
+FM_BUSY_CLAUDE_LIMIT_GIVEUP_DETAIL='usage-limit give-up - agent will not resume on its own; relaunch or captain needed'
+
+# Print the composer region of the tail on stdin (see the header above), or
+# fail when the tail carries no composer box. Lowercasing goes through tr, not
+# bash 4's ${var,,}, because this repo still runs on macOS bash 3.2.
+fm_busy_claude_composer_region() {
+  local line top=-1 bottom=-1 idx=0 start end last
+  local -a lines=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    lines+=("$line")
+    case "$line" in
+      *'╭'*|*'┌'*) top=$idx; bottom=-1 ;;
+      *'╰'*|*'└'*) if [ "$top" -ge 0 ] && [ "$bottom" -lt 0 ]; then bottom=$idx; fi ;;
+    esac
+    idx=$((idx + 1))
+  done
+  [ "$top" -ge 0 ] || return 1
+  last=$(( ${#lines[@]} - 1 ))
+  start=$((top - FM_BUSY_CLAUDE_LIMIT_REGION_LINES))
+  [ "$start" -lt 0 ] && start=0
+  if [ "$bottom" -ge 0 ]; then end=$((bottom + FM_BUSY_CLAUDE_LIMIT_REGION_LINES)); else end=$last; fi
+  [ "$end" -gt "$last" ] && end=$last
+  for ((idx = start; idx <= end; idx++)); do
+    printf '%s\n' "${lines[idx]}"
+  done
+}
+
+fm_busy_claude_limit_banner() {
+  local rl low idx dist widget=-1 state=''
+  local -a region_lines=() region_lower=()
+  while IFS= read -r rl; do
+    low=$(printf '%s' "$rl" | tr '[:upper:]' '[:lower:]')
+    region_lines+=("$rl")
+    region_lower+=("$low")
+  done < <(fm_busy_claude_composer_region)
+  [ "${#region_lines[@]}" -gt 0 ] || return 1
+  for ((idx = 0; idx < ${#region_lines[@]}; idx++)); do
+    case "${region_lower[idx]}" in
+      *'usage limit'*|*'usage-limit'*) ;;
+      *) continue ;;
+    esac
+    case "${region_lower[idx]}" in
+      *'automatic continue stopped after repeated usage-limit hits'*)
+        widget=$idx; state=blocked ;;
+      *'press enter to continue'*|*'continuing automatically'*)
+        if [ "$state" != blocked ]; then widget=$idx; state=paused; fi ;;
+    esac
+  done
+  [ -n "$state" ] || return 1
+  if [ "$state" = blocked ]; then
+    printf 'blocked\t%s' "$FM_BUSY_CLAUDE_LIMIT_GIVEUP_DETAIL"
+    return 0
+  fi
+  for ((dist = 0; dist < ${#region_lines[@]}; dist++)); do
+    for idx in "$((widget - dist))" "$((widget + dist))"; do
+      [ "$idx" -ge 0 ] && [ "$idx" -lt "${#region_lines[@]}" ] || continue
+      case "${region_lower[idx]}" in
+        *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
+          printf 'paused\t%s' "${region_lines[idx]}"
+          return 0 ;;
+      esac
+    done
+  done
+  printf 'paused\tlimit type unspecified - %s' "${region_lines[widget]}"
+}
+
+# fm_busy_claude_limit_notice: the WEAKER companion signal - 0 when a limit
+# name is merely visible in the same composer region, with no blocking widget.
+# It says only "a limit notice is on screen", never that the worker is blocked
+# (see the limitation note in the header above), and bin/fm-crew-state.sh uses
+# it to annotate a working verdict, never to change it.
+fm_busy_claude_limit_notice() {
+  local rl low
+  while IFS= read -r rl; do
+    low=$(printf '%s' "$rl" | tr '[:upper:]' '[:lower:]')
+    case "$low" in
+      *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
+        return 0 ;;
+    esac
+  done < <(fm_busy_claude_composer_region)
+  return 1
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -941,9 +1123,14 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   printf 'unknown missing'
 }
 
-# fm_busy_classify_live: fm_busy_classify behind the one process-level
-# override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
-# be sourced for fm_backend_target_exists.
+# fm_busy_classify_live: fm_busy_classify behind the process-level liveness
+# overrides - a gone endpoint is dead, and an endpoint whose process family
+# confidently holds no agent (fm_backend_agent_state dead/missing) is dead
+# too, never busy: an agent killed mid-turn leaves its semantic record open,
+# and an open window with a bare shell is exactly the false-alive shape the
+# 2026-08-23 empty-shell incidents documented. Ambiguous, unreadable, and
+# unverified agent reads change nothing - only a confident negative
+# overrides. Requires fm-backend.sh to be sourced.
 fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
   if [ -z "$target" ]; then
@@ -954,7 +1141,55 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
     printf 'dead endpoint-gone'
     return 0
   fi
+  case "$(fm_backend_agent_state "$backend" "$target")" in
+    dead|missing)
+      printf 'dead agent-gone'
+      return 0
+      ;;
+  esac
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
+}
+
+# fm_busy_cpu_progress: the CPU-delta progress evidence for the watcher's
+# liveness probe. Reads the backend's accumulated pane CPU sample
+# (fm_backend_pane_cputime), compares it against the previous sample stored in
+# <state-dir>/.proc-cpu-<key> ("<epoch> <cpusecs>", atomically replaced), and
+# prints exactly one verdict:
+#   progress <delta>s   the family accrued at least FM_PROBE_CPU_MIN_SECS of
+#                       CPU since the stored sample
+#   flat <interval>s    a valid earlier sample exists and the family accrued
+#                       less than the threshold across that interval
+#   no-baseline         first successful read for this key - a delta needs two
+#   no-source           this backend/target has no readable CPU source
+# Every successful read replaces the stored sample, so one probe's verdict is
+# always measured against the previous probe, never a stale anchor. A shrunk
+# reading (family member exited and took its accumulated time with it) stores
+# the new sample and reports flat rather than inventing progress.
+# FM_PROBE_CPU_MIN_SECS (default 1) is the activity threshold: `ps` time has
+# one-second granularity, an idle TUI at its prompt stays under it across a
+# probe interval, and a working or streaming agent crosses it.
+fm_busy_cpu_progress() {  # <backend> <target> <state-dir> <key>
+  local backend=$1 target=$2 state=$3 key=$4 now cpu prev prev_ts prev_cpu min
+  min=${FM_PROBE_CPU_MIN_SECS:-1}
+  case "$min" in ''|*[!0-9]*) min=1 ;; esac
+  cpu=$(fm_backend_pane_cputime "$backend" "$target" 2>/dev/null) || {
+    printf 'no-source'
+    return 0
+  }
+  case "$cpu" in ''|*[!0-9]*) printf 'no-source'; return 0 ;; esac
+  now=$(date +%s)
+  prev=$(cat "$state/.proc-cpu-$key" 2>/dev/null || true)
+  prev_ts=${prev%% *}
+  prev_cpu=${prev#* }
+  printf '%s %s' "$now" "$cpu" > "$state/.proc-cpu-$key.tmp" \
+    && mv -f "$state/.proc-cpu-$key.tmp" "$state/.proc-cpu-$key"
+  case "$prev_ts" in ''|*[!0-9]*) printf 'no-baseline'; return 0 ;; esac
+  case "$prev_cpu" in ''|*[!0-9]*) printf 'no-baseline'; return 0 ;; esac
+  if [ "$cpu" -ge $(( prev_cpu + min )) ]; then
+    printf 'progress %ss' $(( cpu - prev_cpu ))
+  else
+    printf 'flat %ss' $(( now - prev_ts ))
+  fi
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every

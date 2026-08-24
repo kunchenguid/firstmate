@@ -378,8 +378,8 @@ test_disabled_relaunch_clears_prior_trace_context() {
   pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
-test_relaunch_appends_the_progress_note_to_the_instructions() {
-  local dir out rc brief
+test_relaunch_precedes_the_instructions_with_the_progress_note() {
+  local dir out rc brief composed
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
@@ -390,7 +390,23 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
-  pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
+  # The brief itself must read note-first: a worker skimming from the top sees
+  # why it was relaunched before it ever reaches the original instructions,
+  # instead of the note trailing on as an easy-to-miss postscript.
+  [ "$(grep -n "reproduced the crash in parser.go" "$brief" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n "^Do the thing\.$" "$brief" | head -1 | cut -d: -f1)" ] \
+    || fail "the note must precede the original instructions, not follow them"
+  # The composed launch text a fresh incarnation actually reads is exactly
+  # this file run through the same encoder every positional-prompt harness's
+  # launch command applies to __BRIEF__ - reproduce that here rather than
+  # re-asserting file bytes, so this pins the real launch contract.
+  composed=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$brief" \
+    | "$ROOT/bin/fm-operational-input.sh" body)
+  case "$composed" in
+    *"reproduced the crash in parser.go"*"Do the thing."*) ;;
+    *) fail "the composed launch text did not carry the note followed by the full brief: $composed" ;;
+  esac
+  pass "fm-control relaunch: the progress note precedes the instructions the replacement reads"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -445,6 +461,41 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
   [ "$(meta_field "$dir" rl5 effort)" = default ] \
     || fail "an effort chosen for the old harness must not carry to a different one"
   pass "fm-control relaunch: a harness switch resets model and effort unless they are named too"
+}
+
+# The O-0018 overload-diversion round trip: an account task moves onto the
+# claude-ox Ox Alpha profile, then back onto an account, at one real (fake
+# transport) endpoint through the ordinary relaunch verb - both directions,
+# not just the code path. Before claude-ox existed only the account-to-Ox leg
+# had a verified adapter value to name; the return leg had none.
+test_relaunch_moves_a_task_onto_ox_and_back_to_an_account() {
+  local dir out rc
+  dir=$(new_case oxroundtrip rl41)
+  add_ship_task "$dir" rl41 claude
+
+  printf 'claude-ox' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl41 relaunch --harness claude-ox --effort high \
+    --note "diverting onto Ox while account quota is tight"); rc=$?
+  expect_code 0 "$rc" "relaunching an account task onto claude-ox should succeed"$'\n'"$out"
+  assert_contains "$out" "harness=claude-ox from=claude" "the outcome should name the account-to-Ox transition"
+  [ "$(meta_field "$dir" rl41 harness)" = claude-ox ] \
+    || fail "the durable record should follow the switch onto claude-ox"
+  assert_grep "claude1 --ox --dangerously-skip-permissions --effort 'high'" "$dir/fake/literal" \
+    "the replacement launch should be the Ox wrapper with the requested effort threaded through"
+  assert_no_grep "--model" "$dir/fake/literal" \
+    "the Ox leg must never receive --model even though none was requested here"
+
+  : > "$dir/fake/literal"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl41 relaunch --harness claude --note "returning to an account"); rc=$?
+  expect_code 0 "$rc" "relaunching a claude-ox task back onto an account should succeed"$'\n'"$out"
+  assert_contains "$out" "harness=claude from=claude-ox" "the outcome should name the Ox-to-account transition"
+  [ "$(meta_field "$dir" rl41 harness)" = claude ] \
+    || fail "the durable record should follow the return to an account"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the return leg should launch a replacement agent"
+  assert_no_grep "claude1 --ox" "$dir/fake/literal" \
+    "the return-to-account launch must not carry the Ox wrapper"
+  pass "fm-control relaunch: an account task moves onto claude-ox and back onto an account through the same verb"
 }
 
 test_harness_switch_resolves_a_prefixed_recorded_harness() {
@@ -1316,10 +1367,11 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
-test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_precedes_the_instructions_with_the_progress_note
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
+test_relaunch_moves_a_task_onto_ox_and_back_to_an_account
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes

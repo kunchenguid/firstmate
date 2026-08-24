@@ -1,0 +1,22 @@
+# config/away-selfheal-command - the command the away-mode sub-supervisor types
+# into the primary pane to bring the session back after it has verifiably exited
+# (bin/fm-supervise-daemon.sh's selfheal_maybe). Copy this into a local,
+# gitignored config/away-selfheal-command and edit. The FIRST non-empty,
+# non-comment line is used; the rest is ignored.
+#
+# Self-healing is OFF while this file is absent and FM_AWAY_SELFHEAL_CMD is
+# unset, so a home opts in deliberately rather than inheriting a restart.
+#
+# It must RESUME this home's session rather than start a fresh one: the daemon
+# restarts the session shell to get delivery moving again, and everything the
+# session was holding has to survive that. For Claude Code that is the --continue
+# form; use whichever launcher and account this home actually runs.
+#
+#   claude --continue
+#   claude3 --continue
+#   codex resume --last
+#
+# The command is typed only AFTER the agent has been asked to leave through its
+# own exit command and its stop has been confirmed, so it is always typed into a
+# plain shell, never into an agent composer.
+claude --continue

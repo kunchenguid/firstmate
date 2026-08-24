@@ -1,0 +1,24 @@
+# Aggregate ceiling for every CI runner on gex44, installed as a systemd USER
+# slice of the unprivileged `ghrunner` user.
+#
+# The ceiling is aggregate on purpose. Two runners at 8 cores each would be 16
+# of gex's 20 cores, and gex runs 25 production containers; the captain's
+# stated purpose ("CI must never displace production") would not survive the
+# literal reading. Both runners together get 8 cores here.
+#
+# CPUWeight=20 against the default 100 is the second half: even inside the
+# quota, production wins every contended scheduling decision.
+[Unit]
+Description=Aggregate CPU/memory ceiling for gex CI runners
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=800%
+CPUWeight=20
+MemoryAccounting=yes
+MemoryHigh=12G
+MemoryMax=16G
+IOAccounting=yes
+IOWeight=20
+TasksAccounting=yes
+TasksMax=8192

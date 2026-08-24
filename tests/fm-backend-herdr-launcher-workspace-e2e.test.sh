@@ -41,6 +41,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=tests/plan-approval-helpers.sh
+. "$ROOT/tests/plan-approval-helpers.sh"
 
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
@@ -387,6 +389,10 @@ EOF
 [ -n "$WS_SM_DECOY" ] && [ -n "$WS_SM_LAUNCH" ] || fail "could not create the two secondmate-labeled workspaces"
 WS_SM_DECOY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_SM_DECOY")
 
+# A ship spawn from a secondmate home needs the primary's signed plan approval
+# before it may start (bin/fm-plan-approval.sh).
+fm_test_plan_approval "$PRIMARY_HOME" "$SM_HOME" smE \
+  || fail "could not approve the plan for the secondmate-owned crewmate smE"
 spawn_from_launcher "$LAUNCH_SM_PANE" "$SM_HOME" smE "$PROJ" --mode no-mistakes --yolo off
 [ "$SPAWN_RC" -eq 0 ] || fail "a secondmate-owned crewmate spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
 SME_META="$SM_HOME/state/smE.meta"

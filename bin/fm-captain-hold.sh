@@ -104,11 +104,28 @@
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
-# passes may add ids. A post-teardown visual review can complete against the
+# passes may add ids, and `hold` itself adds the id it holds under `--origin`
+# to that origin's inventory, so a call found by a later pass is checked here
+# without waiting to be named again; holding never writes the attestation.
+# A post-teardown visual review can complete against the
 # surviving report and tasks without recreating task state.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still be durable and no keyed status decision may be open.
+#
+# WHERE AN ENTRY IS LOOKED UP. tasks-axi prunes a closed task out of the live
+# backlog on every close once `done_keep` is full and keeps it permanently in
+# the archive named by the home's `.tasks.toml`, so an origin with more captain
+# calls than that window has answered ones in the archive from the moment they
+# are answered. Every read-only inspection here - both attestations, `verify`,
+# the keyed intake, and the retry check that makes `answer` idempotent - reads
+# the live backlog first and that archive second, and `answer` records a
+# retroactive block on an archived task in place. Reaching the archive only
+# widens what is FOUND, never what is accepted: an entry missing from both, one
+# carrying no recorded captain answer, an archived id reused for a new call, an
+# archived task never held for the captain, and a release against a closed task
+# all still refuse. `--none` unions the stored inventory rather than replacing
+# it, so an empty attestation cannot wave through a registered call.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -257,6 +274,23 @@ show_field_value() {  # <show-output> <field>
   printf '%s' "$value"
 }
 
+# Read-only lookup of a task that may no longer be in the live backlog.
+# tasks-axi retention prunes a closed task out of the live backlog on every
+# close once `done_keep` is full, and the record persists permanently in the
+# archive. A lookup that stopped at the live backlog therefore reported an
+# answered captain call as absent, which made its origin permanently
+# uncompletable once the first answer aged past that window. Only read-only
+# inspection falls back here; a path that must hold, create, or release a live
+# task keeps the live lookup, because an archived row is not a live task.
+hold_lookup() {  # <task-id>
+  local show
+  if show=$(task_show "$1"); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  fm_tasks_axi_show_archived "$FM_HOME" "$1"
+}
+
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
@@ -344,7 +378,8 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(hold_lookup "$id") \
+    || fail "captain-held task $id is absent from the backlog and the archive of $FM_HOME"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -361,19 +396,41 @@ verify_hold_durable() {  # <task-id>
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  if hold_lookup "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if hold_lookup "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no captain-held task $entry and no legacy identity $legacy in the backlog or archive of $FM_HOME"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no captain-held task $entry in the backlog or archive of $FM_HOME"
+}
+
+# The attested inventory is the exact set of tasks the completion gate
+# re-verifies, so it has to grow with the captain calls themselves. A task held
+# for the captain by a later review pass belongs to this origin whether or not
+# a subsequent `complete` names it, and an inventory frozen at its first store
+# silently stopped checking those entries. This records the inventory only and
+# never `decisions_reviewed`: holding a task for the captain is not attesting
+# that the origin's review is complete.
+record_hold_in_inventory() {  # <origin-id> <task-id>
+  local meta="$STATE/$1.meta" id=$2 previous keys
+  [ -f "$meta" ] || return 0
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
+  fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=1
+  if [ -f "$meta" ]; then
+    previous=$(meta_value "$meta" decision_keys)
+    keys=$(sorted_key_union "$previous" "$id")
+    [ "$previous" = "$keys" ] || printf 'decision_keys=%s\n' "$keys" >> "$meta"
+  fi
+  fm_lock_release "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=0
 }
 
 command_hold() {
@@ -413,6 +470,12 @@ command_hold() {
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
+    # Retention moves a closed task out of the live backlog, so the refusal
+    # above has to follow it into the archive; otherwise an already-answered
+    # captain call silently becomes a brand-new task under the same id.
+    if fm_tasks_axi_show_archived "$FM_HOME" "$id" >/dev/null; then
+      fail "task $id is already closed and archived; a new captain call needs its own task"
+    fi
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -441,13 +504,14 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  [ -z "$origin" ] || record_hold_in_inventory "$origin" "$id"
   printf '%s\n' "$id"
 }
 
 # Record a resolution block at the top of the task body, preserving the
 # previous body below it and archiving the pristine original.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp
+write_resolution_record() {  # <task-id> <mode> <shown-body> [archived]
+  local id=$1 mode=$2 body=$3 archived=${4:-0} new_body tmp
   new_body=$(resolution_block "$mode")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
@@ -460,7 +524,12 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
     rm -f -- "$tmp"
     fail "cannot stage the resolution record for $id"
   fi
-  if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
+  if [ "$archived" = 1 ]; then
+    if ! fm_tasks_axi_update_archived_body_file "$FM_HOME" "$id" "$tmp"; then
+      rm -f -- "$tmp"
+      fail "could not record the captain decision on archived $id"
+    fi
+  elif ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
     rm -f -- "$tmp"
     fail "could not record the captain decision on $id"
   fi
@@ -476,7 +545,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode archived=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -490,7 +559,14 @@ command_answer() {
   validate_slug task-id "$id"
   load_decision "$decision_file"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  # An answer must still reach a task retention has moved into the archive:
+  # this is the retroactive-record path, and it is the only way an origin whose
+  # answer was recorded outside this script gets past the completion gate.
+  if ! show=$(task_show "$id"); then
+    show=$(fm_tasks_axi_show_archived "$FM_HOME" "$id") \
+      || fail "captain-held task $id is absent from the backlog and the archive of $FM_HOME"
+    archived=1
+  fi
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -515,8 +591,13 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
-    write_resolution_record "$id" repaired "$body"
-    show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
+    write_resolution_record "$id" repaired "$body" "$archived"
+    if [ "$archived" = 1 ]; then
+      show=$(fm_tasks_axi_show_archived "$FM_HOME" "$id") \
+        || fail "task $id disappeared while recording the answer"
+    else
+      show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
+    fi
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
@@ -723,7 +804,7 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
+    show=$(hold_lookup "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)

@@ -80,6 +80,14 @@ alive
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
+On 2026-08-23 (Linux, tmux 3.6, uutils coreutils) the portable regression's original stand-in construction was found broken on multi-call coreutils hosts: a `sleep` binary symlinked as `claude-link` dispatched uutils' `link` applet on argv[0] and exited instantly, so every stand-in window died before classification.
+The fixture now symlinks `bash` (argv[0]-neutral) and holds each pane open through a real `sleep` child invoked by its own name; the same run verified the pane CPU sample and delta evidence (`fm_backend_tmux_pane_cputime`, `fm_busy_cpu_progress`) with a busy loop against a sleeper via `tests/fm-tmux-agent-liveness.test.sh`, whose output asserts the two shapes diverge:
+
+```text
+ok - pane cputime: a busy loop accrues CPU, a sleeper stays flat, and the shapes diverge
+ok - fm_busy_cpu_progress: no-baseline on first read, then progress for the busy loop and flat for the sleeper
+```
+
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
@@ -232,6 +240,49 @@ All six installed harnesses honored the doorbell contract with real model turns:
 Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+
+## Away-delivery guards
+
+Two facts the away-mode delivery path depends on are vendor-supplied and cannot be settled by a stub, so both are proven against the real transport and the real harnesses by `tests/fm-away-delivery-live-e2e.test.sh`.
+This is the refresh command after any tmux or harness upgrade; rerun it and update the numbers below rather than trusting them across releases.
+
+```sh
+FM_AWAY_DELIVERY_LIVE=1 tests/fm-away-delivery-live-e2e.test.sh
+```
+
+Verified 2026-08-22 on Linux x86_64, tmux 3.6, from an already-trusted checkout on an isolated private socket.
+
+```text
+# transport: tmux tmux 3.6 budget=15862 accepted, refusal observed at <= 65536
+ok - transport ceiling: the computed one-send budget is accepted by the installed tmux (tmux tmux 3.6, budget 15862 bytes)
+# claude (2.1.239 (Claude Code)): idle settled to byte-stable after 4 attempt(s)
+# claude (2.1.239 (Claude Code)): 9 busy samples, longest byte-identical run 0s, window 6s
+ok - away-delivery override calibrated live on claude (2.1.239 (Claude Code)): idle settles byte-stable, and the longest static stretch while busy (0s) stays below the 6s window
+# codex: not installed, skipped
+# opencode (1.18.21): idle settled to byte-stable after 1 attempt(s)
+# opencode (1.18.21): 8 busy samples, longest byte-identical run 0s, window 6s
+ok - away-delivery override calibrated live on opencode (1.18.21): idle settles byte-stable, and the longest static stretch while busy (0s) stays below the 6s window
+# grok: not installed, skipped
+# kimi: not installed, skipped
+# cursor: not installed, skipped
+# pi: not installed, skipped
+ok - live away-delivery guard verified 2 installed harness(es) and the transport ceiling
+```
+
+### One-send transport ceiling
+
+A tmux client hands each command to its server as a single imsg, and imsg's `MAX_IMSGSIZE` caps the WHOLE command, so an oversize `send-keys -l` is refused with `command too long` and types nothing at all.
+Measured directly on tmux 3.6: payload plus target reached exactly 16346 bytes and was refused at 16347, and that ceiling moved one-for-one with the target-name length (16345 accepted for a 1-character target, 16245 for 101 characters, 15945 for 401), which is what proves the budget belongs to the whole command rather than to the payload.
+`bin/fm-tmux-lib.sh` therefore subtracts the target and a fixed reserve, yielding 15862 bytes for the target this guard used, and the guard confirms that exact budget is accepted.
+The guard also probes far above the ceiling and reports `PREMISE MOVED` instead of passing quietly if some future tmux stops refusing, so the reserve is never trusted blindly.
+
+### Delivery override window
+
+An affirmatively empty composer may outrank a rendered busy signature only when two captures across `FM_INJECT_STABLE_SECS` are byte-identical, so the window has to exceed the longest stretch a WORKING harness can go without repainting.
+That number is per harness and only a real harness can supply it, so the guard measures the longest byte-identical run it observes while a pane reports busy and fails naming the number to configure if the shipped window stops clearing it.
+Longest runs observed on 2026-08-22 were 0s for claude 2.1.239 and 0s for opencode 1.18.21, against a shipped 6s window; earlier samples the same day reached 1s on claude and 2s on opencode, which is why the default keeps a wide margin rather than tracking the smallest passing value.
+The guard reads the shipped `INJECT_STABLE_SECS_DEFAULT` from the daemon rather than a copy, so a drifting default cannot keep it passing.
+Codex, grok, kimi, cursor, and pi were not installed on the verification machine and are reported as skipped rather than passed; the portable half of both claims is pinned without any harness in `tests/fm-daemon.test.sh`.
 
 ## Herdr
 

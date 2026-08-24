@@ -49,6 +49,22 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
+# A commit that exists in <dir> but is neither the current HEAD nor a descendant
+# of it - the shape a pipeline leaves behind when it rebases its work onto
+# another base while the crew's own copy stays put. Kept reachable by its own
+# branch so the repo can still resolve it; HEAD is restored before returning.
+make_diverged_commit() {  # <dir> -> echoes the diverged commit sha
+  local dir=$1 branch sha
+  branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD)
+  git -C "$dir" checkout -q --orphan fm-test-diverged
+  git -C "$dir" commit -q --allow-empty -m 'pipeline rebased head'
+  sha=$(git -C "$dir" rev-parse HEAD)
+  git -C "$dir" checkout -q "$branch"
+  git -C "$dir" merge-base --is-ancestor HEAD "$sha" 2>/dev/null \
+    && fail "make_diverged_commit produced a descendant, not a diverged head"
+  printf '%s\n' "$sha"
+}
+
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
@@ -75,6 +91,8 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    printf 'runs\n' >> "${FM_FAKE_RUNS_CALL_LOG:-/dev/null}"
+    [ "${FM_FAKE_RUNS_FAIL:-0}" = 1 ] && exit 124
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
@@ -83,8 +101,18 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    # Agent-state inventory: a named list serves the agent-liveness cases; the
+    # default is an UNREADABLE inventory (not "missing"), so every case that
+    # predates the process-evidence read keeps its original resolution path.
+    if [ -n "${FM_FAKE_TMUX_LIST:-}" ]; then printf '%s\n' "$FM_FAKE_TMUX_LIST"; exit 0; fi
+    printf 'fake inventory unavailable\n'; exit 1 ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+      *pane_tty*) exit 1 ;;
+    esac
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
@@ -149,6 +177,14 @@ new_case() {  # <name> -> echoes case dir with an empty state/
   printf '%s\n' "$d"
 }
 
+# `no-mistakes runs` invocations recorded by the fake, for the supersession
+# probe's cost assertions.
+assert_runs_calls() {  # <expected> <log> <msg>
+  local actual=0
+  [ -f "$2" ] && actual=$(awk 'END { print NR + 0 }' "$2")
+  [ "$actual" = "$1" ] || fail "$3 (expected $1 runs calls, got $actual)"
+}
+
 arm_idle_record() {  # <state-dir> <id>
   local state=$1 id=$2 gen
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
@@ -170,6 +206,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_RUNS_CALL_LOG=/dev/null
+  FM_FAKE_RUNS_FAIL=0
+  export FM_FAKE_RUNS_CALL_LOG FM_FAKE_RUNS_FAIL
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
@@ -279,6 +318,11 @@ EOF
 }
 
 run_failed() {  # <branch>
+  run_outcome "$1" failed
+}
+
+# Any terminal run object, by outcome word (failed, cancelled, passed, ...).
+run_outcome() {  # <branch> <outcome>
   cat <<EOF
 run:
   id: "01RUN"
@@ -287,7 +331,7 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
-outcome: failed
+outcome: $2
 EOF
 }
 
@@ -783,6 +827,42 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+# The shape above still leaves two things coincidental: run_running binds the
+# foreign run's head to THIS worktree's own real HEAD (FM_FAKE_RUN_HEAD is set
+# by make_repo_on_branch), and the runs list still carries a row for the
+# foreign branch. Pin the exact "neighbour run" shape instead: no run of this
+# crew's own anywhere, the daemon's active/most-recent run belongs to a
+# foreign branch with a head that does not resolve in this worktree at all,
+# and the runs list is genuinely empty (no row for any branch, foreign or
+# own). Attribution must still be refused on branch identity alone, and the
+# watcher's progress predicate (crew_is_provably_working) must not treat the
+# foreign run as this crew's progress either - the direct combination behind
+# test_other_branch_run_ignored (foreign run, but a binding head) and
+# test_not_provably_working_when_stopped (foreign run via crew_is_provably_working,
+# but again a binding head), neither of which uses a genuinely foreign head.
+test_foreign_branch_foreign_head_empty_runs_list_ignored() {
+  reset_fakes
+  local d; d=$(new_case foreignheadempty)
+  make_repo_on_branch "$d/wt" fm/feat-gg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gg.meta" "window=fm:fm-feat-gg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented, ready to validate\n' > "$d/state/feat-gg.status"
+  # Overrides make_repo_on_branch's export: a head that resolves to nothing in
+  # this worktree's history, unlike the crew's own real HEAD.
+  FM_FAKE_RUN_HEAD="f0f0f0f"
+  FM_FAKE_AXI_STATUS="$(run_running fm/foreign-crew)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-gg
+  local out; out=$(run_crew_state "$d" feat-gg)
+  assert_not_contains "$out" "source: run-step" "foreign branch+head+empty runs list not misattributed"
+  assert_contains "$out" "source: status-log" "no own run anywhere -> falls back to status-log"
+  assert_contains "$out" "state: done" "falls back to the log verb"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-gg \
+    && fail "the watcher's progress check treated a foreign branch's run as this crew's progress"
+  pass "a foreign run with a foreign head and an empty runs list is ignored by both state and the progress check"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -843,6 +923,498 @@ test_no_run_grok_uses_isolated_fallback() {
   assert_contains "$out" "state: working" "grok busy tail -> working"
   assert_contains "$out" "grok-regex" "the grok verdict names its isolated fallback source"
   pass "grok still reads working through its isolated rendered-tail fallback"
+}
+
+# Regression for the 2026-08-18 sm-snacksuite incident: two freshly spawned
+# Claude crewmates on a quota-exhausted account read "working" for minutes
+# because claude-hook had opened a turn on UserPromptSubmit and no
+# Stop/StopFailure fired while the pane sat on Claude Code's own account-limit
+# banner. A Claude worker parked on that banner is an external wait, not a
+# working turn, so fm_busy_claude_limit_banner (bin/fm-busy-lib.sh) overrides
+# the busy verdict to paused once its pane tail shows the banner.
+test_no_run_claude_session_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-session-limit)
+  make_repo_on_branch "$d/wt" fm/feat-limit5h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limit5h.meta" "window=fm:fm-feat-limit5h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit5h)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit5h busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limit5h)
+  assert_contains "$out" "state: paused" "the 5h session-limit banner overrides busy to paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  assert_contains "$out" "session limit" "the detail names the limit that was hit"
+  assert_contains "$out" "resets 2:30pm" "the detail carries the banner's reset hint"
+  pass "a Claude worker parked on the 5h session-limit banner reads paused, not working"
+}
+
+# Claude Code renders the auto-continue widget BELOW the composer box, so it is
+# the pane's very last line; the capture reaching the matcher has no trailing
+# newline. That last line must still be read as part of the composer region.
+test_no_run_claude_limit_widget_on_last_captured_line_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-last-line)
+  make_repo_on_branch "$d/wt" fm/feat-limitlast
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitlast.meta" "window=fm:fm-feat-limitlast" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitlast)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitlast busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limitlast)
+  assert_contains "$out" "state: paused" "a widget on the last captured line still overrides busy to paused"
+  assert_contains "$out" "session limit" "the detail still names the limit that was hit"
+  assert_contains "$out" "resets 2:30pm" "the detail still carries the banner's reset hint"
+  pass "the limit widget on the pane's last captured line is not dropped"
+}
+
+# Same override for the 7-day weekly-limit banner (wLt.seven_day="weekly
+# limit" in the claude-cli 2.1.234 bundle - see fm_busy_claude_limit_banner's
+# header for the verified wording and its source).
+test_no_run_claude_weekly_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-weekly-limit)
+  make_repo_on_branch "$d/wt" fm/feat-limit7d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limit7d.meta" "window=fm:fm-feat-limit7d" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit7d)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit7d busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limit7d)
+  assert_contains "$out" "state: paused" "the weekly-limit banner overrides busy to paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  assert_contains "$out" "weekly limit" "the detail names the limit that was hit"
+  pass "a Claude worker parked on the weekly-limit banner reads paused, not working"
+}
+
+# An ordinary busy pane (no limit banner text) must keep reading working -
+# the override only fires on the verified banner wording, never on a plain
+# claude-hook busy verdict.
+test_no_run_claude_ordinary_busy_tail_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-ordinary-busy)
+  make_repo_on_branch "$d/wt" fm/feat-ordinary
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ordinary.meta" "window=fm:fm-feat-ordinary" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='esc to interrupt'
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-ordinary)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-ordinary busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-ordinary)
+  assert_contains "$out" "state: working" "an ordinary busy tail stays working"
+  assert_not_contains "$out" "state: paused" "no limit banner text means no override"
+  pass "a Claude worker with an ordinary busy pane still reads working"
+}
+
+# A non-Claude harness must never be classified by this banner text, even
+# when its pane happens to show similar wording: the override is scoped to
+# harness=claude only (fm_busy_claude_limit_banner is consulted only from
+# fm-crew-state.sh's claude* arm).
+test_no_run_non_claude_harness_ignores_limit_banner_text() {
+  reset_fakes
+  local d; d=$(new_case opencode-similar-text)
+  make_repo_on_branch "$d/wt" fm/feat-opencode
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-opencode.meta" "window=fm:fm-feat-opencode" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-opencode)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-opencode busy --gen "$gen" \
+    --source opencode-plugin --event session-status
+  local out; out=$(run_crew_state "$d" feat-opencode)
+  assert_contains "$out" "state: working" "a non-claude harness keeps the plain busy -> working mapping"
+  assert_not_contains "$out" "state: paused" "similar pane text never overrides a non-claude harness"
+  pass "a non-Claude harness ignores lookalike limit-banner text in its pane"
+}
+
+# Every name in claude-cli 2.1.234's wLt window map blocks the worker the same
+# way, so all six must override busy, not just the 5h/7d pair.
+test_no_run_claude_named_limit_variants_paused() {
+  local name
+  for name in "Opus limit" "Sonnet limit" "Fable 5 limit" "usage credit limit"; do
+    reset_fakes
+    local d; d=$(new_case "claude-limit-${name// /-}")
+    make_repo_on_branch "$d/wt" fm/feat-limitvar
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-limitvar.meta" "window=fm:fm-feat-limitvar" "worktree=$d/wt" "kind=ship" "harness=claude"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=1
+    FM_FAKE_BUSY_TEXT="You've hit your $name · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+    export FM_FAKE_BUSY_TEXT
+    local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitvar)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitvar busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    local out; out=$(run_crew_state "$d" feat-limitvar)
+    assert_contains "$out" "state: paused" "the \"$name\" banner overrides busy to paused"
+    assert_contains "$out" "$name" "the detail names the limit that was hit"
+  done
+  pass "every named Claude limit window (Opus/Sonnet/Fable 5/usage credit) reads paused"
+}
+
+# The named notice scrolls out of the capture window while the persistent
+# auto-continue widget stays on screen; a self-resolving widget alone is still
+# an external wait.
+test_no_run_claude_widget_only_tail_paused() {
+  local widget
+  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel" \
+                "Your usage limit has reset · press enter to continue"; do
+    reset_fakes
+    local d; d=$(new_case "claude-widget-${#widget}")
+    make_repo_on_branch "$d/wt" fm/feat-widget
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-widget.meta" "window=fm:fm-feat-widget" "worktree=$d/wt" "kind=ship" "harness=claude"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=1
+    FM_FAKE_BUSY_TEXT="$widget
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+    export FM_FAKE_BUSY_TEXT
+    local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widget)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widget busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    local out; out=$(run_crew_state "$d" feat-widget)
+    assert_contains "$out" "state: paused" "the auto-continue widget alone overrides busy to paused"
+    assert_contains "$out" "unspecified" "a widget-only match reports the limit type as unspecified"
+  done
+  pass "the auto-continue widget alone reads paused without naming a limit"
+}
+
+# Claude Code's give-up rendering is NOT a self-resolving wait: the agent never
+# resumes without a human, so absorbing it as a pause would silence it for a
+# whole re-surface window instead of letting the watcher's wedge path escalate.
+test_no_run_claude_giveup_widget_blocked() {
+  reset_fakes
+  local d; d=$(new_case claude-giveup)
+  make_repo_on_branch "$d/wt" fm/feat-giveup
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-giveup.meta" "window=fm:fm-feat-giveup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Automatic continue stopped after repeated usage-limit hits
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-giveup)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-giveup busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-giveup)
+  assert_contains "$out" "state: blocked" "the give-up widget reports blocked, not an absorbed pause"
+  assert_not_contains "$out" "state: paused" "the give-up widget must not read as a self-resolving wait"
+  assert_contains "$out" "usage-limit give-up - agent will not resume on its own; relaunch or captain needed" \
+    "the blocked detail names the give-up state and what it needs"
+  pass "Claude Code's usage-limit give-up widget reads blocked, keeping the wedge path"
+}
+
+# The realistic below-box layout: Claude Code renders the status/hint line
+# directly under the composer box and the limit widget under THAT, so both must
+# sit inside the anchored region or the block is never seen.
+test_no_run_claude_widget_two_lines_below_box_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-below-box)
+  make_repo_on_branch "$d/wt" fm/feat-belowbox
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-belowbox.meta" "window=fm:fm-feat-belowbox" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-belowbox)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-belowbox busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-belowbox)
+  assert_contains "$out" "state: paused" "a widget two lines below the box is still inside the region"
+  assert_contains "$out" "session limit" "the detail names the limit found anywhere in the region"
+  assert_contains "$out" "resets 2:30pm" "the detail carries the banner's reset hint"
+  pass "the hint line and the widget both below the composer box are both in the region"
+}
+
+# A genuinely busy crewmate editing this repo's own limit-banner code has both
+# "session limit" and "resets"/"press enter" on screen in ordinary scrollback.
+# The override is anchored to the bottom-most widget/composer region, so that
+# content must never flip the worker to paused.
+test_no_run_claude_scrollback_limit_words_stay_working() {
+  reset_fakes
+  local d; d=$(new_case claude-scrollback-words)
+  make_repo_on_branch "$d/wt" fm/feat-scrollback
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-scrollback.meta" "window=fm:fm-feat-scrollback" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="+ # the 5-hour window is named session limit and the 7-day one
++ # weekly limit; a rejected turn renders resets <time>, and the widget
++ # says press enter to continue once stale
+$(for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf '  editing bin/fm-busy-lib.sh line %s\n' "$i"; done)
+· Thinking…
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-scrollback)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-scrollback busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-scrollback)
+  assert_contains "$out" "state: working" "limit words in ordinary scrollback keep the worker working"
+  assert_not_contains "$out" "state: paused" "scrollback far from the composer never triggers the override"
+  pass "a busy Claude worker editing limit-banner text is not misread as paused"
+}
+
+# A PARKED run stays authoritative even when the pane is limit-blocked: the gate
+# is waiting on a CAPTAIN decision the worker's quota block does not prevent, so
+# the parked verdict and its gate detail must survive and only gain a note.
+test_parked_run_claude_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-parked-run)
+  make_repo_on_branch "$d/wt" fm/feat-limitparked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitparked.meta" "window=fm:fm-feat-limitparked" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-limitparked)"
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-limitparked)
+  assert_contains "$out" "state: parked" "a parked run keeps its own state over the pane override"
+  assert_not_contains "$out" "state: paused" "a limit-blocked pane must not absorb a pending gate decision"
+  assert_contains "$out" "2 finding(s)" "the parked gate detail survives the limit note"
+  assert_contains "$out" "ask-user" "the parked gate's ask-user marker survives the limit note"
+  assert_contains "$out" "worker pane limit-blocked" "the parked run's detail records the blocked pane"
+  assert_contains "$out" "weekly limit" "the appended note names the limit"
+  pass "a parked run whose Claude pane is limit-blocked stays parked with an appended note"
+}
+
+# An actively running step may progress independently of this crew's pane, so
+# it keeps reporting working - but the supervisor still sees the pane is stuck.
+test_active_run_claude_limit_banner_annotates_working() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-active-run)
+  make_repo_on_branch "$d/wt" fm/feat-limitactive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitactive.meta" "window=fm:fm-feat-limitactive" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-limitactive)"
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-limitactive)
+  assert_contains "$out" "state: working" "an active run step keeps reporting working"
+  assert_contains "$out" "worker pane limit-blocked" "the active run's detail records the blocked pane"
+  pass "an actively running step with a limit-blocked Claude pane stays working with a note"
+}
+
+# Claude Code's NON-blocking approaching-limit warning ("You've used NN% of your
+# <name> · resets <time>", status allowed_warning at >=70% utilization) renders
+# the same names and reset hint while the account is NOT blocked and the worker
+# is genuinely still working. Only a blocking auto-continue widget phrase means
+# a real block, so the warning alone must never read paused.
+test_no_run_claude_approaching_limit_warning_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-approaching-limit)
+  make_repo_on_branch "$d/wt" fm/feat-approaching
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-approaching.meta" "window=fm:fm-feat-approaching" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="Approaching session limit
+You've used 85% of your session limit · resets 3:00pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-approaching)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-approaching busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-approaching)
+  assert_contains "$out" "state: working" "an approaching-limit warning keeps the worker working"
+  assert_not_contains "$out" "state: paused" "a non-blocking warning must never read paused"
+  pass "a Claude worker on the non-blocking approaching-limit warning still reads working"
+}
+
+# A bare named limit notice with no blocking widget is deliberately NOT a pause:
+# Claude Code renders the same "<name> limit ... resets <time>" wording while
+# merely approaching a limit and while blocked, so the worker keeps reading
+# working - but the notice is surfaced in the detail so the supervisor sees it.
+# fm_busy_claude_limit_banner's header owns this accepted limitation.
+test_no_run_claude_bare_limit_notice_annotates_working() {
+  reset_fakes
+  local d; d=$(new_case claude-bare-notice)
+  make_repo_on_branch "$d/wt" fm/feat-barenotice
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-barenotice.meta" "window=fm:fm-feat-barenotice" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-barenotice)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-barenotice busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-barenotice)
+  assert_contains "$out" "state: working" "a bare limit notice keeps the worker working"
+  assert_not_contains "$out" "state: paused" "only a blocking widget may report paused"
+  assert_contains "$out" "limit notice visible in pane" "the working detail surfaces the visible notice"
+  pass "a bare Claude limit notice annotates the working detail instead of pausing"
+}
+
+# The blocking widget is matched ONLY inside the composer region: the composer
+# box, its hint line, and the two lines directly above the box's top border.
+# (a) A real widget rendered there is the pause signal.
+test_no_run_claude_widget_in_composer_region_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-in-region)
+  make_repo_on_branch "$d/wt" fm/feat-widgetregion
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetregion.meta" "window=fm:fm-feat-widgetregion" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="  ran the test suite, 41 passed
+Your usage limit has reset · press enter to continue
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetregion)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetregion busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetregion)
+  assert_contains "$out" "state: paused" "a widget rendered in the composer region reads paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  pass "a blocking widget inside the composer region reads paused"
+}
+
+# (b) The identical phrase in transcript/scrollback above that region, with an
+# ordinary composer box and busy footer below it, must keep reading working -
+# the reviewer's confirmed false-positive case. The prose line also lacks the
+# widget's own "usage limit" token, which is the second half of the narrowing.
+test_no_run_claude_widget_phrase_in_scrollback_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-scrollback)
+  make_repo_on_branch "$d/wt" fm/feat-widgetscroll
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetscroll.meta" "window=fm:fm-feat-widgetscroll" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="bin/fm-busy-lib.sh: says press enter to continue once stale
+· Thinking… (12s · esc to interrupt)
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetscroll)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetscroll busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetscroll)
+  assert_contains "$out" "state: working" "a widget phrase in scrollback keeps the worker working"
+  assert_not_contains "$out" "state: paused" "a widget phrase outside the composer region never pauses"
+  pass "a busy Claude worker with a widget phrase in scrollback is not misread as paused"
+}
+
+# (b2) Same phrase pushed further up the transcript: still outside the region,
+# still working, so the bound does not depend on how far above the box it sits.
+test_no_run_claude_widget_phrase_deep_in_transcript_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-deep)
+  make_repo_on_branch "$d/wt" fm/feat-widgetdeep
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetdeep.meta" "window=fm:fm-feat-widgetdeep" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="Your usage limit has reset · press enter to continue
+  (quoted from bin/fm-busy-lib.sh while editing the matcher)
+  editing tests/fm-crew-state.test.sh
+· Thinking… (12s · esc to interrupt)
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetdeep)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetdeep busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetdeep)
+  assert_contains "$out" "state: working" "a verbatim widget line deep in the transcript keeps the worker working"
+  assert_not_contains "$out" "state: paused" "only the composer region may produce the pause"
+  pass "a verbatim widget line quoted deep in the transcript never pauses the worker"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -1408,6 +1980,336 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- a replaced run is history, not current state ---------------------------
+# 2026-08-16 evidence, twice in one day: a worker's own supersession sequence
+# (the run dies or is aborted, custody comes back, a fresh run starts) leaves
+# the dead run as the most recently written record for a while.
+#   - snacksuite-rag-umbau: run 01M03RWN cancelled, replaced by 01M0492M
+#     running in the test step; this helper still reported "failed: run
+#     cancelled", and the watcher turned that into an inactive-crew false alarm.
+#   - lensclash-fix-runde-golive, 08:56: run 01M0490J failed, replaced by
+#     01M04KJJ running; this helper still reported "failed: run failed" while
+#     `axi status` showed running/fixing at the same moment.
+# The pair below pins both shapes, and the third case pins the safety property
+# they must not cost: a terminal run with NO replacement still reports failed.
+
+# The dead run answers `axi status` (its head still binds), while the runs list
+# already shows the newer running one on top.
+test_replaced_terminal_run_not_reported_as_current() {
+  local terminal detail short d out
+  for terminal in cancelled failed; do
+    reset_fakes
+    d=$(new_case "replaced-$terminal")
+    make_repo_on_branch "$d/wt" "fm/feat-replaced-$terminal"
+    short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/replaced-$terminal.meta" \
+      "window=fm:fm-replaced-$terminal" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_outcome "fm/feat-replaced-$terminal" "$terminal")"
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-replaced-$terminal ${short}  2026-08-16 08:56
+  $terminal  fm/feat-replaced-$terminal ${short}  2026-08-16 08:43
+EOF
+)"
+    out=$(run_crew_state "$d" "replaced-$terminal")
+    assert_contains "$out" "state: working" "a $terminal run replaced by a running one is not the current state"
+    assert_contains "$out" "source: run-step" "the replacement run is still a run-step verdict"
+    assert_contains "$out" "superseded run $terminal" "the superseded run is named in the detail"
+    detail="run $terminal"
+    assert_not_contains "$out" "state: failed" "the replaced $terminal run must not be reported as failed ($detail)"
+  done
+  pass "a cancelled or failed run replaced by a running one is not reported as the current state"
+}
+
+# The safety property the supersession rule must not cost: with no replacement
+# in the runs list, a terminal run is still exactly as terminal as before.
+test_terminal_run_without_replacement_stays_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case terminal-no-replacement)
+  make_repo_on_branch "$d/wt" fm/feat-dead
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dead.meta" "window=fm:fm-dead" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-dead failed)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-dead ${short}  2026-08-16 08:43
+  running    fm/some-other aaaaaaa  2026-08-16 08:56
+EOF
+)"
+  out=$(run_crew_state "$d" dead)
+  assert_contains "$out" "state: failed" "an unreplaced failed run is still failed"
+  assert_contains "$out" "run failed" "the failure detail is preserved"
+  assert_not_contains "$out" "superseded" "nothing superseded an unreplaced run"
+  pass "a terminal run with no replacement still reports failed"
+}
+
+# lensclash's other half: the replacement run was started from a preserved
+# pipeline head after the pipeline had rebased onto another base, so its head
+# is neither the local HEAD nor a descendant of it, and the strict head rule
+# rejected it. An EXECUTING run on this crew's branch is current work whatever
+# its head says - nothing but this crew's own validation runs on this branch -
+# so it is attributed, with its own step detail intact.
+test_executing_run_with_diverged_head_is_current() {
+  reset_fakes
+  local d diverged out
+  d=$(new_case diverged-executing)
+  make_repo_on_branch "$d/wt" fm/feat-diverged
+  diverged=$(make_diverged_commit "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/diverged.meta" "window=fm:fm-diverged" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: restarted validation on the preserved head\n' > "$d/state/diverged.status"
+  FM_FAKE_RUN_HEAD="$diverged"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-diverged)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" diverged
+  out=$(run_crew_state "$d" diverged)
+  assert_contains "$out" "state: working" "an executing run on this branch is current despite a diverged head"
+  assert_contains "$out" "source: run-step" "the diverged executing run is a run-step verdict"
+  assert_contains "$out" "validating (fixing)" "the run's own step detail is preserved"
+  assert_contains "$out" "run head diverged from local copy" "the divergence is recorded in the detail"
+  pass "an executing run whose head diverged from the local copy is still the current state"
+}
+
+# The boundary that relaxation must not cross: a TERMINAL run with a diverged
+# head stays unattributed, exactly as before, so an abandoned run on a reused
+# branch can never masquerade as this crew's state.
+test_terminal_run_with_diverged_head_still_not_attributed() {
+  reset_fakes
+  local d diverged out
+  d=$(new_case diverged-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-diverged-dead
+  diverged=$(make_diverged_commit "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/diverged-dead.meta" "window=fm:fm-diverged-dead" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/diverged-dead.status"
+  FM_FAKE_RUN_HEAD="$diverged"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-diverged-dead failed)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" diverged-dead
+  out=$(run_crew_state "$d" diverged-dead)
+  assert_not_contains "$out" "source: run-step" "a terminal run with a diverged head must stay unattributed"
+  assert_contains "$out" "source: status-log" "falls back to the status log as before"
+  pass "a terminal run with a diverged head is still not attributed"
+}
+
+# The coarse path's own supersession: `axi status` answers for another crew's
+# branch, and in the runs list this branch's newest row is the running
+# replacement (diverged head, so the strict rule skips it) sitting above an
+# older terminal row whose head DOES bind. Newest-first ordering makes the
+# running row the newer one, so it wins.
+test_coarse_running_row_outranks_older_matching_terminal_row() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-superseded
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-superseded.meta" \
+    "window=fm:fm-coarse-superseded" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-coarse-superseded ffffff1  2026-08-16 08:56
+  cancelled  fm/feat-coarse-superseded ${short}  2026-08-16 08:43
+EOF
+)"
+  out=$(run_crew_state "$d" coarse-superseded)
+  assert_contains "$out" "state: working" "a newer running row outranks an older terminal row that binds"
+  assert_contains "$out" "source: run-step" "the coarse replacement is still a run-step verdict"
+  assert_not_contains "$out" "state: failed" "the superseded cancelled row must not win"
+  pass "the coarse runs list prefers a newer running row over an older terminal one"
+}
+
+# The other half of the newest-first ordering: no row binds to the worktree, the
+# branch's NEWEST row is terminal and an OLDER row is still marked running. The
+# running row is the stale one there - a run that died without its record being
+# terminalized - so it must NOT supersede the newer terminal verdict, and the
+# coarse fallback must attribute nothing. This is what keeps a genuinely dead
+# crew escalating instead of reading as working forever.
+test_coarse_older_running_row_loses_to_newer_terminal_row() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-stale-running)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-stale-running
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-stale-running.meta" \
+    "window=fm:fm-coarse-stale-running" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: waiting on the validation run\n' > "$d/state/coarse-stale-running.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  failed     fm/feat-coarse-stale-running ffffff2  2026-08-16 09:10
+  running    fm/feat-coarse-stale-running ffffff1  2026-08-16 08:43
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarse-stale-running
+  out=$(run_crew_state "$d" coarse-stale-running)
+  assert_not_contains "$out" "source: run-step" "an older stuck-running row must not outrank a newer terminal row"
+  assert_not_contains "$out" "validating" "no coarse row binds, so no run is attributed as active work"
+  assert_contains "$out" "source: status-log" "falls back to the status log so the dead crew still escalates"
+  pass "an older running row loses to a newer terminal row in the coarse runs list"
+}
+
+# The same ordering rule where a row DOES bind, which the two-halves formulation
+# got wrong: newest row terminal and not binding (the pipeline rebased off the
+# local line), middle row stuck at running and not binding, oldest row terminal
+# and binding. The branch's newest record is not running, so the stuck row must
+# not supersede anything and the binding row's own verdict is the answer.
+test_coarse_stuck_running_row_below_newer_terminal_does_not_win() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-stuck-middle)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-stuck
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-stuck.meta" \
+    "window=fm:fm-coarse-stuck" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-coarse-stuck ffffff3  2026-08-16 09:10
+  running    fm/feat-coarse-stuck ffffff2  2026-08-16 08:30
+  failed     fm/feat-coarse-stuck ${short}  2026-08-16 08:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarse-stuck
+  out=$(run_crew_state "$d" coarse-stuck)
+  assert_contains "$out" "state: failed" "the binding row's own terminal verdict is the answer"
+  assert_contains "$out" "source: run-step" "the binding row is still a run-step verdict"
+  assert_not_contains "$out" "state: working" "a stuck running row below a newer terminal row must not win"
+  pass "a stuck running row below a newer terminal row does not supersede the binding verdict"
+}
+
+# The done half of the terminal set bin/fm-inactive-reconcile.sh consumes: it
+# raises its inactive-terminal-outcome record off `state: done ` exactly as off
+# `state: failed `. Evidence 2026-08-16 10:35, lensclash-datenschutz-loeschung:
+# supervision surfaced a terminal outcome while `axi status` showed running.
+# A done run that a newer running one replaced must not be reported as terminal.
+test_replaced_done_run_not_reported_as_current() {
+  local outcome short d out
+  for outcome in passed checks-passed; do
+    reset_fakes
+    d=$(new_case "replaced-done-$outcome")
+    make_repo_on_branch "$d/wt" "fm/feat-replaced-$outcome"
+    short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/replaced-$outcome.meta" \
+      "window=fm:fm-replaced-$outcome" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_outcome "fm/feat-replaced-$outcome" "$outcome")"
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-replaced-$outcome ${short}  2026-08-16 10:35
+  completed  fm/feat-replaced-$outcome ${short}  2026-08-16 10:02
+EOF
+)"
+    out=$(run_crew_state "$d" "replaced-$outcome")
+    assert_contains "$out" "state: working" "a $outcome run replaced by a running one is not the current state"
+    assert_contains "$out" "superseded" "the superseded done run is named in the detail"
+    assert_not_contains "$out" "state: done" "the replaced $outcome run must not be reported as done"
+  done
+  pass "a done run replaced by a running one is not reported as the current state"
+}
+
+# The ci-green override is NOT a terminal verdict: that run is still executing
+# and is its own newest row, so it must never be handed to the supersession
+# probe and a green PR must keep surfacing as done.
+test_ci_green_override_is_not_probed_for_supersession() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-green-no-probe)
+  make_repo_on_branch "$d/wt" fm/feat-ci-green-probe
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ci-green-probe.meta" \
+    "window=fm:fm-ci-green-probe" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-green-probe)"
+  FM_FAKE_CI_LOGS='CI checks passed'
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+  out=$(run_crew_state "$d" ci-green-probe)
+  assert_contains "$out" "state: done" "a green PR still surfaces as done"
+  assert_runs_calls 0 "$FM_FAKE_RUNS_CALL_LOG" "the ci-green override pays no supersession probe"
+  pass "the ci-green override is never handed to the supersession probe"
+}
+
+# The probe's cost damping. A terminal run nothing ever replaces answers "not
+# superseded" forever, and re-asking the runs list on every read is what made
+# bin/fm-inactive-reconcile.sh's per-child budget worse for exactly the children
+# it exists to report. The negative answer is remembered per task and worktree
+# head for FM_RUN_SUPERSEDED_TTL seconds; a positive one never is.
+test_terminal_supersession_probe_is_damped_but_never_caches_a_positive() {
+  reset_fakes
+  local d short out
+  d=$(new_case supersession-damping)
+  make_repo_on_branch "$d/wt" fm/feat-damping
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/damping.meta" "window=fm:fm-damping" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-damping failed)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-damping ${short}  2026-08-16 08:43"
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: failed" "an unreplaced failed run is still failed on the first read"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the first read probes the runs list once"
+
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: failed" "the cached negative keeps the terminal verdict"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the second read is damped by the cached negative"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_RUN_SUPERSEDED_TTL=0 \
+    "$CREW_STATE" damping)
+  assert_contains "$out" "state: failed" "an expired entry still reports the terminal verdict"
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "an expired entry re-probes"
+
+  : > "$FM_FAKE_RUNS_CALL_LOG"
+  rm -f "$d/state/.run-superseded-damping"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-damping ${short}  2026-08-16 08:56
+  failed     fm/feat-damping ${short}  2026-08-16 08:43
+EOF
+)"
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: working" "a replacement is detected"
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: working" "the positive verdict is re-derived, not cached"
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "a positive supersession is never served from cache"
+  pass "the supersession probe is damped for a negative answer and never caches a positive"
+}
+
+# The damping cache may only remember a DEFINITIVE answer. The runs call is
+# fail-open, so a timed-out listing looks exactly like "no replacement" by its
+# printed word alone; caching that non-answer would pin the terminal verdict for
+# a whole TTL and hand bin/fm-inactive-reconcile.sh the false inactive-outcome
+# record on its very first read, which is the failure this change exists to
+# prevent. An unanswered listing must cost only that one read, as before.
+test_unanswered_runs_listing_is_never_cached_as_absent() {
+  reset_fakes
+  local d short out
+  d=$(new_case runs-listing-unanswered)
+  make_repo_on_branch "$d/wt" fm/feat-listing-unanswered
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/listing-unanswered.meta" \
+    "window=fm:fm-listing-unanswered" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-listing-unanswered failed)"
+  FM_FAKE_RUNS_FAIL=1
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_contains "$out" "state: failed" "an unanswered listing leaves the terminal verdict as it was"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the first read probes once"
+  assert_absent "$d/state/.run-superseded-listing-unanswered" \
+    "an unanswered listing must not be remembered as 'not superseded'"
+
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "the next read probes again instead of trusting a non-answer"
+
+  FM_FAKE_RUNS_FAIL=0
+  FM_FAKE_RUNS_LIST="  running    fm/feat-listing-unanswered ${short}  2026-08-16 08:56"
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_contains "$out" "state: working" "the replacement is detected as soon as the listing answers"
+  pass "an unanswered runs listing is never cached as a negative supersession answer"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1432,9 +2334,27 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
+test_foreign_branch_foreign_head_empty_runs_list_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
+test_no_run_claude_session_limit_banner_paused
+test_no_run_claude_limit_widget_on_last_captured_line_paused
+test_no_run_claude_weekly_limit_banner_paused
+test_no_run_claude_ordinary_busy_tail_stays_working
+test_no_run_non_claude_harness_ignores_limit_banner_text
+test_no_run_claude_named_limit_variants_paused
+test_no_run_claude_widget_only_tail_paused
+test_no_run_claude_giveup_widget_blocked
+test_no_run_claude_widget_two_lines_below_box_paused
+test_no_run_claude_scrollback_limit_words_stay_working
+test_parked_run_claude_limit_banner_paused
+test_active_run_claude_limit_banner_annotates_working
+test_no_run_claude_approaching_limit_warning_stays_working
+test_no_run_claude_bare_limit_notice_annotates_working
+test_no_run_claude_widget_in_composer_region_paused
+test_no_run_claude_widget_phrase_in_scrollback_stays_working
+test_no_run_claude_widget_phrase_deep_in_transcript_stays_working
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
@@ -1444,6 +2364,51 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+# --- process-evidence liveness and the declared machine wait (plan v3 U1.4) --
+
+test_agent_free_endpoint_reports_agent_gone() {
+  reset_fakes
+  local d; d=$(new_case agent-gone)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-gone.status"
+  # A stale busy record is exactly what a killed agent leaves behind.
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gone)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gone busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  export FM_FAKE_TMUX_LIST=fm-feat-gone FM_FAKE_TMUX_CURRENT_COMMAND=bash
+  local out; out=$(run_crew_state "$d" feat-gone)
+  unset FM_FAKE_TMUX_LIST FM_FAKE_TMUX_CURRENT_COMMAND
+  assert_contains "$out" "source: agent-gone" "empty-shell endpoint -> agent-gone source"
+  assert_contains "$out" "state: unknown" "empty-shell endpoint -> unknown, never working"
+  pass "an open endpoint whose process family holds no agent reports agent-gone, not a stale busy verdict"
+}
+
+test_active_wait_field_outranks_run_and_pane() {
+  reset_fakes
+  local d now; d=$(new_case wait-field)
+  make_repo_on_branch "$d/wt" fm/feat-wait
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-wait.meta" "window=fm:fm-feat-wait" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-wait.status"
+  # Both occupation signals present: an executing run and a busy pane. The
+  # abolished precedence rule would have reported working; the field wins.
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-wait)"
+  FM_FAKE_BUSY=1
+  now=$(date +%s)
+  printf 'v1 until=%s ts=%s reason=vendor limit reset\n' $(( now + 3600 )) "$now" > "$d/state/feat-wait.wait"
+  local out; out=$(run_crew_state "$d" feat-wait)
+  assert_contains "$out" "state: paused" "active wait field -> paused"
+  assert_contains "$out" "source: wait-field" "active wait field -> wait-field source"
+  assert_contains "$out" "vendor limit reset" "the declared reason is carried"
+  # Expired field decides nothing: resolution continues to the run as before.
+  printf 'v1 until=%s ts=%s reason=vendor limit reset\n' $(( now - 60 )) $(( now - 600 )) > "$d/state/feat-wait.wait"
+  out=$(run_crew_state "$d" feat-wait)
+  assert_contains "$out" "source: run-step" "expired wait field falls through to the run"
+  pass "an active machine wait outranks run-step and pane busy-ness; an expired one decides nothing"
+}
+
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
@@ -1461,5 +2426,18 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_replaced_terminal_run_not_reported_as_current
+test_terminal_run_without_replacement_stays_failed
+test_executing_run_with_diverged_head_is_current
+test_terminal_run_with_diverged_head_still_not_attributed
+test_coarse_running_row_outranks_older_matching_terminal_row
+test_coarse_older_running_row_loses_to_newer_terminal_row
+test_coarse_stuck_running_row_below_newer_terminal_does_not_win
+test_replaced_done_run_not_reported_as_current
+test_ci_green_override_is_not_probed_for_supersession
+test_terminal_supersession_probe_is_damped_but_never_caches_a_positive
+test_unanswered_runs_listing_is_never_cached_as_absent
+test_agent_free_endpoint_reports_agent_gone
+test_active_wait_field_outranks_run_and_pane
 
 echo "all fm-crew-state tests passed"

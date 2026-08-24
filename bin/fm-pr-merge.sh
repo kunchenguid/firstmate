@@ -267,3 +267,11 @@ case "$PROVIDER" in
     exit 2
     ;;
 esac
+
+# No push without rollout (captain's order 23.08., plan v3 U1.6): reaching this
+# line means the merge SUCCEEDED. For a repo carrying a service line in
+# config/gex-drift.services, the merge is an intermediate state until the
+# running service carries it, so the drift guard's owed-rollout reminder is
+# armed here. This hook must NEVER turn a successful merge into a failure:
+# the deposit is a silent no-op for non-service repos and best-effort always.
+"$SCRIPT_DIR/fm-gex-drift.sh" owe "$PR_OWNER/$PR_REPO" "$ID" "$URL" || true

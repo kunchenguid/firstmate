@@ -1337,6 +1337,54 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# fm_composer_injection_verdict: the ONE rule deciding whether an unsolicited
+# message may be typed into a pane that a rendered busy signature calls busy.
+#
+# WHY IT EXISTS (task fm-afk-zustellblockade-spinner-daempfung): a harness leaves
+# busy-looking RESIDUE on a finished turn - a completion line with a spinner
+# glyph, a footer still advertising an interrupt key, a hosted background shell
+# counted in the status row - and the delivery busy signature is a rendered
+# string, the weakest evidence in this file. Deferring on it alone can hold an
+# away-mode escalation against a session that is simply sitting idle.
+#
+# The override is admitted on exactly one pairing, and only positively:
+#   - the composer is affirmatively `empty`, which by this file's strict rule
+#     already means a PROVEN agent-composer container, never a blank row, a
+#     dialog, a dead shell, or an unreadable pane; and
+#   - two screen captures taken across a bounded window are byte-identical.
+# A working agent redraws: an elapsed counter ticks, a spinner advances, output
+# streams. Byte-equality across the window is therefore positive evidence that
+# no turn is running, and it is structural - it needs no vendor string to stay
+# true. Residue is static by construction, so it is exactly what this admits.
+# How long a working harness can go without repainting is per harness and can
+# only come from a real one, so the CALLER owns the window and
+# tests/fm-away-delivery-live-e2e.test.sh measures it per harness and fails
+# naming the number when a configured window stops clearing it.
+#
+# The asymmetry is deliberate. Being slightly too permissive costs an escalation
+# arriving one turn later, because a harness that receives text mid-turn QUEUES
+# it rather than losing it. Being too strict costs the away channel entirely -
+# on 2026-08-21/22 rendered residue was one of the two things that kept six
+# hours of escalations undelivered. So this errs toward delivering, but only
+# ever from positive evidence, and never past the composer guards below.
+#
+# What it must NEVER do, because these are the guards that keep an escalation
+# out of a human's half-typed line or a shell: `pending`, `pending-unproven`, and
+# `unknown` are returned as `defer` whatever the busy or stability evidence says,
+# and an empty or unreadable capture pair proves nothing and also defers. Nothing
+# here relaxes the strict blank-row rule.
+#
+# Prints `deliver` or `defer`. This function reads no pane; callers supply the
+# verdict, the busy read, and both captures.
+fm_composer_injection_verdict() {  # <composer-state> <busy|idle|unknown> <screen-a> <screen-b>
+  local composer=$1 busy=${2:-} a=${3:-} b=${4:-}
+  [ "$composer" = empty ] || { printf 'defer'; return 0; }
+  [ "$busy" = busy ] || { printf 'deliver'; return 0; }
+  # Busy optics: only a byte-stable screen across the window may override them.
+  [ -n "$a" ] && [ "$a" = "$b" ] || { printf 'defer'; return 0; }
+  printf 'deliver'
+}
+
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))

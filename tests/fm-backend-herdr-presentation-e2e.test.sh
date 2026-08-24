@@ -255,6 +255,8 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=tests/plan-approval-helpers.sh
+. "$ROOT/tests/plan-approval-helpers.sh"
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
 # as a cross-session parent identity. Every projection below is anchored on the
@@ -965,7 +967,7 @@ touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watc
 # may write config/herdr-presentation-spaces.
 git -C "$SECOND_HOME_A" init -q
 git -C "$SECOND_HOME_B" init -q
-printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
+printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\nconfig/plan-approval-key.pub\n' \
   > "$SECOND_HOME_A/.gitignore"
 cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
 git -C "$SECOND_HOME_A" add .gitignore
@@ -1027,6 +1029,16 @@ printf 'Secondmate A fixture 1.\n' > "$SECOND_HOME_A/data/a1/brief.md"
 printf 'Secondmate A fixture 2.\n' > "$SECOND_HOME_A/data/a2/brief.md"
 printf 'Secondmate B fixture 1.\n' > "$SECOND_HOME_B/data/b1/brief.md"
 printf 'Secondmate B fixture 2.\n' > "$SECOND_HOME_B/data/b2/brief.md"
+# A ship spawn from a secondmate home needs the primary's signed plan approval
+# before it may start (bin/fm-plan-approval.sh).
+for approved in a1 a2; do
+  fm_test_plan_approval "$HOME_DIR" "$SECOND_HOME_A" "$approved" \
+    || fail "could not approve the plan for secondmate A task $approved"
+done
+for approved in b1 b2; do
+  fm_test_plan_approval "$HOME_DIR" "$SECOND_HOME_B" "$approved" \
+    || fail "could not approve the plan for secondmate B task $approved"
+done
 
 MULTI_FOCUS_START=$(focus_audit_line_count)
 spawn_task p1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p1.out" 2> "$TMP_ROOT/p1.err" \
@@ -1088,6 +1100,10 @@ mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw
 printf 'Cross-home concurrent primary.\n' > "$HOME_DIR/data/pcw/brief.md"
 printf 'Cross-home concurrent A.\n' > "$SECOND_HOME_A/data/acw/brief.md"
 printf 'Cross-home concurrent B.\n' > "$SECOND_HOME_B/data/bcw/brief.md"
+fm_test_plan_approval "$HOME_DIR" "$SECOND_HOME_A" acw \
+  || fail "could not approve the plan for secondmate A task acw"
+fm_test_plan_approval "$HOME_DIR" "$SECOND_HOME_B" bcw \
+  || fail "could not approve the plan for secondmate B task bcw"
 WAVE_CROSS_FOCUS=$(focus_audit_line_count)
 spawn_task pcw "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/pcw.out" 2> "$TMP_ROOT/pcw.err" &
 PCW_PID=$!

@@ -61,10 +61,21 @@ fake_cursor_y() {
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
+  # Only a --relaunch scenario ever queries pane_current_command (fm-spawn.sh's
+  # dead-endpoint precondition); every other test leaves FM_FAKE_PANE_COMMAND
+  # unset, so this stays silent and behavior is unchanged for them.
+  *"#{pane_current_command}"*)
+    [ -z "${FM_FAKE_PANE_COMMAND:-}" ] || printf '%s\n' "$(cat "$FM_FAKE_PANE_COMMAND" 2>/dev/null || true)"
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  # Only a --relaunch scenario needs its own window name to survive the
+  # inventory check; every other test leaves FM_FAKE_WINDOW_NAME unset, so
+  # this stays exactly as silent as before for them.
+  list-windows)
+    [ -z "${FM_FAKE_WINDOW_NAME:-}" ] || printf '%s\n' "$FM_FAKE_WINDOW_NAME"
+    exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     prev=
@@ -75,6 +86,12 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
+        # A --relaunch's do_exit phase submits kimi's exit command before this
+        # fixture's replacement launch ever runs; only relevant when a test set
+        # FM_FAKE_PANE_COMMAND, exactly like the two guards above.
+        /exit|/quit)
+          [ -z "${FM_FAKE_PANE_COMMAND:-}" ] || printf 'zsh' > "$FM_FAKE_PANE_COMMAND"
+          ;;
         *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
@@ -92,6 +109,10 @@ case "${1:-}" in
           launched)
             if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
               printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+              # Only a --relaunch scenario cares that the endpoint reads alive
+              # again once kimi actually starts running (see the exit-command
+              # guard above); unset for every other test as before.
+              [ -z "${FM_FAKE_PANE_COMMAND:-}" ] || printf 'kimi' > "$FM_FAKE_PANE_COMMAND"
             fi
             ;;
           pointer-typed)
@@ -220,6 +241,79 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+# kimi is a pointer harness: its launch text is one literal sentence, not the
+# brief file's own content, so bin/fm-control.sh's relaunch note (prepended to
+# the brief for every positional-prompt harness) reaches kimi only if
+# fm-spawn.sh itself leads the pointer sentence with it. This spawns kimi for
+# real once (so the recorded task meta and worktree wiring are genuine), marks
+# its endpoint agent-free the way a real control-plane exit leaves it, then
+# drives a direct --relaunch carrying FM_CONTROL_RELAUNCH_NOTE_FILE exactly as
+# bin/fm-control.sh's do_relaunch does - with the control lock pre-armed so
+# SPAWN_CONTROL_PARENT is genuinely true, the same trust gate a real
+# fm-control.sh-launched child satisfies.
+test_kimi_relaunch_leads_the_pointer_with_the_progress_note() {
+  local id rec out rc pointer brief_real note_file lock_dir
+  id=kimi-relaunch-z9
+  rec=$(make_spawn_case relaunch "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "the initial kimi spawn should succeed before relaunching it"$'\n'"$out"
+
+  # Reset the per-launch logs and mark the endpoint agent-free, mirroring what
+  # bin/fm-control.sh's do_exit leaves behind right before it calls
+  # fm-spawn.sh --relaunch.
+  : > "$CASE_DIR/launch.log"
+  : > "$CASE_DIR/pointer.log"
+  : > "$CASE_DIR/kimi.state"
+  printf 'zsh' > "$CASE_DIR/kimi.command"
+
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  note_file="$CASE_DIR/note-block"
+  {
+    echo "## Progress note (2026-08-16T18:56:42Z)"
+    echo
+    echo "This task was relaunched. Continue from here; the local copy and every"
+    echo "uncommitted change are exactly as the previous worker left them."
+    echo
+    echo "reproduced the crash in parser.go"
+  } > "$note_file"
+
+  lock_dir="$HOME_DIR/state/.control-$id.lock"
+  out=$(
+    mkdir -p "$lock_dir"
+    printf '%s' "$BASHPID" > "$lock_dir/pid"
+    HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+      FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" \
+      FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+      FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" \
+      FM_FAKE_PANE_COMMAND="$CASE_DIR/kimi.command" \
+      FM_FAKE_WINDOW_NAME="fm-$id" \
+      FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+      FM_FAKE_BRIEF_REAL="$brief_real" \
+      FM_KIMI_READY_POLLS=5 FM_KIMI_DELIVERY_POLLS=5 FM_KIMI_POLL_INTERVAL=0 \
+      FM_CONTROL_RELAUNCH_NOTE_FILE="$note_file" \
+      PATH="$FAKEBIN_DIR:$BASE_PATH" \
+      "$SPAWN" "$id" --relaunch --harness kimi 2>&1
+  )
+  rc=$?
+  expect_code 0 "$rc" "the kimi relaunch should succeed"$'\n'"$out"
+
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  case "$pointer" in
+    *"reproduced the crash in parser.go"*"Read the brief at $brief_real and follow it exactly."*) ;;
+    *) fail "kimi's submitted pointer text did not lead with the progress note before the pointer sentence: $pointer" ;;
+  esac
+  case "$pointer" in
+    *$'\n'*) fail "kimi's submitted pointer text must stay single-line for a literal composer keystroke: $pointer" ;;
+  esac
+  pass "fm-spawn --relaunch: kimi's pointer text leads with the progress note instead of dropping it"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -636,22 +730,23 @@ test_watcher_never_classifies_kimi_from_its_spinner() (
   # unknown - and unknown is never working. Its moon-phase spinner is
   # deliberately not a state source: the approved redesign forbids inventing a
   # Kimi UI signature, and that glyph set is locale- and emoji-font-sensitive.
-  if window_is_busy fake "$busy_capture"; then
-    fail "fm-watch classified a Kimi task busy from its spinner instead of unknown"
-  fi
+  meta_verdict() { fm_busy_classify_meta "$state/kimi-watch.meta" kimi-watch "$state" "$1"; }
+  case "$(meta_verdict "$busy_capture")" in
+    busy*) fail "the busy contract classified a Kimi task busy from its spinner instead of unknown" ;;
+  esac
   [ "$(fm_busy_classify tmux fake kimi kimi-watch "$state" "$busy_capture")" = "unknown kimi-unverified" ] \
     || fail "a Kimi task must classify unknown kimi-unverified"
   printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake "$busy_capture"; then
-    fail "fm-watch applied Kimi's spinner to a recorded Codex task"
-  fi
+  case "$(meta_verdict "$busy_capture")" in
+    busy*) fail "the busy contract applied Kimi's spinner to a recorded Codex task" ;;
+  esac
   printf 'window=fake\nharness=grok\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake "$busy_capture"; then
-    fail "Kimi's spinner classified a recorded Grok task through its isolated fallback"
-  fi
-  window_is_busy fake 'Ctrl+c:cancel' \
+  case "$(meta_verdict "$busy_capture")" in
+    busy*) fail "Kimi's spinner classified a recorded Grok task through its isolated fallback" ;;
+  esac
+  [ "$(meta_verdict 'Ctrl+c:cancel')" = "busy grok-regex" ] \
     || fail "Grok's own verified token must still classify a recorded Grok task busy"
-  pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
+  pass "the busy contract classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {
@@ -670,6 +765,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_relaunch_leads_the_pointer_with_the_progress_note
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token

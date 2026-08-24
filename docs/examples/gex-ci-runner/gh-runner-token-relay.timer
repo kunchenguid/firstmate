@@ -1,0 +1,14 @@
+# Every 30 minutes against a 60-minute token lifetime: gex always holds a
+# token with at least half its life left, and one missed tick is harmless.
+[Unit]
+Description=Refresh the Actions registration token on gex
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+# Catch up after the laptop wakes from suspend instead of waiting a full tick.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -328,6 +328,64 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   pass "housekeeping clears an already-resumed watcher pause across both supervisors"
 }
 
+# A pane-derived pause (fm-crew-state.sh's Claude account-limit-banner override)
+# writes NO paused: status line, so the absent verb alone must not make its pause
+# marker stale. Regression: the daemon used to clear the marker and the
+# re-surface throttle on every housekeeping cycle, so the watcher re-surfaced the
+# same limit-blocked crew once per cycle instead of once per PAUSE_RESURFACE_SECS.
+test_housekeeping_keeps_pane_derived_pause_marker() {
+  local dir state watcher_key key win stub
+  dir=$(make_supercase pane-derived-pause)
+  state="$dir/state"
+  win="sess:fm-held-w10-panepause"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-panepause.meta"
+  printf 'working: started the task\n' > "$state/held-w10-panepause.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  key=$(printf '%s' "held-w10-panepause" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  : > "$state/.paused-resurfaced-$watcher_key"
+  stub="$dir/fakebin/crew-state"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: paused · source: pane · account limit: session limit · resets 2:30pm
+'
+SH
+  chmod +x "$stub"
+  local cycle
+  for cycle in 1 2 3; do
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" housekeeping "$state"
+    [ -e "$state/.paused-$watcher_key" ] \
+      || fail "cycle $cycle cleared a pane-derived pause marker that is still live"
+    [ -e "$state/.paused-resurfaced-$watcher_key" ] \
+      || fail "cycle $cycle wiped the pane-derived pause's re-surface throttle"
+  done
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a live pane-derived pause was tracked as a wedge"
+  pass "a pane-derived limit pause keeps its marker and throttle across housekeeping cycles"
+}
+
+# The same marker MUST still be cleared once the crew is no longer paused, so the
+# new acceptance does not strand a marker after the limit clears.
+test_housekeeping_clears_pane_pause_marker_once_resumed() {
+  local dir state watcher_key win stub
+  dir=$(make_supercase pane-derived-pause-resumed)
+  state="$dir/state"
+  win="sess:fm-held-w10-paneresume"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-paneresume.meta"
+  printf 'working: resumed after the limit cleared\n' > "$state/held-w10-paneresume.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  stub="$dir/fakebin/crew-state"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: pane · harness busy (claude-hook)
+'
+SH
+  chmod +x "$stub"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" housekeeping "$state"
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "a resumed crew's pause marker survived housekeeping"
+  pass "a pause marker is still cleared once the crew reports working again"
+}
+
 test_housekeeping_seeds_pause_marker_from_status() {
   local dir state key win
   dir=$(make_supercase seed-paused-status)
@@ -519,6 +577,70 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+# Away mode saw the same false alarms the always-on watcher did (2026-08-16
+# lensclash, three escalations between 08:56 and 09:10 while its no-mistakes run
+# was advancing): a crew blocked on the pipeline agent renders nothing, so its
+# quiet endpoint means a healthy validation, not a wedge. Both supervisors ask
+# the same shared question at the escalation moment - crew_run_progressed - so
+# this pins the daemon half of it, including the frozen-run case that must
+# still escalate.
+test_housekeeping_stale_absorbed_while_pipeline_advances() {
+  local dir state fakebin win pane key wt axi head marker
+  dir=$(make_supercase stale-advancing-pipeline)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-adv-w20"; pane="$dir/pane.txt"
+  wt="$dir/wt"; axi="$dir/axi.out"
+  printf 'working: validation under way\n' > "$state/adv-w20.status"
+  printf 'idle prompt $\n' > "$pane"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/adv-w20
+  head=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$state/adv-w20.meta" "window=$win" "worktree=$wt" "kind=ship" "backend=tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = axi ] && [ "${2:-}" = status ] && cat "$FM_FAKE_AXI_STATUS_FILE" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$axi" <<EOF
+run:
+  id: "01R1"
+  branch: fm/adv-w20
+  status: running
+  head: "$head"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,120
+    review,running,0,90000
+EOF
+  key=$(printf '%s' "adv-w20" | tr ':/.' '___')
+  marker="$state/.subsuper-stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$marker"
+
+  # The pipeline is executing and this is the first probe: absorb, and restart
+  # the aging window instead of escalating.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "an advancing pipeline was escalated as a possible wedge"
+  [ -e "$marker" ] || fail "the absorbed stale marker was dropped instead of re-aged"
+  [ "$(( $(date +%s) - $(cat "$marker") ))" -lt 240 ] || fail "the aging window was not reset on absorb"
+  [ -s "$state/.run-progress-adv-w20" ] || fail "no progress baseline was recorded for the absorbed series"
+
+  # Same run, no movement: the escalation must land exactly as before.
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a frozen run did not escalate a possible wedge"
+  [ ! -e "$marker" ] || fail "stale marker not cleared after the escalation"
+  pass "away mode absorbs a stale series while the pipeline advances, and still escalates a frozen run"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1814,21 +1936,31 @@ test_pane_input_pending_herdr_dispatch() {
   pass "pane_input_pending: dispatches through fm_backend_composer_state for backend=herdr"
 }
 
+# A busy pane that is still REDRAWING is a live turn and must still defer. (A
+# busy pane whose screen has stopped moving is finished-turn residue and is
+# handled by test_inject_delivers_through_turnend_residue_...; the two cases
+# together are the whole busy-optics contract.)
 test_inject_msg_herdr_busy_guard_defers() {
-  local dir state
+  local dir state frame
   dir=$(make_supercase inject-herdr-busy)
   state="$dir/state"
   afk_enter "$state"
+  frame="$dir/frame"
+  printf '0\n' > "$frame"
   (
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
     pane_is_busy() { return 0; }
-    fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
-    fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
-    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
-      fail "inject_msg should defer (return non-zero) when the herdr supervisor pane is busy"
+    fm_backend_composer_state() { printf 'empty'; }
+    # Every capture differs from the last, exactly as a working agent's elapsed
+    # counter does.
+    fm_backend_capture() { local n; n=$(cat "$frame"); printf '%s\n' "$((n + 1))" > "$frame"; printf 'working %s\n' "$n"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run while the pane is still redrawing"; }
+    if FM_INJECT_STABLE_SECS=0.05 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+         inject_msg "hello" "$state"; then
+      fail "inject_msg should defer (return non-zero) while the herdr supervisor pane is busy AND redrawing"
     fi
   ) || fail "herdr busy-guard inject_msg subshell failed"
-  pass "inject_msg: herdr busy-guard defers before ever attempting a submit"
+  pass "inject_msg: a busy pane that is still redrawing defers before ever attempting a submit"
 }
 
 test_inject_msg_herdr_composer_guard_defers() {
@@ -1940,8 +2072,11 @@ test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_keeps_pane_derived_pause_marker
+test_housekeeping_clears_pane_pause_marker_once_resumed
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_absorbed_while_pipeline_advances
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
@@ -2014,6 +2149,475 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_reports_delivered_unconfirmed_submit
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
+
+# --- delivery robustness (task fm-afk-zustellblockade-spinner-daempfung) -----
+# The 2026-08-21/22 outage had two distinct halves and these guards pin both.
+# The ABSORBING half was transport capacity: the whole escalation buffer was
+# joined into ONE command, the transport refuses an oversize command outright,
+# and the buffer only ever emptied on success - so every refusal made the next
+# attempt bigger and nothing was ever delivered again. The other half was the
+# delivery guard holding an escalation against a session that had merely LEFT
+# busy-looking residue on a finished turn.
+#
+# Both use a REAL tmux server and REAL processes rather than the suite's fake
+# tmux, because both questions are about what the transport and the classifier
+# actually do, and a fake can only confirm the assumption written into it. No
+# harness is involved, so CI enforces them everywhere it runs tmux; whether a
+# real harness still draws these shapes is the separate live guard's job
+# (tests/fm-away-delivery-live-e2e.test.sh).
+
+_daemon_real_tmux_socket() { printf 'fm-daemon-real-%s-%s' "$$" "$1"; }
+
+# Route the library's bare `tmux` calls at a private server, the same PATH-shim
+# pattern tests/fm-composer-matrix-live-e2e.test.sh uses, so no fleet server can
+# ever be touched. Prints the shim directory to prepend to PATH.
+_daemon_real_tmux_shim() {  # <dir> <socket>
+  local shim="$1/tmuxshim" real
+  real=$(command -v tmux)
+  mkdir -p "$shim"
+  cat > "$shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real" -L "$2" "\$@"
+SH
+  chmod +x "$shim/tmux"
+  printf '%s' "$shim"
+}
+
+_daemon_real_tmux_start() {  # <socket> <session> [command]
+  local socket=$1 session=$2
+  shift 2
+  if [ "$#" -gt 0 ]; then
+    tmux -L "$socket" new-session -d -s "$session" -x 120 -y 20 "$@"
+  else
+    tmux -L "$socket" new-session -d -s "$session" -x 120 -y 20 'cat > /dev/null'
+  fi
+}
+
+# Render the incident's own screen: a completion line carrying a spinner glyph, a
+# genuinely running hosted background shell, an EMPTY bare-glyph composer between
+# two rules, and a footer still advertising the interrupt key. Everything here is
+# real - a real tmux pane, a real background process - except the harness that
+# would normally draw it.
+_daemon_turnend_render_script() {  # <path>
+  cat > "$1" <<'RENDER'
+#!/usr/bin/env bash
+set -u
+w=${1:-110}
+rule() { printf '%.0s\xe2\x94\x80' $(seq 1 "$w"); }
+{ sleep 900 & } 2>/dev/null
+clear
+printf '\xe2\x9c\xbb Churned for 4m 29s \xc2\xb7 1 shell still running\n'
+rule; printf '\n'
+printf '\xe2\x9d\xaf \xc2\xa0\n'
+rule; printf '\n'
+printf '  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on \xc2\xb7 1 shell \xc2\xb7 esc to interrupt \xc2\xb7 \xe2\x86\x90 for agents\n'
+tput cup 2 2
+sleep 900
+RENDER
+  chmod +x "$1"
+}
+
+test_escalate_flush_drains_oversize_backlog_through_real_tmux() {
+  # NOTE: no local here may share a name with an escalate_flush local. Bash
+  # scoping is dynamic, so the stub below sees the caller's frame: a variable
+  # named `sent` would resolve to escalate_flush's item counter and the stub
+  # would append to a file named after a number.
+  local dir state buf socket sizes_file joined rounds accepted refused left
+  command -v tmux >/dev/null 2>&1 || fail "this guard needs a real tmux to measure the transport ceiling"
+  dir=$(make_supercase flush-transport-ceiling)
+  state="$dir/state"
+  afk_enter "$state"
+  buf="$state/.subsuper-escalations"
+  socket=$(_daemon_real_tmux_socket ceiling)
+  _daemon_real_tmux_start "$socket" t || fail "could not start the private tmux server"
+
+  # The incident's own shape: a night's worth of buffered escalations.
+  : > "$buf"
+  local i
+  for i in $(seq 1 40); do
+    printf 'item%02d: %s\n' "$i" "$(head -c 1200 </dev/zero | tr '\0' x)" >> "$buf"
+  done
+  _now > "${buf}.since"
+
+  # DIVERGENCE FIRST, so this case can never pass vacuously: the OLD behavior -
+  # the whole buffer as one command - must still be refused by this very tmux. If
+  # some future tmux accepts it, the premise is gone and this guard says so
+  # instead of quietly proving nothing.
+  joined=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf")
+  if tmux -L "$socket" send-keys -t t -l "$joined" 2>/dev/null; then
+    tmux -L "$socket" kill-server 2>/dev/null || true
+    fail "premise lost: this tmux accepted a $(printf '%s' "$joined" | wc -c)-byte command, so the transport ceiling this guard defends no longer exists"
+  fi
+
+  sizes_file="$dir/sent-sizes"
+  : > "$sizes_file"
+  rounds=0
+  accepted=0
+  refused=0
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    # REAL transport, same command the daemon issues; only the harness's
+    # acknowledgement is stood in for.
+    fm_backend_send_text_submit() {
+      printf '%s\n' "$(printf '%s' "$3" | wc -c)" >> "$sizes_file"
+      if tmux -L "$socket" send-keys -t t -l "$3" 2>/dev/null; then printf 'empty'; else printf 'send-failed'; fi
+    }
+    while [ -s "$buf" ] && [ "$rounds" -lt 25 ]; do
+      rounds=$((rounds + 1))
+      if FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=t escalate_flush "$state"; then
+        accepted=$((accepted + 1))
+      else
+        refused=$((refused + 1))
+      fi
+    done
+    printf '%s %s %s\n' "$rounds" "$accepted" "$refused" > "$dir/rounds"
+  ) || fail "escalate_flush subshell failed"
+  read -r rounds accepted refused < "$dir/rounds"
+  tmux -L "$socket" kill-server 2>/dev/null || true
+
+  left=$(wc -c < "$buf" | tr -d ' ')
+  [ "$left" -eq 0 ] || fail "the backlog did not drain: $left bytes still buffered after $rounds flushes"
+  [ "$refused" -eq 0 ] || fail "the transport refused $refused of $rounds digests; every digest must fit by construction"
+  [ "$accepted" -ge 2 ] || fail "expected the backlog to be split across several digests, got $accepted"
+  [ "$rounds" -lt 25 ] || fail "escalate_flush did not converge; it must make progress on every successful delivery"
+  pass "escalate_flush: a backlog too large for one command drains through the real transport in bounded digests, where the old single-digest form is refused"
+}
+
+test_escalate_flush_makes_progress_past_an_oversize_item() {
+  local dir state buf out delivered
+  dir=$(make_supercase flush-oversize-item)
+  state="$dir/state"
+  afk_enter "$state"
+  buf="$state/.subsuper-escalations"
+  # One item larger than any possible digest, with ordinary items queued behind
+  # it. Refusing to shorten the head would block those forever.
+  {
+    printf 'huge: %s\n' "$(head -c 60000 </dev/zero | tr '\0' y)"
+    printf 'small-a\nsmall-b\n'
+  } > "$buf"
+  _now > "${buf}.since"
+  out="$dir/delivered"
+  : > "$out"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$out"; printf 'empty'; }
+    local guard=0
+    while [ -s "$buf" ] && [ "$guard" -lt 10 ]; do
+      guard=$((guard + 1))
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET='%1' escalate_flush "$state" || break
+    done
+  ) || fail "oversize-item flush subshell failed"
+
+  [ ! -s "$buf" ] || fail "the queue behind an oversize item was never drained"
+  delivered=$(cat "$out")
+  assert_contains "$delivered" "shortened to fit" "an oversize item was delivered without being marked as shortened"
+  assert_contains "$delivered" "small-a" "the item queued behind an oversize one was dropped instead of delivered"
+  assert_contains "$delivered" "small-b" "the item queued behind an oversize one was dropped instead of delivered"
+  pass "escalate_flush: an item too large for any digest is shortened and marked, and never buries the items queued behind it"
+}
+
+test_inject_msg_reports_transport_refusal_distinctly_and_shrinks() {
+  local dir state rc before after
+  dir=$(make_supercase inject-transport-refusal)
+  state="$dir/state"
+  afk_enter "$state"
+  before=$(inject_payload_budget "$state" tmux '%1')
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'send-failed'; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET='%1' inject_msg "hello" "$state"
+    printf '%s' "$?" > "$dir/rc"
+  ) || true
+  rc=$(cat "$dir/rc")
+  [ "$rc" = 2 ] || fail "a transport-level refusal must be reported as 2 (nothing typed), got $rc"
+
+  # And a refusal must make the NEXT attempt strictly smaller, so a ceiling that
+  # is wrong on some future transport costs one digest instead of the channel.
+  _send_shrink_bump "$state" >/dev/null
+  after=$(inject_payload_budget "$state" tmux '%1')
+  [ "$after" -lt "$before" ] || fail "the payload budget did not shrink after a refusal ($before -> $after)"
+  _send_shrink_clear "$state"
+  [ "$(inject_payload_budget "$state" tmux '%1')" = "$before" ] || fail "a confirmed delivery must restore the full budget"
+  pass "inject_msg: a transport refusal is distinguished from a swallowed submit and shrinks the next payload"
+}
+
+test_inject_msg_refuses_a_message_above_the_transport_ceiling() {
+  local dir state rc
+  dir=$(make_supercase inject-oversize-refused)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { fail "an over-ceiling message must be refused before the pane is even probed"; }
+    fm_backend_send_text_submit() { fail "an over-ceiling message must never reach the transport"; }
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET='%1' \
+      inject_msg "$(head -c 40000 </dev/zero | tr '\0' z)" "$state"
+    printf '%s' "$?" > "$dir/rc"
+  ) || true
+  rc=$(cat "$dir/rc")
+  [ "$rc" = 2 ] || fail "an over-ceiling message must be refused with 2, got $rc"
+  pass "inject_msg: a message above the transport ceiling is refused rather than offered, because such a send delivers nothing at all"
+}
+
+test_composer_injection_verdict_matrix() {
+  local stable='row-a
+row-b'
+  local changed='row-a
+row-b-moved'
+  [ "$(fm_composer_injection_verdict empty idle '' '')" = deliver ] \
+    || fail "an empty composer on an idle pane must deliver"
+  [ "$(fm_composer_injection_verdict empty busy "$stable" "$stable")" = deliver ] \
+    || fail "an empty composer with a byte-stable screen must outrank busy optics"
+  [ "$(fm_composer_injection_verdict empty busy "$stable" "$changed")" = defer ] \
+    || fail "a redrawing screen means a live turn and must still defer"
+  [ "$(fm_composer_injection_verdict empty busy '' '')" = defer ] \
+    || fail "an unreadable capture pair proves nothing and must defer"
+  [ "$(fm_composer_injection_verdict pending busy "$stable" "$stable")" = defer ] \
+    || fail "pending input must keep its full protection whatever the stability evidence says"
+  [ "$(fm_composer_injection_verdict pending idle "$stable" "$stable")" = defer ] \
+    || fail "pending input must never be overridden"
+  [ "$(fm_composer_injection_verdict unknown idle "$stable" "$stable")" = defer ] \
+    || fail "an unknown surface must never be injected into"
+  [ "$(fm_composer_injection_verdict pending-unproven idle "$stable" "$stable")" = defer ] \
+    || fail "an unproven composer must never be injected into"
+  pass "fm_composer_injection_verdict: byte-stability may outrank busy optics, and nothing may outrank pending or unknown"
+}
+
+test_inject_delivers_through_turnend_residue_and_still_refuses_half_typed_line() {
+  # PATH is function-local so the library's bare `tmux` calls reach the private
+  # server for this case only; bash restores it when the function returns.
+  local dir state socket render composer busy rc outer_path
+  outer_path=$PATH
+  command -v tmux >/dev/null 2>&1 || fail "this guard needs a real tmux to render and classify a real pane"
+  dir=$(make_supercase inject-turnend-residue)
+  state="$dir/state"
+  afk_enter "$state"
+  render="$dir/render.sh"
+  _daemon_turnend_render_script "$render"
+  socket=$(_daemon_real_tmux_socket residue)
+  _daemon_real_tmux_start "$socket" t "bash $render 110" || fail "could not start the private tmux server"
+  local PATH="$outer_path"
+  PATH="$(_daemon_real_tmux_shim "$dir" "$socket"):$PATH"
+  sleep 2
+
+  (
+    # Real classifier, real pane, real background shell: only the harness's
+    # submit acknowledgement is stood in for.
+    composer=$(fm_tmux_composer_state t)
+    busy=$(fm_pane_busy_state t claude)
+    # DIVERGENCE: both halves of the premise must actually hold, or this case
+    # would "pass" while testing nothing.
+    [ "$composer" = empty ] || { printf 'composer=%s\n' "$composer" > "$dir/why"; exit 3; }
+    [ "$busy" = busy ] || { printf 'busy=%s\n' "$busy" > "$dir/why"; exit 4; }
+
+    fm_backend_target_exists() { return 0; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_INJECT_STABLE_SECS=0.3 FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=t \
+      inject_msg "escalation through turn-end residue" "$state" || exit 5
+  )
+  rc=$?
+  case "$rc" in
+    0) : ;;
+    3|4) command tmux -L "$socket" kill-server 2>/dev/null || true
+         fail "premise lost while rendering the turn-end pane: $(cat "$dir/why" 2>/dev/null)" ;;
+    5) command tmux -L "$socket" kill-server 2>/dev/null || true
+       fail "delivery was held by finished-turn residue on a byte-stable pane with an empty composer" ;;
+    *) command tmux -L "$socket" kill-server 2>/dev/null || true
+       fail "turn-end residue subshell failed with $rc" ;;
+  esac
+
+  # Now the captain leaves a half-typed line on the same pane. Delivery must go
+  # back to refusing, and nothing may be typed.
+  command tmux -L "$socket" send-keys -t t -l 'hal' 2>/dev/null || true
+  sleep 1
+  (
+    [ "$(fm_tmux_composer_state t)" = pending ] || exit 3
+    fm_backend_target_exists() { return 0; }
+    fm_backend_send_text_submit() { exit 9; }
+    if FM_INJECT_STABLE_SECS=0.3 FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=t \
+         inject_msg "must not land" "$state"; then exit 5; fi
+  )
+  rc=$?
+  command tmux -L "$socket" kill-server 2>/dev/null || true
+  case "$rc" in
+    0) : ;;
+    3) fail "the half-typed line was not classified as pending, so its refusal proves nothing" ;;
+    5) fail "an escalation was injected into a pane carrying a half-typed captain line" ;;
+    9) fail "the transport was reached at all while a half-typed captain line was in the composer" ;;
+    *) fail "half-typed-line subshell failed with $rc" ;;
+  esac
+  pass "inject_msg: finished-turn residue with a hosted shell no longer holds delivery, while a half-typed captain line still refuses it"
+}
+
+# --- Layer 2 self-healing restart -------------------------------------------
+# Every gate is asserted separately, because the value of this mechanism is
+# entirely in what it REFUSES to do: it restarts a session shell, so a gate that
+# silently stops holding is worse than no self-healing at all.
+
+_selfheal_state() {  # <name> -> prepared state dir on stdout
+  local dir state
+  dir=$(make_supercase "$1")
+  state="$dir/state"
+  afk_enter "$state"
+  printf 'stuck event\n' > "$state/.subsuper-escalations"
+  printf '%s\n' "$(( $(_now) - 9000 ))" > "$state/.subsuper-escalations.since"
+  printf '%s' "$state"
+}
+
+test_selfheal_declines_without_a_configured_relaunch_command() {
+  local state
+  state=$(_selfheal_state selfheal-unconfigured)
+  (
+    fm_backend_capture() { printf 'static screen\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "self-heal must not touch the pane with no relaunch command configured"; }
+    # Prime the stability probe, then age it past the window.
+    FM_HOME="$state/nohome" FM_AWAY_SELFHEAL_CMD='' selfheal_maybe "$state" 9000 >/dev/null 2>&1 || true
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+    if FM_HOME="$state/nohome" FM_AWAY_SELFHEAL_CMD='' selfheal_maybe "$state" 9000; then
+      fail "self-heal ran without a configured relaunch command"
+    fi
+  ) || fail "unconfigured self-heal subshell failed"
+  pass "self-heal: stays off entirely until the home configures a relaunch command"
+}
+
+test_selfheal_declines_on_a_composer_that_is_not_confirmed_empty() {
+  local state verdict
+  for verdict in pending unknown pending-unproven; do
+    state=$(_selfheal_state "selfheal-composer-$verdict")
+    (
+      fm_backend_capture() { printf 'static screen\n'; }
+      fm_backend_composer_state() { printf '%s' "$verdict"; }
+      fm_backend_send_text_submit() { fail "self-heal must never restart over a $verdict composer"; }
+      printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+      if FM_AWAY_SELFHEAL_CMD='relaunch-me' selfheal_maybe "$state" 9000; then
+        fail "self-heal restarted the session over a $verdict composer"
+      fi
+    ) || fail "self-heal composer-guard subshell failed for $verdict"
+  done
+  pass "self-heal: a half-typed line or an unreadable surface is never restarted over, whatever else agrees"
+}
+
+test_selfheal_requires_uninterrupted_screen_stability() {
+  local state probe first second
+  state=$(_selfheal_state selfheal-stability)
+  (
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "self-heal must not act while the screen is still changing"; }
+    fm_backend_capture() { cat "$state/screen"; }
+    printf 'frame one\n' > "$state/screen"
+    selfheal_maybe "$state" 9000 && fail "self-heal acted on its very first observation"
+    probe="$state/.subsuper-selfheal-probe"
+    [ -s "$probe" ] || fail "the stability probe was not recorded"
+    # Age the probe past the window, then change the screen: the window must
+    # restart from zero rather than count a screen that moved.
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(cut -f2 "$probe")" > "$probe"
+    first=$(cut -f1 "$probe")
+    printf 'frame two\n' > "$state/screen"
+    FM_AWAY_SELFHEAL_CMD='relaunch-me' selfheal_maybe "$state" 9000 \
+      && fail "self-heal acted although the screen had just changed"
+    second=$(cut -f1 "$probe")
+    [ "$second" -gt "$first" ] || fail "a changed screen must restart the stability window, not extend it"
+  ) || fail "self-heal stability subshell failed"
+  pass "self-heal: the inactivity window restarts whenever the screen moves at all"
+}
+
+test_selfheal_restarts_only_after_verifying_the_agent_stopped() {
+  local state log_typed
+  state=$(_selfheal_state selfheal-restart)
+  log_typed="$state/typed"
+  : > "$log_typed"
+  (
+    fm_backend_capture() { printf 'static screen\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$log_typed"; printf 'empty'; }
+    # The agent is still alive on the first read and gone on the next, so the
+    # ordering assertion below is meaningful rather than trivially satisfied.
+    fm_backend_agent_alive() {
+      if [ -e "$state/agent-asked-to-exit" ]; then printf 'dead'; else printf 'alive'; fi
+    }
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+    FM_DAEMON_PRIMARY_HARNESS=claude FM_AWAY_SELFHEAL_CMD='relaunch-me --continue' \
+      FM_AWAY_SELFHEAL_EXIT_WAIT_SECS=6 FM_AWAY_SELFHEAL_READY_WAIT_SECS=6 \
+      selfheal_maybe "$state" 9000 &
+    sleep 1
+    : > "$state/agent-asked-to-exit"
+    wait
+  ) || true
+
+  assert_grep '/exit' "$log_typed" "self-heal did not ask the agent to leave through its own exit command"
+  assert_grep 'relaunch-me --continue' "$log_typed" "self-heal never typed the configured relaunch command"
+  [ "$(head -1 "$log_typed")" = '/exit' ] \
+    || fail "self-heal typed the relaunch command before the agent had exited: $(head -1 "$log_typed")"
+  [ -s "$state/.subsuper-selfheal-last" ] || fail "self-heal left no durable record of the restart"
+  assert_grep 'relaunch_command=' "$state/.subsuper-selfheal-last" "the durable record does not name what was run"
+  pass "self-heal: asks the agent to exit, verifies the stop before typing into the shell, and records the restart durably"
+}
+
+test_selfheal_aborts_when_the_agent_will_not_stop() {
+  local state log_typed
+  state=$(_selfheal_state selfheal-wont-stop)
+  log_typed="$state/typed"
+  : > "$log_typed"
+  (
+    fm_backend_capture() { printf 'static screen\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$log_typed"; printf 'empty'; }
+    fm_backend_agent_alive() { printf 'alive'; }
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+    if FM_DAEMON_PRIMARY_HARNESS=claude FM_AWAY_SELFHEAL_CMD='relaunch-me' \
+       FM_AWAY_SELFHEAL_EXIT_WAIT_SECS=4 selfheal_maybe "$state" 9000; then
+      fail "self-heal reported success although the agent never stopped"
+    fi
+  ) || fail "self-heal abort subshell failed"
+  assert_no_grep 'relaunch-me' "$log_typed" \
+    "self-heal typed a shell command into a pane whose agent had not stopped"
+  pass "self-heal: aborts without typing anything into the shell when the agent will not stop"
+}
+
+test_selfheal_honours_its_cooldown() {
+  local state
+  state=$(_selfheal_state selfheal-cooldown)
+  (
+    fm_backend_capture() { printf 'static screen\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "self-heal ran again inside its cooldown"; }
+    fm_backend_agent_alive() { printf 'dead'; }
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+    printf 'recent attempt\n' > "$state/.subsuper-selfheal-last"
+    if FM_DAEMON_PRIMARY_HARNESS=claude FM_AWAY_SELFHEAL_CMD='relaunch-me' \
+       selfheal_maybe "$state" 9000; then
+      fail "self-heal ignored its cooldown"
+    fi
+  ) || fail "self-heal cooldown subshell failed"
+  pass "self-heal: at most one restart per cooldown window"
+}
+
+test_selfheal_never_runs_outside_away_mode() {
+  local dir state
+  dir=$(make_supercase selfheal-not-away)
+  state="$dir/state"
+  printf 'stuck event\n' > "$state/.subsuper-escalations"
+  printf '%s\n' "$(( $(_now) - 9000 ))" > "$state/.subsuper-escalations.since"
+  (
+    fm_backend_capture() { printf 'static screen\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "self-heal restarted a session that is not in away mode"; }
+    fm_backend_agent_alive() { printf 'dead'; }
+    printf '%s\t%s\n' "$(( $(_now) - 9000 ))" "$(_hash_text 'static screen')" > "$state/.subsuper-selfheal-probe"
+    if FM_DAEMON_PRIMARY_HARNESS=claude FM_AWAY_SELFHEAL_CMD='relaunch-me' \
+       selfheal_maybe "$state" 9000; then
+      fail "self-heal ran with away mode off"
+    fi
+  ) || fail "self-heal away-gate subshell failed"
+  pass "self-heal: never restarts a session the captain is present at"
+}
+
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
@@ -2026,3 +2630,17 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+
+test_escalate_flush_drains_oversize_backlog_through_real_tmux
+test_escalate_flush_makes_progress_past_an_oversize_item
+test_inject_msg_reports_transport_refusal_distinctly_and_shrinks
+test_inject_msg_refuses_a_message_above_the_transport_ceiling
+test_composer_injection_verdict_matrix
+test_inject_delivers_through_turnend_residue_and_still_refuses_half_typed_line
+test_selfheal_declines_without_a_configured_relaunch_command
+test_selfheal_declines_on_a_composer_that_is_not_confirmed_empty
+test_selfheal_requires_uninterrupted_screen_stability
+test_selfheal_restarts_only_after_verifying_the_agent_stopped
+test_selfheal_aborts_when_the_agent_will_not_stop
+test_selfheal_honours_its_cooldown
+test_selfheal_never_runs_outside_away_mode

@@ -20,3 +20,16 @@
 # happens overnight reaches you even away from the machine.
 osascript
 command: curl -fsS -H "Title: firstmate wedge alarm" -d "$1" https://ntfy.sh/replace-with-your-topic
+
+# LINUX. `auto` selects no built-in channel here, so a Linux home that leaves
+# this file absent gets only the durable marker - which nothing surfaces until
+# the next fleet action. Configure at least one command: line. Two that reach a
+# phone, and one that only reaches the machine:
+#
+#   command: curl -fsS -X POST "https://api.telegram.org/bot$FM_TG_TOKEN/sendMessage" -d chat_id="$FM_TG_CHAT" -d text="firstmate wedge: $1"
+#   command: notify-send -u critical "firstmate wedge alarm" "$1"
+#   command: logger -t firstmate-wedge -p daemon.err -- "$1"
+#
+# `notify-send` needs a reachable desktop session; a daemon started outside one
+# usually needs DBUS_SESSION_BUS_ADDRESS in its environment to deliver. Prefer a
+# channel that leaves the machine when the point is to reach a sleeping captain.

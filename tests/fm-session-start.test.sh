@@ -299,6 +299,11 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
+  list-windows)
+    # Inventory lists exactly the live window, so the absent one reads missing.
+    printf '%s\n' "${live#*:}"
+    exit 0
+    ;;
   display-message)
     target=""
     prev=""
@@ -306,8 +311,13 @@ case "\${1:-}" in
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
-    exit 1
+    [ "\$target" = "$live" ] || exit 1
+    case "\$*" in
+      *pane_current_command*) printf 'claude\n'; exit 0 ;;
+      *pane_tty*) exit 1 ;;
+    esac
+    printf '%%1\n'
+    exit 0
     ;;
 esac
 exit 1
@@ -493,7 +503,19 @@ make_fake_herdr() {
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$live" ] && exit 0
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$live"
+    exit 0
+  fi
+  printf '{"error":{"code":"pane_not_found"}}\n'
+  exit 1
+fi
+if [ "\${1:-}" = agent ] && [ "\${2:-}" = get ]; then
+  if [ "\${3:-}" = "$live" ]; then
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+    exit 0
+  fi
+  printf '{"error":{"code":"agent_not_found"}}\n'
   exit 1
 fi
 exit 1
@@ -772,7 +794,6 @@ EOF
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
-  assert_contains "$out" "queued wakes pending - left untouched because this session lacks verified fleet-lock ownership" "read-only guard did not leave queued wakes untouched without verified lock ownership"
   assert_contains "$out" "TANGLE: primary checkout on feature branch 'fm/read-only-tangle'" "read-only bootstrap did not surface the tangle diagnostic"
   assert_contains "$out" "read-only session must leave restore work" "read-only tangle diagnostic did not explain restore ownership"
   assert_contains "$out" "Stay read-only: do not arm" "read-only next step did not block direct watcher repair"
@@ -1238,8 +1259,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read should still see the ambiguous endpoint"
+  assert_contains "$out" "agent: ambiguous (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later fleet read should report the ambiguous agent as ambiguous, never a false alive"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
 
@@ -1257,8 +1278,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
+  assert_contains "$out" "agent: unreadable (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later fleet read should report the unreadable probe as unreadable, never a confident verdict"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
@@ -1315,8 +1336,8 @@ EOF
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "agent: alive (backend=tmux window=fm-sess:live-window)" "live tmux agent not reported alive"
+  assert_contains "$out" "agent: missing (backend=tmux window=fm-sess:dead-window)" "absent tmux window not reported missing"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
@@ -1335,8 +1356,8 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "agent: alive (backend=herdr window=sess:p-live)" "live herdr agent not reported alive"
+  assert_contains "$out" "agent: missing (backend=herdr window=sess:p-dead)" "absent herdr pane not reported missing"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
@@ -1974,7 +1995,7 @@ SH
 # --- context re-emit (--reemit) ----------------------------------------------
 
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
-  local rec root home fakebin network_report reemit sequence generation
+  local rec root home fakebin network_report reemit
   rec=$(new_world reemit)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2001,14 +2022,7 @@ EOF
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
   assert_not_contains "$reemit" "SECONDMATE_LIVENESS" "--reemit repeated a mutating sweep startup already ran"
   assert_contains "$reemit" "done: queued after the re-emit too" "--reemit did not drain the wake queue"
-  [ -s "$home/state/.wake-queue" ] || fail "--reemit removed the wake before its handling acknowledgement"
-  sequence=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
-  generation=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
-  [ -n "$sequence" ] && [ -n "$generation" ] \
-    || fail "--reemit omitted the generation-bound wake acknowledgement"
-  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
-    --recovery-generation "$generation" || fail "--reemit wake acknowledgement failed"
-  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit acknowledgement left queued wakes behind"
+  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit left presented wakes queued instead of consuming them at presentation"
   assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
   assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
   assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
@@ -2456,6 +2470,76 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# --- active-orders pin (hardening 1: recite before acting) -------------------
+
+test_order_pin_empty_book_prints_compact_line() {
+  local rec root home fakebin out
+  rec=$(new_world order-pin-leer)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "ACTIVE ORDERS (PIN)" "digest did not print the active-orders section"
+  assert_contains "$out" "no active orders in the order book" "an empty order book must print the compact line"
+
+  pass "session start prints the compact line for an empty order book"
+}
+
+test_order_pin_active_order_demands_recitation() {
+  local rec root home fakebin out
+  rec=$(new_world order-pin-voll)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  FM_HOME="$home" "$ROOT/bin/fm-order.sh" record --type decision --subject pin-probe \
+    --quote "Der Wortlaut reist mit." >/dev/null
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "ORDER PIN v1" "an active order must render the pin block"
+  assert_contains "$out" "pin-probe" "the pin block must carry the recorded order"
+  assert_contains "$out" "RECITE FIRST" "the pin block must demand recitation before acting"
+
+  pass "session start pins active orders and demands recitation"
+}
+
+# --- context diff cursor (U1.8: pay for changes, not repetition) -------------
+
+test_context_diff_second_start_compacts() {
+  local rec root home fakebin out
+  rec=$(new_world context-diff)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'projektzeile eins\n' > "$home/data/projects.md"
+  printf 'kapitaenszeile eins\n' > "$home/data/captain.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "projektzeile eins" "first start must print projects.md in full"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "(unchanged since the last locked session start" \
+    "second start must compact an unchanged context file"
+  if printf '%s' "$out" | grep -q "projektzeile eins"; then
+    fail "an unchanged projects.md must not be re-printed in full"
+  fi
+
+  printf 'kapitaenszeile zwei\n' >> "$home/data/captain.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "kapitaenszeile zwei" "a changed captain.md must print in full again"
+  if printf '%s' "$out" | grep -q "projektzeile eins"; then
+    fail "projects.md must stay compact while only captain.md changed"
+  fi
+
+  pass "session start pays context tokens for changes, not repetition"
+}
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
@@ -2505,5 +2589,8 @@ test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
+test_order_pin_empty_book_prints_compact_line
+test_order_pin_active_order_demands_recitation
+test_context_diff_second_start_compacts
 
 echo "# fm-session-start.test.sh: all assertions passed"

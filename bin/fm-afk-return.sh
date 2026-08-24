@@ -140,7 +140,7 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
+  local evidence blockers drain_err drained wedge escalations lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -158,14 +158,9 @@ return_reconcile() {
     lifecycle_ok=0
     drained=""
   }
-  grep -v '^WAKE_ACK_REQUIRED:' "$drain_err" >&2 || true
-  wake_ack_line=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
-  wake_ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err" | tail -1)
-  wake_ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err" | tail -1)
-  if [ -n "$wake_ack_line" ] && { [ -z "$wake_ack_through" ] || [ -z "$wake_ack_generation" ]; }; then
-    append_evidence lifecycle 'durable wake drain returned an invalid acknowledgement; retry catch-up before ordinary work' "$evidence"
-    lifecycle_ok=0
-  fi
+  # The drain consumes presented rows at presentation (U1.3); the evidence file
+  # below preserves the drained content durably for the return gate.
+  cat "$drain_err" >&2 || true
   append_evidence wake "$drained" "$evidence"
 
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
@@ -192,13 +187,6 @@ return_reconcile() {
     append_evidence lifecycle 'recovery evidence publication failed; retry catch-up before ordinary work' "$evidence"
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     printf 'fm-afk-return: recovery evidence could not be published; catch-up remains pending\n' >&2
-    rm -f "$evidence" "$blockers" "$drain_err"
-    return 3
-  fi
-
-  if [ -n "$wake_ack_line" ] && ! printf '%s\n' "$wake_ack_line" >&2; then
-    append_evidence lifecycle 'durable wake acknowledgement command publication failed; retry catch-up before ordinary work' "$evidence"
-    write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     rm -f "$evidence" "$blockers" "$drain_err"
     return 3
   fi

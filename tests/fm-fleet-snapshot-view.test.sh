@@ -799,6 +799,31 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A backlog large enough that its JSON encoding exceeds the OS execve()
+# per-argument length cap (observed on real fleets with a ~100 KB
+# data/backlog.md) must not make the snapshot pass that content as a jq
+# command-line argument; jq's exec then fails with "Argument list too long"
+# regardless of the machine's overall ARG_MAX.
+test_large_backlog_avoids_arg_list_too_long() {
+  local home i out
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n'
+    for i in $(seq 1 3000); do
+      printf -- '- [ ] task-%04d - Task %04d filler filler filler filler filler filler (repo: alpha) (kind: program) (since 2026-07-07)\n' "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json 2>&1) \
+    || fail "large-backlog snapshot must not fail with an argument-list error: $out"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 3000
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "large-backlog snapshot must still produce valid inventory JSON: $out"
+  pass "a large backlog does not overflow jq's command-line argument length"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -814,3 +839,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_large_backlog_avoids_arg_list_too_long

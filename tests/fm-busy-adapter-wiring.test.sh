@@ -269,6 +269,14 @@ test_claude_hooks_semantic_lifecycle() {
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
+  # AGENTS.md section 1: never add an agent name as a commit co-author. Both
+  # keys are set: includeCoAuthoredBy is deprecated but still checked directly
+  # in current Claude Code, while attribution.commit/pr="" is the documented
+  # replacement with a known upstream gap (anthropics/claude-code#45137).
+  jq -e '.includeCoAuthoredBy == false' "$settings" >/dev/null \
+    || fail "claude worktree settings did not disable includeCoAuthoredBy"
+  jq -e '.attribution.commit == "" and .attribution.pr == ""' "$settings" >/dev/null \
+    || fail "claude worktree settings did not clear the attribution commit/pr footer"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"

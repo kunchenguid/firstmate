@@ -368,6 +368,10 @@ test_ship_project_memory_wording() {
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
+  assert_grep "Record durable project knowledge however small the change; skip it however large the change if there is none." "$brief" \
+    "project-memory contract lost the substance-only recording criterion"
+  assert_no_grep "trivial" "$brief" \
+    "project-memory contract reintroduced an effort-based (trivial-task) decision criterion"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
@@ -669,7 +673,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief wait_frag
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -692,12 +696,18 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     brief="$home/data/$id/brief.md"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
-      "$kind brief did not instruct the configured pause status"
+    assert_grep 'fm-wait.sh declare' "$brief" \
+      "$kind brief did not instruct the machine wait declaration"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    case "$kind" in
+      secondmate) wait_frag='appends the `awaiting:` event' ;;
+      *)          wait_frag='do NOT hand-write a `awaiting:` line' ;;
+    esac
+    assert_grep "$wait_frag" "$brief" \
+      "$kind brief did not render the configured pause verb in its wait instruction"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
-      "$kind brief still instructs the default paused status"
+      "$kind brief still instructs the prose paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \
@@ -747,6 +757,60 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Every scaffold must carry the fleet-wide no-agent-co-author rule where a
+# worker actually re-reads it before committing (AGENTS.md section 1, hard
+# rule "Never add an agent name as a commit co-author"). The prose alone does
+# not enforce it - mechanical enforcement lives in fm-spawn.sh's claude
+# settings.local.json - so this guards the reinforcement text survives.
+# A scout has no reason to delete: its worktree is discarded at teardown, and a
+# delete built from an empty variable escapes the worktree the moment the
+# variable is empty. Measured near-miss 2026-08-24: a scout attempted
+# "rm $D/*.md" with a possibly empty $D, which would have expanded to
+# "rm /*.md"; the operator refused it at the prompt. The scaffold therefore
+# states the rule as none rather than careful, and this guards that text.
+test_scout_never_deletes_rule() {
+  local home id brief
+  home="$TMP_ROOT/scout-no-delete-home"
+  mkdir -p "$home/data"
+
+  id="brief-no-delete-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never delete anything" "$brief" \
+    "scout brief did not carry the never-delete rule"
+  assert_grep "reaches outside the worktree the moment that variable is empty" "$brief" \
+    "scout brief did not explain why the rule is none rather than careful"
+
+  pass "fm-brief.sh: the scout scaffold forbids deleting at all"
+}
+
+test_no_agent_coauthor_rule_in_every_scaffold() {
+  local home id brief
+  home="$TMP_ROOT/no-coauthor-home"
+  mkdir -p "$home/data"
+
+  id="brief-coauthor-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "ship brief did not carry the no-agent-co-author rule"
+
+  id="brief-coauthor-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "scout brief did not carry the no-agent-co-author rule"
+
+  id="brief-coauthor-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Never add an agent name as a commit co-author or Co-authored-by footer" "$brief" \
+    "secondmate charter did not carry the no-agent-co-author rule"
+
+  pass "fm-brief.sh: ship, scout, and secondmate scaffolds all carry the no-agent-co-author rule"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -768,3 +832,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_no_agent_coauthor_rule_in_every_scaffold
+test_scout_never_deletes_rule

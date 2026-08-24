@@ -363,16 +363,33 @@ test_dead_endpoint_overrides() {
   gen=$("$EV" arm "$state" t1)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 1; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'alive'; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 0; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
+  # An open endpoint whose process family confidently holds no agent (the
+  # empty-shell shape) is dead even though a busy record still stands.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'dead'; }
+  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
+  [ "$out" = "dead agent-gone" ] || fail "agent-free endpoint must classify dead, got '$out'"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'missing'; }
+  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
+  [ "$out" = "dead agent-gone" ] || fail "missing endpoint inventory must classify dead, got '$out'"
+  # Only a confident negative overrides: ambiguous and unreadable fall through.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'ambiguous'; }
+  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "ambiguous agent read must fall through to the record, got '$out'"
   out=$(fm_busy_classify_live tmux '' claude t1 "$state")
   [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
-  unset -f fm_backend_target_exists
-  pass "endpoint death is the only process-level override and yields dead, never busy"
+  unset -f fm_backend_target_exists fm_backend_agent_state
+  pass "endpoint and agent death are the process-level overrides and yield dead, never busy"
 }
 
 test_herdr_native_busy_only() {

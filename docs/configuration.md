@@ -49,7 +49,7 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with an archive at `data/done-archive.md` and the retained-Done count that file's own `done_keep` owns.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
 Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation, delegates the item move to `tasks-axi mv`, and requires a verified receiver wake after a new move becomes durable.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
@@ -131,6 +131,17 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Away-mode session self-healing (config/away-selfheal-command)
+
+When away-mode escalations stay undelivered for `FM_AWAY_SELFHEAL_SECS` (default 1200) and the primary session is provably doing nothing, the sub-supervisor restarts the session shell and then delivers.
+The inactivity proof is uninterrupted screen byte-stability across that whole window, plus an affirmatively empty composer; any change at all restarts the window.
+Self-healing is OFF unless the home configures the relaunch command, so no home inherits a surprise restart.
+`config/away-selfheal-command` (local, gitignored) supplies it as its first non-comment line, and `FM_AWAY_SELFHEAL_CMD` overrides the file.
+The command is typed into the pane only after the agent has been asked to leave through its own exit command and its stop has been verified, so it must be the command that resumes this home's session rather than starting a fresh one.
+It runs only in away mode, at most once per `FM_AWAY_SELFHEAL_COOLDOWN_SECS` (default 3600), never over a composer that is not confirmed empty, and it changes no work state - only the session shell.
+Each attempt logs loudly and leaves a durable `state/.subsuper-selfheal-last` record naming what was run.
+See `bin/fm-supervise-daemon.sh`'s header for the remaining knobs and [`examples/away-selfheal-command`](examples/away-selfheal-command) for a copyable config.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -177,6 +188,14 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Plan approval keys (config/plan-approval-key)
+
+The primary firstmate home holds an ed25519 keypair that authorizes a secondmate implementation: the private `config/plan-approval-key` and the public `config/plan-approval-key.pub`, both local and gitignored.
+[`bin/fm-plan-approval.sh`](../bin/fm-plan-approval.sh)'s header is the single owner of the whole contract, including the approval record, the verification steps, and which spawns the gate covers.
+Run `bin/fm-plan-approval.sh init` once in the primary home to create the pair, or let the first approval create it lazily.
+Only the public half is inherited: it is a declared item in the propagation allowlist, so every convergence point pushes it into each secondmate home under the contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), while the private half is absent from every propagation path.
+Signing and verification need an `openssl` build with ed25519 raw sign and verify, which `init` proves before writing any key.
+
 ## Stow pass horizon (config/stow-pass-horizon)
 
 `config/stow-pass-horizon` is an optional local, gitignored presence flag that opts this home in to the pass-count decay horizon in the internal [`/stow` skill](../.agents/skills/stow/SKILL.md).
@@ -186,7 +205,6 @@ Opt in for a home that stows often enough that entries never sit unreinforced fo
 The flag is per home and is not inherited by secondmate homes, because stow cadence is a property of the home doing the stowing.
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
-
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -419,6 +437,63 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Waiting conditions (state/wartebedingungen.check.sh)
+
+A held or externally waiting backlog entry usually carries its truth outside firstmate: a pull request's state at the forge, an account or payment state, a rolled-out service, an answer somebody else has to send.
+Nothing re-reads that truth on its own, so the condition is only ever re-checked when somebody happens to present the entry - which is exactly when a long-resolved wait gets quoted as still open.
+[`bin/fm-wartebedingungen.sh`](../bin/fm-wartebedingungen.sh) moves that re-reading to the machine.
+It runs on the watcher's ordinary check cadence, probes each deposited condition read-only, and wakes firstmate when reality has already satisfied one.
+It never closes an entry; firstmate closes it, with the evidence the wake carried.
+
+A condition is one line in a backlog entry's note body, indented like every other body line:
+
+```
+wartet-auf: <art> [argumente...]
+```
+
+The probe kinds are `pr-merged`, `gh-runs-green`, `url-status`, `datum`, `cmd`, and `unpruefbar`.
+`bin/fm-wartebedingungen.sh --help` and that script's header own what each kind treats as met and what arguments it takes.
+An entry may carry several lines and is reported as soon as any one of them is met.
+`unpruefbar <grund>` records that no reading probe exists for this wait, which is how a wait is deliberately left unchecked instead of forgotten.
+
+Three findings can reach firstmate, and none of them is a silence:
+
+- `Bedingung laengst erfuellt: <eintrag> - <beleg>` means the wait is over and the entry can be reconciled.
+- `Bedingung unpruefbar hinterlegt: <eintrag>` marks an entry that waits on the outside but carries no condition at all.
+  A hold of kind `external` says so outright; an untyped hold is read from its own reason, because a hold that says in so many words that it is waiting for something is the same risk whether or not anyone typed the kind.
+  Holds of kind `future`, `captain`, `parked`, and `load` are firstmate's own dated, owned, or capacity waits and are left alone.
+  It is a risk marker, not an obligation to retrofit every older entry at once.
+- `Wartebedingung nicht pruefbar: <eintrag> - <grund>` means a probe could not answer.
+  A failed probe is never folded into "not yet met", because that is how a dead detector goes quiet.
+
+`bin/fm-wartebedingungen.sh report` prints every watched entry, its condition, and its verdict, including the entries that still carry none, so the retrofit worklist is read off the machine rather than off memory.
+
+Every built-in probe reads and nothing more; none of them writes, retries, repairs, or closes anything.
+The `cmd` kind is the one that runs text taken from the backlog, so it is gated on the same trust mechanic as every other custom watcher check: a `cmd` probe runs only while `state/wartebedingungen.check.sh` is bound to its current bytes by [`bin/fm-check-register.sh`](../bin/fm-check-register.sh).
+Unbound - including after the check has been edited - the `cmd` probe is refused and reported as refused rather than skipped quietly.
+
+Arm the check once per home with `bin/fm-wartebedingungen.sh arm`.
+That writes `state/wartebedingungen.check.sh` and binds its bytes, so the existing watcher polls it on its normal cadence and turns its findings into a `check:` wake; no separate schedule is involved.
+Arming alone does not make watcher supervision required, and it is refused in a home with no backlog to guard.
+`bin/fm-wartebedingungen.sh disarm` removes the shim, its trust binding, and the record.
+`state/.wartebedingungen` records the exact finding set the last report was made from, so one unhandled finding is reported once instead of on every poll, while a new, changed, or returning finding is news again.
+
+The backlog is read directly as the markdown file `.tasks.toml` pins, rather than through `tasks-axi`, because the note body is what carries the conditions and a listing truncates it, and because the check must keep working in a home whose backlog backend is set to `manual`.
+
+`FM_WARTE_INTERVAL` (default 900 seconds, `0` to sweep on every run) sets how often probes actually run, `FM_WARTE_PROBE_SECS` (default 5) bounds one probe, and `FM_WARTE_BUDGET_SECS` (default 20) bounds a whole sweep.
+The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a check the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
+So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the findings.
+A sweep that runs out of budget names the entry it did not reach rather than reporting the rest as still waiting.
+
+## Declared machine waits (state/<id>.wait)
+
+A live worker's deliberate wait on a known external event is a machine field with reason and deadline, never a prose status prefix.
+The worker declares it with `bin/fm-wait.sh declare <id> --reason <text> --until <when>`, refreshes it by re-declaring, and clears it with `bin/fm-wait.sh clear <id>`; the command also appends the matching status event so the wake channel and the field cannot drift.
+While the field is active, the watcher's liveness probe raises no alarm for that task, and `bin/fm-crew-state.sh` reports the declared wait as the current state ahead of run-step and pane busy-ness.
+At the deadline the watcher checks the task exactly once per field identity; a malformed field silences nothing.
+[`bin/fm-wait-lib.sh`](../bin/fm-wait-lib.sh) owns the byte format and parsing contract, and `bin/fm-wait.sh --help` (its header) owns the accepted deadline shapes.
+Backlog-level external waits remain `wartet-auf:` conditions in the section above; the wait field covers a live worker's own bounded wait, not a queued item's.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -549,7 +624,7 @@ By default, results are published as ordinary `check` wakes carrying the source 
 The self-announcing adapter exception and its fail-safe ordering are defined below.
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a default or fallback publication reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
 A queued `check` delivery is reported at most once per captured source and sequence while any records for that key remain queued.
-A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain's sequence-bound post-handling acknowledgement consumes it.
+A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until an ordinary drain presents and consumes it.
 
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
@@ -668,6 +743,11 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_WARTE_INTERVAL=900   # seconds between waiting-condition sweeps; 0 sweeps on every run, other values must be 60..86400
+FM_WARTE_PROBE_SECS=5   # 1..30 seconds allowed for one waiting-condition probe
+FM_WARTE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole waiting-condition sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_WARTE_NOW=           # test override for the waiting-condition cadence clock; the sweep budget still uses real time
+FM_WARTE_TODAY=         # test override for the date a "wartet-auf: datum" condition is compared against
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
@@ -706,14 +786,17 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watche
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
-FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_PAUSE_RESURFACE_SECS=3600       # seconds before the watcher re-surfaces a declared external wait or verified captain-held transfer for a recheck, including a live busy pane past FM_BUSY_TURN_MAX_SECS; the away-mode daemon uses the same setting for a declared external wait or verified captain-held transfer
+FM_PROBE_INTERVAL_SECS=240         # base seconds between one window's liveness probes (bin/fm-watch.sh probe_window); each refuted alarm doubles that window's interval
+FM_PROBE_BACKOFF_MAX=6             # cap on refuted-alarm doublings of the probe interval (2^6 = 64x base)
+FM_PROBE_CPU_MIN_SECS=1            # accumulated CPU seconds the pane's process family must accrue across a probe interval to count as progress evidence (bin/fm-busy-lib.sh fm_busy_cpu_progress)
+FM_PAUSE_RESURFACE_SECS=3600       # bounded re-surface cadence for anything a supervisor deliberately keeps quiet: the watcher probe's unrefuted no-progress alarms and vendor-derived external waits, and the away-mode daemon's declared external waits and verified captain-held transfers
+FM_RUN_PROGRESS_TIMEOUT=10         # seconds allowed for the read-only no-mistakes run read made at due probe moments; an executing run that advanced since the previous check counts as progress evidence
+FM_STALE_ESCALATE_SECS=240         # AWAY-MODE DAEMON ONLY since the liveness-probe rebuild: idle seconds before the daemon's housekeeping escalates a quiet pane as a possible wedge
 FM_SECONDMATE_WAKE_STALL_SECS=60   # minimum age of the oldest valid foreign wake-queue row before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification; zero or invalid values use 60
-FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
-FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
-FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
-FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
+FM_RUN_SUPERSEDED_TTL=120          # seconds a "no newer running run replaced this terminal one" answer stays cached per task and worktree head before fm-crew-state.sh re-probes; only that negative answer is cached, and a moved head invalidates it outright
+FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the liveness probe's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
+FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at due probe moments, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
+FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the alarm schedule exactly as it was; a value that is not a positive integer falls back to the default
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone

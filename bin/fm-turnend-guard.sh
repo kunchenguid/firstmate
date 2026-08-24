@@ -153,6 +153,24 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+
+# --- child-side corr booking reconciliation ----------------------------------
+# An officer home must hear about received-but-unbooked corr marks BEFORE its
+# turn ends (bin/fm-corr-abgleich.sh; the parent-side owner of the expectation
+# mechanics and the corr format is bin/fm-pending-reply-lib.sh, never
+# duplicated here). The gate runs ONLY where the supervision decision below
+# ALLOWS the stop: a supervision repair keeps its own reason and its own one
+# bounded continuation, and this optional reconciliation never competes with
+# it. The abgleich script bounds its own blocking per distinct difference set,
+# so allowing here can never wedge a session.
+corr_abgleich_gate() {
+  [ -f "$SCRIPT_DIR/fm-corr-abgleich.sh" ] || return 0
+  FM_CORR_ABGLEICH_SESSION=$SESSION_ID "$SCRIPT_DIR/fm-corr-abgleich.sh"
+  local rc=$?
+  [ "$rc" -eq 2 ] && exit 2
+  return 0
+}
+
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -163,12 +181,16 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
+  corr_abgleich_gate
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
-  exit 2
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    fm_failure_episode_reset "$STATE" && { corr_abgleich_gate; exit 0; }
+    exit 2
+  fi
+  corr_abgleich_gate
+  exit 0
 fi
 
 block_stop() {
@@ -379,6 +401,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
+    corr_abgleich_gate
     exit 0
   fi
   sleep 0.1
@@ -388,6 +411,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
+  corr_abgleich_gate
   exit 0
 fi
 
@@ -407,5 +431,7 @@ if [ "$terminal_status" -eq 0 ]; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+[ "$terminal_status" -eq 2 ] && { corr_abgleich_gate; exit 0; }
+# The attended fail-open allow above (systemMessage path) is deliberately NOT
+# gated: its one attended, budget-exhausted allow stands as decided.
 block_stop

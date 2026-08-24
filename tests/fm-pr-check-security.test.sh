@@ -31,16 +31,8 @@ REAL_BASENAME=$(command -v basename)
 # depending on the host keeping jq in one of those four directories.
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
-ack_watcher_cycle() {  # <state>
-  local state=$1 err sequence generation
-  err="$state/.test-wake-drain.err"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+ack_watcher_cycle() {  # <state> - a drain consumes presented rows itself (U1.3)
+  FM_STATE_OVERRIDE="$1" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1
 }
 
 file_mode() {

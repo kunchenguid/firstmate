@@ -50,6 +50,8 @@ FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
 FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
 unset FM_BACKEND_SCRIPT
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
+# shellcheck source=bin/fm-proctree-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-proctree-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -203,28 +205,23 @@ fm_backend_detect_cmux_app_pid() {
 # could not resolve one. Stops at launchd (ppid 1), where a tmux server that
 # was started from a cmux tab has already reparented - ancestry can never
 # false-positive from inside tmux.
-fm_backend_detect_cmux_app_is_ancestor() {
-  local cmux_pid pid ppid comm hops=0
-  cmux_pid=$(fm_backend_detect_cmux_app_pid) || cmux_pid=""
-  pid=$$
-  while [ "$hops" -lt 32 ]; do
-    if [ -n "$cmux_pid" ] && [ "$pid" = "$cmux_pid" ]; then
-      return 0
-    fi
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=""
-    comm="${comm#"${comm%%[![:space:]]*}"}"
-    comm="${comm%"${comm##*[![:space:]]}"}"
-    [ -n "$comm" ] || return 1
-    case "$comm" in
-      */cmux.app/Contents/MacOS/cmux) return 0 ;;
-    esac
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$ppid" -gt 1 ] || return 1
-    pid=$ppid
-    hops=$((hops + 1))
-  done
+_fm_backend_cmux_ancestor_visit() { # climb visitor: app pid or bundle-shaped comm
+  local pid=$1 comm
+  if [ -n "$FM_BACKEND_CMUX_APP_PID" ] && [ "$pid" = "$FM_BACKEND_CMUX_APP_PID" ]; then
+    return 0
+  fi
+  comm=$(fm_proctree_comm "$pid") || comm=""
+  comm="${comm#"${comm%%[![:space:]]*}"}"
+  comm="${comm%"${comm##*[![:space:]]}"}"
+  [ -n "$comm" ] || return 2
+  case "$comm" in
+    */cmux.app/Contents/MacOS/cmux) return 0 ;;
+  esac
   return 1
+}
+fm_backend_detect_cmux_app_is_ancestor() {
+  FM_BACKEND_CMUX_APP_PID=$(fm_backend_detect_cmux_app_pid) || FM_BACKEND_CMUX_APP_PID=""
+  fm_proctree_climb "$$" 32 _fm_backend_cmux_ancestor_visit
 }
 
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
@@ -738,6 +735,25 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_send_text_max_bytes: the largest payload ONE send_text_submit may
+# carry on this backend, in bytes, or 0 when the backend publishes no such
+# ceiling. A caller that composes its own payload (the away-mode daemon's
+# escalation digest) must split or truncate at this budget: a transport that
+# refuses an oversize command delivers NOTHING, so exceeding it loses the whole
+# message rather than part of it. Only tmux has a measured ceiling today - its
+# imsg command budget, owned and explained in bin/fm-tmux-lib.sh; every other
+# adapter answers 0 until its own limit is measured, which keeps an unmeasured
+# backend honest instead of inventing a number for it.
+fm_backend_send_text_max_bytes() {  # <backend> <target> -> byte budget, 0 = unknown
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf '0'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_send_text_max_bytes "$@" ;;
+    *) printf '0' ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
@@ -903,6 +919,21 @@ fm_backend_agent_alive() {  # <backend> <target>
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_pane_cputime: accumulated CPU seconds of <target>'s own process
+# family, as one integer, for the liveness probe's CPU-progress evidence
+# (bin/fm-busy-lib.sh's fm_busy_cpu_progress owns the delta semantics).
+# Only tmux has a verified per-target CPU source today; every other backend
+# fails (non-zero, no output), which the probe treats as "no CPU source",
+# never as a zero-progress verdict.
+fm_backend_pane_cputime() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_pane_cputime "$target" ;;
+    *) return 1 ;;
   esac
 }
 

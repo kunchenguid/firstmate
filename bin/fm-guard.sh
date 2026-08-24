@@ -229,14 +229,8 @@ else
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
 fi
 
-# Queued wakes are an independent hazard; warn whenever they are pending, even if
-# a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
-# Dedup of the watcher-down banner never suppresses this warning.
-if "$queue_pending"; then
-  if [ "$READ_ONLY" -eq 1 ]; then
-    echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
-  else
-    echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
-  fi
-fi
+# Queued wakes get no standing warning here (U1.3): the queue is a trigger
+# stream the next drain presents and consumes, so rows pending mid-turn are the
+# normal shape of a busy fleet, not a hazard. The supervision protocol's
+# drain-first rule and the durable folds own delivery.
 exit 0
