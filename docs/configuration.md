@@ -190,7 +190,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
-With it present, a wake carrying only bare turn-ended markers is absorbed when every referenced task's pane content changed since the previous poll, which is the only evidence available for a harness whose semantic busy state has no verified source and whose workers therefore wake the supervisor once per worker turn with nothing to act on.
+With it present, every referenced task must independently show positive work evidence, and an eligible bare turn-ended task that lacks authoritative proof may satisfy that requirement when its pane content changed since the previous poll.
 It stays opt-in because the other two proofs read a verdict the harness itself vouches for while this one infers execution from rendered bytes; with the flag absent triage behaves exactly as it did before.
 `FM_TURNEND_CHURN_ABSORB_SECS` bounds how long one endpoint's turn-ends may ride that evidence before surfacing anyway, and the bound is required rather than cosmetic because churn and pane staleness read the same pane.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.

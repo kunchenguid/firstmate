@@ -926,6 +926,36 @@ test_turn_ended_malformed_prior_hash_surfaced() {
   pass "a bare turn-end backed by a malformed prior hash surfaces"
 }
 
+test_turn_ended_trailing_newline_prior_hash_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-newline-hash); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexnewline"
+  : > "$state/codexnewline.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexnewline.meta"
+  printf 'rendered after the prior poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s\n' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a newline-terminated prior hash"
+  grep -F "signal: $state/codexnewline.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced newline-hash turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the newline-hash turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexnewline.turn-ended" >/dev/null \
+    || fail "newline-hash turn-end was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "a newline-terminated prior hash opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end backed by a newline-terminated prior hash surfaces"
+}
+
 test_secondmate_turn_ended_churning_pane_surfaced() {
   local dir state fakebin out drain_out capture_file window key pid
   dir=$(make_case secondmate-turn-ended-churning); state="$dir/state"; fakebin="$dir/fakebin"
@@ -981,6 +1011,114 @@ test_turn_ended_colliding_window_key_surfaced() {
     || fail "ambiguous-marker turn-end was not queued"
   unset FM_FAKE_CREW_STATE
   pass "a turn-end whose marker key matches another recorded endpoint surfaces"
+}
+
+test_turn_ended_duplicate_endpoint_records_surfaced() {
+  local dir state fakebin out drain_out capture_file window key pid
+  dir=$(make_case turn-ended-duplicate-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-shared"
+  : > "$state/first.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/first.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/second.meta"
+  printf 'rendered after the prior poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end shared by two endpoint records"
+  grep -F "signal: $state/first.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced duplicate-endpoint turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the duplicate-endpoint turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
+    || fail "duplicate-endpoint turn-end was not queued"
+  [ ! -e "$state/.churn-since-$key" ] \
+    || fail "duplicate endpoint records opened a deferral window"
+  unset FM_FAKE_CREW_STATE
+  pass "two metadata records sharing one endpoint make churn evidence ambiguous"
+}
+
+test_turn_ended_mixed_positive_evidence_batch_absorbed() {
+  local dir state fakebin out capture_file first_window second_window first_key second_key pid
+  dir=$(make_case turn-ended-mixed-evidence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-first"; second_window="test:fm-second"
+  : > "$state/first.turn-ended"
+  : > "$state/second.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$first_window" > "$state/first.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/second.meta"
+  printf 'second task rendered after the prior poll' > "$capture_file"
+  first_key=$(printf '%s' "$first_window" | tr ':/.' '___')
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'first task static pane')" > "$state/.hash-$first_key"
+  printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$first_key"
+  printf '0\n' > "$state/.count-$second_key"
+  export FM_FAKE_CREW_STATE_first='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_second='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-first\nfm-second')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_TMUX_FORBIDDEN_TARGET="$first_window" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a mixed authoritative-and-churn batch was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed mixed-evidence batch printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed mixed-evidence batch enqueued a durable wake record"
+  [ ! -e "$state/.churn-since-$first_key" ] \
+    || fail "an authoritatively working task opened a pane-churn deadline"
+  [ -s "$state/.churn-since-$second_key" ] \
+    || fail "the churn-proven task did not open its bounded deferral window"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_first FM_FAKE_CREW_STATE_second
+  pass "a batch may satisfy positive evidence independently per task"
+}
+
+test_turn_ended_mixed_positive_evidence_batch_default_off() {
+  local dir state fakebin out drain_out capture_file first_window second_window first_key second_key pid
+  dir=$(make_case turn-ended-mixed-evidence-off); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  first_window="test:fm-firstoff"; second_window="test:fm-secondoff"
+  : > "$state/firstoff.turn-ended"
+  : > "$state/secondoff.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$first_window" > "$state/firstoff.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/secondoff.meta"
+  printf 'second task rendered after the prior poll' > "$capture_file"
+  first_key=$(printf '%s' "$first_window" | tr ':/.' '___')
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'first task static pane')" > "$state/.hash-$first_key"
+  printf '%s' "$(hash_text 'second task previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$first_key"
+  printf '0\n' > "$state/.count-$second_key"
+  export FM_FAKE_CREW_STATE_firstoff='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_secondoff='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-firstoff\nfm-secondoff')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir" off)" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a mixed-evidence batch without the opt-in flag"
+  grep -F "$state/firstoff.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the first default-off turn-end"
+  grep -F "$state/secondoff.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the second default-off turn-end"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "drain after the default-off mixed-evidence batch failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/firstoff.turn-ended" >/dev/null \
+    || fail "the first default-off turn-end was not queued"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/secondoff.turn-ended" >/dev/null \
+    || fail "the second default-off turn-end was not queued"
+  [ ! -e "$state/.churn-since-$first_key" ] && [ ! -e "$state/.churn-since-$second_key" ] \
+    || fail "the default-off mixed-evidence batch opened a deferral window"
+  unset FM_FAKE_CREW_STATE_firstoff FM_FAKE_CREW_STATE_secondoff
+  pass "per-task evidence composition stays off until the home opts in"
 }
 
 # The opt-in half. Pane churn infers execution from rendered bytes rather than
@@ -3615,8 +3753,12 @@ test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
+test_turn_ended_trailing_newline_prior_hash_surfaced
 test_secondmate_turn_ended_churning_pane_surfaced
 test_turn_ended_colliding_window_key_surfaced
+test_turn_ended_duplicate_endpoint_records_surfaced
+test_turn_ended_mixed_positive_evidence_batch_absorbed
+test_turn_ended_mixed_positive_evidence_batch_default_off
 test_turn_ended_churn_absorb_off_by_default
 test_turn_ended_churn_absorb_bounded
 test_turn_ended_churn_timer_write_failure_surfaced
