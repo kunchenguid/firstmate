@@ -161,6 +161,7 @@ Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
+A remote endpoint that runs no agent process but still carries a registered agent record is never closed and replaced: launch and recovery refuse it and print the exact in-place `fm-spawn.sh <id> --relaunch` command to run on that host, and an unreadable registration refuses the same way rather than being treated as a stale record.
 
 Send routed requests normally:
 
