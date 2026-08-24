@@ -660,6 +660,37 @@ test_base_branch_contract_uses_last_line() {
   pass "ship base-contract agreement uses the last Base branch line"
 }
 
+test_base_branch_contract_ignores_progress_note() {
+  local rec id brief out status
+  id='pool-base-branch-progress-note-r8'
+  rec=$(make_case base-branch-progress-note "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_ship_brief "$id" no-mistakes develop
+  brief="$HOME_DIR/data/$id/brief.md"
+  cat >> "$brief" <<'EOF'
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Base branch contract: base_branch=release
+Delivery contract: mode=local-only
+EOF
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore contract lines in a relaunch progress note"
+  assert_contains "$out" "spawned $id" "spawn did not report success after a progress-note decoy"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "spawn treated a progress-note Base branch line as the contract"
+  pass "ship base-contract agreement ignores a relaunch progress note"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -679,5 +710,6 @@ test_missing_base_branch_refuses_without_default_fallback
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_base_branch_contract_refuses_mismatch
 test_base_branch_contract_uses_last_line
+test_base_branch_contract_ignores_progress_note
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

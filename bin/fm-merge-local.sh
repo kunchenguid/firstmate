@@ -6,10 +6,13 @@
 # `Base branch contract: base_branch=<branch>` in that same brief (written by
 # --base-branch). For both lines the last match wins, because the generated
 # contract is appended after free-form {TASK} text that may mention the same
-# phrase. When the crew-branch line is absent, this script still uses fm/<id>.
-# When the base-branch line is absent, it still lands on the project's default
-# branch. Omitted flags therefore stay identical to today. An invalid recorded
-# name refuses rather than falling back.
+# phrase. Both lookups read the `# Definition of done` section so a later
+# relaunch progress note cannot override the generated contract; if that
+# section is missing, the last matching line in the brief still wins so older
+# one-line records keep working. When the crew-branch line is absent, this
+# script still uses fm/<id>. When the base-branch line is absent, it still
+# lands on the project's default branch. Omitted flags therefore stay
+# identical to today. An invalid recorded name refuses rather than falling back.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -57,10 +60,31 @@ default_branch() {
   return 1
 }
 
+# Generated contracts live in `# Definition of done`. Stop at the next heading
+# so a relaunch `## Progress note` cannot override them. A brief with no DOD
+# section (older one-line records) falls back to the whole file.
+brief_dod_section() {
+  awk '
+    /^# Definition of done[[:space:]]*$/ { grab=1; next }
+    /^#{1,6}[[:space:]]/ { if (grab) exit }
+    grab { print }
+  ' "$1"
+}
+
+brief_last_contract() {
+  local file=$1 prefix=$2 section value
+  section=$(brief_dod_section "$file")
+  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}//p" | tail -n 1)
+  if [ -z "$value" ]; then
+    value=$(sed -n "s/^${prefix}//p" "$file" | tail -n 1)
+  fi
+  printf '%s' "$value"
+}
+
 BRIEF="$DATA/$ID/brief.md"
 BRANCH="fm/$ID"
 if [ -f "$BRIEF" ]; then
-  recorded_branch=$(sed -n 's/^Crew branch: branch=//p' "$BRIEF" | tail -n 1)
+  recorded_branch=$(brief_last_contract "$BRIEF" 'Crew branch: branch=')
   if [ -n "$recorded_branch" ]; then
     git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
       echo "error: $BRIEF records an invalid crew branch: $recorded_branch" >&2
@@ -74,7 +98,7 @@ git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { e
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 TARGET=$DEFAULT
 if [ -f "$BRIEF" ]; then
-  recorded_base=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | tail -n 1)
+  recorded_base=$(brief_last_contract "$BRIEF" 'Base branch contract: base_branch=')
   if [ -n "$recorded_base" ]; then
     git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
       echo "error: $BRIEF records an invalid base branch: $recorded_base" >&2

@@ -1829,12 +1829,33 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
-# Last matching line wins: generated contracts are appended after {TASK} text
-# that may mention the same phrase. bin/fm-merge-local.sh uses the same rule.
-BRIEF_BASE_BRANCH=$(sed -n 's/^Base branch contract: base_branch=\([^ ]*\).*$/\1/p' "$BRIEF" | tail -n 1)
+# Last matching line in `# Definition of done` wins: generated contracts are
+# appended after {TASK} text that may mention the same phrase, and a later
+# relaunch `## Progress note` must not override them. If that section is
+# missing, the last matching line in the brief still wins. bin/fm-merge-local.sh
+# uses the same rule for landing.
+brief_dod_section() {
+  awk '
+    /^# Definition of done[[:space:]]*$/ { grab=1; next }
+    /^#{1,6}[[:space:]]/ { if (grab) exit }
+    grab { print }
+  ' "$1"
+}
+
+brief_last_contract_word() {
+  local file=$1 prefix=$2 section value
+  section=$(brief_dod_section "$file")
+  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
+  if [ -z "$value" ]; then
+    value=$(sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" "$file" | tail -n 1)
+  fi
+  printf '%s' "$value"
+}
+
+BRIEF_BASE_BRANCH=$(brief_last_contract_word "$BRIEF" 'Base branch contract: base_branch=')
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
-  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | tail -n 1)
+  BRIEF_MODE=$(brief_last_contract_word "$BRIEF" 'Delivery contract: mode=')
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then

@@ -271,6 +271,55 @@ test_invalid_recorded_base_refuses() {
   pass "fm-merge-local.sh refuses an invalid recorded base branch"
 }
 
+test_progress_note_cannot_override_generated_contracts() {
+  local case_dir home project
+  case_dir="$TMP_ROOT/progress-note"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-progress" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/progress-decoy
+  printf 'progress decoy\n' > "$project/progress-decoy.txt"
+  git -C "$project" add progress-decoy.txt
+  git -C "$project" commit -qm progress-decoy
+  git -C "$project" checkout -q main
+  git -C "$project" checkout -qb feature/named-base
+  printf 'named base\n' > "$project/named-base.txt"
+  git -C "$project" add named-base.txt
+  git -C "$project" commit -qm named-base
+  git -C "$project" checkout -qb feature/authoritative-crew
+  printf 'crew work\n' > "$project/crew.txt"
+  git -C "$project" add crew.txt
+  git -C "$project" commit -qm crew-work
+  git -C "$project" checkout -q main
+
+  fm_write_meta "$home/state/task-progress.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-progress/brief.md" <<'EOF'
+# Definition of done
+Base branch contract: base_branch=feature/named-base
+Crew branch: branch=feature/authoritative-crew
+
+## Progress note (2026-08-24T11:29:00Z)
+
+This task was relaunched. Continue from here.
+Crew branch: branch=feature/progress-decoy
+Base branch contract: base_branch=main
+EOF
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-progress >/dev/null \
+    || fail "fm-merge-local.sh should ignore contract lines in a relaunch progress note"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew feature/named-base \
+    || fail "progress-note decoy prevented landing the generated crew branch on the generated base"
+  git -C "$project" merge-base --is-ancestor feature/authoritative-crew main \
+    && fail "a progress-note base contract landed on the default branch"
+  git -C "$project" merge-base --is-ancestor feature/progress-decoy feature/named-base \
+    && fail "a progress-note crew branch was merged instead of the generated contract"
+  pass "fm-merge-local.sh ignores contract lines appended in a relaunch progress note"
+}
+
 test_recorded_custom_branch_merges
 test_omitted_crew_branch_still_merges_fm_id
 test_invalid_recorded_branch_refuses
@@ -278,3 +327,4 @@ test_last_crew_branch_line_wins_over_earlier_mention
 test_recorded_base_lands_on_named_branch_not_default
 test_last_base_branch_line_wins_over_earlier_mention
 test_invalid_recorded_base_refuses
+test_progress_note_cannot_override_generated_contracts
