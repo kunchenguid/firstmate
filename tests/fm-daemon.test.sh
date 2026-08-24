@@ -93,6 +93,66 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+# md5_poisoned_path <dir>: build a PATH directory holding a DATA file named `md5`
+# and no md5sum, so `command -v md5` resolves something that cannot hash. This is
+# the MSYS/Git Bash hazard - every file there reports as executable, and R ships a
+# checksum manifest at $R_HOME/md5 with C:\Program Files\R\R-4.5.1 commonly on
+# PATH. chmod +x reproduces that resolvability on Linux and macOS, so the
+# regression is portable rather than Windows-only. cut and cksum are forwarded in
+# because the sandbox PATH replaces the real one outright.
+md5_poisoned_path() {  # <dir>
+  local dir=$1 tool
+  mkdir -p "$dir"
+  for tool in cut cksum; do
+    cat > "$dir/$tool" <<EOF
+#!/bin/sh
+exec $(command -v "$tool") "\$@"
+EOF
+    chmod +x "$dir/$tool"
+  done
+  # R's manifest shape: plain text, one "<hash> *<path>" line per shipped file.
+  printf '%s\n' \
+    'd41d8cd98f00b204e9800998ecf8427e *bin/R' \
+    'd41d8cd98f00b204e9800998ecf8427e *bin/Rscript' > "$dir/md5"
+  chmod +x "$dir/md5"
+  printf '%s' "$dir"
+}
+
+# with_sandbox_path <dir> <cmd> [args...]: run one command with PATH narrowed to
+# the sandbox. The narrowing must not outlive the call: `fail` exits, and the
+# cleanup traps in tests/lib.sh then reach for real external tools such as rm,
+# so the sandbox PATH may only be in scope while the probed command itself runs.
+# `local` restores the caller's PATH the moment this helper returns.
+with_sandbox_path() {
+  local PATH=$1
+  shift
+  "$@"
+}
+
+test_hash_text_survives_md5_data_file_on_path() {
+  local dir out status first second other
+  dir=$(md5_poisoned_path "$TMP_ROOT/hash-text-md5-poisoned")
+
+  # Guard the case against going vacuous: the sandbox must really resolve the
+  # fake md5 and really lack md5sum, or the probed branch is never reached.
+  with_sandbox_path "$dir" command -v md5 >/dev/null 2>&1 || fail "sandbox PATH does not resolve the fake md5 data file"
+  ! with_sandbox_path "$dir" command -v md5sum >/dev/null 2>&1 || fail "sandbox PATH still resolves a real md5sum"
+
+  out=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>&1); status=$?
+
+  expect_code 0 "$status" "_hash_text must succeed when md5 on PATH is a data file"
+  assert_not_contains "$out" "command not found" "_hash_text executed the md5 data file instead of probing it"
+  [ -n "$out" ] || fail "_hash_text returned no hash when md5 on PATH is a data file"
+
+  first=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>/dev/null)
+  second=$(with_sandbox_path "$dir" _hash_text 'wake-identity' 2>/dev/null)
+  other=$(with_sandbox_path "$dir" _hash_text 'other-identity' 2>/dev/null)
+  [ "$first" = "$second" ] || fail "_hash_text is not deterministic under the cksum backstop"
+  [ "$first" != "$other" ] || fail "_hash_text collapsed distinct inputs onto one hash under the cksum backstop"
+
+  pass "_hash_text still hashes when md5 on PATH is a data file"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1836,6 +1896,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_hash_text_survives_md5_data_file_on_path
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

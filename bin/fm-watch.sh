@@ -188,8 +188,12 @@ afk_present() { [ -e "$STATE/.afk" ]; }
 
 hash_pane() {
   # Prefer md5sum: on Windows a PATH entry named `md5` can be a non-program
-  # (e.g. R's checksum manifest) that `command -v` still resolves.
-  if command -v md5sum >/dev/null 2>&1; then md5sum | cut -d' ' -f1; else md5 -q; fi
+  # (e.g. R's checksum manifest) that `command -v` still resolves. Probe the
+  # BSD/macOS branch functionally so only a tool that really hashes is used,
+  # and back both off with cksum when neither is usable.
+  if command -v md5sum >/dev/null 2>&1; then md5sum | cut -d' ' -f1
+  elif printf '' | md5 -q >/dev/null 2>&1; then md5 -q
+  else cksum | cut -d' ' -f1; fi
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through

@@ -301,11 +301,15 @@ is_live_non_zombie() {
 
 hash_text() {
   # Prefer md5sum: on Windows a PATH entry named `md5` can be a non-program
-  # (e.g. R's checksum manifest) that `command -v` still resolves.
+  # (e.g. R's checksum manifest) that `command -v` still resolves. Probe the
+  # BSD/macOS branch functionally so only a tool that really hashes is used,
+  # and back both off with cksum when neither is usable.
   if command -v md5sum >/dev/null 2>&1; then
     printf '%s' "$1" | md5sum | cut -d' ' -f1
-  else
+  elif printf '' | md5 -q >/dev/null 2>&1; then
     printf '%s' "$1" | md5 -q
+  else
+    printf '%s' "$1" | cksum | cut -d' ' -f1
   fi
 }
 
