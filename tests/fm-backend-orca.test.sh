@@ -453,7 +453,7 @@ test_worktree_create_removes_worktree_when_path_missing() {
 }
 
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
-  local proj data state config id out status
+  local proj data state config id out status neutral endpoint_out endpoint_status teardown_out teardown_status
   id="orcapathlessz6"
   proj="$TMP_ROOT/pathless-cleanup-project"
   data="$TMP_ROOT/pathless-cleanup-data"
@@ -483,8 +483,26 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved pathless metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
+  assert_grep "orca_allocation=worktree-id-only" "$state/$id.meta" "preserved pathless metadata missing cleanup-only ID state"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
+  endpoint_out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
+    "$ROOT" "$state/$id.meta" "$id" 2>&1)
+  endpoint_status=$?
+  [ "$endpoint_status" -ne 0 ] || fail "worktree-ID-only recovery metadata should not validate as a live endpoint"
+  assert_contains "$endpoint_out" "cleanup-only" "worktree-ID-only recovery refusal should name its restricted scope"
+  orca_case pathless-cleanup-recovery
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  teardown_out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  teardown_status=$?
+  expect_code 0 "$teardown_status" "cleanup-only Orca ID recovery teardown should succeed"$'\n'"$teardown_out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-pathless-cleanup'$'\x1f''--force'$'\x1f''--json' \
+    "cleanup-only ID recovery should remove the exact recorded Orca worktree"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show' \
+    "cleanup-only ID recovery should not require an unavailable worktree path"
+  assert_absent "$state/$id.meta" "successful cleanup-only ID recovery should retire task metadata"
+  pass "fm-spawn.sh --backend orca: preserves and tears down an ID-only recovery record"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {

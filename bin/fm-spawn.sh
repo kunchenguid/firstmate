@@ -1090,7 +1090,10 @@ spawn_render_orca_recovery_meta() {
   echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     echo "terminal=$ORCA_TERMINAL" || return 1
-  else
+  fi
+  if [ -z "${WT:-}" ]; then
+    echo "orca_allocation=worktree-id-only" || return 1
+  elif [ -z "${ORCA_TERMINAL:-}" ]; then
     echo "orca_allocation=worktree-only" || return 1
   fi
 }

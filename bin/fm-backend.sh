@@ -409,9 +409,21 @@ fm_backend_orca_worktree_id_valid() {  # <value> <recorded-worktree-path>
   return 1
 }
 
+fm_backend_orca_cleanup_id_valid() {
+  local value=$1 path
+  fm_backend_endpoint_atom_valid "$value" && return 0
+  case "$value" in
+    *::/*)
+      path=${value#*::}
+      fm_backend_orca_worktree_id_valid "$value" "$path"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup]
   local meta=$1 id=$2 validation_scope=${3:-endpoint}
-  local backend_count backend window worktree project binding_count binding
+  local backend_count backend window worktree worktree_count project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
   local allocation_count allocation
   FM_BACKEND_VALIDATED_BACKEND=
@@ -429,10 +441,13 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
-  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
+  worktree_count=$(grep -c '^worktree=' "$meta" 2>/dev/null || true)
+  if [ "$worktree_count" -eq 1 ]; then
+    worktree=$(grep '^worktree=' "$meta" | cut -d= -f2-)
+  else
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
-  }
+  fi
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2
     return 1
@@ -449,6 +464,10 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
   esac
   if [ -z "$backend" ] || ! fm_backend_is_known "$backend"; then
     echo "REFUSED: task $id has a missing, ambiguous, or unknown backend identity; preserving task state." >&2
+    return 1
+  fi
+  if [ -z "$worktree" ] && [ "$backend" != orca ]; then
+    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
   fi
   binding_count=$(grep -c '^endpoint_task_id=' "$meta" 2>/dev/null || true)
@@ -533,20 +552,28 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         return 1
       }
       if [ "$allocation" = worktree-only ]; then
-        if [ "$validation_scope" != cleanup ] || [ -n "$terminal" ]; then
+        if [ "$validation_scope" != cleanup ] || [ -n "$terminal" ] || [ -z "$worktree" ]; then
           echo "REFUSED: worktree-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
+          return 1
+        fi
+      elif [ "$allocation" = worktree-id-only ]; then
+        if [ "$validation_scope" != cleanup ] || [ -n "$worktree" ]; then
+          echo "REFUSED: worktree-ID-only Orca recovery metadata for task $id is cleanup-only or inconsistent; preserving task state." >&2
           return 1
         fi
       elif [ -n "$allocation" ]; then
         echo "REFUSED: Orca endpoint metadata for task $id has an unknown or ambiguous allocation state; preserving task state." >&2
         return 1
-      elif [ -z "$terminal" ]; then
+      elif [ -z "$terminal" ] || [ -z "$worktree" ]; then
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
       fi
       if [ "$window" != "fm-$id" ] \
         || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
-        || ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; then
+        || { [ "$allocation" = worktree-id-only ] \
+          && ! fm_backend_orca_cleanup_id_valid "$worktree_id"; } \
+        || { [ "$allocation" != worktree-id-only ] \
+          && ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; }; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi

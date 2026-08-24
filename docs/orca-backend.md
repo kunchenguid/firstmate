@@ -42,7 +42,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths for a complete endpoint.
-If terminal creation fails after the worktree is allocated and abort cleanup cannot remove it, the atomic recovery record omits `terminal=`, adds `orca_allocation=worktree-only`, and is accepted only by cleanup paths.
+If terminal creation fails after the worktree is allocated and abort cleanup cannot remove it, the atomic recovery record is accepted only by cleanup paths: it uses `orca_allocation=worktree-only` without `terminal=` when the path is known, or `orca_allocation=worktree-id-only` with an empty `worktree=` when Orca returned only the allocation ID.
 Current Orca releases emit `orca_worktree_id=` as a composite `<repo-id>::<absolute-worktree-path>` handle; endpoint validation accepts that shape only when the embedded path is exactly the recorded `worktree=` value, and still accepts the opaque ids older releases emit.
 
 ## Current lifecycle and safety
