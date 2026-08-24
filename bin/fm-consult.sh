@@ -286,14 +286,25 @@ EOF
   # Publish by linking, not moving: creating a link fails when the destination
   # already exists, so a brief another writer created after the absence check
   # above survives. A move would replace it and still report success.
-  if ! publish_error=$(ln -- "$staged" "$brief" 2>&1); then
+  # Not every writable filesystem supports hard links, so a failed link falls
+  # back to an exclusive create, which refuses an existing destination on any
+  # filesystem. The reservation is separate from the fill so that a fill that
+  # fails is known to be ours to remove rather than a rival's brief.
+  if ln -- "$staged" "$brief" 2>/dev/null; then
+    rm -f -- "$staged"
+  elif publish_error=$( (umask 077; set -o noclobber; : > "$brief") 2>&1 ); then
+    if ! publish_error=$(cat -- "$staged" > "$brief" 2>&1); then
+      rm -f -- "$staged" "$brief"
+      die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
+    fi
+    rm -f -- "$staged"
+  else
     rm -f -- "$staged"
     if [ -e "$brief" ] || [ -L "$brief" ]; then
       die "consultation brief already exists: $brief"
     fi
     die "could not publish the consultation brief: $(display_name "$brief")$(parenthesized_cause "$publish_error")"
   fi
-  rm -f -- "$staged"
   printf 'scaffolded: %s (replace every placeholder)\n' "$brief"
 }
 

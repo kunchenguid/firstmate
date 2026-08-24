@@ -134,6 +134,76 @@ SHIM
   pass "fm-consult: scaffold refuses to replace a brief that appears while it stages"
 }
 
+# Hard links are not available on every writable filesystem an FM_HOME or
+# FM_DATA_OVERRIDE can point at. Publishing must not depend on them: the stand-in
+# below fails every link the way such a filesystem does, and scaffold must still
+# publish the same complete brief it publishes anywhere else.
+test_scaffold_publishes_a_brief_without_hard_link_support() {
+  local home shim brief reference out rc leftovers
+  home=$(new_home no-hardlink)
+  shim="$TMP_ROOT/no-hardlink-shim"
+  mkdir -p "$shim"
+  cat > "$shim/ln" <<'SHIM'
+#!/usr/bin/env bash
+printf 'ln: %s: Operation not supported\n' "${*: -1}" >&2
+exit 1
+SHIM
+  chmod +x "$shim/ln"
+  run_consult "$home" scaffold linked >/dev/null
+  reference="$home/data/linked/consult-brief.md"
+
+  brief="$home/data/linkless/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold linkless 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold must publish where hard links are unavailable (got: $out)"
+  assert_contains "$out" "$brief" "the fallback publish did not print the brief path"
+  assert_present "$brief" "scaffold published no brief where hard links are unavailable"
+  diff "$reference" "$brief" >/dev/null \
+    || fail "the fallback publish wrote a brief that differs from an ordinary one"
+  leftovers=$(find "$home/data/linkless" -mindepth 1 ! -name consult-brief.md 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "the fallback publish left staged files behind"
+
+  out=$(run_consult "$home" status linkless 2>&1); rc=$?
+  expect_code 0 "$rc" "status did not report the fallback-published brief (got: $out)"
+  has_exact_line "$out" "linkless: brief written; still awaiting a report" \
+    || fail "status did not report the fallback-published brief as written"$'\n'"--- output ---"$'\n'"$out"
+  pass "fm-consult: scaffold publishes a complete brief where hard links are unavailable"
+}
+
+# The fallback publish must keep the no-clobber contract the hard link gave it.
+# Both stand-ins together are exactly a filesystem without hard links on which a
+# second writer wins the race: mktemp leaves the rival brief behind, and ln
+# cannot refuse the way it would elsewhere.
+test_scaffold_without_hard_links_never_replaces_a_rival_brief() {
+  local home shim brief out rc leftovers
+  home=$(new_home no-hardlink-race)
+  shim="$TMP_ROOT/no-hardlink-race-shim"
+  mkdir -p "$shim"
+  cat > "$shim/ln" <<'SHIM'
+#!/usr/bin/env bash
+printf 'ln: %s: Operation not supported\n' "${*: -1}" >&2
+exit 1
+SHIM
+  cat > "$shim/mktemp" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+template=${*: -1}
+dir=${template%/*}
+staged="$dir/.consult-brief.rival"
+: > "$staged"
+printf 'rival brief\n' > "$dir/consult-brief.md"
+printf '%s\n' "$staged"
+SHIM
+  chmod +x "$shim/ln" "$shim/mktemp"
+  brief="$home/data/raced/consult-brief.md"
+  out=$(PATH="$shim:$PATH" run_consult "$home" scaffold raced 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "the fallback publish reported success over a rival brief"
+  assert_contains "$out" "already exists" "the fallback refusal was not explicit"
+  [ "$(cat "$brief")" = "rival brief" ] || fail "the fallback publish replaced a rival brief"
+  leftovers=$(find "$home/data/raced" -mindepth 1 ! -name consult-brief.md 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "the refused fallback publish left staged files behind (got: $out)"
+  pass "fm-consult: the fallback publish refuses a rival brief instead of replacing it"
+}
+
 test_receive_refuses_missing_and_empty_reports() {
   local home out rc report
   home=$(new_home receive-refusal)
@@ -922,6 +992,8 @@ test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
 test_scaffold_publishes_nothing_when_the_write_fails
 test_scaffold_never_replaces_a_brief_written_during_staging
+test_scaffold_publishes_a_brief_without_hard_link_support
+test_scaffold_without_hard_links_never_replaces_a_rival_brief
 test_receive_refuses_missing_and_empty_reports
 test_path_traversing_id_is_refused
 test_receive_emits_untrusted_input_banner_and_summary
