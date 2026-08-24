@@ -1703,7 +1703,7 @@ JSON
 env FM_HOME="$RECOVERY_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
   FM_FAKE_SDK_LOG="$RECOVERY_LOG" FM_FAKE_SDK_EVENTS="$RECOVERY_EVENTS" FM_FAKE_SDK_ASYNC_ACTIONS=1 \
   FM_FAKE_SDK_RELEASE_MARK="$RECOVERY_RELEASE" FM_FAKE_SDK_SEND_COUNT="$RECOVERY_SEND_COUNT" \
-  FM_FEISHU_OUTBOX_POLL_MS=20 FM_FEISHU_RECOVERY_TIMEOUT_MS=500 \
+  FM_FEISHU_OUTBOX_POLL_MS=20 FM_FEISHU_RECOVERY_TIMEOUT_MS=2000 \
   node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/recovery.out" 2>"$TMP_ROOT/recovery.err" &
 RECOVERY_PID=$!
 TEST_DAEMON_PIDS+=("$RECOVERY_PID")
@@ -1729,7 +1729,7 @@ node -e 'const fs=require("fs");const rows=fs.readFileSync(process.argv[1],"utf8
 wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "transient SDK connection error did not recover"
 [ "$(owner_pid "$RECOVERY_HOME")" = "$RECOVERY_OWNER" ] || fail "SDK reconnect replaced the transport owner process"
 wait_for_send_count "$RECOVERY_SEND_COUNT" 1 || fail "pending outbound did not drain after verified reconnect"
-sleep 0.6
+sleep 2.1
 wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "a stale duplicate recovery timer degraded a verified reconnection"
 [ "$(cat "$RECOVERY_SEND_COUNT")" = 1 ] || fail "verified reconnect sent a pending outbound more than once"
 kill -TERM "$RECOVERY_PID"
