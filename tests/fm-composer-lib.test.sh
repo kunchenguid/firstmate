@@ -109,6 +109,22 @@ test_trailing_shell_glyph_only_rejects_blank_or_glyphless() {
   pass "fm_composer_trailing_shell_glyph_only: blank or glyph-less input is false"
 }
 
+test_trailing_shell_glyph_only_rejects_bare_continuation_prompt() {
+  local line
+  # bash/zsh/dash all default PS2 (the secondary prompt shown mid an
+  # incomplete multiline command - unclosed quote, heredoc, or paren) to
+  # exactly `> `, which trims to a lone `>` indistinguishable from a real
+  # idle PS1 that happens to draw nothing before its own glyph. Trusting
+  # that shape as proof of an empty prompt would let pane-close cleanup
+  # discard a still-pending multiline command. Greptile P1: task
+  # fm-close-exited-panes review.
+  for line in '>' '  >  '; do
+    ! fm_composer_trailing_shell_glyph_only "$line" \
+      || fail "a bare continuation prompt '$line' must read false, read true"
+  done
+  pass "fm_composer_trailing_shell_glyph_only: a bare continuation prompt is false"
+}
+
 # --- Preserved: shell glyph inside a composer box is the harness prompt ------
 
 test_bordered_shell_glyph_is_empty() {
@@ -657,6 +673,7 @@ test_trailing_shell_glyph_only_matches_a_real_ps1_prompt
 test_trailing_shell_glyph_only_rejects_typed_content
 test_trailing_shell_glyph_only_rejects_typed_content_ending_in_a_glyph
 test_trailing_shell_glyph_only_rejects_blank_or_glyphless
+test_trailing_shell_glyph_only_rejects_bare_continuation_prompt
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty

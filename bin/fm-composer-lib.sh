@@ -476,6 +476,14 @@ EOF
 # trailing glyph to be the ONLY prompt-glyph character anywhere in the line;
 # two or more occurrences means typed text follows the real prompt and reads
 # false.
+#
+# A bare `>` with NOTHING else on the line is still not proof, even as the
+# sole occurrence: bash/zsh/dash all default PS2 (the secondary prompt shown
+# mid multiline input - an unclosed quote, heredoc, or paren) to exactly
+# `> ` with no host/path/branch prefix, which trims to the same lone `>` a
+# real idle PS1 would never draw on its own. A `>` preceded by other prompt
+# content (`user@host:~>`) is unambiguous and still accepted (Greptile P1:
+# task fm-close-exited-panes review).
 fm_composer_trailing_shell_glyph_only() {  # <line>
   local __fmtg_trimmed=$1 __fmtg_glyph __fmtg_matched='' __fmtg_class __fmtg_count
   fm_composer_normalize_trim_var __fmtg_trimmed
@@ -489,6 +497,7 @@ fm_composer_trailing_shell_glyph_only() {  # <line>
 $FM_COMPOSER_SHELL_PROMPT_GLYPHS
 EOF
   [ -n "$__fmtg_matched" ] || return 1
+  [ "$__fmtg_matched" = '>' ] && [ "$__fmtg_trimmed" = '>' ] && return 1
   __fmtg_class=$(printf '%s' "$FM_COMPOSER_SHELL_PROMPT_GLYPHS" | tr -d '\n')
   __fmtg_count=$(printf '%s' "$__fmtg_trimmed" | tr -dc "$__fmtg_class" | wc -c)
   [ "$__fmtg_count" -eq 1 ]
