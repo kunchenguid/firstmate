@@ -35,14 +35,88 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
-# liveness questions are decided by the process table alone.
+# liveness questions are decided by the process table alone. The platform is
+# pinned to the POSIX branch so these cases stay deterministic on a Windows
+# host, whose real uname would otherwise divert the walk to the native branch.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  PATH="$fakebin:$PATH" FM_SLOCK_UNAME_OVERRIDE=Linux bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
   " "$LIB"
+}
+
+# Run one library expression on the WINDOWS branch: a fake MSYS /proc supplies
+# the emulated-side chain (this shell as an msys root whose winpid is 4100),
+# and a fake powershell.exe in <fakebin> supplies the native process table for
+# the current FM_TEST_WIN_SHAPE. The expression's shell registers itself in the
+# fake proc, so the walk starts exactly where a real session's walk starts.
+win_eval() {  # <fakebin> <procroot> <expression>
+  local fakebin=$1 procroot=$2 expr=$3
+  PATH="$fakebin:$PATH" FM_SLOCK_UNAME_OVERRIDE=MINGW64_NT-10.0 \
+    FM_PROC_ROOT_OVERRIDE="$procroot" bash -c "
+    . \"\$0\"
+    kill() { return 0; }
+    mkdir -p \"\$FM_PROC_ROOT_OVERRIDE/\$\$\"
+    printf '%s\n' 4100 > \"\$FM_PROC_ROOT_OVERRIDE/\$\$/winpid\"
+    printf '%s\n' /usr/bin/bash > \"\$FM_PROC_ROOT_OVERRIDE/\$\$/exename\"
+    printf 'bash\0-c\0fixture\0' > \"\$FM_PROC_ROOT_OVERRIDE/\$\$/cmdline\"
+    printf '%s\n' 1 > \"\$FM_PROC_ROOT_OVERRIDE/\$\$/ppid\"
+    $expr
+  " "$LIB"
+}
+
+# One fake powershell.exe serves every Windows shape: the ancestry-walk script
+# is recognized by its \$seen hashtable, anything else is the single-process
+# query, answered from the same canned native table. Output uses CRLF exactly
+# as the real PowerShell child does, so the CR stripping stays exercised.
+make_win_fakebin() {  # <dir>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+set -u
+cmd="$*"
+shape=${FM_TEST_WIN_SHAPE:-claude}
+walk_table() {
+  case "$shape" in
+    claude)
+      printf '4100\tbash.exe\t"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c fixture\r\n'
+      printf '4200\tclaude.exe\t"C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"\r\n'
+      printf '4300\tpowershell.exe\tC:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoExit\r\n'
+      ;;
+    node)
+      printf '4100\tbash.exe\t"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c fixture\r\n'
+      printf '4200\tnode.exe\t"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"\r\n'
+      printf '4300\tpowershell.exe\tC:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoExit\r\n'
+      ;;
+    gap)
+      printf '4100\tbash.exe\t"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c fixture\r\n'
+      printf '4200\tclaude.exe\t"C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"\r\n'
+      printf '4300\tbash.exe\t"C:\\Program Files\\Git\\usr\\bin\\bash.exe" tests/run.sh\r\n'
+      printf '4400\tclaude.exe\t"C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"\r\n'
+      ;;
+    none)
+      printf '4100\tbash.exe\t"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c fixture\r\n'
+      printf '4300\tpowershell.exe\tC:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoExit\r\n'
+      ;;
+  esac
+}
+if printf '%s' "$cmd" | grep -q 'seen'; then
+  walk_table
+else
+  pid=$(printf '%s' "$cmd" | grep -o 'ProcessId = [0-9][0-9]*' | grep -o '[0-9][0-9]*')
+  walk_table | while IFS=$'\t' read -r row_pid row_name row_args; do
+    row_pid=${row_pid//$'\r'/}
+    if [ "$row_pid" = "$pid" ]; then
+      printf '%s\t%s' "$row_name" "$row_args"
+    fi
+  done
+fi
+SH
+  chmod +x "$fakebin/powershell.exe"
+  printf '%s\n' "$fakebin"
 }
 
 test_version_named_session_is_identified_on_both_platforms() {
@@ -220,6 +294,63 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_windows_native_session_is_identified() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/win-native"
+  fakebin=$(make_win_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf '4200\n' > "$dir/state/.lock"
+
+  # claude: the harness runs as a native claude.exe above the MSYS root.
+  # node: the same session shape when the harness is a bare node.exe running
+  # the claude-code script, identified from its command line.
+  for shape in claude node; do
+    got=$(FM_TEST_WIN_SHAPE="$shape" win_eval "$fakebin" "$dir/proc-$shape" 'fm_harness_ancestry_pid') \
+      || fail "$shape: the native harness was not found through the MSYS root bridge"
+    [ "$got" = 4200 ] || fail "$shape: ancestry resolved '$got', expected the native harness pid 4200"
+    FM_TEST_WIN_SHAPE="$shape" win_eval "$fakebin" "$dir/proc-$shape" 'fm_harness_pid_alive 4200' \
+      || fail "$shape: a live native harness was not recognized by the liveness predicate"
+    FM_TEST_WIN_SHAPE="$shape" win_eval "$fakebin" "$dir/proc-$shape" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the session holding the lock did not recognize itself as the owner"
+  done
+  pass "session-lock win: a native harness above the MSYS root is identified and owns its lock"
+}
+
+test_windows_harness_beyond_a_gap_never_owns_the_lock() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-gap"
+  fakebin=$(make_win_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  got=$(FM_TEST_WIN_SHAPE=gap win_eval "$fakebin" "$dir/proc" 'fm_harness_ancestry_pid') \
+    || fail "the contiguous native harness run was not resolved"
+  [ "$got" = 4200 ] || fail "ancestry crossed a native non-harness gap, resolved '$got' instead of 4200"
+  printf '4400\n' > "$dir/state/.lock"
+  if FM_TEST_WIN_SHAPE=gap win_eval "$fakebin" "$dir/proc" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "an unrelated native harness beyond a non-harness gap was accepted as this session's lock owner"
+  fi
+  # The unrelated harness is alive, so its lock must read as held, not stale.
+  FM_TEST_WIN_SHAPE=gap win_eval "$fakebin" "$dir/proc" 'fm_harness_pid_alive 4400' \
+    || fail "a live competing native session was classified as a dead lock owner"
+  pass "session-lock win: ownership stops at the first native non-harness gap"
+}
+
+test_windows_no_harness_in_ancestry_fails_closed() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-none"
+  fakebin=$(make_win_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf '4300\n' > "$dir/state/.lock"
+
+  if FM_TEST_WIN_SHAPE=none win_eval "$fakebin" "$dir/proc" 'fm_harness_ancestry_pid'; then
+    fail "an all-ordinary native chain produced a harness pid"
+  fi
+  if FM_TEST_WIN_SHAPE=none win_eval "$fakebin" "$dir/proc" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a session with no harness in its ancestry claimed the home's session lock"
+  fi
+  pass "session-lock win: no harness in the native chain fails closed"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +491,20 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_windows_native_session_is_identified
+test_windows_harness_beyond_a_gap_never_owns_the_lock
+test_windows_no_harness_in_ancestry_fails_closed
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # The e2e fixtures orphan POSIX process trees and watch them with
+    # `ps -o ppid=`, which the MSYS ps does not support; the Windows branch is
+    # covered by the deterministic win-shape cases above, and the e2e layer
+    # stays authoritative on the POSIX CI hosts.
+    echo "note: MSYS host; skipping the POSIX process-tree e2e layer" >&2
+    ;;
+  *)
+    test_e2e_version_named_session_claims_the_home
+    test_e2e_daemon_parented_session_claims_the_home
+    test_e2e_daemon_parented_version_named_session_keeps_its_lock
+    ;;
+esac

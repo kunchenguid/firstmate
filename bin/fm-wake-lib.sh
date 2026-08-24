@@ -13,6 +13,23 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+# The lock primitives below publish a claim with an atomic `ln -s` and verify
+# it with readlink. Git Bash/MSYS silently emulates `ln -s` as a COPY unless
+# the MSYS runtime is told to create native symlinks, which turns the claim
+# into an unverifiable plain directory and the acquire path into an endless
+# retry. Native symlink creation without elevation requires Windows Developer
+# Mode; with it off, `ln -s` fails with "Operation not permitted", which the
+# claim path reports as a lock failure instead of spinning on a false copy.
+# Exported here, at source time, so every child `ln` a lock helper forks
+# inherits the request; an operator's own winsymlinks choice is preserved.
+case "$_FM_UNAME" in
+  MINGW*|MSYS*|CYGWIN*)
+    case "${MSYS:-}" in
+      *winsymlinks*) ;;
+      *) export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ;;
+    esac
+    ;;
+esac
 mkdir -p "$STATE"
 
 fm_current_pid() {
