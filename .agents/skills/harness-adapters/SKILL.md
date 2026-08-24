@@ -359,7 +359,7 @@ The tracked Claude hook entries whose event Grok already covers through its own 
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
 
-## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, and SECONDMATE/PRIMARY 2026-08-13, Cursor Agent CLI 2026.08.11-e8db854)
+## cursor (VERIFIED CREWMATE/SCOUT 2026-08-23 on tmux, Cursor Agent CLI 2026.08.11-e8db854; prior SECONDMATE/PRIMARY verification 2026-08-13)
 
 Cursor Agent CLI runs crewmate, scout, secondmate, and primary work.
 Its primary supervision is the stop-hook park in [`docs/supervision-protocols/cursor.md`](../../../docs/supervision-protocols/cursor.md), registered in tracked `.cursor/hooks.json`; a Cursor primary or secondmate must be launched with `--trust` or no project hook loads at all.
@@ -368,18 +368,20 @@ Do not confuse `harness=cursor` using a `cursor-grok-4.5-*` model with `harness=
 | Fact | Value |
 |---|---|
 | Binary | Resolved through `fm_cursor_resolve_binary` (bin/fm-cursor-lib.sh). `cursor` is NOT the CLI: the installed names are `cursor-agent` and the legacy alias `agent`, both symlinked into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`. The STABLE launcher is used, never the versioned target, which the CLI replaces on its own auto-update. |
-| Launch | A positional prompt with `--trust`, `--yolo`, `--model <model>` when selected, and `--workspace <absolute-task-worktree>`, behind `env -u` of the foreign primary markers. |
-| Models | Validate against `cursor-agent --list-models` for the current account rather than a fixed list; that list has already drifted once. The live catalog contains only `-high` Grok ids (`cursor-grok-4.5-high`, `cursor-grok-4.5-high-fast`) and several `xhigh` ids, so an assumed low/medium Grok id is invalid. |
+| Launch (ship/scout) | Sources `FM_CURSOR_AUTH_ENV` (default `~/.config/crew-router/env`) through a bounded `sh -c` wrapper that exports `CURSOR_API_KEY` without firstmate ever reading, printing, or copying the credential, then `exec`s the resolved binary with `-f`, `--model <model>` when selected, and `--workspace <absolute-task-worktree>`. The brief is delivered through a post-launch `fm-send` pointer, not a positional prompt. |
+| Launch (secondmate) | Same resolved binary with `--trust -f`, positional brief, and `--workspace` pinned to the secondmate home so project-scope hooks load. |
+| Models | Validate against `cursor-agent --list-models` for the current account rather than a fixed list; verified ids include `composer-2.5` and `cursor-grok-4.6-high`. |
 | Busy state | Its own per-conversation transcript, folded on demand by `bin/fm-busy-lib.sh` (source `cursor-transcript`). Each turn is bracketed by a `role:user` open and a typed `turn_ended` close covering `success` and `aborted`, so unlike Claude's `Stop` hook this source covers manual interruption. Nothing is armed and no record is ever seeded. Backend-agnostic, and confirmed identical on tmux and Herdr. |
-| Exit command | `/exit` |
+| Exit command | `/exit` (slash popup, then Enter submits; verified 2026-08-23). |
 | Interrupt | Single Escape. The composer returns to its placeholder rather than the cancelled prompt, so NO clear key is needed (unlike muse). `bin/fm-control-lib.sh` claims no cancellation acknowledgement: the aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`. Cursor discovers firstmate's user-level skills; `/no-mistakes` autocompleted with firstmate's own description and invoked the skill. |
 | Slash submission | The popup is REAL and swallows the first Enter: the first closes the popup and a SECOND submits, the same hazard as grok. The submit core's retried Enter covers it. |
-| Autonomy | `--yolo`, the documented alias for `--force`, whose TUI footer reads `Run Everything`. |
-| Trust dialog | `--trust` suppresses it. `--yolo` does NOT, and every task gets a fresh worktree path, so without `--trust` every spawn would block on it. |
+| Autonomy | `-f` (alias `--force` / `--yolo`); the TUI footer reads `Run Everything`. |
+| Trust dialog | Ship/scout spawns omit `--trust` and accept the one-time `[a] Trust this workspace` dialog with Enter during `fm-spawn`'s launch-ready gate (verified 2026-08-23). Secondmates keep `--trust` so project hooks load. |
 | Environment marker | `CURSOR_INVOKED_AS=cursor-agent` on the agent process and its children, plus `CURSOR_AGENT=1` on child/tool processes. Other `CURSOR_*` endpoint and credential variables are not identity markers. |
 | Effort | No effort flag exists. The requested axis is recorded in task metadata and never reaches the launch command. |
 | Composer | A BARE row whose prompt glyph is `→` (U+2192); no border. Idle placeholders are `Plan, search, build anything` fresh and `Add a follow-up` after a turn, drawn de-emphasised so a styled capture separates them from real typed text. |
+| Resume | `cursor-agent --continue` resumes the latest session for the same `--workspace` (verified 2026-08-23). Bare `--resume` opens a picker; pass a chat id to resume a specific session. `Ctrl+D` clean exit from the interactive TUI is unverified. |
 | Primary hooks | Tracked project-scope `.cursor/hooks.json` registers `stop`, `sessionStart`, and two `preToolUse` seatbelts, all anchored through `$CURSOR_PROJECT_DIR`. Cursor ALSO loads `<project>/.claude/settings.json`, so the tracked Claude entries stand down on a Cursor-delivered payload; `docs/turnend-guard.md` owns that predicate. |
 | Primary limits | `stop` does not fire in headless `cursor-agent -p`. `preCompact` is deliberately unregistered because it cannot inject context, so a Cursor primary does not re-emit its digest after a compaction; that surface is deferred to a follow-up. Project hooks need `--trust`. |
 
@@ -419,12 +421,13 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 Firstmate acquires and enters the treehouse worktree before launching Cursor, then passes that same absolute path through `--workspace`.
 NEVER pass Cursor's own `-w/--worktree`: it allocates a SECOND worktree under `~/.cursor/worktrees` and would break firstmate's worktree-isolation contract.
-The raw CLI accepts repeatable `--add-dir <path>` for deliberate multi-root workspaces; the adapter adds none, and the brief rides inline as the positional prompt, so the private brief directory needs no grant.
+The raw CLI accepts repeatable `--add-dir <path>` for deliberate multi-root workspaces; the adapter adds none.
+Ship and scout tasks receive the brief through a post-launch `fm-send` pointer after the trust dialog clears.
 
 Spawn a Cursor scout with an explicit model:
 
 ```bash
-bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high
+bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.6-high
 ```
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)

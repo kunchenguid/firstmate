@@ -36,23 +36,71 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+cursor_state() {
+  cat "${FM_FAKE_CURSOR_STATE:-}" 2>/dev/null || true
+}
+cursor_screen() {
+  local state brief
+  state=$(cursor_state)
+  brief=${FM_FAKE_BRIEF_REAL:-/tmp/brief.md}
+  case "$state" in
+    delivered)
+      printf 'Read the brief at %s and follow it exactly.\n\n  → Add a follow-up\n\n  Composer 2.5 · 5.0%%                                          Run Everything\n' "$brief"
+      ;;
+    ready|brief-typed)
+      printf '  → Plan, search, build anything\n\n  Composer 2.5                                          Run Everything\n'
+      ;;
+    *)
+      printf 'shell\n'
+      ;;
+  esac
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{cursor_y}"*) printf '2\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
+    prev=
+    literal=
+    for arg in "$@"; do
+      if [ "$prev" = "-l" ]; then literal=$arg; break; fi
+      prev=$arg
+    done
+    if [ -n "$literal" ]; then
+      case "$literal" in
+        sh\ -c\ *)
+          if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+            printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          fi
+          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'launched\n' > "$FM_FAKE_CURSOR_STATE"
+          ;;
+        *'Read the brief at'*)
+          [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'brief-typed\n' > "$FM_FAKE_CURSOR_STATE"
+          ;;
+        *)
+          if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+            printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          fi
+          ;;
+      esac
+      exit 0
     fi
+    case " $* " in
+      *' Enter '*)
+        case "$(cursor_state)" in
+          launched) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'ready\n' > "$FM_FAKE_CURSOR_STATE" ;;
+          brief-typed) [ -n "${FM_FAKE_CURSOR_STATE:-}" ] && printf 'delivered\n' > "$FM_FAKE_CURSOR_STATE" ;;
+        esac
+        ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    cursor_screen
     exit 0
     ;;
 esac
@@ -129,6 +177,8 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_CURSOR_STATE="$home/state/.fake-cursor-state" \
+    FM_CURSOR_LAUNCH_POLLS=4 FM_CURSOR_DELIVERY_POLLS=4 FM_CURSOR_POLL_INTERVAL=0 \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -523,19 +573,35 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
-  local rec id out status launch
+  local rec id out status launch auth_env
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
+  auth_env="$HOME_DIR/config/crew-router/env"
+  mkdir -p "$(dirname -- "$auth_env")"
+  printf 'export CURSOR_API_KEY=dummy\n' > "$auth_env"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(FM_CURSOR_AUTH_ENV="$auth_env" FM_FAKE_BRIEF_REAL="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model cursor-grok-4.5-high --effort high)
   status=$?
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
-    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  assert_contains "$launch" "sh -c" \
+    "cursor launch must source auth through a bounded sh -c wrapper"
+  assert_contains "$launch" "$auth_env" \
+    "cursor launch must source the configured auth env file"
+  assert_contains "$launch" "export CURSOR_API_KEY" \
+    "cursor launch must export CURSOR_API_KEY after sourcing auth"
+  assert_contains "$launch" "-f --model" \
+    "cursor launch did not carry the -f autonomy flag and model switch"
+  assert_contains "$launch" "cursor-grok-4.5-high" \
+    "cursor launch did not carry the requested model id"
+  assert_contains "$launch" "--workspace" \
+    "cursor launch did not pin the task workspace"
+  assert_contains "$launch" "$WT_DIR" \
+    "cursor launch did not pass the exact task worktree path"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
   # real installed names.
@@ -548,7 +614,12 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
   # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
   assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
-  assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
+  assert_not_contains "$launch" "encode launch-brief" \
+    "cursor ship launch must not deliver the brief positionally"
+  assert_not_contains "$launch" "--trust" \
+    "cursor ship launch must accept the one-time trust dialog instead of --trust"
+  assert_not_contains "$launch" "--yolo" \
+    "cursor launch must use -f rather than the --yolo alias"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
@@ -556,13 +627,31 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
+test_cursor_refuses_spawn_without_auth_env() {
+  local rec id out status missing
+  id=profile-cursor-noauth-z6f
+  rec=$(make_spawn_case profile-cursor-noauth cursor "$id")
+  read_case_record "$rec"
+  missing="$HOME_DIR/missing-crew-router.env"
+  out=$(FM_CURSOR_AUTH_ENV="$missing" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "cursor spawn should refuse when the auth env file is absent"
+  assert_contains "$out" "auth env file '$missing' is absent" \
+    "cursor auth refusal did not name the missing env file"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor auth refusal must happen before launch"
+  pass "cursor refuses spawn when its auth env file is absent"
+}
+
 test_cursor_refuses_model_absent_from_live_catalog() {
-  local rec id out status
+  local rec id out status auth_env
   id=profile-cursor-unsupported-z6d
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
+  auth_env="$HOME_DIR/config/crew-router/env"
+  mkdir -p "$(dirname -- "$auth_env")"
+  printf 'export CURSOR_API_KEY=dummy\n' > "$auth_env"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+  out=$(FM_CURSOR_AUTH_ENV="$auth_env" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model cursor-grok-4.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
@@ -575,18 +664,22 @@ test_cursor_refuses_model_absent_from_live_catalog() {
 }
 
 test_cursor_failed_catalog_probe_does_not_block_spawn() {
-  local rec id out status launch
+  local rec id out status launch auth_env
   id=profile-cursor-catalog-unreachable-z6e
   rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
   read_case_record "$rec"
+  auth_env="$HOME_DIR/config/crew-router/env"
+  mkdir -p "$(dirname -- "$auth_env")"
+  printf 'export CURSOR_API_KEY=dummy\n' > "$auth_env"
 
   FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    out=$(FM_CURSOR_AUTH_ENV="$auth_env" FM_FAKE_BRIEF_REAL="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
       --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'cursor-catalog-unreachable'" \
+  assert_contains "$launch" "cursor-catalog-unreachable" \
     "failed catalog lookup incorrectly removed the requested model"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
   pass "cursor preserves the requested model when its live catalog is unreachable"
@@ -844,6 +937,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_refuses_spawn_without_auth_env
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

@@ -1151,19 +1151,26 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
-    # --yolo does NOT cover and which would otherwise block every spawn, since
-    # each task gets a fresh worktree path cursor has never seen. --yolo is the
-    # --force alias whose TUI label is "Run Everything". --workspace pins the
-    # exact worktree. -w/--worktree is deliberately never passed: it allocates a
-    # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
-    # isolation contract. The binary is resolved rather than named because
-    # `cursor` is not the CLI (the installed names are cursor-agent and the
-    # legacy alias agent), and the foreign primary markers are cleared so an
-    # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
-    # only reads the environment. Cursor exposes no effort flag, so the shared
-    # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Cursor Agent CLI. Ship and scout launches source an operator auth env file
+    # (never read or copied by firstmate), exec the resolved binary with -f
+    # (Run Everything), pin --workspace to the task worktree, and deliver the
+    # brief through a post-launch fm-send because a positional prompt is
+    # unverified for unattended delivery. The spawn flow accepts the one-time
+    # "[a] Trust this workspace" dialog with Enter. Secondmates keep --trust so
+    # project-scope hooks load, and still carry the brief positionally.
+    # -w/--worktree is deliberately never passed: it allocates a SECOND
+    # worktree under ~/.cursor/worktrees and would break firstmate's isolation
+    # contract. The binary is resolved rather than named because `cursor` is
+    # not the CLI (the installed names are cursor-agent and the legacy alias
+    # agent), and foreign primary markers are cleared so an inherited
+    # CLAUDECODE cannot outrank cursor's own marker.
+    cursor)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust -f __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' '__CURSOR_BARE__'
+      fi
+      ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1262,6 +1269,13 @@ case "$HARNESS" in
     # missing install a loud spawn refusal instead of a pane that dies with a
     # command-not-found the supervisor would read as a wedged worker.
     CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+    if [ "$KIND" != secondmate ]; then
+      CURSOR_AUTH_ENV=${FM_CURSOR_AUTH_ENV:-${HOME:-}/.config/crew-router/env}
+      if [ ! -f "$CURSOR_AUTH_ENV" ]; then
+        echo "error: Cursor auth env file '$CURSOR_AUTH_ENV' is absent; set FM_CURSOR_AUTH_ENV to a readable env file that exports CURSOR_API_KEY, or install crew-router auth at ~/.config/crew-router/env" >&2
+        exit 1
+      fi
+    fi
     if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
       if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
         if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
@@ -2209,6 +2223,71 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+cursor_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+cursor_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+cursor_trust_dialog_visible() {  # <plain-pane-capture>
+  local pane=$1
+  { printf '%s\n' "$pane" | grep -Fq 'Workspace Trust Required' \
+     || printf '%s\n' "$pane" | grep -Fq 'Trust this workspace'; }
+}
+
+cursor_ready_signal_visible() {  # <plain-pane-capture>
+  local pane=$1
+  cursor_composer_is_empty \
+    || { printf '%s\n' "$pane" | grep -Fq 'Plan, search, build anything'; } \
+    || { printf '%s\n' "$pane" | grep -Fq 'Add a follow-up'; }
+}
+
+cursor_wait_for_launch_ready() {
+  local pane i=0 max=${FM_CURSOR_LAUNCH_POLLS:-60} interval=${FM_CURSOR_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(cursor_capture)
+    if cursor_trust_dialog_visible "$pane"; then
+      spawn_send_key "$T" Enter
+      sleep "$interval"
+    elif cursor_ready_signal_visible "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+cursor_delivery_is_confirmed() {  # <plain-pane-capture>
+  local pane=$1
+  if printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; then
+    return 0
+  fi
+  cursor_composer_is_empty || return 1
+  if printf '%s\n' "$pane" | grep -qiE '·[[:space:]]*[0-9]+\.[0-9]+%|[[:space:]][0-9]+\.[0-9]+%'; then
+    return 0
+  fi
+  return 1
+}
+
+cursor_wait_for_delivery() {
+  local pane i=0 max=${FM_CURSOR_DELIVERY_POLLS:-40} interval=${FM_CURSOR_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(cursor_capture)
+    cursor_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+cursor_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2739,9 +2818,18 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-  cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  cursor)
+    LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"}
+    if [ "$KIND" != secondmate ] && [ "$LAUNCH" = __CURSOR_BARE__ ]; then
+      sq_cursor_auth=$(shell_quote "${CURSOR_AUTH_ENV:-${HOME:-}/.config/crew-router/env}")
+      sq_cursor_bin=$(shell_quote "$CURSOR_BIN")
+      CURSOR_INNER=". $sq_cursor_auth && export CURSOR_API_KEY && exec env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS $sq_cursor_bin -f $MODELFLAG--workspace $sq_worktree"
+      LAUNCH="sh -c $(shell_quote "$CURSOR_INNER")"
+    fi
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+LAUNCH=${LAUNCH//__CURSOR_BARE__/}
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
@@ -2849,6 +2937,30 @@ if [ "$HARNESS" = kimi ]; then
   fi
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = cursor ] && [ "$KIND" != secondmate ]; then
+  if ! cursor_wait_for_launch_ready; then
+    cursor_spawn_fail "cursor did not show a verified ready signal before brief delivery"
+    exit 1
+  fi
+  CURSOR_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  CURSOR_SUBMIT_RETRIES=${FM_CURSOR_SUBMIT_RETRIES:-3}
+  CURSOR_SUBMIT_SLEEP=${FM_CURSOR_SUBMIT_SLEEP:-${FM_CURSOR_POLL_INTERVAL:-0.5}}
+  CURSOR_SUBMIT_SETTLE=${FM_CURSOR_SUBMIT_SETTLE:-0}
+  CURSOR_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$CURSOR_POINTER" "$CURSOR_SUBMIT_RETRIES" \
+    "$CURSOR_SUBMIT_SLEEP" "$CURSOR_SUBMIT_SETTLE" "$W") || {
+    cursor_spawn_fail "cursor brief pointer could not be submitted"
+    exit 1
+  }
+  if [ "$CURSOR_SUBMIT_VERDICT" = send-failed ]; then
+    cursor_spawn_fail "cursor brief pointer could not be submitted"
+    exit 1
+  fi
+  if ! cursor_wait_for_delivery; then
+    cursor_spawn_fail "cursor brief pointer delivery was not confirmed"
     exit 1
   fi
 fi
