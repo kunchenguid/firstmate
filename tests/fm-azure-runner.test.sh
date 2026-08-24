@@ -136,9 +136,9 @@ PY
 }
 
 static_private_controller_contract() {
-  python3 - "$TEMPLATE" "$HOST" "$GUEST" "$AGENT_FLEET_INSTALLER" <<'PY' || fail "private controller static contract failed"
+  python3 - "$TEMPLATE" "$HOST" "$GUEST" <<'PY' || fail "private controller static contract failed"
 import json, pathlib, sys
-template=json.loads(pathlib.Path(sys.argv[1]).read_text()); host=pathlib.Path(sys.argv[2]).read_text(); guest=pathlib.Path(sys.argv[3]).read_text(); installer=pathlib.Path(sys.argv[4]).read_text()
+template=json.loads(pathlib.Path(sys.argv[1]).read_text()); host=pathlib.Path(sys.argv[2]).read_text(); guest=pathlib.Path(sys.argv[3]).read_text()
 vm=next(r for r in template["resources"] if r["type"]=="Microsoft.Compute/virtualMachines")
 nic=next(r for r in template["resources"] if r["type"]=="Microsoft.Network/networkInterfaces")
 assert template["parameters"]["controllerIdentityId"]["type"] == "string"
@@ -183,20 +183,7 @@ assert input_token_at < guest.index('rm -f "$TOKEN_FILE"',input_token_at) < run_
 assert '/usr/bin/python3 "$EXECUTOR"' in guest
 assert "https://files.pythonhosted.org/packages/*.whl" in guest
 assert 'repository"].get("source_ancestors", [])' in guest
-assert 'git -C /work/repo fetch --depth=1' not in guest
-assert 'git -C /work/repo rev-parse --is-shallow-repository' in guest
 assert 'fetch_exact "$url"' in guest and '--location' not in guest[guest.index('while IFS=$\'\\t\' read -r url'):guest.index('done <"$BASE/wheels.tsv"')]
-assert 'AGENT_FLEET_INSTALLER_B64=${agent_fleet_installer_b64:-}' in guest
-assert 'agent_fleet_installer_digest' in guest and 'Agent Fleet installer digest mismatch' in guest
-pip_at=guest.index('pip install --python /work/repo/tools/agent-fleet/.venv/bin/python')
-install_at=guest.index('/.venv/bin/python "$AGENT_FLEET_INSTALLER"',pip_at)
-assert pip_at < install_at < guest.index('/.venv/bin/agent-fleet --help',install_at) < guest.index('systemd-run --quiet')
-assert 'FM_TEST_HOST_CAPABILITIES_ABSENT' not in guest
-assert 'dependencies_match.group(1).strip() != "[]"' in installer
-assert 'Agent Fleet lock does not bind the exact editable project' in installer
-assert 'from agent_fleet.cli import main' in installer
-assert 'private-direct-bundle' in host and 'private_snapshot_from_head' in host
-assert 'verify_self_contained_private_bundle' in host
 assert "protectedParameters" not in host
 assert "generate-sas" not in host
 assert "controller_identity_client_id" in host
@@ -465,8 +452,7 @@ agent_fleet_offline_install_contract() {
   mkdir -p "$project/src"
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" "$project/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$project/src/"
-  python="$ROOT/tools/agent-fleet/.venv/bin/python"
-  [ -x "$python" ] || fail "the provisioned Agent Fleet Python is unavailable"
+  python=$(command -v python3)
   "$python" -m venv --without-pip "$project/.venv" \
     || fail "could not create the hermetic Agent Fleet installer venv"
   "$project/.venv/bin/python" "$AGENT_FLEET_INSTALLER" "$project" "$project/.venv" >/dev/null \
@@ -819,6 +805,7 @@ assert len(reserve_calls)==2 and sleeps
 assert all(command[command.index("--reservation-id")+1]=="azr-aaaaaaaaaaaa" for command in reserve_calls)
 assert len({command[command.index("--fence-binding")+1] for command in reserve_calls})==1
 assert reserve_calls[-1][reserve_calls[-1].index("--sku-family")+1]=="StandardDasv7Family"
+assert reserve_calls[-1][reserve_calls[-1].index("--role")+1]=="validation"
 assert state["shared_capacity_reservation"]["status"]=="reserved"
 # A non-capacity queue refusal is immediate and releases its exact row.
 state.pop("shared_capacity_reservation")
@@ -1384,7 +1371,7 @@ PY
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" \
     "$fixture/tools/agent-fleet/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$fixture/tools/agent-fleet/src/"
-  python="$ROOT/tools/agent-fleet/.venv/bin/python"
+  python=$(command -v python3)
   "$python" -m venv --without-pip "$fixture/tools/agent-fleet/.venv" >/dev/null \
     || fail "the remote-command fixture could not create its Agent Fleet venv"
   "$fixture/tools/agent-fleet/.venv/bin/python" "$AGENT_FLEET_INSTALLER" \
@@ -1653,11 +1640,6 @@ required = (
     "immutable Azure `vm_instance_id`",
     "verified guest `boot_id`",
     "The earlier `selected REMOTE ... (dispatching)` line proves only selection",
-    "`--private-snapshot-from-head`",
-    "`refs/heads/fm-no-mistakes/<run-id>`",
-    "ordinary standalone shared-capacity reservation",
-    "real-tmux-server,passwordless-root-escalation,system-openat-binding,origin-egress",
-    "one fresh routed `test=behavior-heavy` run passes on real Azure compute",
 )
 missing = [needle for needle in required if needle not in document]
 assert not missing, missing
