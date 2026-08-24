@@ -446,9 +446,85 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "'$ROOT/bin/fm-codex-fabric-env.sh' codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+  pass "codex receives the process-only Fabric bridge, --model, and model_reasoning_effort profile flags"
+}
+
+test_codex_fabric_bridge_acquires_fresh_process_environment() {
+  local dir fakebin out status args
+  dir="$TMP_ROOT/codex-fabric-success"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir"
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_TEST_AZ_ARGS"
+printf '%s\n' 'not-a-real-fabric-token'
+SH
+  cat > "$fakebin/codex" <<'SH'
+#!/bin/sh
+[ "${FABRIC_CORE_BEARER_TOKEN:-}" = 'not-a-real-fabric-token' ] || exit 41
+[ "${FABRIC_DW_GLOBAL_BEARER_TOKEN:-}" = 'not-a-real-fabric-token' ] || exit 42
+printf '%s\n' "$*" > "$FM_TEST_CODEX_ARGS"
+printf '%s\n' worker-env-ok
+SH
+  chmod +x "$fakebin/az" "$fakebin/codex"
+
+  printf '%s\n' 'set -x' > "$dir/enable-xtrace"
+  out=$(BASH_ENV="$dir/enable-xtrace" PATH="$fakebin:$PATH" FM_TEST_AZ_ARGS="$dir/az.args" \
+    FM_TEST_CODEX_ARGS="$dir/codex.args" \
+    FABRIC_CORE_BEARER_TOKEN=stale-core FABRIC_DW_GLOBAL_BEARER_TOKEN=stale-warehouse \
+    "$ROOT/bin/fm-codex-fabric-env.sh" "$fakebin/codex" --bounded-read-only 2>&1)
+  status=$?
+  expect_code 0 "$status" "Codex Fabric bridge should launch the worker with a fresh token"
+  [ "$out" = worker-env-ok ] || fail "Codex Fabric bridge exposed unexpected output: $out"
+  args=$(cat "$dir/az.args")
+  [ "$args" = 'account get-access-token --resource https://api.fabric.microsoft.com --query accessToken --output tsv --only-show-errors' ] \
+    || fail "Codex Fabric bridge used an unexpected Azure CLI request: $args"
+  [ "$(cat "$dir/codex.args")" = --bounded-read-only ] \
+    || fail "Codex Fabric bridge changed the worker arguments"
+  assert_not_contains "$args$out$(cat "$dir/codex.args")" 'not-a-real-fabric-token' \
+    "Codex Fabric bridge exposed the acquired token in output or process arguments"
+  pass "Codex Fabric bridge acquires a fresh Fabric token and exposes it only in the worker environment"
+}
+
+test_codex_fabric_bridge_falls_back_without_login_or_environment_changes() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/codex-fabric-fallback"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir"
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_TEST_AZ_ARGS"
+exit 1
+SH
+  cat > "$fakebin/codex" <<'SH'
+#!/bin/sh
+[ "${FABRIC_CORE_BEARER_TOKEN+x}" != x ] || exit 43
+[ "${FABRIC_DW_GLOBAL_BEARER_TOKEN+x}" != x ] || exit 44
+printf '%s\n' worker-fallback-ok
+SH
+  chmod +x "$fakebin/az" "$fakebin/codex"
+
+  out=$(env -u FABRIC_CORE_BEARER_TOKEN -u FABRIC_DW_GLOBAL_BEARER_TOKEN \
+    PATH="$fakebin:$PATH" FM_TEST_AZ_ARGS="$dir/az.args" \
+    "$ROOT/bin/fm-codex-fabric-env.sh" "$fakebin/codex" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Codex Fabric bridge should preserve launch behavior when Azure CLI cannot answer"
+  [ "$out" = worker-fallback-ok ] || fail "Codex Fabric fallback exposed Azure output or changed the worker result: $out"
+  assert_not_contains "$(cat "$dir/az.args")" 'login' \
+    "Codex Fabric bridge attempted an interactive Azure login"
+  pass "Codex Fabric bridge falls back silently without interactive login or Fabric environment mutation"
+}
+
+test_codex_fabric_bridge_refuses_non_codex_processes() {
+  local out status
+  out=$("$ROOT/bin/fm-codex-fabric-env.sh" true 2>&1)
+  status=$?
+  expect_code 2 "$status" "Codex Fabric bridge should refuse a non-Codex target"
+  assert_contains "$out" "launches codex only" \
+    "Codex Fabric bridge did not explain its process-scope refusal"
+  pass "Codex Fabric bridge cannot export Fabric credentials to a non-Codex process"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -839,6 +915,9 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_fabric_bridge_acquires_fresh_process_environment
+test_codex_fabric_bridge_falls_back_without_login_or_environment_changes
+test_codex_fabric_bridge_refuses_non_codex_processes
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

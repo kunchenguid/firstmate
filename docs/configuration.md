@@ -239,6 +239,11 @@ New harnesses get verified through a supervised trial task before joining the se
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Every Firstmate-spawned Codex worker asks the existing non-interactive Azure CLI session for a fresh `https://api.fabric.microsoft.com` access token before launch.
+When acquisition succeeds, only the Codex worker process and its children receive the token through `FABRIC_CORE_BEARER_TOKEN` and `FABRIC_DW_GLOBAL_BEARER_TOKEN`, matching the global Fabric Core and Fabric Warehouse MCP configuration.
+The bridge does not put the token in a backend daemon, pane shell, process argument, profile, configuration file, log, or cache.
+An absent Azure CLI or an unavailable existing session does not start an interactive login and preserves the prior Codex launch behavior.
+[`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) verifies token acquisition, process-only environment construction, failure fallback, and Codex-only launch wiring with fake credentials.
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
