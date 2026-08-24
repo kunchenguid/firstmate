@@ -798,10 +798,10 @@ fm_remote_job_read_single_line() {
   printf '%s\n' "$value"
 }
 
-fm_remote_job_lock_owner_matches_process() {
-  local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
+fm_remote_job_lock_owner_matches_process() { # <account-home> [lock-directory]
+  local account_home=$1 lock=${2:-} pid recorded_start actual_start recorded_command actual_command
   fm_remote_job_prepare_state "$account_home" || return 1
-  lock=$(fm_remote_job_worker_lock_path)
+  [ -n "$lock" ] || lock=$(fm_remote_job_worker_lock_path)
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac

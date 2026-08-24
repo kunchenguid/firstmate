@@ -19,6 +19,10 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
+SUPERVISOR_PID=
+SUPERVISOR_CHILD_PID=
+SUPERVISOR_SLEEP_PID=
+RESTART_SUPERVISOR_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +31,10 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
+  [ -z "$SUPERVISOR_PID" ] || kill -KILL "$SUPERVISOR_PID" 2>/dev/null || true
+  [ -z "$SUPERVISOR_CHILD_PID" ] || kill -KILL "$SUPERVISOR_CHILD_PID" 2>/dev/null || true
+  [ -z "$SUPERVISOR_SLEEP_PID" ] || kill -KILL "$SUPERVISOR_SLEEP_PID" 2>/dev/null || true
+  [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -582,7 +590,7 @@ assert_present "$STATE_ROOT/worker.lock/quarantine" "failed shutdown released wo
 fm_remote_job_probe "$ACCOUNT_HOME" && fail "quarantined worker ownership still reported ready"
 set +e
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
-  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err"
 REPLACEMENT_RC=$?
 set -e
@@ -709,5 +717,138 @@ kill -TERM "$REPEAT_WORKER_PID"
 wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
+
+SUPERVISOR_ROOT="$TMP_ROOT/supervisor-root"
+SUPERVISOR_HOME="$TMP_ROOT/supervisor-account"
+SUPERVISOR_STATE="$TMP_ROOT/supervisor-state"
+SUPERVISOR_CHILD_LOG="$TMP_ROOT/supervisor-children"
+mkdir -p "$SUPERVISOR_ROOT/bin" "$SUPERVISOR_HOME"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$SUPERVISOR_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-job-worker.sh" "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
+printf 'fixture\n' > "$SUPERVISOR_ROOT/AGENTS.md"
+cat > "$SUPERVISOR_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+set -u
+[ "${1:-}" = --serve ] || exit 2
+printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
+sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS" &
+sleep_pid=$!
+trap 'kill "$sleep_pid" 2>/dev/null || true; wait "$sleep_pid" 2>/dev/null || true; exit 143' HUP INT TERM
+wait "$sleep_pid" 2>/dev/null || true
+trap - HUP INT TERM
+exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
+SH
+chmod +x "$SUPERVISOR_ROOT/bin"/*.sh
+
+HOME="$SUPERVISOR_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SUPERVISOR_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_TEST_SUPERVISOR_CHILD_LOG="$SUPERVISOR_CHILD_LOG" FM_TEST_SUPERVISOR_CHILD_SECONDS=30 \
+  FM_TEST_SUPERVISOR_CHILD_STATUS=1 "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/supervisor-first.out" 2> "$TMP_ROOT/supervisor-first.err" &
+SUPERVISOR_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$SUPERVISOR_STATE/supervisor.lock/pid" ] && [ -s "$SUPERVISOR_CHILD_LOG" ] && break
+  sleep 0.05
+done
+assert_present "$SUPERVISOR_STATE/supervisor.lock/pid" "the first supervisor did not publish its ownership lock"
+assert_present "$SUPERVISOR_CHILD_LOG" "the first supervisor did not start its serving child"
+[ "$(cat "$SUPERVISOR_STATE/supervisor.lock/pid")" = "$SUPERVISOR_PID" ] \
+  || fail "the supervisor lock did not identify the first supervisor"
+set +e
+SECOND_SUPERVISOR_OUT=$(HOME="$SUPERVISOR_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SUPERVISOR_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_TEST_SUPERVISOR_CHILD_LOG="$SUPERVISOR_CHILD_LOG" FM_TEST_SUPERVISOR_CHILD_SECONDS=30 \
+  FM_TEST_SUPERVISOR_CHILD_STATUS=1 "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" 2>&1)
+SECOND_SUPERVISOR_RC=$?
+set -e
+[ "$SECOND_SUPERVISOR_RC" -eq 0 ] || fail "a duplicate supervisor did not exit cleanly"
+assert_contains "$SECOND_SUPERVISOR_OUT" "remote job worker supervisor is already running" \
+  "a duplicate supervisor did not explain its refusal"
+[ "$(cat "$SUPERVISOR_STATE/supervisor.lock/pid")" = "$SUPERVISOR_PID" ] \
+  || fail "a duplicate supervisor replaced the active supervisor's ownership"
+kill -TERM "$SUPERVISOR_PID"
+wait "$SUPERVISOR_PID" 2>/dev/null || true
+SUPERVISOR_PID=
+for _ in $(seq 1 100); do
+  [ ! -e "$SUPERVISOR_STATE/supervisor.lock" ] && [ ! -L "$SUPERVISOR_STATE/supervisor.lock" ] && break
+  sleep 0.05
+done
+assert_absent "$SUPERVISOR_STATE/supervisor.lock" "a clean supervisor exit retained its ownership lock"
+pass "the Linux worker supervisor is a per-account singleton"
+
+: > "$SUPERVISOR_CHILD_LOG"
+HOME="$SUPERVISOR_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SUPERVISOR_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_TEST_SUPERVISOR_CHILD_LOG="$SUPERVISOR_CHILD_LOG" FM_TEST_SUPERVISOR_CHILD_SECONDS=30 \
+  FM_TEST_SUPERVISOR_CHILD_STATUS=1 "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/supervisor-crashed.out" 2> "$TMP_ROOT/supervisor-crashed.err" &
+SUPERVISOR_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$SUPERVISOR_STATE/supervisor.lock/pid" ] && [ -s "$SUPERVISOR_CHILD_LOG" ] && break
+  sleep 0.05
+done
+assert_present "$SUPERVISOR_STATE/supervisor.lock/pid" "the crash fixture did not acquire supervisor ownership"
+assert_present "$SUPERVISOR_CHILD_LOG" "the crash fixture did not start its serving child"
+SUPERVISOR_CHILD_PID=$(tail -n 1 "$SUPERVISOR_CHILD_LOG")
+SUPERVISOR_SLEEP_PID=$(pgrep -P "$SUPERVISOR_CHILD_PID" | head -n 1)
+kill -KILL "$SUPERVISOR_PID"
+wait "$SUPERVISOR_PID" 2>/dev/null || true
+SUPERVISOR_PID=
+kill -KILL "$SUPERVISOR_CHILD_PID" 2>/dev/null || true
+kill -KILL "$SUPERVISOR_SLEEP_PID" 2>/dev/null || true
+SUPERVISOR_CHILD_PID=
+SUPERVISOR_SLEEP_PID=
+touch -t 200001010000 "$SUPERVISOR_STATE/supervisor.lock"
+: > "$SUPERVISOR_CHILD_LOG"
+HOME="$SUPERVISOR_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SUPERVISOR_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_TEST_SUPERVISOR_CHILD_LOG="$SUPERVISOR_CHILD_LOG" FM_TEST_SUPERVISOR_CHILD_SECONDS=30 \
+  FM_TEST_SUPERVISOR_CHILD_STATUS=1 "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/supervisor-recovered.out" 2> "$TMP_ROOT/supervisor-recovered.err" &
+SUPERVISOR_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$SUPERVISOR_STATE/supervisor.lock/pid" ] && \
+    [ "$(cat "$SUPERVISOR_STATE/supervisor.lock/pid" 2>/dev/null || true)" = "$SUPERVISOR_PID" ] && break
+  sleep 0.05
+done
+[ "$(cat "$SUPERVISOR_STATE/supervisor.lock/pid" 2>/dev/null || true)" = "$SUPERVISOR_PID" ] \
+  || fail "a stale crashed-supervisor lock blocked its replacement"
+kill -TERM "$SUPERVISOR_PID"
+wait "$SUPERVISOR_PID" 2>/dev/null || true
+SUPERVISOR_PID=
+assert_absent "$SUPERVISOR_STATE/supervisor.lock" "the recovered supervisor retained its ownership lock"
+pass "a crashed supervisor lock is safely reclaimed"
+
+RESTART_HOME="$TMP_ROOT/restart-account"
+RESTART_STATE="$TMP_ROOT/restart-state"
+RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
+mkdir -p "$RESTART_HOME"
+HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$SUPERVISOR_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$RESTART_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=1 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=3 \
+  FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=0 FM_TEST_SUPERVISOR_CHILD_LOG="$RESTART_CHILD_LOG" \
+  FM_TEST_SUPERVISOR_CHILD_SECONDS=1.1 FM_TEST_SUPERVISOR_CHILD_STATUS=1 \
+  "$SUPERVISOR_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/restart-supervisor.out" 2> "$TMP_ROOT/restart-supervisor.err" &
+RESTART_SUPERVISOR_PID=$!
+for _ in $(seq 1 150); do
+  kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null; then
+  fail "workers dying just past the healthy threshold drove an unbounded restart loop"
+fi
+set +e
+wait "$RESTART_SUPERVISOR_PID"
+RESTART_SUPERVISOR_RC=$?
+set -e
+RESTART_SUPERVISOR_PID=
+[ "$RESTART_SUPERVISOR_RC" -ne 0 ] || fail "the exhausted restart guard reported success"
+[ "$(wc -l < "$RESTART_CHILD_LOG" | tr -d ' ')" -eq 3 ] \
+  || fail "the restart guard did not stop at the configured maximum"
+assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
+  "the restart guard did not explain why it stopped"
+assert_absent "$RESTART_STATE/supervisor.lock" "the exhausted restart guard retained supervisor ownership"
+pass "barely healthy worker failures remain bounded by the restart guard"
 
 echo "ALL TESTS PASSED"
