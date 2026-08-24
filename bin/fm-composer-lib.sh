@@ -67,6 +67,19 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   capped     - omp: a bordered composer whose TOP row permanently embeds a
+#                status/title line (cost, model, effort, cwd, context, so it
+#                is NEVER a blank rule) and whose CLOSING row is itself the
+#                last content row rather than pure chrome - a fresh single-line
+#                composer is exactly `╭── <status> ──╮` / `╰─ <text> ─╯` with
+#                zero rows in between; wrapped input adds genuine side-bordered
+#                `│ … │` rows ahead of that same merged closing row (verified
+#                live, omp v18.0.4, `composer.shape=box`). No geometry match is
+#                required between the top's status text and the closing row's
+#                typed content - they are unrelated by design - so a capped box
+#                is proven the instant its family and contiguity line up, with
+#                zero interior rows a legitimate empty composer rather than an
+#                "incomplete box".
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -311,7 +324,7 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop|⟨esc⟩'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -325,6 +338,14 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+# omp's busy line pairs a rotating braille spinner with a DYNAMIC working
+# message ("Working…" for a plain turn, a tool-specific summary such as
+# "Sleep then echo marker" while a bash call runs) - the verb/summary text is
+# never stable, so only the trailing cancel-hint token is matched, the same
+# policy as cursor's `ctrl+c to stop` and grok's `Ctrl+c:cancel` (verified
+# live, omp v18.0.4: present throughout every busy turn, gone the instant it
+# settles).
+FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='⟨esc⟩'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -341,6 +362,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -592,6 +614,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
   local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
+  local bottom_is_capped=0
   # Complete-box results: the box containing the cursor (cursor mode) or the
   # bottom-most complete box (no cursor).
   FM_COMPOSER_SCAN_BOX_TOP=-1
@@ -609,6 +632,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
+  # Capped-box results (omp): a bordered composer whose CLOSING row is itself
+  # a content row, so it fires even with zero interior content rows, and
+  # whose top row may embed non-rule status/title text (tolerated: no
+  # geometry match is required between the top's status and the closing
+  # row's own typed content). See the CAPPED shape note below the catalogue.
+  FM_COMPOSER_SCAN_CAPPED_TOP=-1
+  FM_COMPOSER_SCAN_CAPPED_BOTTOM=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -699,6 +729,27 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         *[![:space:]]*) geometry_check=0; geometry_ambiguous=1 ;;
       esac
     elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
+      # Capped-box candidate (omp): the same family+contiguity guarantee the
+      # generic box below requires, but WITHOUT its content_rows>0 gate, since
+      # this shape's closing row is itself content. Captured before the
+      # generic block's end-of-branch reset so both can observe the same
+      # top/family/valid state for this one closing row. bottom_is_capped also
+      # tells the incomplete-box branch below that a cursor sitting on this
+      # exact closing row is a proven capped composer, not a broken box, so it
+      # must not fail closed to `unsafe`.
+      bottom_is_capped=0
+      if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] && [ "$valid" = 1 ]; then
+        bottom_is_capped=1
+        if [ -n "$cy" ]; then
+          if [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
+            FM_COMPOSER_SCAN_CAPPED_TOP=$top
+            FM_COMPOSER_SCAN_CAPPED_BOTTOM=$row
+          fi
+        else
+          FM_COMPOSER_SCAN_CAPPED_TOP=$top
+          FM_COMPOSER_SCAN_CAPPED_BOTTOM=$row
+        fi
+      fi
       if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
          && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ]; then
         [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
@@ -737,7 +788,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -lt 0 ]; then
           FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
         fi
-        if [ -n "$cy" ]; then
+        if [ -n "$cy" ] && [ "$bottom_is_capped" != 1 ]; then
           if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
              || [ "$row" -eq "$cy" ]; then
             FM_COMPOSER_SCAN_UNSAFE=1
@@ -861,7 +912,11 @@ _fm_composer_screen_row() {  # <n> <screen>
 
 # _fm_composer_row_content: extract the classification content of one raw row:
 # ghost-strip when styled, plain otherwise, normalize-trim, and strip one
-# matching pair of side border glyphs.
+# matching pair of side border glyphs. The closing-corner pairs (`╰…╯` etc.)
+# are stripped too: only the capped shape's own closing row is ever fed here
+# carrying them (its content and its rule live on the same row), and no
+# legitimate content row in any other shape both starts and ends with a
+# corner glyph.
 _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
   local raw=$1 styled=$2 stripped
   if [ "$styled" = 1 ]; then
@@ -875,6 +930,14 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
     '║'*'║') stripped=${stripped#║}; stripped=${stripped%║} ;;
     '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
+    # The capped shape's closing row also carries one decorative rule-dash
+    # flanking its real content on each side (`╰─ text ─╯`, verified live on
+    # omp v18.0.4 both empty and typed, single- and multi-line); strip it the
+    # same way the corners themselves are stripped, a no-op if ever absent.
+    '╰'*'╯') stripped=${stripped#╰}; stripped=${stripped%╯}; stripped=${stripped#─}; stripped=${stripped%─} ;;
+    '└'*'┘') stripped=${stripped#└}; stripped=${stripped%┘}; stripped=${stripped#─}; stripped=${stripped%─} ;;
+    '╚'*'╝') stripped=${stripped#╚}; stripped=${stripped%╝}; stripped=${stripped#═}; stripped=${stripped%═} ;;
+    '┗'*'┛') stripped=${stripped#┗}; stripped=${stripped%┛}; stripped=${stripped#━}; stripped=${stripped%━} ;;
   esac
   fm_composer_normalize_trim_var stripped
   printf '%s' "$stripped"
@@ -1036,6 +1099,17 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))
     FM_COMPOSER_SELECTED_AMBIG=$FM_COMPOSER_SCAN_BOX_AMBIG
   fi
+  # Capped (omp): only wins when the generic box above did not already claim
+  # this same closing row (a wrapped, titled-top box already resolved as an
+  # ambiguous generic box above; capped's value is the zero-content-row case
+  # the generic box's content_rows>0 gate always misses).
+  if [ "$FM_COMPOSER_SCAN_CAPPED_BOTTOM" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_CAPPED_BOTTOM
+    FM_COMPOSER_SELECTED_KIND=capped
+    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_CAPPED_TOP + 1))
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_CAPPED_BOTTOM
+    FM_COMPOSER_SELECTED_AMBIG=0
+  fi
   if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$generic" ]; then
     generic=$FM_COMPOSER_SCAN_BARE_ROW
     FM_COMPOSER_SELECTED_KIND=bare
@@ -1082,19 +1156,22 @@ _fm_composer_select_cursorless() {
     done
   fi
   if [ "$FM_COMPOSER_SELECTED_KIND" = box ] \
+     || [ "$FM_COMPOSER_SELECTED_KIND" = capped ] \
      || [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
     boundary=$FM_COMPOSER_SELECTED_LAST
-    if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
-      boundary=$FM_COMPOSER_SCAN_BOX_BOTTOM
-    else
-      next=$((boundary + 1))
-      raw=$(_fm_composer_screen_row "$next" "$plain")
-      trimmed=$raw
-      fm_composer_normalize_trim_var trimmed
-      if _fm_composer_leftbar_floor_row "$trimmed"; then
-        boundary=$next
-      fi
-    fi
+    case "$FM_COMPOSER_SELECTED_KIND" in
+      box) boundary=$FM_COMPOSER_SCAN_BOX_BOTTOM ;;
+      capped) boundary=$FM_COMPOSER_SCAN_CAPPED_BOTTOM ;;
+      *)
+        next=$((boundary + 1))
+        raw=$(_fm_composer_screen_row "$next" "$plain")
+        trimmed=$raw
+        fm_composer_normalize_trim_var trimmed
+        if _fm_composer_leftbar_floor_row "$trimmed"; then
+          boundary=$next
+        fi
+        ;;
+    esac
     next=$((boundary + 1))
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
@@ -1211,6 +1288,11 @@ EOF
         "$((FM_COMPOSER_SCAN_BOX_TOP + 1))" "$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))"
       return 0
     fi
+    if [ "$FM_COMPOSER_SCAN_CAPPED_TOP" -ge 0 ]; then
+      _fm_composer_classify_rows "$screen" "$styled" 0 \
+        "$((FM_COMPOSER_SCAN_CAPPED_TOP + 1))" "$FM_COMPOSER_SCAN_CAPPED_BOTTOM"
+      return 0
+    fi
     if [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -ge 0 ] \
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_LEFTBAR_START" ] \
        && [ "$cy" -le "$FM_COMPOSER_SCAN_LEFTBAR_END" ]; then
@@ -1267,6 +1349,10 @@ EOF
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       ;;
     box)
+      _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+      ;;
+    capped)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
