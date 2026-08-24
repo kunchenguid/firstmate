@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "When it is implemented and committed, run /no-mistakes to validate and ship a PR." "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -345,6 +345,10 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "Before appending \`done:\`, verify the no-mistakes run is for your branch and all checks are green." "$brief" \
+    "no-mistakes DOD must require a green run for the worker's own branch before done:"
+  assert_no_grep "When you believe it is complete, append \`done:" "$brief" \
+    "no-mistakes DOD must not treat a committed implementation as done"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -352,6 +356,18 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+test_direct_pr_confirms_target_branch_before_opening() {
+  local home id brief
+  home="$TMP_ROOT/pr-target-home"
+  mkdir -p "$home/data"
+  id="brief-pr-target-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "before opening the PR, verify its target branch is correct" "$brief" \
+    "direct-PR DOD must require confirming the PR target branch before opening it"
+  pass "fm-brief.sh: direct-PR DOD confirms the target branch before opening a PR"
 }
 
 test_ship_project_memory_wording() {
@@ -756,6 +772,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_direct_pr_confirms_target_branch_before_opening
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
