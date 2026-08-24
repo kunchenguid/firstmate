@@ -2,8 +2,10 @@
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # project's default branch to the crewmate's recorded branch.
 # The recorded name is `Crew branch: branch=<name>` in data/<id>/brief.md
-# (written by bin/fm-brief.sh --branch-name). When that line is absent, this
-# script still uses fm/<id>, so omitted --branch-name stays identical to today.
+# (written by bin/fm-brief.sh --branch-name). The last matching line wins,
+# because the generated contract is appended after free-form {TASK} text that
+# may mention the same phrase. When that line is absent, this script still
+# uses fm/<id>, so omitted --branch-name stays identical to today.
 # An invalid recorded name refuses rather than falling back to fm/<id>.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
@@ -55,7 +57,7 @@ default_branch() {
 BRIEF="$DATA/$ID/brief.md"
 BRANCH="fm/$ID"
 if [ -f "$BRIEF" ]; then
-  recorded_branch=$(sed -n 's/^Crew branch: branch=//p' "$BRIEF" | head -n 1)
+  recorded_branch=$(sed -n 's/^Crew branch: branch=//p' "$BRIEF" | tail -n 1)
   if [ -n "$recorded_branch" ]; then
     git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
       echo "error: $BRIEF records an invalid crew branch: $recorded_branch" >&2

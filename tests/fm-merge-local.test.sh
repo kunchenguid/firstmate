@@ -111,6 +111,49 @@ test_invalid_recorded_branch_refuses() {
   pass "fm-merge-local.sh refuses an invalid recorded crew branch"
 }
 
+test_last_crew_branch_line_wins_over_earlier_mention() {
+  local case_dir home project after
+  case_dir="$TMP_ROOT/last-line-wins"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  mkdir -p "$home/data/task-last" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/decoy-first
+  printf 'decoy\n' > "$project/decoy.txt"
+  git -C "$project" add decoy.txt
+  git -C "$project" commit -qm decoy-first
+  git -C "$project" checkout -q main
+  git -C "$project" checkout -qb feature/authoritative-last
+  printf 'authoritative\n' > "$project/authoritative.txt"
+  git -C "$project" add authoritative.txt
+  git -C "$project" commit -qm authoritative-last
+  git -C "$project" checkout -q main
+
+  fm_write_meta "$home/state/task-last.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-last/brief.md" <<'EOF'
+# Task
+Crew branch: branch=feature/decoy-first
+
+# Definition of done
+Crew branch: branch=feature/authoritative-last
+EOF
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-last >/dev/null \
+    || fail "fm-merge-local.sh should merge the last recorded crew branch"
+  after=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" merge-base --is-ancestor feature/authoritative-last main \
+    || fail "last Crew branch line was not merged"
+  git -C "$project" merge-base --is-ancestor feature/decoy-first main \
+    && fail "an earlier Crew branch mention was merged instead of the last line"
+  [ "$after" = "$(git -C "$project" rev-parse feature/authoritative-last)" ] \
+    || fail "merge did not land on the last recorded crew branch tip"
+  pass "fm-merge-local.sh uses the last Crew branch line, not an earlier mention"
+}
+
 test_recorded_custom_branch_merges
 test_omitted_crew_branch_still_merges_fm_id
 test_invalid_recorded_branch_refuses
+test_last_crew_branch_line_wins_over_earlier_mention
