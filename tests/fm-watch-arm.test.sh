@@ -393,10 +393,14 @@ test_marker_publish_failure_retains_recovery_evidence() {
   rmdir "$state/.watcher-down"
   armout="$dir/recovery-arm.out"
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  wait_for_exit "$ARM_PID" 80 || fail "stale-lock recovery did not surface downtime"
-  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
-    || fail "stale-lock recovery did not emit the recovery wake: $(cat "$armout")"
-  pass "watch-arm: marker publication failure retains stale-lock recovery evidence"
+  sleep 0.25
+  is_live_non_zombie "$ARM_PID" \
+    || fail "stale-lock recovery closed despite having no durable work to surface"
+  ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "empty stale-lock recovery emitted a no-work completion: $(cat "$armout")"
+  printf 'done: fixture cleanup\n' > "$state/cleanup.status"
+  wait_for_exit "$ARM_PID" 80 || fail "marker-failure recovery cleanup wake did not surface"
+  pass "watch-arm: marker publication failure retains recovery evidence without a no-work close"
 }
 
 test_delivery_gap_wake_is_recovered_once() {
@@ -541,20 +545,17 @@ test_malformed_marker_is_quarantined_once() {
   printf 'foreign state\n' > "$state/.watcher-down/payload"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
-  wait_for_exit "$ARM_PID" 80 || fail "malformed marker did not produce a bounded recovery wake"
-  grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
-    || fail "malformed marker did not emit the recovery wake"
+  sleep 0.25
+  is_live_non_zombie "$ARM_PID" || fail "malformed marker closed a no-work recovery cycle"
+  ! grep -F 'check: rearm-resurface' "$dir/recovery-arm.out" >/dev/null \
+    || fail "malformed marker emitted a no-work completion"
   invalid_count=$(find "$state" -maxdepth 1 -type d -name '.watcher-down.invalid.*' | wc -l | tr -d '[:space:]')
   [ "$invalid_count" -eq 1 ] || fail "malformed marker was not quarantined exactly once"
-
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/recovery-drain.out" \
-    || fail "malformed-marker recovery drain failed"
-  ack_wakes "$state" || fail "malformed-marker handling acknowledgement failed"
-  start_rearm_arm "$home" "$state" "$fakebin" "$dir/stable-successor.out"
-  is_live_non_zombie "$ARM_PID" || fail "malformed marker caused a persistent recovery loop"
+  printf 'done: malformed marker fixture cleanup\n' > "$state/cleanup.status"
+  wait_for_exit "$ARM_PID" 80 || fail "malformed-marker cleanup wake did not surface"
   kill "$ARM_PID" 2>/dev/null || true
   wait "$ARM_PID" 2>/dev/null || true
-  pass "watch-arm: malformed recovery state is quarantined without a successor loop"
+  pass "watch-arm: malformed recovery state is quarantined without a no-work completion"
 }
 
 test_recovery_consumption_serializes_queue_publication() {
@@ -603,13 +604,17 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   ln -s "$owner" "$state/.watch.lock"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  wait_for_exit "$ARM_PID" 80 || fail "restart did not surface recovery after clearing a reused-pid lock"
-  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
-    || fail "restart cleared reused-pid lock evidence without a recovery wake: $(cat "$armout")"
+  sleep 0.25
+  is_live_non_zombie "$ARM_PID" \
+    || fail "restart closed after clearing a reused-pid lock with no durable work"
+  ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "restart emitted a no-work completion after clearing reused-pid evidence: $(cat "$armout")"
   is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
+  printf 'done: reused-pid fixture cleanup\n' > "$state/cleanup.status"
+  wait_for_exit "$ARM_PID" 80 || fail "reused-pid recovery cleanup wake did not surface"
   kill "$unrelated" 2>/dev/null || true
   wait "$unrelated" 2>/dev/null || true
-  pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
+  pass "watch-arm: restart preserves recovery evidence without a no-work close after a reused-pid watcher lock"
 }
 
 test_markerless_legacy_queue_is_recovered_on_arm() {

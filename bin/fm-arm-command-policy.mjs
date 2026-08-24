@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Semantic policy for watcher arm and checkpoint shell commands.
+// Semantic policy for watcher arm, checkpoint, and Grok long-runner shell commands.
 //
 // This parser is deliberately narrow.
 // It recognizes executed command positions without evaluating, expanding,
@@ -44,7 +44,7 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
+  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint|grok-longrun))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
 function rawMentionsBroadKill(command) {
@@ -598,6 +598,7 @@ export function commandPosition(tokens) {
 const PROTECTED_SCRIPTS = [
   { relative: "bin/fm-watch-arm.sh", kind: "arm" },
   { relative: "bin/fm-watch-checkpoint.sh", kind: "checkpoint" },
+  { relative: "bin/fm-watch-grok-longrun.sh", kind: "grok-longrun" },
   { relative: "bin/fm-watch.sh", kind: "watch" },
 ];
 
