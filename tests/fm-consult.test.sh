@@ -72,6 +72,38 @@ test_scaffold_refuses_to_clobber() {
   pass "fm-consult: scaffold refuses to clobber an existing brief"
 }
 
+# A brief that stopped halfway through its write would still look written to
+# status while scaffold refused to replace it, so a failed write must publish
+# nothing at all. The file size limit makes the write fail deterministically.
+test_scaffold_publishes_nothing_when_the_write_fails() {
+  local home brief out rc leftovers
+  home=$(new_home partial-write)
+  brief="$home/data/truncated/consult-brief.md"
+  if ! (ulimit -f 1) 2>/dev/null; then
+    pass "fm-consult: partial brief write (skipped: this shell cannot set a file size limit)"
+    return 0
+  fi
+  out=$( (ulimit -f 1 && run_consult "$home" scaffold truncated) 2>&1 ); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    assert_grep "{FALSIFIABLE_CLAIM}" "$brief" \
+      "scaffold reported success but wrote an incomplete brief"
+    pass "fm-consult: partial brief write (skipped: file size limit not enforced for this user)"
+    return 0
+  fi
+
+  assert_absent "$brief" "a failed scaffold left a partial consultation brief behind"
+  leftovers=$(find "$home/data/truncated" -mindepth 1 2>/dev/null | wc -l | tr -d '[:space:]')
+  expect_code 0 "$leftovers" "a failed scaffold left staged files behind (got: $out)"
+
+  out=$(run_consult "$home" status truncated 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "status reported a consultation whose brief was never published"
+
+  out=$(run_consult "$home" scaffold truncated 2>&1); rc=$?
+  expect_code 0 "$rc" "scaffold could not retry after a failed write (got: $out)"
+  assert_grep "{FALSIFIABLE_CLAIM}" "$brief" "the retried scaffold did not write the complete contract"
+  pass "fm-consult: a failed brief write publishes nothing and stays retryable"
+}
+
 test_receive_refuses_missing_and_empty_reports() {
   local home out rc report
   home=$(new_home receive-refusal)
@@ -858,6 +890,7 @@ test_scaffold_reports_the_underlying_creation_failure() {
 test_script_parses_and_help_owns_contract
 test_scaffold_writes_question_shaped_sections
 test_scaffold_refuses_to_clobber
+test_scaffold_publishes_nothing_when_the_write_fails
 test_receive_refuses_missing_and_empty_reports
 test_path_traversing_id_is_refused
 test_receive_emits_untrusted_input_banner_and_summary

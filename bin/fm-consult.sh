@@ -213,7 +213,7 @@ validate_consult_file() {
 }
 
 scaffold_consult() {
-  local id=$1 dir brief create_error
+  local id=$1 dir brief create_error staged
   validate_consult_id "$id"
   validate_data_directory
   dir="$DATA/$id"
@@ -228,7 +228,14 @@ scaffold_consult() {
   create_error=$( (umask 077; mkdir -p -- "$dir") 2>&1 ) \
     || die "could not create consultation directory: $(display_name "$dir")$(parenthesized_cause "$create_error")"
 
-  cat > "$brief" <<'EOF'
+  # Stage the brief beside its destination and publish it in one move. Writing
+  # the final path directly would leave a truncated brief behind if the write
+  # failed partway: status would report that stub as a written brief while
+  # scaffold refused to replace it, stranding the consultation.
+  staged=$(umask 077; mktemp "$dir/.consult-brief.XXXXXX" 2>/dev/null) \
+    || die "could not stage the consultation brief in: $(display_name "$dir")"
+
+  if ! cat > "$staged" <<'EOF'
 # External advisor consultation
 
 ## The claim, stated falsifiably
@@ -272,6 +279,14 @@ Any action it implies goes through that action's existing owner.
 
 Define the evidence, reasoning, counterexample, or recommendation needed for this consultation to be complete.
 EOF
+  then
+    rm -f -- "$staged"
+    die "could not write the consultation brief: $(display_name "$brief")"
+  fi
+  if ! mv -- "$staged" "$brief"; then
+    rm -f -- "$staged"
+    die "could not publish the consultation brief: $(display_name "$brief")"
+  fi
   printf 'scaffolded: %s (replace every placeholder)\n' "$brief"
 }
 
