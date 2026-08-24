@@ -881,10 +881,11 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# exact window; the Herdr adapter treats its terminal `done` agent status as
+# `dead` while its separate husk classifier still refuses to close it. Zellij
+# remains unverified because its secondmate ghost-tab and agent-process recovery
+# path has not been empirically validated. Orca and cmux do not support
+# secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
