@@ -271,6 +271,7 @@ render_board_nodes() {  # <board-path>
 # Pass "visible" to also require that the visible text is that same exact value.
 assert_node_title() {  # <render> <class> <want> [visible]
   local also=""
+  # shellcheck disable=SC2016 # $want is a jq variable bound by --arg below, not a shell expansion.
   [ "${4:-}" = visible ] && also=' and .text == $want'
   printf '%s' "$1" | jq -e --arg cls "$2" --arg want "$3" \
     "any(.nodes[]; (.classes | index(\$cls)) != null and .title == \$want$also)" \
