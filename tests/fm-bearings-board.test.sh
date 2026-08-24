@@ -276,6 +276,12 @@ test_v2_refuses_invalid_usage_and_underway_rows() {
   jq '.underway[0].pr_url = "http://example.com/pull/2"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "non-HTTPS Underway PR URL was accepted"
+
+  write_valid_payload "$data"
+  latest=$(printf '%241s' '' | tr ' ' x)
+  jq --arg latest "$latest" '.underway[0].latest = $latest' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an overlong Underway latest status was accepted"
   pass "v2 refuses invalid usage and Underway rows"
 }
 
@@ -285,7 +291,7 @@ test_v2_accepts_unavailable_unknown_and_optional_absence() {
   data="$home/payload.json"
 
   write_valid_payload "$data"
-  jq '.usage = {available:false,reason:"quota-axi unavailable: command failed",read_at:"2026-08-19T00:00:03Z",source:"quota-axi"} | .underway[0] |= del(.harness,.model,.effort,.worktree_tail,.latest,.blockers,.pr_url,.report_path)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.usage = {available:false,reason:"quota-axi unavailable: command failed",read_at:"2026-08-19T00:00:03Z",source:"quota-axi",attention:[{text:"Sign in to quota-axi."}]} | .underway[0] |= del(.harness,.model,.effort,.worktree_tail,.latest,.blockers,.pr_url,.report_path)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   out=$(run_board "$home" build "$data") || fail "unavailable usage and absent optional task fields were rejected: $out"
   assert_present "$home/.lavish/bearings-board.html" "accepted v2 payload did not build a board"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
@@ -343,18 +349,28 @@ test_v2_renders_in_browser() {
   assert_contains "$state" '"expanded":false' "browser detail did not expand: $state"
   assert_contains "$state" '"aria":"true"' "expanded detail did not expose aria-expanded: $state"
 
-  jq '.usage = {available:false,reason:"quota-axi unavailable: command failed",read_at:"2026-08-19T00:00:03Z",source:"quota-axi"}' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.usage = {available:false,reason:"quota-axi unavailable: command failed",read_at:"2026-08-19T00:00:03Z",source:"quota-axi",attention:[{text:"Sign in to quota-axi."}]}' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null || fail "could not build unavailable usage fixture"
   CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi open "file://$board" >/dev/null 2>&1 || fail "browser could not reload unavailable usage fixture"
-  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'document.querySelector("#bb-provisions").textContent.includes("usage unavailable: quota-axi unavailable")' 2>&1 | sed -n 's/^result: //p')
-  assert_contains "$state" 'true' "browser did not render explicit unavailable usage: $state"
+  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'JSON.stringify({reason:document.querySelector("#bb-provisions").textContent.includes("usage unavailable: quota-axi unavailable"),attention:document.querySelector("#bb-provisions").textContent.includes("Sign in to quota-axi.")})' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
+  assert_contains "$state" '"reason":true' "browser did not render explicit unavailable usage: $state"
+  assert_contains "$state" '"attention":true' "browser dropped usage attention while unavailable: $state"
 
   write_valid_payload "$data"
-  jq '.usage.providers = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.usage.providers = [] | .usage.attention = [{text:"Reconnect quota source."}]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null || fail "could not build zero-provider fixture"
   CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi open "file://$board" >/dev/null 2>&1 || fail "browser could not reload zero-provider fixture"
-  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'document.querySelector("#bb-provisions").textContent.includes("No providers reported.")' 2>&1 | sed -n 's/^result: //p')
-  assert_contains "$state" 'true' "browser did not render zero-provider empty state: $state"
+  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'JSON.stringify({empty:document.querySelector("#bb-provisions").textContent.includes("No providers reported."),attention:document.querySelector("#bb-provisions").textContent.includes("Reconnect quota source.")})' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
+  assert_contains "$state" '"empty":true' "browser did not render zero-provider empty state: $state"
+  assert_contains "$state" '"attention":true' "browser dropped usage attention with zero providers: $state"
+
+  write_valid_payload "$data"
+  jq 'del(.underway[0].model,.underway[0].effort)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "could not build empty model-effort fixture"
+  CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi open "file://$board" >/dev/null 2>&1 || fail "browser could not reload empty model-effort fixture"
+  state=$(CHROME_DEVTOOLS_AXI_SESSION="$session" chrome-devtools-axi eval 'JSON.stringify({defaults:document.querySelector("#bb-underway").textContent.includes("default"),report_links:document.querySelectorAll("#bb-underway .bb-underway-detail__links a").length})' 2>&1 | sed -n 's/^result: //p' | jq -r . | jq -r .)
+  assert_contains "$state" '"defaults":false' "browser invented model or effort defaults: $state"
+  assert_contains "$state" '"report_links":2' "browser did not render report_path as a link: $state"
   pass "v2 renders usage and accessible Underway detail in browser"
 }
 

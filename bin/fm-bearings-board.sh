@@ -145,7 +145,8 @@ validate_payload() {  # <data.json>
       and (.owner | nonempty_string) and (.next | bounded_string(240))
       and optional_string("harness") and optional_string("model")
       and optional_string("effort") and optional_string("worktree_tail")
-      and optional_string("latest") and optional_string("report_path")
+      and ((has("latest") | not) or (.latest | bounded_string(240)))
+      and optional_string("report_path")
       and ((has("blockers") | not) or (.blockers | type == "array"
         and all(.[]; bounded_string(240))))
       and optional_https_url("pr_url");
