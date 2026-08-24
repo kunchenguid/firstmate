@@ -265,6 +265,27 @@ test_unstageable_status_cursor_withholds_ack() {
   pass "nonmutating drain withholds ACK when status presentation cannot be staged"
 }
 
+test_empty_queue_unstageable_status_cursor_withholds_ack() {
+  local home="$TMP_ROOT/empty-queue-unstageable-cursor" pid i=0
+  install_real_drain_fixture "$home"; printf 'window=fleet:alpha\nbackend=tmux\n' > "$home/state/alpha.meta"
+  printf 'note: alpha unread\n' > "$home/state/alpha.status"
+  : > "$home/state/.wake-queue"; printf 'pending:handling:fixture\n' > "$home/state/.watcher-down"
+  # shellcheck disable=SC2016 # The generated fixture expands these variables at runtime.
+  printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = diverged ] || exit 0' ': > "$FM_HOME/divergence.entered"' \
+    'while [ -e "$FM_HOME/divergence.hang" ]; do sleep 0.05; done' > "$home/bin/fm-captain-hold.sh"
+  : > "$home/divergence.hang"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" & pid=$!
+  while [ ! -e "$home/divergence.entered" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$home/divergence.entered" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "empty queue never reached status presentation"; }
+  printf 'note: alpha replaced during presentation\n' > "$home/state/alpha.status.next"
+  mv "$home/state/alpha.status.next" "$home/state/alpha.status"; rm -f "$home/divergence.hang"; wait "$pid" || true
+  grep -F 'WAKE_ACK_REQUIRED' "$home/err" >/dev/null && fail "empty queue published an ACK without staging its status cursor"
+  grep -F 'WAKE_CONTEXT_FALLBACK:' "$home/out" >/dev/null || fail "empty queue lost its pre-presentation fallback"
+  [ ! -e "$home/state/.wake-context-cache.status-cursor" ] || fail "empty queue staged an invalidated status cursor"
+  pass "empty queue withholds ACK when status presentation cannot be staged"
+}
+
 test_empty_status_set_stages_empty_cursor() {
   local home="$TMP_ROOT/empty-status-stage" packet
   install_real_drain_fixture "$home"
@@ -526,6 +547,7 @@ test_real_drain_presentation_replays_identically_before_ack
 test_sigkill_before_cache_publish_keeps_unread_note
 test_status_cursor_is_staged_before_ack
 test_unstageable_status_cursor_withholds_ack
+test_empty_queue_unstageable_status_cursor_withholds_ack
 test_empty_status_set_stages_empty_cursor
 test_mktemp_failure_emits_safe_fallback
 test_cardinality_overflow_falls_back_before_drain

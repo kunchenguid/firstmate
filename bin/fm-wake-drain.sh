@@ -409,7 +409,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_presentation) || true
+  print_status_presentation_before_ack '' || exit 1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
