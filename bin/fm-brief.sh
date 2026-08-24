@@ -40,6 +40,11 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# Ship and scout scaffolds carry a standing CodeGraph usage contract: index
+# init/sync at start, structure queries over grep, sync after each edit batch,
+# affected-based test selection before done, a learning loop into the project's
+# docs/agents/codegraph/README.md with an AGENTS.md pointer, and a one-line note
+# to continue without codegraph when the binary is missing.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -298,6 +303,20 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Standing CodeGraph usage contract shared by the ship and scout scaffolds.
+# shellcheck disable=SC2016  # single quotes are deliberate: backtick-wrapped command names must reach the reading agent verbatim, not expand at scaffold time; only the '"$FM_ROOT"' break-out interpolates.
+CODEGRAPH_SECTION=$(printf '%s\n' \
+'# CodeGraph usage contract' \
+'This repo may carry a CodeGraph structural index; use it consistently when it exists.' \
+'1. At task start, run `codegraph status` in this worktree.' \
+'   If `.codegraph/` is absent, run `codegraph init`; if present, run `codegraph sync`.' \
+'2. Structure questions (call paths, blast radius, symbol lookup) go through `codegraph explore`, `node`, `callers`, `callees`, or `impact`, not grep.' \
+'3. Run `codegraph sync` after each edit batch: the index does not follow edits automatically and silently goes stale, so a stale `No results found` is NOT proof that code is absent.' \
+'4. Before reporting done, run `codegraph affected` on your changed files to select which tests to run.' \
+'5. Learning loop: append useful query patterns, keywords, and per-area symbol maps discovered during the task to `docs/agents/codegraph/README.md` (create it if missing).' \
+"   Keep an \`AGENTS.md\` pointer section to that file via '$FM_ROOT/bin/fm-ensure-agents-md.sh .'" \
+'If the `codegraph` binary is missing, append one status line noting it and continue with ordinary tools; nothing else changes.')
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -335,6 +354,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$CODEGRAPH_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -452,6 +473,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$CODEGRAPH_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

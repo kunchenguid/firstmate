@@ -26,6 +26,50 @@ mkdir -p "$BRIEF_HOME/data"
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
+# Ship and scout scaffolds carry a standing CodeGraph usage contract; a
+# secondmate charter supervises its own crews and must not carry this worker
+# contract.
+test_codegraph_contract_in_ship_and_scout_briefs() {
+  local home id kind brief
+  home="$TMP_ROOT/codegraph-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-codegraph-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# CodeGraph usage contract" "$brief" \
+      "$kind brief missing the CodeGraph contract heading"
+    assert_grep "run \`codegraph status\` in this worktree" "$brief" \
+      "$kind brief missing the start-time status check"
+    assert_grep "run \`codegraph init\`; if present, run \`codegraph sync\`" "$brief" \
+      "$kind brief missing the init/sync fork on a missing index"
+    assert_grep "go through \`codegraph explore\`, \`node\`, \`callers\`, \`callees\`, or \`impact\`, not grep" "$brief" \
+      "$kind brief missing the structure-queries-over-grep rule"
+    assert_grep "Run \`codegraph sync\` after each edit batch: the index does not follow edits automatically and silently goes stale, so a stale \`No results found\` is NOT proof that code is absent." "$brief" \
+      "$kind brief missing the post-edit-batch sync rule with the stale-no-results warning"
+    assert_grep "run \`codegraph affected\` on your changed files to select which tests to run" "$brief" \
+      "$kind brief missing affected-based test selection before done"
+    assert_grep "append useful query patterns, keywords, and per-area symbol maps discovered during the task to \`docs/agents/codegraph/README.md\` (create it if missing)" "$brief" \
+      "$kind brief missing the learning-loop target file"
+    assert_grep "$ROOT/bin/fm-ensure-agents-md.sh ." "$brief" \
+      "$kind brief missing the AGENTS.md pointer via fm-ensure-agents-md.sh"
+    assert_grep "If the \`codegraph\` binary is missing, append one status line noting it and continue with ordinary tools" "$brief" \
+      "$kind brief missing the continue-without-codegraph note"
+    assert_no_grep "EOF" "$brief" \
+      "$kind brief leaked a heredoc EOF marker (unterminated heredoc) in the CodeGraph section"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" brief-codegraph-mate --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# CodeGraph usage contract" "$home/data/brief-codegraph-mate/brief.md" \
+    "secondmate charter must not carry the worker-level CodeGraph contract"
+  pass "fm-brief.sh: ship and scout scaffolds carry the standing CodeGraph usage contract"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -726,6 +770,7 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_codegraph_contract_in_ship_and_scout_briefs
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
