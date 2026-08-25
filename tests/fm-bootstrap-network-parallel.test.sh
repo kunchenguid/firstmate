@@ -73,6 +73,12 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+  : > "$FM_FAKE_OVERLAP_DIR/remote-active"
+  overlap_wait=0
+  while [ ! -e "$FM_FAKE_OVERLAP_DIR/fleet-active" ] && [ "$overlap_wait" -lt 80 ]; do
+    sleep 0.05
+    overlap_wait=$((overlap_wait + 1))
+  done
   sleep "$sleep_s"
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
@@ -137,6 +143,12 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
+  : > "\$FM_FAKE_OVERLAP_DIR/fleet-active"
+  overlap_wait=0
+  while [ ! -e "\$FM_FAKE_OVERLAP_DIR/remote-active" ] && [ "\$overlap_wait" -lt 80 ]; do
+    sleep 0.05
+    overlap_wait=\$((overlap_wait + 1))
+  done
   sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi
@@ -174,6 +186,7 @@ test_remote_probe_scheduling_keeps_per_mate_lines() { # <parallel|fallback>
   fm_fake_exit0 "$fakebin" gh treehouse tmux node
   log="$dir/probe.log"
   : > "$log"
+  mkdir -p "$dir/overlap"
   install_fake_ssh "$fakebin"
   install_slow_git "$fakebin" "$REAL_GIT" "$log"
   if [ "$mode" = fallback ]; then
@@ -215,6 +228,7 @@ SH
     FM_BOOTSTRAP_NETWORK=only \
     FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_FAKE_SSH_LOG="$log" \
+    FM_FAKE_OVERLAP_DIR="$dir/overlap" \
     FM_FAKE_SSH_SLEEP=0.4 \
     FM_FAKE_SSH_UNREACHABLE_HOST=host-bravo \
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
