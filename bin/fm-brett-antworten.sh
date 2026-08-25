@@ -13,6 +13,7 @@
 #   fm-brett-antworten.sh bemerkungen  list the open captain-remark markers
 #   fm-brett-antworten.sh bemerkung-erledigt <antwort-id> --vermerk <text>
 #                                    record where the remark was routed and retire its marker
+#   fm-brett-antworten.sh nachrichten  list the open chat-message markers
 #   fm-brett-antworten.sh arm        write and register state/brett-antworten.check.sh
 #   fm-brett-antworten.sh disarm     remove the check shim and its trust binding
 #   fm-brett-antworten.sh --selftest verify the sources this check needs
@@ -27,13 +28,15 @@
 #      one keeps standing in the wake text until a hand resolves it.
 #   2. Card headers are parsed strictly (antwort-id, entscheid, art,
 #      gesendet, schonfrist-bis, ersetzt, plus the "Wort des Captains"
-#      body). Known arts are the board's wahl, vertagt, and
-#      zurueckgenommen; anything else, a missing required field, a
-#      filename mismatch, or an unparseable timestamp is a loud FEHLER
-#      finding on that card, never a silent skip, and the card stays
-#      pending. A vertagt or wahl head records its "Wort des Captains"
-#      verbatim through the intake; a zurueckgenommen head is receipted
-#      as withdrawn and never fed.
+#      body). Known arts are the board's wahl, vertagt, zurueckgenommen,
+#      and nachricht; anything else, a missing required field, a filename
+#      mismatch, or an unparseable timestamp is a loud FEHLER finding on
+#      that card, never a silent skip, and the card stays pending. A
+#      vertagt or wahl head records its "Wort des Captains" verbatim
+#      through the intake; a zurueckgenommen head is receipted as
+#      withdrawn and never fed. A nachricht head is the captain's chat:
+#      it books nothing anywhere (a message is not a card answer), and
+#      its own handling owns step 10 below.
 #   3. Cards inside their schonfrist are deferred to a later sweep because
 #      the captain may still withdraw them; the deferral horizon is
 #      FM_BRETT_ANTWORTEN_GRACE_HORIZON seconds (default 3600). A schonfrist
@@ -89,6 +92,21 @@
 #      state/brett-bemerkungen/erledigt/ as durable evidence. `bemerkungen`
 #      lists the open markers with their remark text.
 #
+#  10. A chat message (art nachricht) stays its own open kind until this
+#      home answers it: past its schonfrist, the sweep secures a durable
+#      marker state/brett-chat-nachrichten/<antwort-id>.md carrying the
+#      collapsed message word, and every open marker stands in the wake
+#      line as a leading "chat-nachricht(<antwort-id>)" token - never an
+#      unbekannt finding, never a captain-hold booking. The marker closes
+#      when a format-valid answer file naming the message in its
+#      antwort-auf exists under data/chat-antworten/ (format contract:
+#      bin/fm-brett-chat-lib.sh; written by bin/fm-brett-chat-antwort.sh):
+#      that sweep receipts the card with a "chat-beantwortet" vermerk,
+#      retires the marker to erledigt/ with the answer filename as
+#      evidence, and reports "chat-beantwortet(<id>)" once. Until then the
+#      card keeps nagging like any other unanswered board word.
+#      `nachrichten` lists the open message markers with their text.
+#
 # Paths follow the house overrides: FM_ROOT_OVERRIDE, FM_HOME, and
 # FM_STATE_OVERRIDE resolve as in fm-tool-update-check.sh. The brett tool is
 # taken from <home>/projects/captain-brett/bin/brett-quittung, falling back to
@@ -103,6 +121,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ANTWORTEN="$FM_HOME/data/brett-antworten"
+CHAT_ANTWORTEN="$FM_HOME/data/chat-antworten"
 SECONDMATES="$FM_HOME/data/secondmates.md"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 BRETT_QUITTUNG="$PROJECTS/captain-brett/bin/brett-quittung"
@@ -116,11 +135,16 @@ MAX_LIST=5
 BEMERKUNG_DIR="$STATE/brett-bemerkungen"
 BEMERKUNG_DONE_DIR="$BEMERKUNG_DIR/erledigt"
 BEMERKUNG_MAX=4000
+CHAT_MARKER_DIR="$STATE/brett-chat-nachrichten"
+CHAT_MARKER_DONE_DIR="$CHAT_MARKER_DIR/erledigt"
+CHAT_WORT_MAX=4000
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-brett-chat-lib.sh
+. "$SCRIPT_DIR/fm-brett-chat-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -133,6 +157,7 @@ Usage:
   fm-brett-antworten.sh bemerkung-erledigt <antwort-id> --vermerk <text>
                                   record where the remark was routed / how it was
                                   answered, retire the marker to erledigt/
+  fm-brett-antworten.sh nachrichten list open chat-message markers with their text
   fm-brett-antworten.sh arm       write and register state/brett-antworten.check.sh
   fm-brett-antworten.sh disarm    remove the check shim and its trust binding
   fm-brett-antworten.sh --selftest  verify the sources this check needs
@@ -174,6 +199,8 @@ N_OFFIZIER=0 L_OFFIZIER=
 N_UNBEKANNT=0 L_UNBEKANNT=
 N_GESCHLOSSEN=0 L_GESCHLOSSEN=
 N_BEMERKUNG=0 L_BEMERKUNG=
+N_CHAT=0 L_CHAT=
+N_CHAT_ZU=0 L_CHAT_ZU=
 F_FEHLER=
 
 list_add() {  # <L-var> <N-var> <token>
@@ -211,12 +238,27 @@ scan_open_bemerkungen() {
   done
 }
 
+# Every still-open chat-message marker keeps standing in the wake line the
+# same way (header step 10): an unanswered message is an open conversational
+# turn, whatever else the sweep found.
+scan_open_chat_nachrichten() {
+  local f
+  [ -d "$CHAT_MARKER_DIR" ] || return 0
+  for f in "$CHAT_MARKER_DIR"/*.md; do
+    [ -f "$f" ] || continue
+    list_add L_CHAT N_CHAT "$(basename "${f%.md}")"
+  done
+}
+
 summary_line() {
   local out=brett-antworten
+  scan_open_chat_nachrichten
   scan_open_bemerkungen
+  [ "$N_CHAT" -gt 0 ] && out+=" $N_CHAT chat-nachricht(${L_CHAT// /,});"
   [ "$N_BEMERKUNG" -gt 0 ] && out+=" $N_BEMERKUNG bemerkung-vorhanden(${L_BEMERKUNG// /,});"
   [ "$N_VERBUCHT" -gt 0 ] && out+=" $N_VERBUCHT verbucht(${L_VERBUCHT// /,});"
   [ "$N_ERSATZ" -gt 0 ] && out+=" $N_ERSATZ als ersetzt markiert(${L_ERSATZ// /,});"
+  [ "$N_CHAT_ZU" -gt 0 ] && out+=" $N_CHAT_ZU chat-beantwortet(${L_CHAT_ZU// /,});"
   [ "$N_ZURUECK" -gt 0 ] && out+=" $N_ZURUECK zurueckgenommen(${L_ZURUECK// /,});"
   [ "$N_OFFIZIER" -gt 0 ] && out+=" offizier-nicht-verbucht(${L_OFFIZIER// /,});"
   [ "$N_UNBEKANNT" -gt 0 ] && out+=" unbekannt(${L_UNBEKANNT// /,});"
@@ -320,7 +362,7 @@ parse_card() {  # <file>
     '' | *[!a-z0-9-]* ) C_ERR="entscheid-unlesbar"; return 1 ;;
   esac
   case $C_ART in
-    wahl | vertagt | zurueckgenommen) ;;
+    wahl | vertagt | zurueckgenommen | nachricht) ;;
     *) C_ERR="unbekannte-art-$C_ART"; return 1 ;;
   esac
   C_EPOCH=$(iso_epoch "$C_SENT")
@@ -427,10 +469,59 @@ bem_mark() {  # <antwort-id> <bemerkung> <verbleib>; loud on a failed rewrite
   return 0
 }
 
+# --- chat-message markers ------------------------------------------------------
+# Contract: header step 10. Same durability shape as the captain-remark
+# markers: written BEFORE anything else may treat the message as handled, and
+# closed only by a format-valid answer file (never by a hand command).
+
+chat_marker_path() { printf '%s/%s.md\n' "$CHAT_MARKER_DIR" "$1"; }
+chat_marker_done_path() { printf '%s/%s.md\n' "$CHAT_MARKER_DONE_DIR" "$1"; }
+
+chat_marker_ensure() {  # <antwort-id> <wort>
+  local id=$1 wort=$2 dest tmp
+  dest=$(chat_marker_path "$id")
+  [ ! -f "$dest" ] || return 0
+  [ ! -f "$(chat_marker_done_path "$id")" ] || return 0
+  (umask 077; mkdir -p "$CHAT_MARKER_DIR") || return 1
+  [ -d "$CHAT_MARKER_DIR" ] && [ ! -L "$CHAT_MARKER_DIR" ] || return 1
+  tmp=$(umask 077; mktemp "$CHAT_MARKER_DIR/.nachricht.XXXXXX" 2>/dev/null) || return 1
+  if ! {
+    printf 'schema: fm-brett-chat-nachricht.v1\n'
+    printf 'antwort-id: %s\n' "$id"
+    printf 'verbleib: offen\n'
+    printf 'angelegt: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'wort: %s\n' "$wort"
+  } > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+  return 0
+}
+
+chat_marker_close() {  # <antwort-id> <antwortdatei>; nonzero leaves the marker open
+  local id=$1 datei=$2 src dest tmp
+  src=$(chat_marker_path "$id")
+  [ -f "$src" ] || return 0
+  (umask 077; mkdir -p "$CHAT_MARKER_DONE_DIR") || return 1
+  tmp=$(umask 077; mktemp "$CHAT_MARKER_DIR/.nachricht.XXXXXX" 2>/dev/null) || return 1
+  if ! {
+    cat "$src"
+    printf 'beantwortet: %s\n' "$datei"
+    printf 'erledigt: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  } > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$(chat_marker_done_path "$id")"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$src"
+  return 0
+}
+
 # --- the check ----------------------------------------------------------------
 
 action_check() {
-  local f id key bem e line reason off now rest verdict src tgt
+  local f id key bem e line reason off now rest verdict src tgt antwortdatei
   local -A valid_seen=() file_of=() is_pending=() replaced_by=() hold_back=()
   local -a all_files=() good=() sorted=()
 
@@ -547,6 +638,38 @@ action_check() {
         continue  # the captain can still withdraw it; a later sweep owns it
       fi
       fehler_add "$id:schonfrist-zu-weit-in-der-zukunft"
+      continue
+    fi
+    # Header step 10: the captain's chat is its own kind. It books nothing
+    # (a message is not a card answer), stands as chat-nachricht until an
+    # answer file closes it, and receipts only as answered.
+    if [ "$C_ART" = nachricht ]; then
+      antwortdatei=$(chat_antwort_fuer "$CHAT_ANTWORTEN" "$id")
+      if [ -n "$antwortdatei" ]; then
+        # Secure the evidence marker even on the fast path (answer arrived
+        # before the first sweep), then close it BEFORE receipting: if any
+        # step is interrupted the card stays pending and replays into this
+        # same branch, while the reverse order could strand a closed marker
+        # beside a card that never stopped nagging.
+        if ! chat_marker_ensure "$id" "$C_WORT" \
+          || ! chat_marker_close "$id" "$antwortdatei"; then
+          fehler_add "chat-marker-abschluss-$id"
+          continue
+        fi
+        if receipt_card "$id" "chat-beantwortet durch fm-brett-chat-antwort"; then
+          list_add L_CHAT_ZU N_CHAT_ZU "$id"
+        fi
+        continue
+      fi
+      if [ "$(printf '%s' "$C_WORT" | wc -c | tr -d ' ')" -gt "$CHAT_WORT_MAX" ]; then
+        fehler_add "$id:chat-wort-zu-lang"
+        continue
+      fi
+      if ! chat_marker_ensure "$id" "$C_WORT"; then
+        fehler_add "$id:chat-marker-scheitert"
+        continue
+      fi
+      list_add L_CHAT N_CHAT "$id"
       continue
     fi
     # Order O-0054: the remark marker must exist before the card may be
@@ -702,6 +825,25 @@ action_bemerkung_erledigt() {
   fi
   rm -f -- "$src"
   printf 'erledigt: %s\n' "$id"
+  return 0
+}
+
+# --- chat-message listing -----------------------------------------------------
+
+action_nachrichten() {
+  local f id verbleib wort found=
+  if [ -d "$CHAT_MARKER_DIR" ]; then
+    for f in "$CHAT_MARKER_DIR"/*.md; do
+      [ -f "$f" ] || continue
+      found=1
+      id=$(sed -n 's/^antwort-id: //p' "$f" | head -1)
+      verbleib=$(sed -n 's/^verbleib: //p' "$f" | head -1)
+      wort=$(sed -n 's/^wort: //p' "$f" | head -1)
+      printf 'offen: %s verbleib=%s\n  %s\n' \
+        "${id:-$(basename "${f%.md}")}" "${verbleib:--}" "${wort:--}"
+    done
+  fi
+  [ -n "$found" ] || printf 'keine offenen Chat-Nachrichten\n'
   return 0
 }
 
@@ -863,6 +1005,11 @@ action_selftest() {
   else
     echo "SELFTEST OK: Antwortordner $ANTWORTEN noch nicht angelegt (leer ist ok)"
   fi
+  if [ -d "$CHAT_ANTWORTEN" ]; then
+    echo "SELFTEST OK: Chat-Antwortordner $CHAT_ANTWORTEN lesbar"
+  else
+    echo "SELFTEST OK: Chat-Antwortordner $CHAT_ANTWORTEN noch nicht angelegt (leer ist ok)"
+  fi
   if [ -f "$SECONDMATES" ]; then
     while IFS= read -r home; do
       [ -d "$home" ] || { echo "SELFTEST FAIL: Offiziers-Heim $home fehlt"; ok=0; }
@@ -879,6 +1026,7 @@ case ${1:-check} in
   check) action_check ;;
   bemerkungen) action_bemerkungen ;;
   bemerkung-erledigt) shift; action_bemerkung_erledigt "$@" ;;
+  nachrichten) action_nachrichten ;;
   arm) action_arm ;;
   disarm) action_disarm ;;
   --selftest) action_selftest ;;

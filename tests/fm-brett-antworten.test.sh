@@ -446,6 +446,133 @@ receipt_exists "$HBN" "$IDBL" && fail "an oversize-remark card was receipted any
 grep -q "^- \[ \] lang-vermerk-posten " "$HBN/data/backlog.md" \
   || fail "an oversize remark consumed the held task"
 
+# --- chat messages (art nachricht): own kind, no booking, closed by answer ----
+# A captain message is conversational freight, not a card answer: it books
+# nothing against any hold, stands as chat-nachricht(<id>) until a
+# format-valid answer file closes it, and only then gets its receipt.
+
+write_antwort_datei() {  # <home> <bezug> <dateiname>
+  mkdir -p "$1/data/chat-antworten"
+  {
+    printf '# Antwort des Firstmate\n'
+    printf 'antwort-auf: %s\n' "$2"
+    printf 'von: firstmate\n'
+    printf 'gesendet: %s\n' "$(ts_offset '-10 seconds')"
+    printf '\n'
+    printf '## Wort\n'
+    printf 'Erledigt, das Wort steht im Bericht.\n'
+    printf '\n'
+  } > "$1/data/chat-antworten/$3"
+}
+
+HC=$(make_home hc)
+install_quittung_stub "$HC"
+IDCHAT=20260825T140000-chat-aaaa21
+write_card "$HC" "$IDCHAT" chat "Captain hier: wie steht es um die Lieferung?" - nachricht
+
+out=$(run_check "$HC")
+case $out in
+  *"chat-nachricht($IDCHAT)"*) pass "ok - chat message presented as its own kind" ;;
+  *) fail "expected chat-nachricht token, got: $out" ;;
+esac
+case $out in
+  *unbekannt*) fail "a chat message was reported as unknown: $out" ;;
+  *FEHLER*) fail "a well-formed chat message raised a finding: $out" ;;
+  *) : ;;
+esac
+receipt_exists "$HC" "$IDCHAT" && fail "an unanswered message was receipted"
+[ -f "$HC/state/brett-chat-nachrichten/$IDCHAT.md" ] || fail "no durable chat marker under state/"
+grep -q "^verbleib: offen$" "$HC/state/brett-chat-nachrichten/$IDCHAT.md" \
+  || fail "chat marker does not stand open"
+grep -qF "wort: Captain hier: wie steht es um die Lieferung?" \
+  "$HC/state/brett-chat-nachrichten/$IDCHAT.md" || fail "chat marker lost the message text"
+out=$(FM_HOME="$HC" FM_STATE_OVERRIDE="$HC/state" "$CHECK" nachrichten)
+case $out in
+  *"$IDCHAT"*) pass "ok - nachrichten lists the open message" ;;
+  *) fail "nachrichten does not list the open message: $out" ;;
+esac
+
+# A broken answer file must not close the message: the board would reject it
+# red, so the checker treats it as no answer at all.
+mkdir -p "$HC/data/chat-antworten"
+{
+  printf '# Antwort des Firstmate\n'
+  printf 'antwort-auf: %s\n' "$IDCHAT"
+  printf 'von: firstmate\n'
+  printf '\n'
+  printf '## Wort\n'
+  printf 'x\n'
+} > "$HC/data/chat-antworten/kaputt.md"
+out=$(run_check "$HC")
+case $out in
+  *"chat-nachricht($IDCHAT)"*) pass "ok - a format-broken answer leaves the message open" ;;
+  *) fail "broken answer closed the message, got: $out" ;;
+esac
+receipt_exists "$HC" "$IDCHAT" && fail "the broken answer triggered a receipt"
+
+rm -f "$HC/data/chat-antworten/kaputt.md"
+write_antwort_datei "$HC" "$IDCHAT" 20260825T140500-antwort.md
+out=$(run_check "$HC")
+case $out in
+  *"chat-beantwortet($IDCHAT)"*) pass "ok - valid answer closed the message and was reported" ;;
+  *) fail "expected chat-beantwortet token, got: $out" ;;
+esac
+receipt_exists "$HC" "$IDCHAT" || fail "the answered message was not receipted"
+grep -qF "beantwortet: 20260825T140500-antwort.md" \
+  "$HC/state/brett-chat-nachrichten/erledigt/$IDCHAT.md" \
+  || fail "retired marker lost the answer filename as evidence"
+[ ! -e "$HC/state/brett-chat-nachrichten/$IDCHAT.md" ] || fail "closed marker still open"
+out=$(run_check "$HC")
+[ -z "$out" ] || fail "an answered message kept waking: $out"
+
+# The withdraw window holds for messages too: nothing fires inside it.
+HS=$(make_home hs)
+install_quittung_stub "$HS"
+IDS=20260825T141000-chat-bbbb32
+write_card "$HS" "$IDS" chat "Noch frisch, noch zurueckziehbar" - nachricht "$(ts_offset '+45 seconds')"
+out=$(run_check "$HS")
+[ -z "$out" ] || fail "a withdrawable message fired early: $out"
+[ ! -e "$HS/state/brett-chat-nachrichten" ] || fail "a withdrawable message created marker state"
+pass "ok - chat schonfrist defers like any other card"
+
+# Answer arriving before the first sweep: one sweep closes everything.
+HR=$(make_home hr)
+install_quittung_stub "$HR"
+IDR=20260825T142000-chat-cccc43
+write_card "$HR" "$IDR" chat "Sofort beantwortet" - nachricht
+write_antwort_datei "$HR" "$IDR" 20260825T142100-antwort.md
+out=$(run_check "$HR")
+case $out in
+  *"chat-beantwortet($IDR)"*) : ;;
+  *) fail "expected immediate chat-beantwortet, got: $out" ;;
+esac
+case $out in
+  *"chat-nachricht($IDR)"*) fail "the pre-answered message stood open anyway: $out" ;;
+  *) : ;;
+esac
+[ -f "$HR/state/brett-chat-nachrichten/erledigt/$IDR.md" ] \
+  || fail "pre-answered message has no retired evidence marker"
+receipt_exists "$HR" "$IDR" || fail "pre-answered message not receipted"
+
+# Receipt path down while an answer exists: the marker may not vanish while
+# the card could still nag - the sweep reports the broken receipt loudly and
+# replays the whole closure once the tool is back.
+HQ=$(make_home hq)
+IDQ=20260825T143000-chat-dddd54
+write_card "$HQ" "$IDQ" chat "Antwort ohne Quittungswerkzeug da" - nachricht
+write_antwort_datei "$HQ" "$IDQ" 20260825T143100-antwort.md
+out=$(run_check "$HQ")
+case $out in
+  *FEHLER*brett-quittung-fehlt*) pass "ok - missing receipt tool named loudly on closure" ;;
+  *) fail "expected brett-quittung-fehler finding, got: $out" ;;
+esac
+install_quittung_stub "$HQ"
+out=$(run_check "$HQ")
+case $out in
+  *"chat-beantwortet($IDQ)"*) pass "ok - closure replayed cleanly once receipts work again" ;;
+  *) fail "expected replayed chat-beantwortet, got: $out" ;;
+esac
+
 # --- arm, disarm, shim bytes, selftest -----------------------------------------
 
 H8=$(make_home h8)
