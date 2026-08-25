@@ -4,6 +4,19 @@
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
 # owner/repository and PR number are passed to gh-axi as separate arguments.
 #
+# A PR whose task has no runtime record at all - state/<id>.meta absent, as
+# happens when a real PR outlives the session that raised it - is still merged,
+# because refusing it only pushes the caller to call gh-axi directly and step
+# around this path. Nothing is recorded for such a PR and no merge poll is
+# armed, so the reduced guarantee is printed in full on stderr rather than left
+# silent. Anything else occupying the metadata path - a symlink, a directory -
+# is a tampering signal, not an absent record, and keeps the original refusal.
+# bin/fm-pr-check.sh deliberately does NOT get the same treatment: its product
+# is a durable merge poll whose validation is bound to the task's recorded
+# metadata identity (fm_pr_poll_artifacts_valid in bin/fm-pr-lib.sh, re-checked
+# by the watcher and by bin/fm-pr-check-migrate.sh), and there is no task to
+# wake for anyway. This path therefore skips it instead of relaxing it.
+#
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
@@ -63,18 +76,30 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
+# Name every guarantee this merge does not carry, so an unrecorded PR is an
+# informed choice rather than a silent downgrade.
+report_unrecorded_pr() {
+  echo "notice: no runtime record at state/$ID.meta, merging $URL as an unrecorded PR" >&2
+  echo "notice: not recorded: pr=$URL, so bin/fm-teardown.sh has no PR reference to verify landed work for $ID after a squash merge" >&2
+  echo "notice: not recorded: pr_head=, so bin/fm-review-diff.sh cannot pin the reviewed head for $ID" >&2
+  echo "notice: not armed: the merge poll, so no wake follows this merge" >&2
+  echo "notice: unchanged: the merge itself, including the checks bar, which gh-axi pr merge and the forge still decide for $PR_OWNER/$PR_REPO#$PR_NUMBER" >&2
+}
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+  grep -qxF "pr=$URL" "$META" || {
+    echo "error: PR metadata recording failed" >&2
+    exit 1
+  }
+elif [ -e "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+else
+  report_unrecorded_pr
 fi
-
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
-  exit 1
-}
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

@@ -9,7 +9,11 @@
 #   (a) merge records pr= and pr_head= before merging, and merges
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
-#   (d) merge is refused before gh-axi when task meta is missing
+#   (d) a PR with no task meta is merged, stating what it cannot record
+#   (d2) the recorded path keeps pr=, pr_head=, and the armed poll intact
+#   (d3) both paths issue the identical gh-axi merge command
+#   (d4) a symlink occupying the meta path is still refused as tampering
+#   (d5) a failing fm-pr-check.sh still aborts the merge for a recorded task
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
@@ -156,27 +160,173 @@ test_extra_merge_args_forwarded() {
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
 
-test_missing_meta_refuses_before_merge() {
+# An orphan PR - real, green, raised in a session whose runtime record is gone -
+# has no meta and no worktree. Refusing it here only pushes the caller to run
+# gh-axi directly and around this path, so it is served, and every guarantee it
+# does not carry is named in the output rather than dropped silently.
+test_unrecorded_pr_merges_and_states_lost_verification() {
   local case_dir fakebin rc
-  case_dir="$TMP_ROOT/missing-meta"
+  case_dir="$TMP_ROOT/unrecorded-pr"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
   add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" missing-x1 https://github.com/example/repo/pull/21 \
+  run_pr_merge "$case_dir" orphan-x1 https://github.com/example/repo/pull/21 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
+  expect_code 0 "$rc" "unrecorded-pr: fm-pr-merge should serve a PR with no task record"
+  grep -qxF 'pr merge 21 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "unrecorded-pr: gh-axi pr merge was not invoked for the unrecorded PR"
+
+  # The caller must be able to see exactly which post-merge verification is gone.
+  assert_grep 'notice: no runtime record at state/orphan-x1.meta' "$case_dir/stderr" \
+    "unrecorded-pr: output did not say the task has no runtime record"
+  assert_grep 'not recorded: pr=https://github.com/example/repo/pull/21' "$case_dir/stderr" \
+    "unrecorded-pr: output did not say pr= goes unrecorded"
+  assert_grep 'fm-teardown.sh has no PR reference to verify landed work' "$case_dir/stderr" \
+    "unrecorded-pr: output did not name the landed-work verification it cannot perform"
+  assert_grep 'not recorded: pr_head=' "$case_dir/stderr" \
+    "unrecorded-pr: output did not say pr_head= goes unrecorded"
+  assert_grep 'not armed: the merge poll' "$case_dir/stderr" \
+    "unrecorded-pr: output did not say no merge poll is armed"
+
+  # Serving the PR must not fabricate a task record or arm a watch for a task
+  # that does not exist.
+  assert_absent "$case_dir/state/orphan-x1.meta" \
+    "unrecorded-pr: a task record was invented for a PR with no task"
+  assert_absent "$case_dir/state/orphan-x1.check.sh" \
+    "unrecorded-pr: a merge poll was armed for a task with no runtime record"
+  pass "fm-pr-merge merges a PR with no task record and states what it cannot verify"
+}
+
+# Criterion for the untouched path: when meta IS present, every guarantee the
+# recorded path carried before must still be there, and the reduced-guarantee
+# notice must not appear.
+test_recorded_pr_keeps_every_guarantee() {
+  local case_dir rc
+  case_dir=$(make_case recorded-guarantees)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" abcabcabcabcabcabcabcabcabcabcabcabcabca
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-guarantees: fm-pr-merge should succeed"
+  # fm-teardown.sh reads the PR reference back as `pr=<url>` on its own line.
+  assert_line_in_file 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "recorded-guarantees: pr= is no longer recorded for teardown to verify landed work against"
+  assert_line_in_file 'pr_head=abcabcabcabcabcabcabcabcabcabcabcabcabca' "$case_dir/state/task-x1.meta" \
+    "recorded-guarantees: pr_head= is no longer recorded"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "recorded-guarantees: the merge poll is no longer armed"
+  assert_no_grep 'notice: no runtime record' "$case_dir/stderr" \
+    "recorded-guarantees: a task WITH a runtime record took the unrecorded path"
+  assert_no_grep 'not recorded' "$case_dir/stderr" \
+    "recorded-guarantees: a reduced guarantee was reported for a fully recorded task"
+  pass "fm-pr-merge keeps pr=, pr_head=, and the armed poll when task meta is present"
+}
+
+# The red-PR bar lives in gh-axi and the forge, so serving an unrecorded PR must
+# not change one byte of the merge command - no --admin, no bypass flag, no
+# different method.
+test_unrecorded_pr_merge_command_is_identical_to_recorded() {
+  local recorded_dir unrecorded_dir
+  recorded_dir=$(make_case identical-recorded)
+  mkdir -p "$recorded_dir/wt"
+  add_gh_mocks "$recorded_dir" 1010101010101010101010101010101010101010
+  : > "$recorded_dir/gh-axi.log"
+
+  unrecorded_dir="$TMP_ROOT/identical-unrecorded"
+  mkdir -p "$unrecorded_dir/state" "$unrecorded_dir/fakebin"
+  add_gh_mocks "$unrecorded_dir" 1010101010101010101010101010101010101010
+  : > "$unrecorded_dir/gh-axi.log"
+
+  run_pr_merge "$recorded_dir" task-x1 https://github.com/example/repo/pull/42 -- --delete-branch \
+    > "$recorded_dir/stdout" 2> "$recorded_dir/stderr" \
+    || fail "identical-command: recorded merge failed"
+  run_pr_merge "$unrecorded_dir" orphan-x1 https://github.com/example/repo/pull/42 -- --delete-branch \
+    > "$unrecorded_dir/stdout" 2> "$unrecorded_dir/stderr" \
+    || fail "identical-command: unrecorded merge failed"
+
+  # The recorded run's log also carries fm-pr-check.sh's own gh-axi calls, so
+  # compare the merge invocations rather than the whole logs.
+  grep '^pr merge ' "$recorded_dir/gh-axi.log" > "$recorded_dir/merge-calls"
+  grep '^pr merge ' "$unrecorded_dir/gh-axi.log" > "$unrecorded_dir/merge-calls"
+  [ -s "$recorded_dir/merge-calls" ] || fail "identical-command: recorded run issued no merge"
+  cmp -s "$recorded_dir/merge-calls" "$unrecorded_dir/merge-calls" \
+    || fail "identical-command: the unrecorded path changed the gh-axi merge command: $(cat "$unrecorded_dir/merge-calls")"
+  assert_no_grep 'admin' "$unrecorded_dir/merge-calls" \
+    "identical-command: the unrecorded path added a protection-bypass flag"
+  pass "fm-pr-merge issues the same gh-axi merge command with and without a task record"
+}
+
+# The recorded path merges only after fm-pr-check.sh succeeds. A hardlinked meta
+# is one thing fm-pr-check.sh refuses, and that refusal must still stop the merge
+# rather than fall through to the unrecorded path.
+test_pr_check_failure_aborts_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case check-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+  ln "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.meta.hardlink"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "check-fails: fm-pr-merge should abort when fm-pr-check.sh refuses"
   assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
-    "missing-meta: refusal did not explain missing meta"
-  [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
-  assert_absent "$case_dir/state/missing-x1.check.sh" \
-    "missing-meta: fm-pr-check should not arm a poll for an unknown task"
-  pass "fm-pr-merge refuses before merging when task meta is missing"
+    "check-fails: the refusal from fm-pr-check.sh was not surfaced"
+  assert_no_grep 'notice: no runtime record' "$case_dir/stderr" \
+    "check-fails: a refused recording fell through to the unrecorded path"
+  # fm-pr-check.sh's own non-zero exit is what stops the merge. The later
+  # `pr=` grep is a second line of defence, not the one that must fire: a
+  # future partial write could satisfy it while the recording still failed.
+  assert_no_grep 'PR metadata recording failed' "$case_dir/stderr" \
+    "check-fails: the merge continued past fm-pr-check.sh's refusal and only the pr= grep stopped it"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "check-fails: gh-axi pr merge ran despite a refused recording"
+  pass "fm-pr-merge aborts the merge when fm-pr-check.sh refuses a recorded task"
+}
+
+# An absent record is an orphan PR; a symlink sitting on the metadata path is a
+# tampering signal, and keeps the original refusal.
+test_symlinked_meta_refuses_before_merge() {
+  local case_dir fakebin rc
+  case_dir="$TMP_ROOT/symlinked-meta"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+  fm_write_meta "$case_dir/elsewhere.meta" "window=fm-task-x1" "kind=ship"
+  ln -s "$case_dir/elsewhere.meta" "$case_dir/state/linked-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" linked-x1 https://github.com/example/repo/pull/23 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "symlinked-meta: fm-pr-merge should refuse a symlinked task record"
+  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
+    "symlinked-meta: refusal did not explain the unusable meta"
+  assert_no_grep 'notice: no runtime record' "$case_dir/stderr" \
+    "symlinked-meta: tampering was treated as an absent record"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "symlinked-meta: gh-axi pr merge was invoked"
+  assert_absent "$case_dir/state/linked-x1.check.sh" \
+    "symlinked-meta: a poll was armed through a symlinked meta"
+  pass "fm-pr-merge still refuses when a symlink occupies the task metadata path"
 }
 
 test_malformed_url_refuses_before_merge() {
@@ -304,7 +454,11 @@ test_parses_pr_url_for_gh_axi() {
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
-test_missing_meta_refuses_before_merge
+test_unrecorded_pr_merges_and_states_lost_verification
+test_recorded_pr_keeps_every_guarantee
+test_unrecorded_pr_merge_command_is_identical_to_recorded
+test_symlinked_meta_refuses_before_merge
+test_pr_check_failure_aborts_the_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording

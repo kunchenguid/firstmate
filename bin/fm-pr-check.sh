@@ -5,6 +5,13 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+#
+# An absent state/<id>.meta stays a refusal here and must not be relaxed: the
+# published poll is only valid while it matches the task's recorded metadata
+# identity (fm_pr_poll_artifacts_valid in bin/fm-pr-lib.sh, re-checked by the
+# watcher and by bin/fm-pr-check-migrate.sh), and a PR with no runtime record
+# has no task to wake for. bin/fm-pr-merge.sh serves such a PR by skipping this
+# script and reporting what it cannot record, not by weakening this check.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
