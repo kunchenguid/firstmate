@@ -944,7 +944,17 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE"/.wedge-permanent-"$key"-* "$STATE/.wedge-permanent-$key"
+  # LOCAL PATCH (2026-08-19, v5): do NOT clear .wedge-permanent-<key>-* here.
+  # A pause-class transition is NOT proof that the underlying wedge has
+  # resolved - the operator may have declared `paused:` precisely because the
+  # wedge was unfixable in real time. Clearing the permanent marker would
+  # re-arm the cap, so when the pause lifts the same still-wedged hash would
+  # climb back to FM_WEDGE_MAX_ESCALATIONS and fire another terminal wake.
+  # The marker is keyed on (window, hash) so it is naturally stale if the
+  # wedge genuinely resolves (next poll sees a new hash, fresh cap cycle).
+  # Manual operator reset (e.g. `rm STATE/.wedge-permanent-<key>-H12`) is the
+  # only legitimate way to lift the cap.
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -1038,11 +1048,13 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
-  # LOCAL PATCH (2026-08-19): clear per-hash permanent-wedge markers on full
-  # pause tracking reset. Each stale hash in this window has its own
-  # .wedge-permanent-<key>-<hash12> marker; the glob clears them all so a
-  # genuinely-resolved pane can re-escalate if it wedges again.
-  rm -f "$STATE"/.wedge-permanent-"$key"-* "$STATE/.wedge-permanent-$key"
+  # LOCAL PATCH (2026-08-19, v5): do NOT clear .wedge-permanent-<key>-* here.
+  # A full pause-tracking reset is not the same as the wedge genuinely
+  # resolving. The hash will change on the next stale poll, at which point the
+  # marker for the old hash is naturally stale clutter (no fresh
+  # wedge_timer_check call would ever look up that marker again - the lookup
+  # key is the new hash). Manual operator action is the only legitimate way
+  # to lift the cap.
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
