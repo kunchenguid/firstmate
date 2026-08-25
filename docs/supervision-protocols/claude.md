@@ -1,14 +1,18 @@
 Mode: Claude Stop-hook-owned supervision.
 
 When this session owns supervision and away mode is not active:
-1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+1. On a manual recovery or handling turn with neither an attached packet nor an attached fallback presentation, run `bin/fm-wake-drain.sh` only when the adapter emitted its single manual-drain instruction.
+   An attached complete fallback presentation has already been drained, so handle it directly without draining again.
+   A published packet or fallback receipt remains the sole transaction through opt-out and later wakes; no manual drain may replace it before its exact acknowledgement.
+   After handling the presented wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
    An actionable close wakes you through the hook's exit-2 rewake, delivered as a `Stop hook feedback` message.
-3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
+3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), handle an attached `fm-wake-context.v1` packet without draining or rebuilding the same context.
+   After handling a packet, run its exact acknowledgement command.
+   When no packet is attached and the adapter prints its manual-drain instruction, use `bin/fm-wake-drain.sh` once.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
-   Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
+   Do not invent a wake from an attach-status line alone; act only on a real attached packet, the manual drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.

@@ -334,93 +334,37 @@ EOF
 
 test_pi_actionable_close_starts_single_successor_before_delivery() {
   local repo home plugin log stop out status
-  repo="$TMP_ROOT/pi-continuous-rearm-root"
-  home="$TMP_ROOT/pi-continuous-rearm-home"
-  log="$TMP_ROOT/pi-continuous-rearm.log"
-  stop="$TMP_ROOT/pi-continuous-rearm.stop"
+  repo="$TMP_ROOT/pi-continuous-rearm-root"; home="$TMP_ROOT/pi-continuous-rearm-home"
+  log="$TMP_ROOT/pi-continuous-rearm.log"; stop="$TMP_ROOT/pi-continuous-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --handling-delivered ]; then
-  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
-  exit 0
-fi
-printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
-count=$(grep -c '^arm=' "$FM_ARM_LOG")
-if [ "$count" -eq 1 ]; then
-  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: synthetic actionable close\n'
-  exit 0
-fi
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
-trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
-SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-let tool = null;
-let deliveryStarted = false;
-let rowsAtDelivery = 0;
-let releaseDelivery = () => {};
-const deliveryBlocked = new Promise((resolve) => {
-  releaseDelivery = resolve;
-});
-const pi = {
-  on() {},
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  sendUserMessage: async () => {
-    rowsAtDelivery = existsSync(process.env.FM_ARM_LOG)
-      ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
-      : 0;
-    deliveryStarted = true;
-    await deliveryBlocked;
-  },
-};
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-await tool.execute("tool-call-continuity", {}, undefined, undefined, {});
-for (let i = 0; i < 250; i += 1) {
-  const rows = existsSync(process.env.FM_ARM_LOG)
-    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
-    : [];
-  if (rows.length >= 2 && deliveryStarted) break;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-const armRows = rows.filter((row) => row.startsWith("arm="));
-if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
-if (!deliveryStarted) throw new Error("wake delivery did not begin");
-if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
-if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
-if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
-  throw new Error(`handling delivery was not confirmed before the follow-up: ${rows.join(" | ")}`);
-}
-await new Promise((resolve) => setTimeout(resolve, 100));
-const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (stableRows.filter((row) => row.startsWith("arm=")).length !== 2) {
-  throw new Error(`blocked follow-up started extra arm work: ${stableRows.join(" | ")}`);
-}
-if (stableRows.filter((row) => row.startsWith("confirmed ")).length !== 1) {
-  throw new Error(`successful prompt delivery was not confirmed exactly once: ${stableRows.join(" | ")}`);
-}
-releaseDelivery();
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-process.exit(0);
-EOF
-  )
+  : > "$home/config/wake-context-presentation"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-context.sh" "$repo/bin/fm-wake-context.sh"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-arm.sh" "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-wake-context.sh" "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    node "$ROOT/tests/fixtures/pi-actionable-close-probe.mjs" 2>&1)
   status=$?
   expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
   pass "Pi actionable close starts one successor before wake delivery settles"
+}
+
+test_pi_actionable_close_without_opt_in_uses_manual_drain_fallback() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-default-off-root"; home="$TMP_ROOT/pi-default-off-home"
+  log="$TMP_ROOT/pi-default-off.log"; stop="$TMP_ROOT/pi-default-off.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"; plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-context.sh" "$repo/bin/fm-wake-context.sh"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-arm.sh" "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-wake-context.sh" "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_EXPECT_WAKE_CONTEXT=disabled node "$ROOT/tests/fixtures/pi-actionable-close-probe.mjs" 2>&1)
+  status=$?; expect_code 0 "$status" "Pi default-off wake must preserve actionable delivery"
+  [ -z "$out" ] || fail "Pi default-off wake test printed output: $out"
+  pass "Pi actionable close preserves one manual-drain fallback while wake context is default-off"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -1271,57 +1215,17 @@ EOF
 
 test_pi_actionable_close_rechecks_session_lock() {
   local repo home plugin log release out status
-  repo="$TMP_ROOT/pi-close-lock-root"
-  home="$TMP_ROOT/pi-close-lock-home"
-  log="$TMP_ROOT/pi-close-lock.log"
-  release="$TMP_ROOT/pi-close-lock.release"
+  repo="$TMP_ROOT/pi-close-lock-root"; home="$TMP_ROOT/pi-close-lock-home"
+  log="$TMP_ROOT/pi-close-lock.log"; release="$TMP_ROOT/pi-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-wake-context.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-classify-lib.sh" \
+    "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
-printf 'signal: lock handoff\n'
-SH
+  cp "$ROOT/tests/fixtures/pi-lock-loss-arm.sh" "$repo/bin/fm-watch-arm.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" node --input-type=module 2>&1 <<'EOF'
-import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-let tool = null;
-let prompt = "";
-const pi = {
-  on() {},
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  sendUserMessage: async (message) => {
-    prompt += message;
-  },
-};
-const lock = `${process.env.FM_HOME}/state/.lock`;
-writeFileSync(lock, `${process.pid}\n`);
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-await tool.execute("tool-call-lock-close", {}, undefined, undefined, {});
-const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-try {
-  writeFileSync(lock, `${other.pid}\n`);
-  writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
-  for (let i = 0; i < 250 && !prompt.includes("no longer owns the lock"); i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-  if (rows.length !== 1) throw new Error(`successor launched after lock loss: ${rows.join(" | ")}`);
-  if (!prompt.includes("no longer owns the lock")) throw new Error(`missing lock-loss failure: ${prompt}`);
-} finally {
-  other.kill("SIGTERM");
-}
-EOF
-  )
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" \
+    node "$ROOT/tests/fixtures/pi-lock-loss-probe.mjs" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "Pi close handler must verify session-lock ownership before successor launch: $out"
   [ -z "$out" ] || fail "Pi close lock test printed output: $out"
@@ -2703,6 +2607,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_close_without_opt_in_uses_manual_drain_fallback
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_with_main_owned_queue_row_stays_on_main

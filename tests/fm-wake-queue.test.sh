@@ -219,6 +219,7 @@ test_drain_dedupes_obvious_duplicates() {
   dir=$(make_case dedupe)
   state="$dir/state"
   out="$dir/drain.out"
+  : > "$state/task.status"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "first heartbeat append failed"
   append_wake "$state" signal task.status "signal: $state/task.status" || fail "first signal append failed"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "second heartbeat append failed"
@@ -231,27 +232,8 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
-# The drain runs at the top of every wake-handling turn, so it also asserts
-# watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
-# plain drain-and-handle turn that runs no other supervision script. It must warn
-# when work is in flight with no live watcher, and stay silent right after a
-# normal fire from a live watcher with a fresh beacon, so it never false-alarms.
-test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
-  local dir state sub fakebin out row_before row_after stall_count
-  dir=$(make_case secondmate-foreign-stall)
-  state="$dir/state"
-  sub="$dir/secondmate"
-  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
-  printf '# Firstmate\n' > "$sub/AGENTS.md"
-  printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
-    "$sub" > "$state/mate.meta"
-  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
-  row_before="$dir/foreign-before"
-  row_after="$dir/foreign-after"
-  cp "$sub/state/.wake-queue" "$row_before"
-  fakebin="$dir/fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+write_foreign_stall_tmux() { # <fakebin>
+  cat > "$1/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
@@ -260,61 +242,84 @@ case "${1:-}" in
   *) exit 0 ;;
 esac
 SH
-  chmod +x "$fakebin/tmux"
-  out="$dir/watch.out"
+  chmod +x "$1/tmux"
+}
 
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
-    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$out" 2> "$dir/watch.err" || true
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
-    || fail "an aged foreign row did not wake the parent checkpoint: $(cat "$out"); err=$(cat "$dir/watch.err"); meta=$(cat "$state/mate.meta"); foreign=$(cat "$sub/state/.wake-queue")"
-  [ -s "$state/.wake-queue" ] || fail "the parent notification was not durable"
-  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+prepare_foreign_stall_case() { # <dir> <state> <secondmate> <fakebin>
+  local epoch
+  mkdir -p "$3/state" "$3/data" "$3/bin"
+  printf '# Firstmate\n' > "$3/AGENTS.md"
+  printf 'mate\n' > "$3/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$3" > "$2/mate.meta"
+  epoch=$(( $(date +%s) - 10 ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$3/state/.wake-queue"
+  cp "$3/state/.wake-queue" "$1/foreign-before"
+  write_foreign_stall_tmux "$4"
+}
+
+run_foreign_stall_checkpoint() { # <dir> <state> <fakebin> <threshold> <seconds> <label>
+  PATH="$3:$PATH" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$2" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' FM_FAKE_TMUX_LOG="$1/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$1/fake-tmux/pane.txt" FM_SECONDMATE_WAKE_STALL_SECS="$4" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$5" >> "$1/$6.out" 2>> "$1/$6.err" || true
+}
+
+run_first_foreign_stall_checkpoint() { # <dir> <state> <fakebin>
+  : > "$1/watch.out"; : > "$1/watch.err"
+  run_foreign_stall_checkpoint "$1" "$2" "$3" 1 8 watch
+}
+
+assert_foreign_stall_publication() { # <dir> <state> <secondmate>
+  local stall_count
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$1/watch.out" >/dev/null \
+    || fail "an aged foreign row did not wake the parent checkpoint: $(cat "$1/watch.out"); err=$(cat "$1/watch.err"); meta=$(cat "$2/mate.meta"); foreign=$(cat "$3/state/.wake-queue")"
+  [ -s "$2/.wake-queue" ] || fail "the parent notification was not durable"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$2/.wake-queue" || true)
   [ "$stall_count" -eq 1 ] || fail "the first parent checkpoint did not publish exactly one stall notification"
-
-  cmp -s "$row_before" "$sub/state/.wake-queue" \
+  cmp -s "$1/foreign-before" "$3/state/.wake-queue" \
     || fail "foreign queue row changed during read-only stall detection"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+  FM_STATE_OVERRIDE="$2" "$DRAIN" > "$1/drain.out" 2> "$1/drain.err" \
     || fail "parent drain failed after the stall notification"
-  ack_drain_err "$state" "$dir/drain.err" \
-    || fail "parent stall notification could not be acknowledged"
+  ack_drain_err "$2" "$1/drain.err" || fail "parent stall notification could not be acknowledged"
+}
 
-  sleep 1
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
-    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-second.out" 2> "$dir/watch-second.err" || true
-  [ ! -s "$state/.wake-queue" ] || {
-    stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+assert_foreign_stall_is_one_shot() { # <dir> <state> <secondmate> <fakebin>
+  local stall_count
+  sleep 1; : > "$1/watch-second.out"; : > "$1/watch-second.err"
+  run_foreign_stall_checkpoint "$1" "$2" "$4" 1 2 watch-second
+  if [ -s "$2/.wake-queue" ]; then
+    stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$2/.wake-queue" || true)
     [ "$stall_count" -eq 0 ] || fail "repeated checkpoint re-published the same stall notification"
-  }
-  cp "$sub/state/.wake-queue" "$row_after"
-  cmp -s "$row_before" "$row_after" || fail "foreign queue changed after idempotent re-check"
+  fi
+  cp "$3/state/.wake-queue" "$1/foreign-after"
+  cmp -s "$1/foreign-before" "$1/foreign-after" || fail "foreign queue changed after idempotent re-check"
+}
 
-  : > "$sub/state/.wake-queue"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
-    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-empty.out" 2> "$dir/watch-empty.err" || true
-  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-empty.out" >/dev/null \
+assert_foreign_stall_quiet_cases() { # <dir> <state> <secondmate> <fakebin>
+  : > "$3/state/.wake-queue"; : > "$1/watch-empty.out"; : > "$1/watch-empty.err"
+  run_foreign_stall_checkpoint "$1" "$2" "$4" 1 2 watch-empty
+  ! grep -F 'secondmate wake-loop stalled' "$1/watch-empty.out" >/dev/null \
     || fail "an empty foreign queue produced a stall notification"
-
-  printf '%s\t8\tcheck\thealthy\tcheck: healthy row\n' "$(date +%s)" > "$sub/state/.wake-queue"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
-    FM_SECONDMATE_WAKE_STALL_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=0 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-healthy.out" 2> "$dir/watch-healthy.err" || true
-  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-healthy.out" >/dev/null \
+  printf '%s\t8\tcheck\thealthy\tcheck: healthy row\n' "$(date +%s)" > "$3/state/.wake-queue"
+  : > "$1/watch-healthy.out"; : > "$1/watch-healthy.err"
+  run_foreign_stall_checkpoint "$1" "$2" "$4" 60 2 watch-healthy
+  ! grep -F 'secondmate wake-loop stalled' "$1/watch-healthy.out" >/dev/null \
     || fail "a healthy foreign queue produced a stall notification"
+}
+
+# The existing signal-checkpoint convention gives startup and one poll one
+# bounded eight-second window while preserving a single public checkpoint.
+test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
+  local dir state sub fakebin
+  dir=$(make_case secondmate-foreign-stall); state="$dir/state"
+  sub="$dir/secondmate"; fakebin="$dir/fakebin"
+  prepare_foreign_stall_case "$dir" "$state" "$sub" "$fakebin"
+  run_first_foreign_stall_checkpoint "$dir" "$state" "$fakebin"
+  assert_foreign_stall_publication "$dir" "$state" "$sub"
+  assert_foreign_stall_is_one_shot "$dir" "$state" "$sub" "$fakebin"
+  assert_foreign_stall_quiet_cases "$dir" "$state" "$sub" "$fakebin"
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
@@ -463,19 +468,16 @@ test_drain_asserts_watcher_liveness() {
   pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
 }
 
-test_structural_signal_enrichment_preserves_raw_rows() {
-  local dir state out expected actual annotation_count outside perl_bin
-  dir=$(make_case enrichment)
-  state="$dir/state"
-  out="$dir/drain.out"
-  expected="$dir/expected.out"
-  actual="$dir/actual.out"
-  outside="$dir/outside-secret"
+setup_structural_enrichment_fixture() {
+  local state=$1 outside=$2
   printf 'working: first\n\ndone: latest event\n' > "$state/task.status"
   printf 'working: old turn-end context\n' > "$state/turn-only.status"
   printf 'must-not-be-read\n' > "$outside"
   ln -s "$outside" "$state/escape.status"
-  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+}
+
+install_enrichment_perl_swap() {
+  local dir=$1
   cat > "$dir/fakebin/perl" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
@@ -490,7 +492,10 @@ fi
 exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
 SH
   chmod +x "$dir/fakebin/perl"
+}
 
+append_structural_enrichment_wakes() {
+  local state=$1 outside=$2
   append_wake "$state" signal task.status "signal: $outside" || fail "direct status wake append failed"
   append_wake "$state" signal task.turn-ended "signal: $outside" || fail "coalesced turn-end wake append failed"
   append_wake "$state" signal turn-only.turn-ended "signal: $outside" || fail "bare turn-end wake append failed"
@@ -499,15 +504,25 @@ SH
   append_wake "$state" check task.check.sh "check: complete payload" || fail "check wake append failed"
   append_wake "$state" stale test:fm-task "stale: test:fm-task" || fail "stale wake append failed"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat wake append failed"
+}
 
+run_structural_enrichment_drain() {
+  local dir=$1 state=$2 outside=$3 perl_bin=$4 status=0
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
+    "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$dir/expected.out"
+  cp "$state/.wake-queue" "$dir/queue.before"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
-    FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
-    || fail "structural enrichment drain failed"
-  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
-  cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
+    FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" \
+    "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" || status=$?
+  [ "$status" -ne 0 ] || fail "changed status identity published a structural enrichment ACK"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null && fail "changed status identity exposed an ACK"
+  cmp -s "$dir/queue.before" "$state/.wake-queue" || fail "changed status identity mutated the queue"
+}
 
+assert_structural_enrichment_output() {
+  local dir=$1 out=$2 annotation_count
+  awk -F '\t' 'NF == 5 { print }' "$out" > "$dir/actual.out"
+  cmp -s "$dir/expected.out" "$dir/actual.out" || fail "enrichment changed or reordered an authoritative raw row"
   annotation_count=$(grep -c '^wake annotation:' "$out" || true)
   [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
   if grep -E '^wake annotation:.*: task\.status:' "$out" >/dev/null; then
@@ -518,6 +533,19 @@ SH
   if grep -F 'must-not-be-read' "$out" >/dev/null; then
     fail "drain trusted a payload path or followed an out-of-state status symlink"
   fi
+}
+
+test_structural_signal_enrichment_preserves_raw_rows() {
+  local dir state outside perl_bin
+  dir=$(make_case enrichment)
+  state="$dir/state"
+  outside="$dir/outside-secret"
+  setup_structural_enrichment_fixture "$state" "$outside"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  install_enrichment_perl_swap "$dir"
+  append_structural_enrichment_wakes "$state" "$outside"
+  run_structural_enrichment_drain "$dir" "$state" "$outside" "$perl_bin"
+  assert_structural_enrichment_output "$dir" "$dir/drain.out"
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
@@ -577,31 +605,48 @@ wait_for_file_text() {  # <file> <fixed-text>
   return 1
 }
 
-test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
-  local dir state out1 out2 pid
-  dir=$(make_case slow-annotation)
-  state="$dir/state"
-  out1="$dir/drain-one.out"
-  out2="$dir/drain-two.out"
+start_slow_annotation_drain() {
+  local dir=$1 state=$2
   printf 'done: disappears before bounded read\n' > "$state/slow.status"
   append_wake "$state" signal slow.status "signal: slow" || fail "slow status wake append failed"
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=3 "$DRAIN" \
+    > "$dir/drain-one.out" 2> "$dir/drain-one.err" &
+}
 
-  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=3 "$DRAIN" > "$out1" &
-  pid=$!
-  wait_for_file_text "$out1" "$(printf '\tsignal\tslow.status\t')" \
+append_during_slow_annotation() {
+  local dir=$1 state=$2 pid=$3
+  wait_for_file_text "$dir/drain-one.out" "$(printf '\tsignal\tslow.status\t')" \
     || { kill "$pid" 2>/dev/null || true; fail "slow drain did not commit its raw row"; }
   printf 'done: appended while first drain annotates\n' > "$state/next.status"
   append_wake "$state" signal next.status "signal: next" || fail "append blocked or failed during annotation"
+  cp "$state/.wake-queue" "$dir/queue.before"
   kill -0 "$pid" 2>/dev/null || fail "slow annotation finished before the concurrent append proved lock independence"
+}
+
+assert_deleted_status_withholds_ack() {
+  local dir=$1 state=$2 pid=$3 out
+  out=$dir/drain-one.out
   rm -f "$state/slow.status"
-  wait "$pid" || fail "deleted status file made the committed drain fail"
-  grep -F "$(printf '\tsignal\tslow.status\t')" "$out1" >/dev/null || fail "deleted status file hid the committed raw row"
-  if grep -F ': slow.status:' "$out1" >/dev/null; then
+  wait "$pid" && fail "deleted status file published an ACK without a committable cursor"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain-one.err" >/dev/null && fail "deleted status file exposed an ACK"
+  cmp -s "$dir/queue.before" "$state/.wake-queue" || fail "deleted status file mutated the durable queue"
+  grep -F "$(printf '\tsignal\tslow.status\t')" "$out" >/dev/null || fail "deleted status file hid the committed raw row"
+  if grep -F ': slow.status:' "$out" >/dev/null; then
     fail "status deleted during annotation still produced an annotation"
   fi
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "follow-up drain after concurrent append failed"
-  grep -F "$(printf '\tsignal\tnext.status\t')" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
-  pass "slow annotation releases the append lock and a deleted status file fails open"
+}
+
+test_slow_annotation_does_not_block_append_and_deleted_file_withholds_ack() {
+  local dir state pid
+  dir=$(make_case slow-annotation)
+  state="$dir/state"
+  start_slow_annotation_drain "$dir" "$state"
+  pid=$!
+  append_during_slow_annotation "$dir" "$state" "$pid"
+  assert_deleted_status_withholds_ack "$dir" "$state" "$pid"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-two.out" || fail "follow-up drain after concurrent append failed"
+  grep -F "$(printf '\tsignal\tnext.status\t')" "$dir/drain-two.out" >/dev/null || fail "concurrent append was not left for the next drain"
+  pass "slow annotation releases the append lock and a deleted status file withholds ACK"
 }
 
 # Per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement").
@@ -1215,7 +1260,7 @@ test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
-test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_slow_annotation_does_not_block_append_and_deleted_file_withholds_ack
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_grant_refuses_rows_already_claimed_by_main

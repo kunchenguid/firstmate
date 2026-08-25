@@ -2329,6 +2329,17 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_supervision_blocks_describe_conditional_wake_context() {
+  local home="$TMP_ROOT/conditional-supervision" harness out
+  mkdir -p "$home/config"
+  for harness in claude codex pi; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-supervision-instructions.sh" --harness "$harness")
+    assert_contains "$out" "config/wake-context-presentation" "$harness supervision omitted the opt-in"
+    assert_contains "$out" "otherwise follow the fallback and drain once" "$harness supervision omitted the default-off path"
+  done
+  pass "supported wake-context harnesses describe enabled and default-off handling"
+}
+
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
   local rec root home fakebin out
   rec=$(new_world pi-signed-supervision-block)
@@ -2490,6 +2501,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_supervision_blocks_describe_conditional_wake_context
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker

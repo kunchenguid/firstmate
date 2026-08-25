@@ -34,6 +34,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Wake-context presentation (config/wake-context-presentation)
+
+The optional local, gitignored `config/wake-context-presentation` presence flag enables enriched `fm-wake-context.v1` packets for actionable Claude and Codex wakes and Pi wakes that remain on the captain-facing path.
+The effective config directory is `FM_CONFIG_OVERRIDE` when set, otherwise `$FM_HOME/config`.
+The flag must be a regular non-symlinked file, and an absent or unsafe flag keeps enriched presentation off by default.
+On those presentation paths, when disabled and no previously published packet remains unacknowledged, adapters preserve the actionable wake and direct the primary to one ordinary `bin/fm-wake-drain.sh` presentation without creating a wake-context cache, staged cursor, fallback receipt, or acknowledgement.
+A packet already published before the flag is removed remains the sole transaction and replays byte-identically until its exact acknowledgement retires it, including after a new wake or an attempted manual drain.
+This preference belongs to one Firstmate home and is not inherited into secondmate homes, so enabling one home never broadens the captain's grant implicitly.
+
 ## Pi supervision branch
 
 On a Pi primary, a persistent in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, mixed-queue dispatch, heartbeat routing, and the pre-drain recheck.
@@ -671,6 +680,8 @@ FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=10   # aggregate seconds for the drain and projection collection after preflight; zero or invalid values use 10
+FM_WAKE_CONTEXT_BACKEND_TIMEOUT=3   # maximum seconds per local backend liveness probe, capped by the remaining aggregate collection budget; zero or invalid values use 3
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code

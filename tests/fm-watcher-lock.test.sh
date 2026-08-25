@@ -459,50 +459,80 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
-test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer_ready peer identity armpid status i
-  dir=$(make_case restart-healthy-peer)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/restart.out"
-  peer_ready="$dir/peer.ready"
+write_failing_recovery_mv() { # <path>
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+target=; for target do :; done
+case "$target" in */.watcher-down) exit 1 ;; *) exec "$FM_TEST_REAL_MV" "$@" ;; esac
+SH
+  chmod +x "$1"
+}
+
+test_recovery_failure_retains_watcher_lock() {
+  local dir state fakebin real_mv status=0
+  dir=$(make_case recovery-fail-closed); state="$dir/state"; fakebin="$dir/fakebin"
   mark_pr_check_migration_complete "$state"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
-  peer=$!
-  i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ ! -s "$peer_ready" ]; then
-    kill -KILL "$peer" 2>/dev/null || true
-    wait "$peer" 2>/dev/null || true
+  printf 'announced:downtime:fixture-generation\n' > "$state/.watcher-down"
+  real_mv=$(command -v mv); write_failing_recovery_mv "$fakebin/mv"
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_STATE_OVERRIDE="$state" \
+    "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher ignored a failed recovery publication"
+  grep -F 'retaining stale lock evidence' "$dir/watch.err" >/dev/null || fail "watcher hid its fail-closed recovery result"
+  [ -s "$state/.watch.lock/pid" ] || fail "recovery failure released the stale watcher lock evidence"
+  pass "watcher recovery failure retains stale lock evidence"
+}
+
+start_term_resistant_peer() { # <ready-file>
+  local i=0
+  perl -e '$SIG{TERM} = "IGNORE"; open my $fh, ">", $ARGV[0] or die $!; print {$fh} "ready\n"; close $fh; sleep 300' "$1" &
+  FM_TEST_HEALTHY_PEER=$!
+  while [ "$i" -lt 50 ] && [ ! -s "$1" ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -s "$1" ]; then
+    kill -KILL "$FM_TEST_HEALTHY_PEER" 2>/dev/null || true
+    wait "$FM_TEST_HEALTHY_PEER" 2>/dev/null || true
     fail "TERM-resistant peer did not become ready"
   fi
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
-  armpid=$!
-  i=0
+}
+
+seed_healthy_peer_lock() { # <dir> <state> <peer> <identity>
+  mkdir "$2/.watch.lock"
+  printf '%s\n' "$3" > "$2/.watch.lock/pid"
+  printf '%s\n' "$1" > "$2/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$2/.watch.lock/watcher-path"
+  printf '%s\n' "$4" > "$2/.watch.lock/pid-identity"
+  touch "$2/.last-watcher-beat"
+}
+
+wait_for_healthy_peer_attachment() { # <output> <peer>
+  local i=0
   while [ "$i" -lt 80 ]; do
-    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
+    grep -qF "watcher: attached pid=$2" "$1" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
-  is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
-  is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
-  kill -KILL "$peer" 2>/dev/null || true
-  wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
-  status=$?
+  grep -qF "watcher: attached pid=$2" "$1" || fail "restart did not attach to the verified healthy peer: $(cat "$1")"
+}
+
+finish_healthy_peer_attachment() { # <output> <peer> <arm-pid>
+  local status
+  is_live_non_zombie "$3" || fail "restart arm exited instead of following the healthy peer"
+  is_live_non_zombie "$2" || fail "restart killed a TERM-resistant peer unexpectedly"
+  kill -KILL "$2" 2>/dev/null || true; wait "$2" 2>/dev/null || true
+  wait_for_exit "$3" 80; status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$1" || fail "restart arm did not surface the attached cycle end"
+}
+
+test_watch_restart_attaches_to_healthy_peer() {
+  local dir state fakebin out identity peer armpid
+  dir=$(make_case restart-healthy-peer); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/restart.out"
+  mark_pr_check_migration_complete "$state"; start_term_resistant_peer "$dir/peer.ready"; peer=$FM_TEST_HEALTHY_PEER
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  seed_healthy_peer_lock "$dir" "$state" "$peer" "$identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
+  armpid=$!; wait_for_healthy_peer_attachment "$out" "$peer"
+  finish_healthy_peer_attachment "$out" "$peer" "$armpid"
   pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
@@ -1138,6 +1168,7 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
+test_recovery_failure_retains_watcher_lock
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor

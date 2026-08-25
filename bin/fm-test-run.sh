@@ -130,13 +130,11 @@ now_ms() {
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
 # unclassified so new tests are still runnable and visible in summaries.
-family_for_basename() {
+family_is_pure_contract_unit() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
-    fm-bearings-board.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
-    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
-    fm-classify-decision-key.test.sh|\
+    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
@@ -148,28 +146,40 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
-      printf '%s\n' pure-contract-unit
-      ;;
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_watcher_wake_lock() {
+  case "$1" in
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-drain-unread-status.test.sh|\
+    fm-wake-context.test.sh|fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
-    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
-      printf '%s\n' watcher-wake-lock
-      ;;
+    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_real_herdr_gated() {
+  case "$1" in
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
-    fm-control-herdr-smoke.test.sh)
-      printf '%s\n' real-herdr-gated
-      ;;
+    fm-control-herdr-smoke.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_secondmate() {
+  case "$1" in
     fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-remote-job-orphan-reap.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
@@ -177,14 +187,22 @@ family_for_basename() {
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
-    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
-      printf '%s\n' secondmate
-      ;;
+    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_session_bootstrap() {
+  case "$1" in
     fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
-    fm-tangle-guard.test.sh|fm-update.test.sh)
-      printf '%s\n' session-bootstrap
-      ;;
+    fm-tangle-guard.test.sh|fm-update.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_live_harness_optin() {
+  case "$1" in
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
@@ -198,9 +216,13 @@ family_for_basename() {
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh)
-      printf '%s\n' live-harness-optin
-      ;;
+    fm-herdr-submit-confirm-live-e2e.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_is_backend_dispatch() {
+  case "$1" in
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
@@ -208,31 +230,27 @@ family_for_basename() {
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
-    fm-teardown-endpoint-safety.test.sh)
-      printf '%s\n' backend-dispatch
-      ;;
-    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
-    fm-teardown.test.sh|fm-x-mode.test.sh)
-      printf '%s\n' pr-forge
-      ;;
-    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
-      printf '%s\n' afk
-      ;;
-    fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)
-      printf '%s\n' snapshot-bearings
-      ;;
-    fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
-      printf '%s\n' cmux
-      ;;
-    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
-      printf '%s\n' zellij
-      ;;
-    fm-backend-orca.test.sh)
-      printf '%s\n' orca
-      ;;
-    *)
-      printf '%s\n' unclassified
-      ;;
+    fm-teardown-endpoint-safety.test.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+family_for_basename() {
+  family_is_pure_contract_unit "$1" && { printf '%s\n' pure-contract-unit; return; }
+  family_is_watcher_wake_lock "$1" && { printf '%s\n' watcher-wake-lock; return; }
+  family_is_real_herdr_gated "$1" && { printf '%s\n' real-herdr-gated; return; }
+  family_is_secondmate "$1" && { printf '%s\n' secondmate; return; }
+  family_is_session_bootstrap "$1" && { printf '%s\n' session-bootstrap; return; }
+  family_is_live_harness_optin "$1" && { printf '%s\n' live-harness-optin; return; }
+  family_is_backend_dispatch "$1" && { printf '%s\n' backend-dispatch; return; }
+  case "$1" in
+    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh) printf '%s\n' pr-forge ;;
+    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh) printf '%s\n' afk ;;
+    fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh) printf '%s\n' snapshot-bearings ;;
+    fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh) printf '%s\n' cmux ;;
+    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh) printf '%s\n' zellij ;;
+    fm-backend-orca.test.sh) printf '%s\n' orca ;;
+    *) printf '%s\n' unclassified ;;
   esac
 }
 
@@ -382,9 +400,7 @@ list_portable_serial() {
 # only: the shard partition stays complete and disjoint whatever they say, so a
 # stale hint costs balance rather than coverage. That doc owns the refresh
 # procedure.
-portable_serial_weight_hints() {
-  cat <<'EOF'
-tests/fm-afk-inject-e2e.test.sh 35900
+PORTABLE_SERIAL_WEIGHT_HINTS='tests/fm-afk-inject-e2e.test.sh 35900
 tests/fm-afk-pi-herdr-return-e2e.test.sh 66
 tests/fm-afk-return.test.sh 3974
 tests/fm-ask-user-authority.test.sh 83
@@ -493,6 +509,7 @@ tests/fm-turnend-guard.test.sh 34915
 tests/fm-update.test.sh 5280
 tests/fm-vendor-auth-probe.test.sh 43243
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 6219
+tests/fm-wake-context.test.sh 1500
 tests/fm-wake-drain-open-decisions-cursor.test.sh 17357
 tests/fm-wake-drain-open-decisions.test.sh 11300
 tests/fm-wake-drain-unread-status.test.sh 25214
@@ -501,8 +518,10 @@ tests/fm-watch-arm.test.sh 53598
 tests/fm-watch-checkpoint.test.sh 5293
 tests/fm-watch-recovery-loop.test.sh 58721
 tests/fm-watch-triage.test.sh 142409
-tests/fm-watcher-lock.test.sh 54364
-EOF
+tests/fm-watcher-lock.test.sh 54364'
+
+portable_serial_weight_hints() {
+  printf '%s\n' "$PORTABLE_SERIAL_WEIGHT_HINTS"
 }
 
 portable_serial_weight_for() {

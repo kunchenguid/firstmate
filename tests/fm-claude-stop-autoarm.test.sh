@@ -22,24 +22,47 @@ ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
 
+write_autoarm_wake_context_fixture() {
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wake-context-presentation" ]; then
+  printf 'WAKE_CONTEXT_FALLBACK: automatic wake context is disabled; run bin/fm-wake-drain.sh once.\n'
+  exit 3
+fi
+if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
+  printf 'context fixture failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
+  exit 1
+fi
+if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
+  printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
+  printf 'durable Claude presentation\n'; printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
+  exit 1
+fi
+printf 'CLAUDE_CONTEXT_PACKET\n'
+SH
+}
+
+install_autoarm_wake_context_fixture() {
+  write_autoarm_wake_context_fixture "$1/bin/fm-wake-context.sh"
+  chmod +x "$1/bin/fm-wake-context.sh"
+}
+
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
-  local dir=$1
+  local dir=$1 script
   mkdir -p "$dir/bin"
-  cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
-  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
-  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
-  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
-  cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
+  for script in fm-claude-stop-autoarm.sh fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-lock.sh; do
+    cp "$ROOT/bin/$script" "$dir/bin/$script"
+  done
+  install_autoarm_wake_context_fixture "$dir"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
 }
 
 make_primary_dir() {
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state" "$dir/config"
+  : > "$dir/config/wake-context-presentation"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -339,12 +362,54 @@ test_actionable_close_rewakes_with_reason() {
   expect_code 2 "$status" "an actionable arm close must exit 2 so Claude rewakes"
   assert_contains "$out" "firstmate watcher wake" "rewake must carry the wake banner"
   assert_contains "$out" "stale: fixture-win actionable" "rewake must carry the arm's reason line"
-  assert_contains "$out" "bin/fm-wake-drain.sh" "rewake must direct the drain-first protocol"
+  assert_contains "$out" "CLAUDE_CONTEXT_PACKET" "rewake must attach the wake-context presentation"
+  assert_not_contains "$out" "bin/fm-wake-drain.sh" "attached packet must avoid a redundant drain"
   assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "rewake must forbid a duplicate model re-arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
+}
+
+test_actionable_close_without_opt_in_uses_manual_drain_fallback() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-default-off")
+  rm "$dir/config/wake-context-presentation"; : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "default-off context must preserve Claude's actionable rewake"
+  assert_contains "$out" "stale: fixture-win actionable" "default-off Claude wake lost its reason"
+  assert_contains "$out" "WAKE_CONTEXT_FALLBACK:" "default-off Claude wake lost its manual-drain fallback"
+  assert_not_contains "$out" "CLAUDE_CONTEXT_PACKET" "default-off Claude wake attached enriched context"
+  assert_not_contains "$out" "WAKE_ACK_REQUIRED" "default-off Claude wake exposed an acknowledgement"
+  [ "$(printf '%s\n' "$out" | grep -c 'WAKE_CONTEXT_FALLBACK:')" -eq 1 ] || fail "Claude duplicated the default-off fallback: $out"
+  pass "auto-arm: default-off wake context preserves one actionable Claude fallback"
+}
+
+test_actionable_close_surfaces_context_fallback() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-context-fallback")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(FM_WAKE_CONTEXT_FIXTURE_FAIL=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "context failure must preserve Claude's actionable rewake"
+  assert_contains "$out" "context fixture failed on stderr" "Claude dropped context stderr"
+  assert_contains "$out" "WAKE_CONTEXT_FALLBACK:" "Claude omitted the canonical context fallback"
+  [ "$(printf '%s\n' "$out" | grep -c 'WAKE_CONTEXT_FALLBACK:')" -eq 1 ] || fail "Claude duplicated the canonical fallback: $out"
+  pass "auto-arm: Claude delivers context stderr and canonical fallback"
+}
+
+test_actionable_close_relays_post_presentation_result() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-context-presented")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "post-presentation context failure must preserve Claude's actionable rewake"
+  assert_contains "$out" "WAKE_CONTEXT_PRESENTED:" "Claude dropped the common post-presentation result"
+  assert_contains "$out" "--ack-through 7 --recovery-generation fixture-7" "Claude dropped the durable acknowledgement"
+  assert_not_contains "$out" "WAKE_CONTEXT_FALLBACK:" "Claude requested a second drain after durable presentation"
+  pass "auto-arm: Claude relays post-presentation result without re-drain"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -795,6 +860,9 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_actionable_close_without_opt_in_uses_manual_drain_fallback
+test_actionable_close_surfaces_context_fallback
+test_actionable_close_relays_post_presentation_result
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

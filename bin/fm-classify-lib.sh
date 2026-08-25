@@ -574,116 +574,113 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
-  local target_cursor
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
-  cf=$(_fm_open_decisions_cursor_path "$f")
-  offset=0
-  ident=''
+_fm_open_decisions_parse_identity() {
+  case "$rest" in *$'\n'*) rest=${rest#*$'\n'} ;; *) offset=0; version=''; return ;; esac
+  ident_line=${rest%%$'\n'*}
+  case "$ident_line" in
+    ident=*)
+      ident=${ident_line#ident=}
+      case "$rest" in *$'\n'*) open=${rest#*$'\n'} ;; esac
+      if [ -n "$version" ] && [ -n "$ident" ]; then trusted_open=$open; fi
+      ;;
+    *) offset=0; version='' ;;
+  esac
+}
+
+_fm_open_decisions_parse_cursor() {
+  [ -n "${cursor_data:-}" ] || return 0
+  first=${cursor_data%%$'\n'*}
+  case "$first" in
+    version=*) version=${first#version=} ;;
+    *) return ;;
+  esac
+  [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
+  rest=${cursor_data#*$'\n'}
+  offset_line=${rest%%$'\n'*}
+  case "$offset_line" in offset=*) offset=${offset_line#offset=} ;; *) offset=0; version=''; return ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0; version=''; return ;; esac
+  _fm_open_decisions_parse_identity
+}
+
+_fm_open_decisions_read_cursor() {
+  cursor_data=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
     cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) || cursor_data=''
   fi
-  if [ -n "${cursor_data:-}" ]; then
-      first=${cursor_data%%$'\n'*}
-      case "$first" in
-        version=*)
-          version=${first#version=}
-          [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
-          rest=${cursor_data#*$'\n'}
-          offset_line=${rest%%$'\n'*}
-          case "$offset_line" in
-            offset=*) offset=${offset_line#offset=} ;;
-            *) offset=0; version='' ;;
-          esac
-          case "$offset" in
-            ''|*[!0-9]*) offset=0; version='' ;;
-            *)
-              case "$rest" in
-                *$'\n'*)
-                  rest=${rest#*$'\n'}
-                  ident_line=${rest%%$'\n'*}
-                  case "$ident_line" in
-                    ident=*)
-                      ident=${ident_line#ident=}
-                      case "$rest" in
-                        *$'\n'*) open=${rest#*$'\n'} ;;
-                      esac
-                      if [ -n "$version" ] && [ -n "$ident" ]; then trusted_open=$open; fi
-                      ;;
-                    *) offset=0; version='' ;;
-                  esac
-                  ;;
-                *) offset=0; version='' ;;
-              esac
-              ;;
-          esac
-          ;;
-      esac
-  fi
+  _fm_open_decisions_parse_cursor
+}
 
-  # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
-  # report the already-trusted persisted set unchanged rather than risking a
-  # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(_fm_status_file_size "$f") \
-    || { printf '%s' "$trusted_open"; return 0; }
+_fm_open_decisions_measure() {
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$cur_ident" ] || return 1
+  actual_size=$(_fm_status_file_size "$f") || return 1
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$actual_size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -n "$captured_end" ]; then
-    case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
-    esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    case "$captured_end" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$captured_end" -le "$actual_size" ] || return 1
     size=$captured_end
   else
     size=$actual_size
   fi
+}
 
+_fm_open_decisions_reset_rotated_cursor() {
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
     cursor_dirty=1
   fi
+}
 
+_fm_open_decisions_read_chunk() {
+  chunk_file="$cf.read.$$"
+  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null || { rm -f "$chunk_file"; return 1; }
+  chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) || { rm -f "$chunk_file"; return 1; }
+  chunk_size=${chunk_size//[[:space:]]/}
+  case "$chunk_size" in ''|*[!0-9]*) rm -f "$chunk_file"; return 1 ;; esac
+  [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
+    && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+  return 0
+}
+
+_fm_open_decisions_fold_chunk() {
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  offset=$size
+  cursor_dirty=1
+}
+
+_fm_open_decisions_commit_cursor() {
+  [ "$cursor_dirty" -eq 1 ] && [ "${FM_WAKE_CONTEXT_NONMUTATING:-0}" != 1 ] || return 0
+  target_cursor="$cf.tmp.$$"
+  {
+    printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
+    printf 'offset=%s\n' "$offset"
+    printf 'ident=%s\n' "$cur_ident"
+    if [ -n "$open" ]; then printf '%s' "$open"; fi
+  } > "$target_cursor" || return 1
+  mv -f "$target_cursor" "$cf"
+}
+
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset=0 ident='' open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0 target_cursor
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  _fm_open_decisions_read_cursor
+  _fm_open_decisions_measure || { printf '%s' "$trusted_open"; return 0; }
+  _fm_open_decisions_reset_rotated_cursor
   if [ "$offset" -lt "$size" ]; then
-    chunk_file="$cf.read.$$"
-    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=${chunk_size//[[:space:]]/}
-    case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
-    esac
-    # Test-only observability seam (off by default, no production behavior
-    # change): when set, records exactly how many bytes THIS call folded, so a
-    # test can assert the incremental path stays bounded by new appends rather
-    # than re-reading the whole file, without relying on timing or source text.
-    [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
-      && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
-    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-    while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-    done < "$chunk_file"
-    rm -f "$chunk_file"
-    offset=$size
-    cursor_dirty=1
+    _fm_open_decisions_read_chunk || { printf '%s' "$trusted_open"; return 0; }
+    _fm_open_decisions_fold_chunk
   fi
-  if [ "$cursor_dirty" -eq 1 ]; then
-    target_cursor="$cf.tmp.$$"
-    {
-      printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
-      printf 'offset=%s\n' "$offset"
-      printf 'ident=%s\n' "$cur_ident"
-      if [ -n "$open" ]; then printf '%s' "$open"; fi
-    } > "$target_cursor" || return 1
-    mv -f "$target_cursor" "$cf" || return 1
-  fi
+  _fm_open_decisions_commit_cursor || return 1
   printf '%s' "$open"
 }
 
@@ -866,28 +863,86 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
-  tmp="$state/.status-presentation-cursor.tmp.$$"
+_fm_status_snapshot_row_is_current() {  # <state> <task> <endpoint> <ident>
+  local state=$1 task=$2 endpoint=$3 ident=$4 f cur_ident size
+  case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$ident" ] || return 1
+  f="$state/$task.status"
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$cur_ident" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$cur_ident" = "$ident" ] || return 2
+  [ "$endpoint" -le "$size" ]
+}
+
+status_validate_presentation_snapshot() {  # <state> <snapshot>
+  local state=$1 snapshot=$2 task endpoint ident
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    _fm_status_snapshot_row_is_current "$state" "$task" "$endpoint" "$ident" || return
+  done <<EOF
+$snapshot
+EOF
+}
+
+status_commit_presentation_snapshot() {  # <state> <snapshot> [<target>]
+  local state=$1 snapshot=$2 target=${3:-$1/.status-presentation-cursor} task endpoint ident tmp rc
+  tmp="$target.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
-    case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
-    [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
-    f="$state/$task.status"
-    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
-    cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$tmp"; return 1; }
-    size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
-    size=${size//[[:space:]]/}
-    case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
-    [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
-      || { rm -f "$tmp"; return 1; }
+    _fm_status_snapshot_row_is_current "$state" "$task" "$endpoint" "$ident" \
+      || { rc=$?; rm -f "$tmp"; return "$rc"; }
     printf '%s\t%s\t%s\n' "$task" "$ident" "$endpoint" >> "$tmp" \
       || { rm -f "$tmp"; return 1; }
   done <<EOF
 $snapshot
 EOF
-  mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+}
+
+_fm_status_ensure_presentation_cursor() {  # <cursor>
+  local cursor=$1
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    [ -f "$cursor" ] && [ ! -L "$cursor" ]
+  else
+    : > "$cursor"
+  fi
+}
+
+_fm_status_write_live_idents() {  # <state> <idents>
+  local state=$1 idents=$2 f task ident
+  : > "$idents" || return 1
+  for f in "$state"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    task=${f##*/}; task=${task%.status}; ident=$(_fm_open_decisions_file_ident "$f") || continue
+    printf '%s\t%s\n' "$task" "$ident" >> "$idents"
+  done
+}
+
+_fm_status_merge_cursor_rows() {  # <idents> <staged> <cursor> <tmp>
+  awk -F '\t' 'FILENAME == ARGV[1] { live[$1] = $2; next }
+    FILENAME == ARGV[2] { staged[$1] = $0; next }
+    { split(staged[$1], fields, FS); if ($1 in staged && fields[2] == live[$1]) { if (fields[2] == $2 && fields[3] + 0 < $3 + 0) print; else print fields[1] FS fields[2] FS fields[3]; delete staged[$1] } else print }
+    END { for (task in staged) { split(staged[task], fields, FS); if (fields[2] == live[task]) print staged[task] } }' "$1" "$2" "$3" > "$4"
+}
+
+status_merge_presentation_cursor() {  # <state> <staged-cursor>
+  local state=$1 staged=$2 cursor lock tmp idents
+  cursor="$state/.status-presentation-cursor"; lock="$state/.status-presentation-lock"
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp="$cursor.tmp.$$"; idents="$tmp.idents"
+  _fm_status_ensure_presentation_cursor "$cursor" || { fm_lock_release "$lock"; return 1; }
+  _fm_status_write_live_idents "$state" "$idents" || { fm_lock_release "$lock"; return 1; }
+  if ! _fm_status_merge_cursor_rows "$idents" "$staged" "$cursor" "$tmp" || ! mv -f "$tmp" "$cursor"; then
+    rm -f "$tmp" "$idents"; fm_lock_release "$lock"; return 1
+  fi
+  rm -f "$idents"
+  fm_lock_release "$lock"
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
