@@ -70,7 +70,9 @@ A merged PR and a torn-down task both move the anchor; ordinary progress on the 
 A fleet-wide outcome carries no task-local claim and is never treated as stale.
 
 Both delivery paths apply it.
-The extension queues every note through one delivery boundary and re-checks it immediately before handoff, either synchronously while main remains idle or at an idle-confirmed `agent_settled` event after a running turn: a stale `routine` note is dropped, because it is noise by definition and the durable row still holds it for `fm_branch_outcomes`, while a stale `captain` note still opens its one turn - suppressing it could bury a real terminal result - carrying an explicit supersession marker that sends main back to the task's current state instead of the recorded claim.
+The extension queues every note through one delivery boundary and re-checks it immediately before handoff, either synchronously while main remains idle or at an idle-confirmed `agent_settled` event after a running turn: a `routine` note found stale is dropped, because it is noise by definition and the durable row still holds it for `fm_branch_outcomes`, while a `captain` note found stale still opens its one turn - suppressing it could bury a real terminal result - carrying an explicit supersession marker that sends main back to the task's current state instead of the recorded claim.
+The anchor read and the handoff are not atomic, so an anchor-mutating transition in that instant can still let one already-checked note through.
+This accepted residual follows the same confused-agent-grade boundary as the producer/drain residual above rather than claiming adversarial isolation, and it bounds the exposure to that instant instead of the whole captain turn that produced the reported failure.
 The locked session-start replay applies the same check to rows that never reached a handoff at all, emitting a stale row with `"superseded":true` added rather than relaying it as current; the stored line is never rewritten.
 An anchor that cannot be computed is empty and never reads as stale, so an unverifiable claim is delivered unchanged rather than suppressed.
 

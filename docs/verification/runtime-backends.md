@@ -949,10 +949,10 @@ The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [do
 
 Evidence produced 2026-08-24 on macOS 15.7.3 arm64, Node v26.5.0, signed `pi` CLI 0.84.3:
 
-- Real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.84.3 printed `ok - real Pi SDK 0.84.3 accepts the branch session construction, preserves an unpromptable wake, and never starts a turn it does not end`.
+- Real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.84.3 printed `ok - real Pi SDK 0.84.3 accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn`.
   The guard reads no credentials and makes no provider call: an isolated empty `PI_CODING_AGENT_DIR` leaves model resolution empty, so the branch's first prompt fails fast and must prove the fallback that returns the wake to main.
-  The same emptiness is what the held-note clause pins: a prompt the SDK refuses to run emitted neither `agent_start` nor `agent_end`/`agent_settled` through handlers the real `DefaultResourceLoader` wired, so a turn cannot start without an end and a note held mid-turn cannot be stranded.
-  Measured limit of that clause on 0.84.3: with no credentials the SDK delivers no extension event at all, so this guard pins the refused-turn case and the wiring, not a completed turn's own end emission.
+  The same emptiness is what the held-note clause measures: a prompt the SDK refuses to run emitted neither `agent_start` nor `agent_end`/`agent_settled` through handlers the real `DefaultResourceLoader` wired.
+  Measured limit of that clause on 0.84.3: with no credentials the SDK delivers no extension event at all, so this guard pins the refused-turn case and the wiring, not a successfully started turn's own end emission.
 - Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3` with the branch extension and dispatch lib included; it is what pins the `agent_end`/`agent_settled` event names against the installed package.
 
 Scope of this evidence: the installed signed `pi` CLI (0.84.3 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
