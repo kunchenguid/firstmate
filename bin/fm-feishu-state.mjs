@@ -825,6 +825,8 @@ function validateRecordAtPath(path, record) {
     requireSafeInteger(record.reconnects, "transport reconnect count");
     for (const [key, label] of [["last_connected_at", "connection"], ["last_identity_verified_at", "identity verification"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
     if (record.last_error_type !== null && typeof record.last_error_type !== "string") throw new Error("invalid Feishu transport health error");
+    if (record.recovery_class !== undefined && record.recovery_class !== null && !new Set(["retryable", "terminal"]).has(record.recovery_class)) throw new Error("invalid Feishu transport process recovery class");
+    if (record.recovery_class && !new Set(["degraded", "stopped"]).has(record.phase)) throw new Error("active Feishu transport health has a process recovery class");
     requireIso(record.updated_at, "transport update time");
   }
   return record;
@@ -3249,6 +3251,7 @@ export function writeTransportHealth(home, patch) {
     last_connected_at: patch.lastConnectedAt ?? prior?.last_connected_at ?? null,
     last_identity_verified_at: patch.lastIdentityVerifiedAt ?? prior?.last_identity_verified_at ?? null,
     last_error_type: patch.lastErrorType ?? null,
+    recovery_class: patch.recoveryClass ?? null,
     updated_at: nowIso(),
   };
   validateRecordAtPath(paths.health, health);

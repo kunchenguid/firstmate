@@ -99,6 +99,7 @@ Automatic startup invokes `bin/fm-feishu-transport.sh` for configuration validat
 `bin/fm-feishu-transport.sh stop` signals only the exact owner process after home, module, nonce, PID incarnation, and process-title verification.
 `bin/fm-feishu-transport.sh restart` performs the same controlled stop followed by start.
 `bin/fm-feishu-transport.sh status` prints a body-free and identifier-free health summary.
+While an enabled exact binding still has its trusted live Pi owner, an ownerless stopped transport is eligible for automatic process recovery; use `/fm-feishu-disable`, not transport-only stop, to keep the channel disabled.
 
 The transport creates one SDK `WSClient` and one `EventDispatcher` for `im.message.receive_v1`.
 It uses one SDK `Client` for P2P chat verification, inbound `messageResource.get` downloads, and canonical outbound post `message.create` calls to the bound chat.
@@ -114,6 +115,14 @@ One recovery episode has one five-minute deadline by default, configurable as a 
 Expiry becomes the distinct terminal `sdk-recovery-timeout` outcome, closes the client, and releases the owner instead of leaving a falsely live process.
 Structured authentication or authorization failures, configuration or ownership fence loss, reconnect identity failure, and durable event-handoff failure remain terminal rather than entering recovery.
 Connection diagnostics retain only bounded error kinds: HTTP status, non-negative numeric SDK code, or fixed structural categories for common connection failures.
+
+If that dedicated process terminates or releases ownership after a retryable terminal outcome, the existing Pi bridge enters the credential-blind lifecycle recovery boundary without replacing the SDK reconnect state machine.
+The first replacement attempt waits one second, later retryable failures use exponential delay capped at 60 seconds, and one process-local single-flight continues while the exact current Pi session remains active.
+Every attempt revalidates the unchanged protected configuration identity, Firstmate session lock, exact binding and generation, current live Pi owner, absence of a conflicting transport owner, app authentication, and P2P chat before starting one replacement.
+Backoff resets only after the replacement health record and owner record agree on the new PID incarnation, nonce, process-start token, configuration identity, exact binding generation, and a fresh successful P2P identity verification.
+Transient SDK reconnect under a live owner never starts a replacement.
+Disabled or absent configuration remains inert, while malformed or changed configuration, authentication or authorization refusal, lock or session loss, binding mismatch, ambiguous ownership, unsafe or corrupt durable state, and event-handoff failure stop automatic recovery with a local diagnostic.
+Pending outbound records remain behind the unhealthy transport fence and retain their event and chunk UUIDs; the replacement drains them only after full health, so recovery neither re-registers nor marks them delivered early.
 
 The SDK event callback performs only bounded validation and private durable publication.
 It does not wait for Pi, execute a model, execute a tool, or send an outbound response.

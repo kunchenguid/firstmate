@@ -4,6 +4,8 @@
 // The dedicated transport process parses config/feishu.env and owns all
 // credential handling.  This launcher forwards session identity on stdin and
 // exposes only its body-free result to the Pi extension.
+// Process recovery preserves transport exit 75 as retryable; every other
+// refusal exits 2 and remains terminal until an explicit trusted lifecycle.
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -25,12 +27,12 @@ const transportEnvironment = Object.fromEntries(Object.entries({
 }).filter(([, value]) => typeof value === "string"));
 
 function usage() {
-  return "usage: fm-feishu-lifecycle.mjs reconcile|hard-bind";
+  return "usage: fm-feishu-lifecycle.mjs reconcile|hard-bind|recover";
 }
 
 async function main(argv) {
   const action = argv.shift();
-  if (!new Set(["reconcile", "hard-bind"]).has(action) || argv.length > 0) throw new Error(usage());
+  if (!new Set(["reconcile", "hard-bind", "recover"]).has(action) || argv.length > 0) throw new Error(usage());
   const child = spawn(TRANSPORT_SCRIPT, [action], {
     cwd: ROOT,
     env: transportEnvironment,
@@ -43,12 +45,15 @@ async function main(argv) {
     child.once("error", rejectPromise);
     child.once("close", (code) => {
       if (code === 0) resolvePromise();
-      else rejectPromise(Object.assign(new Error("Feishu activation stopped safely; inspect config/feishu.env and docs/feishu-channel.md"), { reported: true }));
+      else rejectPromise(Object.assign(new Error("Feishu activation stopped safely; inspect config/feishu.env and docs/feishu-channel.md"), {
+        exitCode: code === 75 ? 75 : 2,
+        reported: true,
+      }));
     });
   });
 }
 
 main(process.argv.slice(2)).catch((error) => {
   if (!error?.reported) process.stderr.write("Feishu activation stopped safely; inspect config/feishu.env and docs/feishu-channel.md\n");
-  process.exitCode = 2;
+  process.exitCode = error?.exitCode === 75 ? 75 : 2;
 });
