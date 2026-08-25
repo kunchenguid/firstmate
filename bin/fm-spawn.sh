@@ -2743,7 +2743,12 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude)
+    # Claude disables transcript saving when it inherits this Herdr child-session
+    # marker, so remove it at the same per-launch environment boundary.
+    LAUNCH="env -u CLAUDE_CODE_CHILD_SESSION -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    ;;
+  codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
