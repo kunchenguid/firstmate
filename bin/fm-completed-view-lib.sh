@@ -480,7 +480,7 @@ fm_completed_view_list() {  # <state-dir>
   dir=$(fm_completed_view_directory_path "$state")
   printf 'TASK\tPHASE\tSESSION\tWORKSPACE\tTAB\tPANE\tPRESENCE\tSUMMARY_FILE\n'
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
-  LC_ALL=C
+  export LC_ALL=C
   for record in "$dir"/*"$FM_COMPLETED_VIEW_RECORD_SUFFIX"; do
     [ -e "$record" ] || [ -L "$record" ] || continue
     count=$((count + 1))
