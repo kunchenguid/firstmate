@@ -151,6 +151,97 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_large_backlog_crosses_argv_limit_via_public_interface() {
+  local home out payload payload_bytes
+  home=$(make_home large-backlog)
+  payload=$(LC_ALL=C awk 'BEGIN { for (i = 0; i < 196608; i++) printf "x" }')
+  payload_bytes=$(printf '%s' "$payload" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$payload_bytes" -gt 131072 ] \
+    || fail "large-backlog fixture must exceed the ordinary Linux per-argument limit"
+  printf '## Done\n%s\n' "$payload" > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --argjson payload_bytes "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 0
+      and (.backlog.records | length) == 1
+      and .backlog.records[0].structured == false
+      and (.backlog.records[0].raw | length) == $payload_bytes
+  ' >/dev/null || fail "public snapshot must return valid complete JSON above argv limits"
+  pass "public snapshot transports a backlog larger than ordinary Linux argv limits"
+}
+
+test_large_task_status_crosses_argv_limit_via_public_interface() {
+  local home fakebin out payload payload_bytes prefix prefix_bytes status_value status_bytes
+  home=$(make_home large-task-status)
+  mkdir -p "$home/projects/large-task-status"
+  fm_write_meta "$home/state/large-task-status.meta" \
+    "window=firstmate:fm-large-task-status" \
+    "worktree=$home/projects/large-task-status" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  record_claude_idle "$home/state" large-task-status
+  prefix='needs-decision [key=oversize]: '
+  payload=$(LC_ALL=C awk 'BEGIN { for (i = 0; i < 196608; i++) printf "s" }')
+  payload_bytes=$(printf '%s' "$payload" | LC_ALL=C wc -c | tr -d ' ')
+  prefix_bytes=$(printf '%s' "$prefix" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$payload_bytes" -gt 131072 ] \
+    || fail "large-status fixture must exceed the ordinary Linux per-argument limit"
+  status_value="https://$payload/pull/1"
+  status_bytes=$(printf '%s' "$status_value" | LC_ALL=C wc -c | tr -d ' ')
+  printf '%s%s\n' "$prefix" "$status_value" > "$home/state/large-task-status.status"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e \
+    --argjson status_bytes "$status_bytes" \
+    --argjson prefix_bytes "$prefix_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 1
+      and (.tasks[0].id == "large-task-status")
+      and (.tasks[0].current_state.state == "parked")
+      and (.tasks[0].current_state.source == "status-log")
+      and ((.tasks[0].current_state.detail | length) == $status_bytes)
+      and ((.tasks[0].paths.status_log.last_event.raw | length) == ($prefix_bytes + $status_bytes))
+      and ((.tasks[0].paths.status_log.last_event.note | length) == $status_bytes)
+      and ((.tasks[0].hints.open_decisions[0].summary | length) == $status_bytes)
+      and ((.tasks[0].pr.url | length) == $status_bytes)
+      and (.tasks[0].pr.source == "status_event")
+  ' >/dev/null || fail "public snapshot must preserve complete task status above argv limits"
+  pass "public snapshot transports task status above ordinary Linux argv limits"
+}
+
+test_large_task_metadata_crosses_argv_limit_via_public_interface() {
+  local home fakebin out payload payload_bytes
+  home=$(make_home large-task-metadata)
+  mkdir -p "$home/projects/large-task-metadata"
+  payload=$(LC_ALL=C awk 'BEGIN { for (i = 0; i < 196608; i++) printf "m" }')
+  payload_bytes=$(printf '%s' "$payload" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$payload_bytes" -gt 131072 ] \
+    || fail "large-metadata fixture must exceed the ordinary Linux per-argument limit"
+  fm_write_meta "$home/state/large-task-metadata.meta" \
+    "window=firstmate:fm-large-task-metadata" \
+    "worktree=$home/projects/large-task-metadata" \
+    "project=$payload" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  record_claude_idle "$home/state" large-task-metadata
+  printf 'working: bounded status\n' > "$home/state/large-task-metadata.status"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --argjson payload_bytes "$payload_bytes" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 1
+      and (.tasks[0].id == "large-task-metadata")
+      and ((.tasks[0].project | length) == $payload_bytes)
+  ' >/dev/null || fail "public snapshot must preserve complete task metadata above argv limits"
+  pass "public snapshot transports task metadata above ordinary Linux argv limits"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -800,6 +891,9 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_large_backlog_crosses_argv_limit_via_public_interface
+test_large_task_status_crosses_argv_limit_via_public_interface
+test_large_task_metadata_crosses_argv_limit_via_public_interface
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
