@@ -1262,7 +1262,7 @@ case "$HARNESS" in
       PI_TUI_MODE=' --tui-mode regular'
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
-    LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    LAUNCH="FM_PI_HARNESS=$HARNESS PI_CLEAR_ON_SHRINK=1 $LAUNCH"
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too

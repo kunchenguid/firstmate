@@ -284,6 +284,7 @@ Firstmate records `pi-signed` without normalization and refuses rather than fall
 The observed signed process tree is an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for both selected executables.
 The installed plain `pi` command also execs that signed launcher, so `FM_PI_HARNESS=pi-signed` is the authoritative selection marker and shared unmarked ancestry remains `pi`.
 Firstmate sets `FM_PI_HARNESS` explicitly for both worker launch identities, and a signed primary uses the README launch command to establish the same boundary.
+Firstmate's Pi-family launch commands also set `PI_CLEAR_ON_SHRINK=1`; [`docs/configuration.md`](../../../docs/configuration.md#pi-calm-preference-configcalm) owns why Calm's transcript shrink requires it, the operator override, the redraw tradeoff, and why Pi 0.84.3 alone is insufficient.
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 

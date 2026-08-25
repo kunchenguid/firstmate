@@ -33,6 +33,12 @@ The values it writes are `on` and `off`, each followed by one newline; an absent
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+Firstmate launches Pi and `pi-signed` workers, scouts, and secondmates with `PI_CLEAR_ON_SHRINK=1`, and the documented primary commands set the same environment variable.
+Calm and ordinary tool-collapse transitions can shrink Pi's regular-TUI transcript, so full clearing prevents removed rows from remaining as large empty terminal regions.
+An explicit Pi `terminal.clearOnShrink` setting takes precedence over the launch environment, preserving the operator's settings-level override.
+Pi 0.84.3 does not fix this behavior by itself.
+Full clear-on-shrink can flicker and clears superseded terminal scrollback before Pi redraws the current component tree.
+The opt-in native regression is `FM_PI_CLEAR_ON_SHRINK_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-clear-on-shrink-live-e2e.test.sh`.
 
 ## Pi supervision branch
 

@@ -101,13 +101,14 @@ grok --trust
 **Pi**
 
 ```sh
-pi
+PI_CLEAR_ON_SHRINK=1 pi
 # or, when the signed wrapper is installed
-FM_PI_HARNESS=pi-signed pi-signed
+FM_PI_HARNESS=pi-signed PI_CLEAR_ON_SHRINK=1 pi-signed
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+`PI_CLEAR_ON_SHRINK=1` keeps a shrinking Pi transcript from leaving empty terminal regions; [`docs/configuration.md`](docs/configuration.md#pi-calm-preference-configcalm) owns that rationale and its tradeoffs.
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 Those Calm-hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
