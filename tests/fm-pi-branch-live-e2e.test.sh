@@ -10,14 +10,13 @@
 #
 # It also pins the vendor-side invariant the delivery-time freshness re-check
 # rides on. A note reported while the captain's turn is running is HELD until
-# Pi reports that turn finished, so the hazard is a turn that starts without
-# ever ending: that would strand the held note. This guard proves, against the
-# real SDK, that the real loader wires an extension's handlers and that a
-# prompt Pi refuses to run emits NEITHER a start NOR an end - the pair moves
-# together, so the hold is only ever entered when a release must follow.
+# Pi emits agent_settled with an idle context, so the hazard is a run that
+# starts without ever settling: that would strand the held note. This guard
+# proves, against the real SDK, that the real loader wires an extension's
+# handlers and that a prompt Pi refuses to run emits no lifecycle event.
 # LIMIT, stated rather than glossed: an isolated agent dir has no credentials
 # and no model, so no extension event is deliverable at all here and this guard
-# cannot exercise a real turn's own end emission. The event NAMES are pinned
+# cannot exercise a real run's own agent_settled emission. The event NAMES are pinned
 # separately by the strict typecheck against the installed package
 # (tests/fm-pi-primary-types.test.sh).
 #
@@ -151,11 +150,9 @@ if (!existsSync(`${home}/state/branch-session`)) {
   throw new Error("branch session store directory was not created");
 }
 
-// Held-note release: a note reported mid-turn waits for Pi to report the
-// captain's turn finished, so a turn that starts without ending would strand
-// it. Drive a prompt the real SDK refuses to run and assert the start and end
-// events move together - neither fires - through handlers the real loader
-// actually wired.
+// Held-note release waits for Pi's idle agent_settled event. Drive a prompt
+// the real SDK refuses to run and assert it emits no lifecycle event through
+// handlers the real loader actually wired.
 const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
 let factoryWired = 0;
 const seen = [];
@@ -210,7 +207,7 @@ if (!promptRefused) {
   throw new Error("credential-free probe prompt was accepted: this guard can no longer prove the refused-turn case");
 }
 if (seen.length !== 0) {
-  throw new Error(`a refused turn emitted ${JSON.stringify(seen)}: a start without an end would strand every held note`);
+  throw new Error(`a refused turn emitted unexpected lifecycle events: ${JSON.stringify(seen)}`);
 }
 console.log("LIVE_OK");
 process.exit(0);
@@ -220,4 +217,4 @@ out=$(cat "$TMP_ROOT/node-output")
 if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION accepts the branch session construction, preserves an unpromptable wake, and never starts a turn it does not end"
+pass "real Pi SDK $PI_VERSION accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn"

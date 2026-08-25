@@ -94,8 +94,8 @@ const MERGE_NOTE_BOAT = "⛵";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
-// A merge note main could not be given yet, held with the task's claim anchor
-// so the claim can be re-checked at the delivery boundary (see holdNote).
+// A merge note queued with the task's claim anchor so the claim can be
+// re-checked at the single delivery boundary.
 type PendingNote = {
   generation: number;
   seq: string;
@@ -388,13 +388,11 @@ export default function (pi: ExtensionAPI) {
     return markRead(expectedGeneration, seq);
   }
 
-  // Main is mid-turn, so the note cannot be delivered yet. Hold it HERE with
-  // the task's claim anchor rather than handing it to Pi's own queue: the
-  // fleet keeps moving inside that turn (the PR a note calls review-ready can
-  // merge before the turn ends), and a note Pi already owns can no longer be
+  // Keep every note HERE with the task's claim anchor until the single
+  // delivery boundary re-checks it. A note Pi already owns can no longer be
   // re-checked before it is rendered. The row stays unread until the note is
   // actually delivered, so a session that ends first replays it at startup.
-  function holdNote(
+  function enqueueNote(
     expectedGeneration: number,
     seq: string,
     task: string,
@@ -406,25 +404,28 @@ export default function (pi: ExtensionAPI) {
     pendingNotes.push({ generation: expectedGeneration, seq, task, verdict, summary, silent, anchor });
   }
 
-  // Main's idle boundary: deliver every held note, re-checking each claim
-  // against the task's durable record first. A stale routine note is dropped
-  // (the durable row keeps it, and fm_branch_outcomes still reads it) and a
-  // stale captain-relevant one is refreshed, so a queued summary is never
-  // rendered as if its claim were still true.
-  function flushPendingNotes(): void {
+  // Main's idle boundary: deliver queued notes, re-checking each claim against
+  // the task's durable record first. A stale routine note is dropped (the
+  // durable row keeps it, and fm_branch_outcomes still reads it) and a stale
+  // captain-relevant one is refreshed, so a queued summary is never rendered
+  // as if its claim were still true.
+  function releasePendingNotes(idleConfirmed: boolean): "released" | "blocked" | "refused" {
     while (pendingNotes.length > 0) {
-      if (mainStreaming) return;
+      if (!idleConfirmed || mainStreaming) return "blocked";
       const note = pendingNotes[0];
       if (!actingAsOwner(note.generation)) {
         // Ownership is gone; the rows are still unread and replay at session start.
         pendingNotes.length = 0;
-        return;
+        return "refused";
       }
       pendingNotes.shift();
       const current = note.anchor ? claimAnchor(note.task) : "";
       const stale = note.anchor !== "" && current !== "" && current !== note.anchor;
       if (stale && note.verdict === "routine") {
-        markRead(note.generation, note.seq);
+        if (!markRead(note.generation, note.seq)) {
+          pendingNotes.length = 0;
+          return "refused";
+        }
         continue;
       }
       const content = stale
@@ -433,12 +434,13 @@ export default function (pi: ExtensionAPI) {
       const display = noteDisplay(note.task, note.verdict, note.silent);
       if (!sendNote(note.generation, note.seq, note.task, note.verdict, content, display)) {
         pendingNotes.length = 0;
-        return;
+        return "refused";
       }
       // A captain-relevant note just opened main's turn; the rest wait for the
       // next idle boundary rather than steering that turn.
-      if (note.verdict === "captain") return;
+      if (note.verdict === "captain") return "released";
     }
+    return "released";
   }
 
   function mergeIntoMain(
@@ -451,15 +453,13 @@ export default function (pi: ExtensionAPI) {
     anchor: string,
   ): "delivered" | "held" | "refused" {
     if (!actingAsOwner(expectedGeneration)) return "refused";
-    if (mainStreaming) {
-      holdNote(expectedGeneration, seq, task, verdict, summary, silent, anchor);
-      return "held";
-    }
-    const display = noteDisplay(task, verdict, silent);
-    if (!sendNote(expectedGeneration, seq, task, verdict, noteContent(task, verdict, summary), display)) {
-      return "refused";
-    }
-    return "delivered";
+    enqueueNote(expectedGeneration, seq, task, verdict, summary, silent, anchor);
+    if (mainStreaming) return "held";
+    const released = releasePendingNotes(true);
+    if (released === "refused") return "refused";
+    return pendingNotes.some((note) => note.generation === expectedGeneration && note.seq === seq)
+      ? "held"
+      : "delivered";
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -759,13 +759,10 @@ ${context.command}
   pi.on?.("agent_start", () => {
     mainStreaming = true;
   });
-  pi.on?.("agent_end", () => {
+  pi.on?.("agent_settled", (_event, ctx) => {
+    if (!ctx.isIdle()) return;
     mainStreaming = false;
-    flushPendingNotes();
-  });
-  pi.on?.("agent_settled", () => {
-    mainStreaming = false;
-    flushPendingNotes();
+    releasePendingNotes(true);
   });
 
   // Mirror at main's turn_end: collect the new captain/assistant dialog into
@@ -780,9 +777,6 @@ ${context.command}
       return;
     }
     enqueueMirrorFlush();
-    // Backstop for a turn that ends without agent_end/agent_settled: the flush
-    // is queue-driven and returns immediately while main is still streaming.
-    flushPendingNotes();
   });
 
   // Pi emits session_shutdown for ordinary same-process replacements (/new,

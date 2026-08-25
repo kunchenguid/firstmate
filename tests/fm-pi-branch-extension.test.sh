@@ -340,7 +340,11 @@ if (sentToMain.length !== 1) {
   throw new Error(`a routine note must be held, not handed to Pi, while main streams: ${JSON.stringify(sentToMain.map((s) => s.options))}`);
 }
 fire("agent_end", {});
-if (sentToMain.length !== 2) throw new Error("a held routine note was not delivered when main went idle");
+if (sentToMain.length !== 1) throw new Error("agent_end released a note before Pi settled");
+fire("agent_settled", {}, { isIdle: () => false });
+if (sentToMain.length !== 1) throw new Error("a non-idle agent_settled event released a held note");
+fire("agent_settled", {}, { isIdle: () => true });
+if (sentToMain.length !== 2) throw new Error("a held routine note was not delivered when Pi settled idle");
 if (sentToMain[1].options.deliverAs || sentToMain[1].options.triggerTurn) {
   throw new Error(`a delivered routine note must append with no turn: ${JSON.stringify(sentToMain[1].options)}`);
 }
@@ -1129,13 +1133,36 @@ EOF
 }
 
 test_stale_task_claim_is_rechecked_before_delivery() {
-  local repo home out status
+  local repo home fakebin out status real_bash
   repo="$TMP_ROOT/freshness-root"
   home="$TMP_ROOT/freshness-home"
-  mkdir -p "$home/state" "$home/config"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
   install_pi_branch_extension_fixture "$repo"
-  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+if [ "$1" = "$FM_TEST_OUTCOME_SCRIPT" ] && [ "$2" = append ]; then
+  task=
+  previous=
+  for argument do
+    if [ "$previous" = --task ]; then task=$argument; fi
+    previous=$argument
+  done
+  "$FM_TEST_REAL_BASH" "$@"
+  code=$?
+  if [ "$task" = idle-race-lab ]; then
+    rm -f "$FM_TEST_STATE/idle-race-lab.meta" "$FM_TEST_STATE/idle-race-lab.pr-poll"
+  fi
+  exit "$code"
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    FM_TEST_STATE="$home/state" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
 const { fire, dispatch, settle, outcomeScript, sentToMain, mainTools, home } = globalThis.__t;
@@ -1143,9 +1170,9 @@ import { writeFileSync, rmSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 
-// Four live tasks, each with a PR whose merge poll fm-pr-check.sh has armed.
+// Five live tasks, each with a PR whose merge poll fm-pr-check.sh has armed.
 const PR = {};
-for (const id of ["ledger-lab", "steady-lab", "chart-lab", "other-lab"]) {
+for (const id of ["idle-race-lab", "ledger-lab", "steady-lab", "chart-lab", "other-lab"]) {
   PR[id] = `https://github.com/acme/${id}/pull/7`;
   writeFileSync(`${home}/state/${id}.meta`, `project=${home}/projects/approved\nwindow=w\npr=${PR[id]}\n`);
   writeFileSync(`${home}/state/${id}.pr-poll`, `github\n${PR[id]}\ngithub.com\nacme/${id}\n7\n`);
@@ -1155,15 +1182,23 @@ dispatch(`signal: ledger-lab done: PR ${PR["ledger-lab"]} checks green`);
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 const report = globalThis.__fmSessions[0].options.customTools.find((t) => t.name === "fm_branch_report");
 const contents = () => sentToMain.map((s) => String(s.message.content));
-
-// The captain's turn is running - they told main to merge the very PR the
-// branch is about to call review-ready.
-fire("agent_start", {});
-
 const record = async (id, verdict, summary) => {
   const res = await report.execute(`c-${id}`, { task: id, verdict, summary, wake: `signal: ${id}` }, undefined, undefined, {});
   if (res.isError) throw new Error(`report failed for ${id}: ${JSON.stringify(res)}`);
 };
+
+// The append wrapper advances this task after the real durable append but
+// before append returns, reproducing an idle-path change at the handoff edge.
+await record("idle-race-lab", "captain", `PR ${PR["idle-race-lab"]} checks green and is ready for your review`);
+const idleRace = contents().filter((c) => c.includes("idle-race-lab"));
+if (idleRace.length !== 1 || !/SUPERSEDED/.test(idleRace[0])) {
+  throw new Error(`an idle-path review-ready claim changed during append was delivered as current: ${JSON.stringify(idleRace)}`);
+}
+const priorDeliveryCount = sentToMain.length;
+
+// The captain's turn is running - they told main to merge the very PR the
+// branch is about to call review-ready.
+fire("agent_start", {});
 
 await record("ledger-lab", "captain", `PR ${PR["ledger-lab"]} checks green and is ready for your review`);
 await record("steady-lab", "captain", `PR ${PR["steady-lab"]} checks green and is ready for your review`);
@@ -1171,7 +1206,7 @@ await record("chart-lab", "routine", "worker healthy, no action needed");
 await record("fleet", "routine", "fleet review: rebased two branches");
 // Checked at the end, so the delivered-content assertions below report the
 // captain-visible symptom first rather than this structural cause.
-const reachedPiMidTurn = sentToMain.length;
+const reachedPiMidTurn = sentToMain.length - priorDeliveryCount;
 
 // Inside that same turn the fleet moves on: ledger-lab's PR merges (the
 // watcher retires its poll) and the finished task is torn down. chart-lab is
@@ -1182,8 +1217,10 @@ for (const id of ["ledger-lab", "chart-lab"]) {
 }
 rmSync(`${home}/state/other-lab.meta`); // unrelated churn must not touch the fleet note
 
-// Main goes idle: every held note is delivered now, each re-checked first.
+// Main settles idle: every held note is delivered now, each re-checked first.
 fire("agent_end", {});
+if (sentToMain.length !== priorDeliveryCount) throw new Error("agent_end handed a held note to Pi before the run settled");
+fire("agent_settled", {}, { isIdle: () => true });
 
 // The stale review-ready claim is never delivered as if it were still true.
 const ledger = contents().filter((c) => c.includes("ledger-lab"));
@@ -1204,7 +1241,7 @@ if (ledgerSent.message.display !== false) throw new Error("captain notes are nev
 // One idle boundary delivers one captain-relevant note, because that note
 // opens main's turn and the rest must not steer it. Each fire() below is a
 // separate boundary draining the next held note; they are not redundant.
-fire("agent_end", {});
+fire("agent_settled", {}, { isIdle: () => true });
 const steady = contents().filter((c) => c.includes("steady-lab"));
 if (steady.length !== 1 || /SUPERSEDED/.test(steady[0])) {
   throw new Error(`an unchanged claim must be delivered verbatim: ${JSON.stringify(steady)}`);
@@ -1212,8 +1249,8 @@ if (steady.length !== 1 || /SUPERSEDED/.test(steady[0])) {
 if (!steady[0].includes("ready for your review")) throw new Error(`current claim lost its outcome: ${steady[0]}`);
 
 // A stale ROUTINE note is dropped rather than rendered as current...
-fire("agent_end", {});
-fire("agent_end", {});
+fire("agent_settled", {}, { isIdle: () => true });
+fire("agent_settled", {}, { isIdle: () => true });
 
 if (contents().some((c) => c.includes("chart-lab"))) {
   throw new Error(`a stale routine note was rendered: ${JSON.stringify(contents())}`);
