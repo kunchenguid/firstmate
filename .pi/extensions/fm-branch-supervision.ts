@@ -737,6 +737,12 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return result;
       },
+      async getIssue(config, issueId) {
+        assertRuntimeOwner();
+        const result = await rawLinear.getIssue(config, issueId);
+        assertRuntimeOwner();
+        return result;
+      },
       async setProgress(config, issue, claimId, taskId, summary) {
         assertRuntimeOwner();
         const result = await rawLinear.setProgress(config, issue, claimId, taskId, summary);
@@ -766,6 +772,14 @@ export default function (pi: ExtensionAPI) {
       capacity(config) {
         assertRuntimeOwner();
         return rawFirstmate.capacity(config);
+      },
+      assertProjectOwnership(config, issue) {
+        assertRuntimeOwner();
+        rawFirstmate.assertProjectOwnership(config, issue);
+      },
+      assertPullRequestRepository(config, issue, prUrl) {
+        assertRuntimeOwner();
+        rawFirstmate.assertPullRequestRepository(config, issue, prUrl);
       },
       async dispatch(config, issue, claim, taskId, profile) {
         assertRuntimeOwner();
@@ -823,6 +837,7 @@ export default function (pi: ExtensionAPI) {
         ? (inputTokens, outputTokens) => uncachedBatchCost(selectedModelCost, inputTokens, outputTokens) * configValue.supervision.limits.maxIterationsPerBatch
         : undefined,
       killSwitchPath: autonomyKillSwitch,
+      redactedValues: token ? [token] : [],
     });
     autonomyTimer = setInterval(() => {
       void runAutonomyTick(expectedGeneration, true);
@@ -940,7 +955,7 @@ export default function (pi: ExtensionAPI) {
     const replay: MainTranscriptCommit[] = [];
     let replayTokens = 0;
     for (const commit of commits.reverse()) {
-      const tokens = Math.ceil(Buffer.byteLength(commit.text, "utf8") / 3);
+      const tokens = Buffer.byteLength(commit.text, "utf8");
       if (replayTokens + tokens > replayTokenBudget) continue;
       replay.unshift(commit);
       replayTokens += tokens;

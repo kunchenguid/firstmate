@@ -293,6 +293,7 @@ export interface DecisionClassifier {
 
 export interface LinearAdapter {
   listEligibleIssues(config: AutonomyConfig): Promise<LinearIssue[]>;
+  getIssue(config: AutonomyConfig, issueId: string): Promise<LinearIssue>;
   claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<{ evidence: string }>;
   setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string): Promise<{ evidence: string }>;
   linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }>;
@@ -340,6 +341,8 @@ export interface LandingResult {
 
 export interface FirstmateAdapter {
   capacity(config: AutonomyConfig): CapacitySnapshot;
+  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void;
+  assertPullRequestRepository(config: AutonomyConfig, issue: LinearIssue, prUrl: string): void;
   dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile): Promise<DispatchResult>;
   taskExists(taskId: string): boolean;
   taskPullRequest(taskId: string): string | undefined;
@@ -347,6 +350,25 @@ export interface FirstmateAdapter {
   mergeAndVerify(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult>;
   verifyMerged(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult>;
   doctor(config: AutonomyConfig): string[];
+}
+
+function redactExternalText(value: string, secrets: readonly string[]): string {
+  let redacted = value;
+  for (const secret of secrets) {
+    if (secret.length >= 8) redacted = redacted.replaceAll(secret, "[redacted credential]");
+  }
+  return redacted
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]{8,}/gi, "$1[redacted credential]")
+    .replace(/\b(?:sk|gh[oprsu]|glpat|lin_api)_[A-Za-z0-9._-]{8,}\b/gi, "[redacted credential]");
+}
+
+function redactExternalValue(value: JsonValue, secrets: readonly string[]): JsonValue {
+  if (typeof value === "string") return redactExternalText(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactExternalValue(item, secrets));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactExternalValue(item, secrets)]));
+  }
+  return value;
 }
 
 export class AutonomyError extends Error {
@@ -1501,7 +1523,7 @@ export class LinearGraphqlClient implements LinearAdapter {
           throw new AutonomyError("linear-workspace-refused", `Linear credential resolves workspace ${data.organization?.id || "unknown"}, not allowlisted workspace ${config.linear.workspaceId}`);
         }
         for (const raw of data.issues.nodes) {
-          const issue = normalizeLinearIssue(raw);
+          const issue = this.redactIssue(normalizeLinearIssue(raw));
           if (issue.teamId !== scope.teamId || issue.projectId !== scope.projectId || !scope.statuses.intake.includes(issue.stateId)) continue;
           if (!scope.labels.required.every((label) => issue.labelIds.includes(label))) continue;
           if (scope.labels.blocked.some((label) => issue.labelIds.includes(label))) continue;
@@ -1516,7 +1538,16 @@ export class LinearGraphqlClient implements LinearAdapter {
     }
     const deduped = new Map<string, LinearIssue>();
     for (const issue of issues) deduped.set(issue.id, issue);
-    return [...deduped.values()].sort((left, right) => left.priority - right.priority || left.createdAt.localeCompare(right.createdAt) || left.identifier.localeCompare(right.identifier));
+    const sortablePriority = (priority: number): number => priority === 0 ? Number.POSITIVE_INFINITY : priority;
+    return [...deduped.values()].sort((left, right) => sortablePriority(left.priority) - sortablePriority(right.priority) || left.createdAt.localeCompare(right.createdAt) || left.identifier.localeCompare(right.identifier));
+  }
+
+  private redactIssue(issue: LinearIssue): LinearIssue {
+    return {
+      ...issue,
+      title: redactExternalText(issue.title, [this.token]),
+      description: redactExternalText(issue.description, [this.token]),
+    };
   }
 
   private scope(config: AutonomyConfig, issue: LinearIssue): LinearScopePolicy {
@@ -1525,7 +1556,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     return matches[0];
   }
 
-  private async currentIssue(config: AutonomyConfig, issueId: string): Promise<LinearIssue> {
+  async getIssue(config: AutonomyConfig, issueId: string): Promise<LinearIssue> {
     const data = await this.request<{ organization: { id?: string } | null; issue: Record<string, unknown> | null }>(
       "FirstmateIssueClaimRead",
       `query FirstmateIssueClaimRead($id: String!) { organization { id } issue(id: $id) { ${ISSUE_FIELDS} } }`,
@@ -1533,7 +1564,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     );
     if (data.organization?.id !== config.linear.workspaceId) throw new AutonomyError("linear-workspace-refused", "Linear workspace changed before claim");
     if (!data.issue) throw new AutonomyError("linear-issue-missing", `Linear issue ${issueId} is unavailable at claim time`);
-    return normalizeLinearIssue(data.issue);
+    return this.redactIssue(normalizeLinearIssue(data.issue));
   }
 
   private claimMarker(config: AutonomyConfig, claimId: string, taskId: string): string {
@@ -1551,17 +1582,17 @@ export class LinearGraphqlClient implements LinearAdapter {
     return (data.issue?.comments.nodes ?? []).map((comment) => String(comment.body ?? ""));
   }
 
-  private async issueClaimSnapshot(config: AutonomyConfig, issueId: string): Promise<{ stateId: string; comments: string[] }> {
-    const data = await this.request<{ organization: { id?: string } | null; issue: { state: { id?: string } | null; comments: { nodes: Array<{ body?: string }>; pageInfo: { hasNextPage?: boolean } } } | null }>(
+  private async issueClaimSnapshot(config: AutonomyConfig, issueId: string): Promise<{ issue: LinearIssue; comments: string[] }> {
+    const data = await this.request<{ organization: { id?: string } | null; issue: (Record<string, unknown> & { comments: { nodes: Array<{ body?: string }>; pageInfo: { hasNextPage?: boolean } } }) | null }>(
       "FirstmateClaimSnapshot",
-      `query FirstmateClaimSnapshot($id: String!) { organization { id } issue(id: $id) { state { id } comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } }`,
+      `query FirstmateClaimSnapshot($id: String!) { organization { id } issue(id: $id) { ${ISSUE_FIELDS} comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } }`,
       { id: issueId },
     );
     if (data.organization?.id !== config.linear.workspaceId) throw new AutonomyError("linear-workspace-refused", "Linear workspace changed during claim reconciliation");
     if (!data.issue) throw new AutonomyError("linear-issue-missing", `Linear issue ${issueId} is unavailable during claim reconciliation`);
     if (data.issue.comments.pageInfo.hasNextPage) throw new AutonomyError("linear-comment-pagination", `Linear issue ${issueId} has more than 100 comments; claim evidence is incomplete`);
     return {
-      stateId: String(data.issue.state?.id ?? ""),
+      issue: this.redactIssue(normalizeLinearIssue(data.issue)),
       comments: data.issue.comments.nodes.map((comment) => String(comment.body ?? "")),
     };
   }
@@ -1577,7 +1608,13 @@ export class LinearGraphqlClient implements LinearAdapter {
     if (markers.length === 0 || markers.some((marker) => marker !== ours)) {
       throw new AutonomyError("linear-claim-conflict", `exclusive Linear claim evidence for ${taskId} is missing or conflicting`);
     }
-    if (!allowedStates.includes(snapshot.stateId)) {
+    const scope = this.scope(config, snapshot.issue);
+    if (snapshot.issue.teamId !== issue.teamId || snapshot.issue.projectId !== issue.projectId ||
+        !scope.labels.required.every((label) => snapshot.issue.labelIds.includes(label)) ||
+        scope.labels.blocked.some((label) => snapshot.issue.labelIds.includes(label))) {
+      throw new AutonomyError("linear-scope-refused", `Linear issue ${issue.identifier} no longer satisfies its exact team, project, and label policy`);
+    }
+    if (!allowedStates.includes(snapshot.issue.stateId)) {
       throw new AutonomyError("linear-claim-stale", `Linear issue ${issue.identifier} is in an unexpected status for ${taskId}`);
     }
   }
@@ -1603,7 +1640,7 @@ export class LinearGraphqlClient implements LinearAdapter {
   }
 
   async claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<{ evidence: string }> {
-    const current = await this.currentIssue(config, issue.id);
+    const current = await this.getIssue(config, issue.id);
     const scope = this.scope(config, current);
     if (current.teamId !== issue.teamId || current.projectId !== issue.projectId || !scope.statuses.intake.includes(current.stateId)) {
       throw new AutonomyError("linear-claim-stale", `issue ${issue.identifier} left its allowlisted team, project, or intake status before claim`);
@@ -1613,6 +1650,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     }
     const marker = this.claimMarker(config, claimId, taskId);
     await this.ensureComment(config, issue.id, marker, `Firstmate claimed this issue as \`${taskId}\`.`);
+    await this.assertTaskOwnership(config, issue, claimId, taskId, scope.statuses.intake);
     await this.updateState(issue.id, scope.statuses.claimed);
     const verdict = await this.reconcileClaim(config, issue, claimId, taskId);
     if (verdict !== "owned") throw new AutonomyError("linear-claim-conflict", `Linear claim for ${issue.identifier} reconciled as ${verdict}`);
@@ -1625,7 +1663,10 @@ export class LinearGraphqlClient implements LinearAdapter {
     const markers = this.claimMarkers(snapshot.comments);
     const ours = this.claimMarker(config, claimId, taskId);
     if (markers.some((marker) => marker !== ours)) return "conflict";
-    const ownedState = [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed].includes(snapshot.stateId);
+    if (snapshot.issue.teamId !== issue.teamId || snapshot.issue.projectId !== issue.projectId ||
+        !scope.labels.required.every((label) => snapshot.issue.labelIds.includes(label)) ||
+        scope.labels.blocked.some((label) => snapshot.issue.labelIds.includes(label))) return "conflict";
+    const ownedState = [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed].includes(snapshot.issue.stateId);
     return markers.includes(ours) && ownedState ? "owned" : "missing";
   }
 
@@ -1636,6 +1677,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     const boundedSummary = summary.slice(0, 1500);
     const progressId = stableId("progress", { taskId, summary: boundedSummary });
     const marker = `<!-- firstmate-progress:v1 task=${taskId} progress=${progressId} -->`;
+    await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.inProgress]);
     await this.ensureComment(config, issue.id, marker, boundedSummary.replaceAll("<!--", "&lt;!--"));
     return { evidence: marker };
   }
@@ -1659,6 +1701,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed]);
     const marker = `<!-- firstmate-complete:v1 task=${taskId} -->`;
     await this.ensureComment(config, issue.id, marker, `Landed through ${prUrl}. Closing only after merge confirmation.`);
+    await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed]);
     await this.updateState(issue.id, scope.statuses.completed);
     return { evidence: marker };
   }
@@ -1798,6 +1841,55 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { raw, mode: mode as "no-mistakes" | "direct-PR" | "local-only", yolo, registered };
   }
 
+  private secondmateProjects(): Set<string> {
+    const registry = join(this.data, "secondmates.md");
+    if (!existsSync(registry)) return new Set();
+    const projects = new Set<string>();
+    for (const line of readFileSync(registry, "utf8").split(/\r?\n/)) {
+      const match = line.match(/(?:^|;\s*)projects:\s*([^;)]+)/);
+      for (const project of match?.[1].split(",") ?? []) {
+        const normalized = project.trim();
+        if (normalized) projects.add(normalized);
+      }
+    }
+    return projects;
+  }
+
+  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void {
+    const mapping = this.mapping(config, issue);
+    if (this.secondmateProjects().has(mapping.firstmateProject)) {
+      throw new AutonomyError("secondmate-route", `${mapping.firstmateProject} is assigned to a secondmate; primary Pi autonomy must not claim or dispatch it`);
+    }
+  }
+
+  private repositoryIdentity(config: AutonomyConfig, issue: LinearIssue): { host: string; path: string } {
+    const mapping = this.mapping(config, issue);
+    return this.repositoryIdentityForMapping(mapping);
+  }
+
+  private repositoryIdentityForMapping(mapping: RepositoryMapping): { host: string; path: string } {
+    const checkout = this.checkout(mapping);
+    const remote = this.run("git", ["-C", checkout, "remote", "get-url", "origin"]);
+    const https = remote.match(/^https:\/\/([^/]+)\/(.+?)(?:\.git)?$/);
+    const ssh = remote.match(/^(?:ssh:\/\/)?git@([^:/]+)[:/](.+?)(?:\.git)?$/);
+    const match = https ?? ssh;
+    if (!match || match[2].split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new AutonomyError("repository-remote", `mapped checkout for ${mapping.firstmateProject} has no supported canonical origin remote`);
+    }
+    return { host: match[1].toLowerCase(), path: match[2].replace(/\.git$/, "") };
+  }
+
+  assertPullRequestRepository(config: AutonomyConfig, issue: LinearIssue, prUrl: string): void {
+    assertCanonicalPullRequestUrl(prUrl);
+    const approved = this.repositoryIdentity(config, issue);
+    const github = prUrl.match(/^https:\/\/(github\.com)\/([^/]+\/[^/]+)\/pull\/[1-9][0-9]*$/);
+    const gitlab = prUrl.match(/^https:\/\/([^/]+)\/(.+)\/-\/merge_requests\/[1-9][0-9]*$/);
+    const forge = github ?? gitlab;
+    if (!forge || forge[1].toLowerCase() !== approved.host || forge[2].replace(/\.git$/, "") !== approved.path) {
+      throw new AutonomyError("pr-repository-mismatch", `pull request ${prUrl} does not belong to the mapped checkout origin`);
+    }
+  }
+
   capacity(config: AutonomyConfig): CapacitySnapshot {
     mkdirSync(this.state, { recursive: true });
     const metaRows = readdirSync(this.state)
@@ -1838,12 +1930,16 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     const diagnostics: string[] = [];
     for (const mapping of config.repositories) {
       try {
+        if (this.secondmateProjects().has(mapping.firstmateProject)) {
+          diagnostics.push(`${mapping.firstmateProject} is assigned to a secondmate; primary Pi autonomy is refused`);
+        }
         const checkout = this.checkout(mapping);
         if (!existsSync(checkout)) {
           diagnostics.push(`mapped checkout projects/${mapping.checkout} is missing`);
         } else {
           const topLevel = realpathSync(this.run("git", ["-C", checkout, "rev-parse", "--show-toplevel"]));
           if (topLevel !== checkout) diagnostics.push(`mapped checkout projects/${mapping.checkout} is not one exact repository root`);
+          this.repositoryIdentityForMapping(mapping);
         }
         const policy = this.projectPolicy(mapping.firstmateProject);
         if (policy.mode === "local-only") diagnostics.push(`${mapping.firstmateProject} is local-only; Linear PR autonomy requires a PR-based delivery mode`);
@@ -1864,6 +1960,7 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
 
   async dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile): Promise<DispatchResult> {
     validateDispatchProfile(profile);
+    this.assertProjectOwnership(config, issue);
     const mapping = this.mapping(config, issue);
     if (claim.repository !== mapping.firstmateProject) throw new AutonomyError("repository-claim", `work claim repository ${claim.repository} does not match allowlisted mapping ${mapping.firstmateProject}`);
     const policy = this.projectPolicy(mapping.firstmateProject);
@@ -1927,8 +2024,10 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { taskId, mode, evidence: join(this.state, `${taskId}.meta`) };
   }
 
-  async prepareLanding(_config: AutonomyConfig, _issue: LinearIssue, taskId: string, prUrl: string): Promise<PreparedLanding> {
+  async prepareLanding(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string): Promise<PreparedLanding> {
     assertCanonicalPullRequestUrl(prUrl);
+    this.assertProjectOwnership(config, issue);
+    this.assertPullRequestRepository(config, issue, prUrl);
     if (!this.taskExists(taskId)) throw new AutonomyError("task-missing", `task ${taskId} has no Firstmate metadata`);
     const currentState = this.run("bash", [join(this.fmRoot, "bin", "fm-crew-state.sh"), taskId], { timeout: 30000 });
     if (!/^state: done\b/.test(currentState)) throw new AutonomyError("validation-not-green", `task ${taskId} is not at the current-code passing-checks result: ${currentState}`);
@@ -1948,8 +2047,10 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { expectedHead, evidence: `prepared ${prUrl} at ${expectedHead} from current-code passing task ${taskId}` };
   }
 
-  async verifyMerged(_config: AutonomyConfig, _issue: LinearIssue, _taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult> {
+  async verifyMerged(config: AutonomyConfig, issue: LinearIssue, _taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult> {
     assertCanonicalPullRequestUrl(prUrl);
+    this.assertProjectOwnership(config, issue);
+    this.assertPullRequestRepository(config, issue, prUrl);
     if (!/^[0-9a-f]{40,64}$/i.test(expectedHead)) throw new AutonomyError("pr-head-missing", "landing verification requires one valid expected head");
     const currentHead = verifyMergedHeadWithForge(prUrl, expectedHead, this.run.bind(this));
     return { merged: true, green: true, currentHead, expectedHead, evidence: `verified merged ${prUrl} at ${currentHead}` };
@@ -2030,6 +2131,7 @@ export interface AutonomyOrchestratorOptions {
   classificationCostEstimator?: (inputTokens: number, maxOutputTokens: number) => number;
   clock?: Clock;
   killSwitchPath: string;
+  redactedValues?: string[];
 }
 
 export class AutonomyOrchestrator {
@@ -2042,7 +2144,10 @@ export class AutonomyOrchestrator {
   private readonly classificationCostEstimator?: (inputTokens: number, maxOutputTokens: number) => number;
   private readonly clock: Clock;
   private readonly killSwitchPath: string;
+  private readonly redactedValues: string[];
   private readonly acceptedInProcess = new Set<string>();
+  private readonly operationOwner = randomUUID();
+  private readonly activeIssueOperations = new Map<string, Promise<unknown>>();
 
   constructor(options: AutonomyOrchestratorOptions) {
     this.resolution = options.resolution;
@@ -2054,6 +2159,7 @@ export class AutonomyOrchestrator {
     this.classificationCostEstimator = options.classificationCostEstimator;
     this.clock = options.clock ?? systemClock;
     this.killSwitchPath = options.killSwitchPath;
+    this.redactedValues = (options.redactedValues ?? []).filter((value) => value.length >= 8);
   }
 
   private config(): AutonomyConfig {
@@ -2097,11 +2203,57 @@ export class AutonomyOrchestrator {
   }
 
   appendEvent(event: LoopEvent): { record: JournalRecord; deduped: boolean } {
-    return this.journal.appendEvent(event);
+    const redacted = { ...event, payload: redactExternalValue(event.payload, this.redactedValues) };
+    return this.journal.appendEvent(redacted);
   }
 
   appendMainTranscriptCommit(commit: MainTranscriptCommit): { record: JournalRecord; deduped: boolean } {
-    return this.journal.appendTranscript(commit);
+    return this.journal.appendTranscript({ ...commit, text: redactExternalText(commit.text, this.redactedValues) });
+  }
+
+  private async withIssueOperation<T>(issueId: string, operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquireIssueOperation(issueId);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async acquireIssueOperation(issueId: string): Promise<() => void> {
+    const active = this.activeIssueOperations.get(issueId);
+    if (active) {
+      await active.catch(() => undefined);
+      return this.acquireIssueOperation(issueId);
+    }
+    let resolveGate: (() => void) | undefined;
+    const gate = new Promise<void>((resolveGatePromise) => { resolveGate = resolveGatePromise; });
+    this.activeIssueOperations.set(issueId, gate);
+    try {
+      const now = this.clock.now();
+      const records = this.journal.read().filter((record) => record.key === issueId && (record.kind === "operation-lease-acquired" || record.kind === "operation-lease-released"));
+      const latest = records.at(-1);
+      const latestData = latest?.data as { operationId?: unknown; owner?: unknown; expiresAt?: unknown } | undefined;
+      if (latest?.kind === "operation-lease-acquired" && latestData?.owner !== this.operationOwner &&
+          typeof latestData?.expiresAt === "string" && Date.parse(latestData.expiresAt) > now.getTime()) {
+        throw new AutonomyError("issue-operation-busy", `issue ${issueId} has an unexpired durable operation lease`, true);
+      }
+      const operationId = stableId("issue-operation", { issueId, owner: this.operationOwner, nonce: randomUUID() });
+      const expiresAt = new Date(now.getTime() + this.config().supervision.limits.maxTurnMilliseconds * 2).toISOString();
+      this.journal.append("operation-lease-acquired", issueId, { operationId, owner: this.operationOwner, expiresAt }, `operation-lease-acquired:${operationId}`);
+      return () => {
+        try {
+          this.journal.append("operation-lease-released", issueId, { operationId, owner: this.operationOwner }, `operation-lease-released:${operationId}`);
+        } finally {
+          if (this.activeIssueOperations.get(issueId) === gate) this.activeIssueOperations.delete(issueId);
+          resolveGate?.();
+        }
+      };
+    } catch (error) {
+      if (this.activeIssueOperations.get(issueId) === gate) this.activeIssueOperations.delete(issueId);
+      resolveGate?.();
+      throw error;
+    }
   }
 
   async intakeLinearIssues(): Promise<LinearIssue[]> {
@@ -2144,7 +2296,7 @@ export class AutonomyOrchestrator {
     const issueCount = events.filter((event) => event.kind === "linear.issue.available").length;
     if (issueCount > limits.maxBatchIssues) throw new AutonomyError("batch-ceiling", `pending batch has ${issueCount} issues above maxBatchIssues=${limits.maxBatchIssues}`);
     const id = stableId("batch", events.map((event) => event.id));
-    const estimatedInputTokens = Math.ceil(Buffer.byteLength(canonicalJson(events as unknown as JsonValue), "utf8") / 3);
+    const estimatedInputTokens = Buffer.byteLength(canonicalJson(events as unknown as JsonValue), "utf8");
     if (estimatedInputTokens > limits.maxPromptInputTokens) throw new AutonomyError("token-ceiling", `pending batch estimates ${estimatedInputTokens} input tokens above maxPromptInputTokens=${limits.maxPromptInputTokens}`);
     return { id, events, issueCount, estimatedInputTokens };
   }
@@ -2376,16 +2528,28 @@ export class AutonomyOrchestrator {
   }
 
   async dispatchIssue(decisionId: string, issueId: string, profile: DispatchProfile): Promise<DispatchResult> {
+    return this.withIssueOperation(issueId, () => this.dispatchIssueUnlocked(decisionId, issueId, profile));
+  }
+
+  private async dispatchIssueUnlocked(decisionId: string, issueId: string, profile: DispatchProfile): Promise<DispatchResult> {
     this.newClaimsAllowed();
     validateDispatchProfile(profile);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate dispatch adapter is unavailable");
     const config = this.config();
     const { decision, claim, issue } = this.issueFromDecision(decisionId, issueId);
+    this.firstmate.assertProjectOwnership(config, issue);
+    const currentIssue = await this.linear.getIssue(config, issue.id);
+    const scope = config.linear.scopes.find((candidate) => candidate.teamId === currentIssue.teamId && candidate.projectId === currentIssue.projectId);
+    if (!scope || currentIssue.teamId !== issue.teamId || currentIssue.projectId !== issue.projectId ||
+        !scope.labels.required.every((label) => currentIssue.labelIds.includes(label)) ||
+        scope.labels.blocked.some((label) => currentIssue.labelIds.includes(label))) {
+      throw new AutonomyError("linear-scope-refused", `issue ${issue.identifier} no longer satisfies the exact scope before claim or dispatch`);
+    }
     if (claim.issueIdentifier !== issue.identifier) throw new AutonomyError("claim-identity", `work claim identifier ${claim.issueIdentifier} does not match intake issue ${issue.identifier}`);
     if (decision.action !== "wake") throw new AutonomyError("decision-authority", "only a wake decision may authorize a new autonomous issue claim");
     const boundary = strongBoundaryReasons(claim);
     if (boundary.length > 0) throw new AutonomyError("stronger-boundary", `issue ${claim.issueIdentifier} requires escalation: ${boundary.join(", ")}`);
-    const requiredDependencies = new Set(issue.blockedByIssueIds);
+    const requiredDependencies = new Set(currentIssue.blockedByIssueIds);
     if ([...requiredDependencies].some((dependency) => !claim.dependencies.includes(dependency))) {
       throw new AutonomyError("dependency-evidence", `work claim for ${claim.issueIdentifier} omitted a Linear blocking dependency`);
     }
@@ -2406,13 +2570,19 @@ export class AutonomyOrchestrator {
       throw new AutonomyError(code, message, true);
     };
     const foldedClaims = this.foldedClaims();
-    const unresolvedDependencies = claim.dependencies.filter((dependency) =>
+    const unresolvedDependencies = currentIssue.blockedByIssueIds.filter((dependency) =>
       ![...foldedClaims.values()].some((folded) =>
         folded.state === "completed" && (folded.issue.id === dependency || folded.issue.identifier === dependency)));
     if (unresolvedDependencies.length > 0) {
       deferDispatch("dependency-unresolved", `${claim.issueIdentifier} is still blocked by ${unresolvedDependencies.join(", ")}`);
     }
     const existing = foldedClaims.get(issue.id);
+    const allowedCurrentStates = existing && ["intent", "claimed", "dispatched"].includes(existing.state)
+      ? [...scope.statuses.intake, scope.statuses.claimed, scope.statuses.inProgress]
+      : scope.statuses.intake;
+    if (!allowedCurrentStates.includes(currentIssue.stateId)) {
+      throw new AutonomyError("linear-scope-refused", `issue ${issue.identifier} is not in an allowed status before claim or dispatch`);
+    }
     if (existing && existing.taskId !== taskId && existing.state !== "completed" && existing.state !== "conflict") {
       throw new AutonomyError("claim-conflict", `issue ${issue.identifier} is already claimed by ${existing.taskId}`);
     }
@@ -2484,6 +2654,8 @@ export class AutonomyOrchestrator {
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate adapter is unavailable");
+    this.firstmate.assertProjectOwnership(this.config(), folded.issue);
+    this.firstmate.assertPullRequestRepository(this.config(), folded.issue, prUrl);
     const taskPr = this.firstmate.taskPullRequest(folded.taskId);
     if (!taskPr) throw new AutonomyError("pr-missing", `task ${folded.taskId} must record its validated canonical PR before Linear linking`);
     if (taskPr !== prUrl) throw new AutonomyError("pr-mismatch", `task ${folded.taskId} records ${taskPr}, not ${prUrl}`);
@@ -2498,6 +2670,8 @@ export class AutonomyOrchestrator {
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate adapter is unavailable");
+    this.firstmate.assertProjectOwnership(this.config(), folded.issue);
+    this.firstmate.assertPullRequestRepository(this.config(), folded.issue, prUrl);
     if (strongBoundaryReasons(folded.claim).length > 0) throw new AutonomyError("stronger-boundary", "stronger boundary prevents autonomous landing");
     const taskPr = this.firstmate.taskPullRequest(folded.taskId);
     if (!taskPr) throw new AutonomyError("pr-missing", `task ${folded.taskId} must record its validated canonical PR before landing`);
@@ -2525,15 +2699,15 @@ export class AutonomyOrchestrator {
         landing = await this.firstmate.mergeAndVerify(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead);
       }
     } catch (error) {
-      this.journal.append("merge-refused", issueId, {
+      this.journal.append("merge-uncertain", issueId, {
         mergeIntent,
         code: error instanceof AutonomyError ? error.code : "landing-error",
         message: error instanceof Error ? error.message.slice(0, 1000) : String(error).slice(0, 1000),
-      }, `merge-refused:${mergeIntent}`);
+      }, `merge-uncertain:${mergeIntent}:${randomUUID()}`);
       throw error;
     }
     if (!landing.merged || !landing.green || landing.currentHead !== prepared.expectedHead || landing.expectedHead !== prepared.expectedHead) {
-      this.journal.append("merge-refused", issueId, { mergeIntent, landing } as unknown as JsonValue, `merge-refused:${mergeIntent}`);
+      this.journal.append("merge-uncertain", issueId, { mergeIntent, landing } as unknown as JsonValue, `merge-uncertain:${mergeIntent}:${randomUUID()}`);
       throw new AutonomyError("landing-unconfirmed", "merge result did not prove current-head green landing; Linear remains open");
     }
     this.journal.append("merge-confirmed", issueId, { mergeIntent, taskId: folded.taskId, prUrl, claimId: folded.claimId, landing } as unknown as JsonValue, `merge-confirmed:${mergeIntent}`);
@@ -2561,9 +2735,12 @@ export class AutonomyOrchestrator {
     if (this.linear && this.resolution.config) {
       const activeClaims = [...this.foldedClaims()].filter(([, folded]) => ["intent", "claimed", "dispatched"].includes(folded.state));
       for (const [issueId, folded] of activeClaims.slice(0, limits?.maxBatchIssues ?? 10)) {
+        const releaseIssueOperation = await this.acquireIssueOperation(issueId);
+        try {
         const claimRecords = this.journal.read();
         const refusedMergeIntents = new Set(claimRecords
           .filter((record) => record.kind === "merge-refused" && record.key === issueId)
+          .filter((record) => (record.data as { definitive?: unknown }).definitive === true)
           .map((record) => String((record.data as { mergeIntent?: unknown }).mergeIntent ?? ""))
           .filter(Boolean));
         const pendingMerge = claimRecords
@@ -2602,12 +2779,16 @@ export class AutonomyOrchestrator {
             this.journal.append("merge-confirmed", issueId, { ...pendingMerge, claimId: folded.claimId, landing } as unknown as JsonValue, `merge-confirmed:${pendingMergeId}`);
             confirmed = { ...pendingMerge, landing };
           } catch (error) {
-            this.journal.append("merge-refused", issueId, {
+            const definitivelyUnmerged = error instanceof AutonomyError && error.code === "landing-unconfirmed" && !this.firstmate.taskExists(folded.taskId);
+            const kind = definitivelyUnmerged ? "merge-refused" : "merge-uncertain";
+            this.journal.append(kind, issueId, {
               mergeIntent: pendingMergeId,
+              definitive: definitivelyUnmerged,
               code: error instanceof AutonomyError ? error.code : "landing-error",
               message: error instanceof Error ? error.message.slice(0, 1000) : String(error).slice(0, 1000),
-            }, `merge-refused:${pendingMergeId}`);
-            throw error;
+            }, `${kind}:${pendingMergeId}:${randomUUID()}`);
+            if (definitivelyUnmerged) continue;
+            continue;
           }
         }
         if (confirmed?.prUrl && confirmed.landing && this.firstmate) {
@@ -2653,6 +2834,9 @@ export class AutonomyOrchestrator {
           this.journal.append("dispatch-confirmed", issueId, { ...folded, state: "dispatched", dispatchResult: dispatched, dispatchEvidence: dispatched.evidence } as unknown as JsonValue, `dispatch-confirmed:${folded.claimId}`);
         }
         claims += 1;
+        } finally {
+          releaseIssueOperation();
+        }
       }
       if (this.claimsReady()) {
         const deferredClaims = [...this.foldedClaims()]
@@ -2745,20 +2929,40 @@ export interface HeldOutEvaluation {
   failed: number;
 }
 
-export function evaluateHeldOutCorpus(cases: HeldOutCase[]): HeldOutEvaluation {
-  const results = cases.map((testCase) => {
-    const action: DecisionAction = testCase.routing.urgency === "urgent" || testCase.routing.requiresMainAction || testCase.claims.length > 0
-      ? "wake"
-      : testCase.routing.exactDuplicate
-        ? "coalesce"
-        : "nextTurn";
-    const selection = selectIndependentSet(testCase.claims, testCase.capacity, testCase.active);
+function heldOutBatch(testCase: HeldOutCase): PendingBatch {
+  const events: LoopEvent[] = testCase.claims.length > 0
+    ? testCase.claims.map((claim, index) => ({
+        id: `heldout:${testCase.id}:${index}`,
+        source: "test",
+        kind: "linear.issue.available",
+        occurredAt: "2026-08-25T00:00:00.000Z",
+        urgency: testCase.routing.urgency,
+        payload: { issueId: claim.issueId },
+      }))
+    : [{
+        id: `heldout:${testCase.id}:0`,
+        source: "test",
+        kind: testCase.routing.kind,
+        occurredAt: "2026-08-25T00:00:00.000Z",
+        urgency: testCase.routing.urgency,
+        payload: {},
+      }];
+  return {
+    id: stableId("batch", events.map((event) => event.id)),
+    events,
+    issueCount: testCase.claims.length,
+    estimatedInputTokens: Buffer.byteLength(canonicalJson(events as unknown as JsonValue), "utf8"),
+  };
+}
+
+function evaluateHeldOutDecisions(cases: HeldOutCase[], decisions: SupervisionDecision[]): HeldOutEvaluation {
+  const results = cases.map((testCase, index) => {
+    const decision = validateDecision(decisions[index], heldOutBatch(testCase));
+    const selection = selectIndependentSet(decision.workClaims, testCase.capacity, testCase.active);
     const selected = selection.selected.map((claim) => claim.issueId);
     const edges = selection.graph.edges.map((edge) => ({ left: edge.left, right: edge.right }));
-    const expectedSelected = [...testCase.expectedSelected];
-    const expectedEdges = [...testCase.expectedEdges];
-    const pass = action === testCase.routing.expectedAction && canonicalJson(selected) === canonicalJson(expectedSelected) && canonicalJson(edges as unknown as JsonValue) === canonicalJson(expectedEdges as unknown as JsonValue);
-    return { id: testCase.id, action, selected, edges, pass };
+    const pass = decision.action === testCase.routing.expectedAction && canonicalJson(selected) === canonicalJson(testCase.expectedSelected) && canonicalJson(edges as unknown as JsonValue) === canonicalJson(testCase.expectedEdges as unknown as JsonValue);
+    return { id: testCase.id, action: decision.action, selected, edges, pass };
   });
   return {
     contractFingerprint: decisionContractFingerprint(),
@@ -2766,4 +2970,28 @@ export function evaluateHeldOutCorpus(cases: HeldOutCase[]): HeldOutEvaluation {
     passed: results.filter((result) => result.pass).length,
     failed: results.filter((result) => !result.pass).length,
   };
+}
+
+export async function evaluateHeldOutClassifier(cases: HeldOutCase[], classifier: DecisionClassifier): Promise<HeldOutEvaluation> {
+  const decisions: SupervisionDecision[] = [];
+  for (const testCase of cases) {
+    const batch = heldOutBatch(testCase);
+    decisions.push(validateDecision(await classifier.classify(batch), batch));
+  }
+  return evaluateHeldOutDecisions(cases, decisions);
+}
+
+export function evaluateHeldOutCorpus(cases: HeldOutCase[]): HeldOutEvaluation {
+  const decisions = cases.map((testCase) => {
+    const batch = heldOutBatch(testCase);
+    return createDecision({
+      batchId: batch.id,
+      action: testCase.routing.expectedAction,
+      eventIds: batch.events.map((event) => event.id),
+      summary: `Recorded held-out classifier output for ${testCase.id}.`,
+      reasonCodes: ["recorded-heldout-output"],
+      workClaims: testCase.claims,
+    });
+  });
+  return evaluateHeldOutDecisions(cases, decisions);
 }

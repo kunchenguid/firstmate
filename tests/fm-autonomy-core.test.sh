@@ -108,6 +108,7 @@ const shellAdapter = new m.ShellFirstmateAdapter({
     if (args.includes("--raw")) return "no-mistakes on\n";
     if (args.some((arg) => String(arg).endsWith("fm-project-mode.sh"))) return "no-mistakes on\n";
     if (args[0] === "-C" && args.includes("--show-toplevel")) return join(shellHome, "projects", "app");
+    if (args[0] === "-C" && args.includes("get-url")) return "https://github.com/acme/app.git";
     return "/fixture/bin\n";
   },
 });
@@ -118,6 +119,21 @@ assert(subprocessCredentials.every((value) => value === undefined), "Linear cred
 // Held-out routing/collision baseline, including disconfirming cases.
 const evaluation = m.evaluateHeldOutCorpus(corpusEnvelope.cases);
 assert.equal(evaluation.failed, 0, JSON.stringify(evaluation, null, 2));
+const classifierEvaluation = await m.evaluateHeldOutClassifier(corpusEnvelope.cases, {
+  async classify(batch) {
+    const caseId = batch.events[0].id.split(":").slice(1, -1).join(":");
+    const testCase = corpusEnvelope.cases.find((candidate) => candidate.id === caseId);
+    return m.createDecision({
+      batchId: batch.id,
+      action: testCase.routing.expectedAction,
+      eventIds: batch.events.map((item) => item.id),
+      summary: `Recorded classifier output for ${caseId}.`,
+      reasonCodes: ["recorded-heldout-output"],
+      workClaims: testCase.claims,
+    });
+  },
+});
+assert.equal(classifierEvaluation.failed, 0, JSON.stringify(classifierEvaluation, null, 2));
 assert.equal(evaluation.passed, baseline.passed);
 assert.equal(evaluation.contractFingerprint, baseline.contractFingerprint);
 assert.equal(m.AUTONOMY_DECISION_CONTRACT_VERSION, baseline.decisionContractVersion);
@@ -157,7 +173,41 @@ const client = new m.LinearGraphqlClient({
 });
 const issues = await client.listEligibleIssues(resolution.config);
 assert.deepEqual(issues.map((issue) => issue.id), ["issue-1", "issue-2"]);
+shellAdapter.assertPullRequestRepository(resolution.config, issues[0], "https://github.com/acme/app/pull/99");
+assert.throws(
+  () => shellAdapter.assertPullRequestRepository(resolution.config, issues[0], "https://github.com/acme/other/pull/99"),
+  (error) => error.code === "pr-repository-mismatch",
+);
+writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; projects: app; added 2026-08-25)\n");
+assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0]), (error) => error.code === "secondmate-route");
+assert(shellAdapter.doctor(resolution.config).some((line) => line.includes("assigned to a secondmate")));
+rmSync(join(shellHome, "data", "secondmates.md"));
 assert.deepEqual(issues[1].blockedByIssueIds, ["issue-1"]);
+const priorityPage = structuredClone(linearFixture.responses.page1);
+priorityPage.body.data.issues.nodes = [
+  { ...structuredClone(linearFixture.responses.page1.body.data.issues.nodes[0]), priority: 0 },
+  { ...structuredClone(linearFixture.responses.page2.body.data.issues.nodes[0]), priority: 1, inverseRelations: { nodes: [] } },
+];
+priorityPage.body.data.issues.pageInfo = { hasNextPage: false, endCursor: null };
+const priorityClient = new m.LinearGraphqlClient({
+  token: "priority-not-logged",
+  credentialKind: "api-key",
+  limits,
+  fetchImpl: async () => responseFrom(priorityPage),
+});
+assert.deepEqual((await priorityClient.listEligibleIssues(resolution.config)).map((issue) => issue.id), ["issue-2", "issue-1"]);
+const secretPage = structuredClone(linearFixture.responses.page1);
+secretPage.body.data.issues.nodes[0].description = `Leaked ${env.FM_TEST_LINEAR_KEY} and ghp_fixturecredential123456789`;
+secretPage.body.data.issues.pageInfo = { hasNextPage: false, endCursor: null };
+const secretClient = new m.LinearGraphqlClient({
+  token: env.FM_TEST_LINEAR_KEY,
+  credentialKind: "api-key",
+  limits,
+  fetchImpl: async () => responseFrom(secretPage),
+});
+const redactedIssue = (await secretClient.listEligibleIssues(resolution.config))[0];
+assert.equal(redactedIssue.description.includes(env.FM_TEST_LINEAR_KEY), false);
+assert.equal(redactedIssue.description.includes("ghp_fixturecredential"), false);
 assert.equal(requests.length, 3);
 assert.equal(requests[0].headers.Authorization, env.FM_TEST_LINEAR_KEY);
 assert.equal(String(requests[0].headers.Authorization).startsWith("Bearer "), false);
@@ -224,7 +274,10 @@ const claimClient = new m.LinearGraphqlClient({
       return new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), { status: 200 });
     }
     if (body.operationName === "FirstmateClaimSnapshot") {
-      return new Response(JSON.stringify({ data: { organization: { id: "workspace-1" }, issue: { state: { id: remoteClaim.stateId }, comments: { nodes: remoteClaim.comments.map((value) => ({ body: value })), pageInfo: { hasNextPage: false } } } } }), { status: 200 });
+      const issue = structuredClone(claimIssueRaw);
+      issue.state = { id: remoteClaim.stateId };
+      issue.comments = { nodes: remoteClaim.comments.map((value) => ({ body: value })), pageInfo: { hasNextPage: false } };
+      return new Response(JSON.stringify({ data: { organization: { id: "workspace-1" }, issue } }), { status: 200 });
     }
     if (body.operationName === "FirstmateAttachmentCreate") {
       return new Response(JSON.stringify({ data: { attachmentCreate: { success: true, attachment: { id: "attachment-fixture" } } } }), { status: 200 });
@@ -240,9 +293,17 @@ assert.deepEqual(claimOperations, [
   "FirstmateIssueClaimRead",
   "FirstmateCommentEvidence",
   "FirstmateCommentCreate",
+  "FirstmateClaimSnapshot",
   "FirstmateIssueUpdate",
   "FirstmateClaimSnapshot",
 ]);
+const originalClaimLabels = structuredClone(claimIssueRaw.labels);
+claimIssueRaw.labels = { nodes: [], pageInfo: { hasNextPage: false } };
+await assert.rejects(
+  () => claimClient.setProgress(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", "Unsafe stale-scope progress"),
+  (error) => error.code === "linear-scope-refused",
+);
+claimIssueRaw.labels = originalClaimLabels;
 await claimClient.setProgress(
   resolution.config,
   normalizedIssue,
@@ -475,8 +536,28 @@ const taskPrs = new Map();
 let redLanding = false;
 let capacityBlocked = false;
 const mergedHeads = new Map();
+const remoteDependencies = new Map();
 const linearMock = {
   async listEligibleIssues() { return []; },
+  async getIssue(_config, issueId) {
+    const source = issueId === "issue-1" ? issueEvent.payload : issueId === "issue-2" ? secondEvent?.payload ?? issueEvent.payload : issueEvent.payload;
+    return {
+      id: issueId,
+      identifier: String(source.identifier).replace(/\d+$/, issueId.replace(/\D/g, "") || "1"),
+      title: source.title,
+      description: source.description,
+      priority: 1,
+      createdAt: "2026-08-25T01:00:00.000Z",
+      updatedAt: "2026-08-25T01:00:00.000Z",
+      url: source.url,
+      teamId: "team-1",
+      projectId: "project-1",
+      stateId: claimed.has(issueId) ? "status-claimed" : "status-todo",
+      labelIds: ["label-auto"],
+      blockedByIssueIds: remoteDependencies.get(issueId) ?? [],
+      blocksIssueIds: [],
+    };
+  },
   async claimIssue(_config, issue, claimId, taskId) { operationLog.push(`claim:${issue.id}`); claimed.add(issue.id); return { evidence: `${claimId}:${taskId}` }; },
   async setProgress(_config, issue) { operationLog.push(`progress:${issue.id}`); return { evidence: "progress" }; },
   async linkPullRequest(_config, issue) { operationLog.push(`link:${issue.id}`); return { evidence: "link" }; },
@@ -485,6 +566,10 @@ const linearMock = {
 };
 const firstmateMock = {
   capacity() { return capacityBlocked ? { activeIssues: 1, activeWorkers: 1, activeHeavyValidations: 0 } : { activeIssues: 0, activeWorkers: 0, activeHeavyValidations: 0 }; },
+  assertProjectOwnership() {},
+  assertPullRequestRepository(_config, _issue, prUrl) {
+    if (!prUrl.startsWith("https://github.com/acme/app/pull/")) throw new m.AutonomyError("pr-repository-mismatch", "fixture repository mismatch");
+  },
   async dispatch(_config, issue, _claim, taskId) { operationLog.push(`dispatch:${issue.id}`); tasks.add(taskId); return { taskId, mode: "no-mistakes", evidence: `meta:${taskId}` }; },
   taskExists(taskId) { return tasks.has(taskId); },
   taskPullRequest(taskId) { return taskPrs.get(taskId); },
@@ -535,7 +620,13 @@ const issueDecision = m.createDecision({
 claimsJournal.append("decision", issueDecision.id, issueDecision, `decision:${issueDecision.id}`);
 const killPath = join(temp, "claims", "KILL");
 const claimOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
-const dispatched = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+const [dispatched, concurrentDispatch] = await Promise.all([
+  claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+  claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+]);
+assert.equal(concurrentDispatch.taskId, dispatched.taskId);
+assert.equal(operationLog.filter((entry) => entry === "claim:issue-1").length, 1, "concurrent dispatch duplicated the Linear claim");
+assert.equal(operationLog.filter((entry) => entry === "dispatch:issue-1").length, 1, "concurrent reconciliation duplicated Firstmate dispatch");
 assert(tasks.has(dispatched.taskId));
 const beforeIdempotent = operationLog.length;
 const dispatchedAgain = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
@@ -622,6 +713,11 @@ crashJournal.append("merge-intent", "issue-3", {
   expectedHead: crashHead,
   preparationEvidence: "fixture prepared",
 }, `merge-intent:${crashMergeIntent}`);
+crashJournal.append("merge-refused", "issue-3", {
+  mergeIntent: crashMergeIntent,
+  code: "firstmate-command",
+  message: "transient post-merge verification failure",
+}, `merge-refused:${crashMergeIntent}`);
 mergedHeads.set("issue-3", crashHead);
 tasks.delete(crashDispatch.taskId);
 const mergesBeforeCrashRecovery = operationLog.filter((entry) => entry === "merge:issue-3").length;
@@ -658,18 +754,20 @@ const deferredDecision = m.createDecision({
   eventIds: [deferredEvent.id],
   summary: "Dispatch ENG-5 when capacity clears.",
   reasonCodes: ["new-issue"],
-  workClaims: [claimFor("issue-5", "ENG-5", "src/five.ts")],
+  workClaims: [claimFor("issue-5", "ENG-5", "src/five.ts", { dependencies: ["external-blocker"] })],
 });
 deferredJournal.append("decision", deferredDecision.id, deferredDecision, `decision:${deferredDecision.id}`);
 const deferredOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: deferredJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: join(temp, "deferred", "KILL") });
+remoteDependencies.set("issue-5", ["external-blocker"]);
 capacityBlocked = true;
 const claimsBeforeDeferral = operationLog.filter((entry) => entry === "claim:issue-5").length;
-await assert.rejects(() => deferredOrchestrator.dispatchIssue(deferredDecision.id, "issue-5", { harness: "pi" }), (error) => error.retryable && error.code === "unknown-active-scope");
+await assert.rejects(() => deferredOrchestrator.dispatchIssue(deferredDecision.id, "issue-5", { harness: "pi" }), (error) => error.retryable && error.code === "dependency-unresolved");
 assert.equal(operationLog.filter((entry) => entry === "claim:issue-5").length, claimsBeforeDeferral, "capacity deferral claimed Linear work");
 assert.equal(deferredOrchestrator.reportStatus().journal.deferredDispatches, 1);
 capacityBlocked = false;
+remoteDependencies.set("issue-5", []);
 await deferredOrchestrator.reconcile();
-assert(operationLog.includes("claim:issue-5"), "cleared capacity did not replay the durable deferred dispatch");
+assert(operationLog.includes("claim:issue-5"), "external Linear dependency completion did not replay the durable deferred dispatch");
 assert.equal(deferredOrchestrator.reportStatus().journal.deferredDispatches, 0);
 
 const boundaryJournal = new m.DurableJournal(join(temp, "boundary", "journal.jsonl"), fakeClock);
