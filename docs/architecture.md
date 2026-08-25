@@ -40,7 +40,7 @@ In each home the scan considers only that home's long-inactive direct ordinary c
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
-Claude, Codex, and Pi actionable notifications call `fm-wake-context.sh` once.
+Claude and Codex actionable notifications, plus Pi notifications that remain on the captain-facing path, call `fm-wake-context.sh` once.
 The script first replays a pending packet byte-identically; with no pending transaction, the home-local `config/wake-context-presentation` opt-in authorizes a bounded `fm-wake-context.v1` projection of the durable presentation, including its post-handling acknowledgement, so the primary does not reconstruct the same fleet context in later model turns.
 When neither that opt-in nor a previously published packet exists, the notification preserves the actionable reason and directs the primary to one ordinary human drain without publishing wake-context state.
 A single aggregate collection deadline covers the initial drain and every crew-state or backend probe rather than resetting for each probe.

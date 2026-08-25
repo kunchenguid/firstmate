@@ -12,7 +12,7 @@ When this session owns supervision and away mode is not active:
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns every later successor launch.
 6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`, reload) retires only the prior generation; call `fm_watch_arm_pi` once for the first cycle of the replacement session without restarting Pi.
    The generation-owner contract lives in `.pi/extensions/fm-primary-pi-watch.ts`.
-7. After an actionable child close, the extension rechecks session-lock ownership, verifies one successor, and attaches one bounded `fm-wake-context.v1` packet when presentation succeeds.
+7. After an actionable child close that remains on the captain-facing path, the extension rechecks session-lock ownership, verifies one successor, and attaches one bounded `fm-wake-context.v1` packet when presentation succeeds.
    Handle an attached packet without draining or rebuilding the same context, then run its exact acknowledgement command.
    When no packet is attached and the extension reports that presentation was unavailable, use `bin/fm-wake-drain.sh` once.
 8. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_pi` again because continuity is extension-owned rather than model-memory-owned.

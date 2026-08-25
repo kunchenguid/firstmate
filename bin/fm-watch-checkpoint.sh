@@ -11,7 +11,8 @@ usage() {
 Usage: fm-watch-checkpoint.sh [--seconds <n>]
 
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
-On an actionable watcher wake, pass through the watcher output and one bounded wake-context packet, then exit 0.
+On an actionable watcher wake, pass through the watcher output and one bounded wake-context result, then exit 0.
+That result is a packet, a complete fallback presentation, or one manual-drain instruction.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
 EOF
 }
