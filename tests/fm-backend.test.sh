@@ -521,6 +521,62 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+# A missing or unreadable adapter file must make fm_backend_source RETURN
+# non-zero, so a caller's refusal branch actually runs. Under `set -e`, bash
+# 3.2 aborts the entire shell when the `.` builtin cannot open its file - the
+# trailing `|| return 1` never executes - and an EXIT trap in the caller can
+# then publish that abort as exit 0, reporting success for work that never
+# happened (bin/fm-teardown.sh's herdr preflight is one such caller). Every
+# adapter arm shares that code shape, so every adapter is pinned here rather
+# than only the one whose caller happened to expose the defect.
+
+# Run fm_backend_source against a fixture root under `set -e` with a
+# conditional caller, which is exactly bin/fm-teardown.sh's shape. Echoes
+# REFUSED when the call returned non-zero and REACHED_CALLER when the caller
+# survived to its next statement; an aborted shell prints neither.
+backend_source_refusal_probe() {  # <fixture-root> <backend>
+  bash -c '
+    set -eu
+    . "$1/bin/fm-backend.sh"
+    if ! fm_backend_source "$2"; then printf "REFUSED\n"; fi
+    printf "REACHED_CALLER\n"
+  ' _ "$1" "$2" 2>/dev/null
+}
+
+test_backend_source_missing_adapter_refuses() {
+  local fixture backend out
+  fixture=$TMP_ROOT/missing-adapter
+  for backend in tmux herdr zellij orca cmux; do
+    rm -rf "$fixture"
+    mkdir -p "$fixture/bin/backends"
+    cp "$ROOT/bin/fm-backend.sh" "$fixture/bin/fm-backend.sh"
+    cp "$ROOT"/bin/backends/*.sh "$fixture/bin/backends/"
+
+    rm -f "$fixture/bin/backends/$backend.sh"
+    out=$(backend_source_refusal_probe "$fixture" "$backend") \
+      || fail "$backend: a missing adapter aborted the caller instead of returning non-zero"
+    assert_contains "$out" "REFUSED" \
+      "$backend: fm_backend_source did not report failure for a missing adapter"
+    assert_contains "$out" "REACHED_CALLER" \
+      "$backend: a missing adapter killed the caller before its refusal branch"
+
+    # Present but unreadable must refuse the same way rather than abort.
+    : > "$fixture/bin/backends/$backend.sh"
+    chmod 000 "$fixture/bin/backends/$backend.sh"
+    if [ ! -r "$fixture/bin/backends/$backend.sh" ]; then
+      out=$(backend_source_refusal_probe "$fixture" "$backend") \
+        || fail "$backend: an unreadable adapter aborted the caller instead of returning non-zero"
+      assert_contains "$out" "REFUSED" \
+        "$backend: fm_backend_source did not report failure for an unreadable adapter"
+      assert_contains "$out" "REACHED_CALLER" \
+        "$backend: an unreadable adapter killed the caller before its refusal branch"
+    fi
+    chmod 644 "$fixture/bin/backends/$backend.sh"
+  done
+  rm -rf "$fixture"
+  pass "fm_backend_source: a missing or unreadable adapter refuses without aborting the caller"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1148,6 +1204,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_refuses
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
