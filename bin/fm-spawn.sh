@@ -165,7 +165,13 @@
 #   roughly doubles the number of send_text_line calls that can reach that
 #   pre-existing adapter path. Every gate refusal names the window and says
 #   whether it survives, and the gate removes nothing itself, so on every flat
-#   layout that pane is still there afterwards.
+#   layout that pane is still there afterwards. A refusal also speaks to the task
+#   record, because the second gate runs after that record is published and no
+#   refusal retracts it: on a fresh spawn the record is an orphan, so the refusal
+#   names $STATE/<id>.meta and the exact `bin/fm-teardown.sh <id>` that clears it;
+#   on a relaunch the record is the live task being adopted, so the refusal says
+#   teardown is NOT the remedy there and to fix the endpoint's shell and relaunch
+#   again.
 #   Known residuals on the herdr presentation-projection path: both gates run
 #   while this session's presentation-order lock is held, so an unresponsive pane
 #   can add up to two full poll budgets to that hold window; and the shared
@@ -2229,16 +2235,16 @@ spawn_send_key() {  # <target> <key>
 # repo drives the real fm-spawn.sh against a FAKE backend whose send channel has
 # no shell behind it at all, so no marker can ever appear there and the gate
 # would time out on fixtures that are not testing a shell. tests/lib.sh exports
-# the bypass for those, while the real-backend smoke suites - which do not source
-# it - exercise the gate for real, and tests/fm-spawn-first-send.test.sh strips
-# it to verify the gate itself. No portable CI lane proves the gate's premise
-# against a real shell: the tmux and herdr smoke suites never invoke this script
-# at all, and every suite that does either bypasses the gate or is classified
-# real-herdr-gated and excluded from those lanes. So "a live pane shell executes
-# the marker touch, and this script observes that marker" is unproven against any
-# real shell there; follow-up task spawn-ready-live-backend-evidence owns closing
-# that, and tests/fm-spawn-first-send.test.sh covers only the gate's logic against
-# a modelled byte-lossy shell.
+# the bypass for those, and tests/fm-spawn-first-send.test.sh strips it to verify
+# the gate itself. No portable CI lane proves the gate's premise against a real
+# shell: the tmux and herdr smoke suites never invoke this script at all, and
+# every suite that does either bypasses the gate or is classified real-herdr-gated
+# or live-harness-optin, which portable lanes exclude and which exit early anyway
+# without herdr, jq, treehouse, or cmux. So "a live pane shell executes the marker
+# touch, and this script observes that marker" is unproven against any real shell
+# there; follow-up task spawn-ready-live-backend-evidence owns closing that, and
+# tests/fm-spawn-first-send.test.sh covers only the gate's logic against a
+# modelled byte-lossy shell.
 
 # spawn_ready_probe_dir <root>: mktemp one probe directory under <root> and echo
 # it. Separate from the caller so the preferred root and the known-safe fallback
@@ -2273,10 +2279,15 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
     aftermath="inspect window $T, which survives this refusal and is left for you to clean up"
   fi
   # The second gate runs after the task record is published, and a refusal does
-  # not retract it, so the fleet would keep enumerating a task whose pane never
-  # got its launch command. Name the record and the command that clears it.
-  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-    aftermath="$aftermath; task record $STATE/$ID.meta is published and this refusal does not retract it, so clear the task with '$FM_ROOT/bin/fm-teardown.sh $ID'"
+  # not retract it. What that record MEANS differs by path, and so does the
+  # remedy: a fresh spawn leaves an orphan nothing will ever launch into, while a
+  # relaunch leaves the live task it was adopting. Teardown kills the endpoint and
+  # removes the worktree holding the work, so it is named only where the record is
+  # genuinely orphaned.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    aftermath="$aftermath; task $ID is a LIVE adopted task and its record $STATE/$ID.meta stands, so do NOT run fm-teardown.sh here - that would kill the endpoint and remove the worktree holding this task's work; fix the endpoint's shell and run the relaunch again"
+  elif [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    aftermath="$aftermath; task record $STATE/$ID.meta is published for a pane that never received its launch command, and this refusal does not retract it, so clear the orphaned task with '$FM_ROOT/bin/fm-teardown.sh $ID'"
   fi
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}

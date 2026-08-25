@@ -40,9 +40,13 @@ export FM_GATE_REFUSE_BYPASS=1
 # pane itself must create; nearly every suite here drives the real fm-spawn.sh
 # against a FAKE backend whose send channel has no shell behind it, so the marker
 # can never appear and the gate would time out on fixtures that are not testing a
-# shell at all. The real-backend smoke suites deliberately do NOT source this
-# library, so they still exercise the gate against a real shell, and
-# tests/fm-spawn-first-send.test.sh strips this bypass to verify the gate itself.
+# shell at all. tests/fm-spawn-first-send.test.sh strips this bypass to verify the
+# gate itself against a modelled byte-lossy shell. No portable CI lane proves the
+# gate against a real shell: the tmux and herdr smoke suites never invoke
+# bin/fm-spawn.sh at all, and every suite that drives it unbypassed is classified
+# real-herdr-gated or live-harness-optin, which portable lanes exclude and which
+# exit early anyway without herdr, jq, treehouse, or cmux. Follow-up task
+# spawn-ready-live-backend-evidence owns closing that gap.
 export FM_SPAWN_READY_BYPASS=1
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
