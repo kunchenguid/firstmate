@@ -32,6 +32,8 @@
 #   (w) a zero-exit queue-required refusal keeps merge semantics unchanged
 #   (x) an unreadable outcome after a successful merge call keeps the PR
 #       recorded and the merge poll armed
+#   (y) agreeing queue rules still produce exact retry flags
+#   (z) conflicting queue rules report ambiguous retry guidance
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -585,6 +587,59 @@ test_github_queue_required_refusal_names_retry_flags() {
   pass "fm-pr-merge explains how to retry with the required GitHub merge queue method"
 }
 
+test_github_agreeing_queue_rules_keep_retry_guidance() {
+  local case_dir rc
+  case_dir=$(make_case github-agreeing-queue-rules)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2424242424242424242424242424242424242424
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'merge_method=REBASE\nmerge_method=REBASE\n' > "$case_dir/github-rules"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/58 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-agreeing-queue-rules: an unproved merge must fail"
+  assert_grep 'base branch main requires the merge queue' "$case_dir/stderr" \
+    "github-agreeing-queue-rules: refusal did not name the queue requirement"
+  assert_grep '-- --auto --rebase' "$case_dir/stderr" \
+    "github-agreeing-queue-rules: agreeing rules omitted exact retry flags"
+  assert_no_grep 'exact retry flags are ambiguous' "$case_dir/stderr" \
+    "github-agreeing-queue-rules: agreeing rules were reported as ambiguous"
+  pass "fm-pr-merge aggregates agreeing merge-queue rules"
+}
+
+test_github_conflicting_queue_rules_report_ambiguity() {
+  local case_dir rc
+  case_dir=$(make_case github-conflicting-queue-rules)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2525252525252525252525252525252525252525
+  write_github_outcome "$case_dir" OPEN false false main
+  printf 'merge_method=MERGE\nmerge_method=SQUASH\n' > "$case_dir/github-rules"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/59 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-conflicting-queue-rules: an unproved merge must fail"
+  assert_grep 'base branch main has conflicting merge queue methods (MERGE, SQUASH)' \
+    "$case_dir/stderr" \
+    "github-conflicting-queue-rules: conflicting methods were not named"
+  assert_no_grep '-- --auto --merge' "$case_dir/stderr" \
+    "github-conflicting-queue-rules: an exact retry method was guessed"
+  assert_no_grep '-- --auto --squash' "$case_dir/stderr" \
+    "github-conflicting-queue-rules: an exact retry method was guessed"
+  pass "fm-pr-merge reports ambiguity for conflicting merge-queue rules"
+}
+
 test_extra_merge_args_forwarded() {
   local case_dir rc
   case_dir=$(make_case extra-args)
@@ -1126,6 +1181,8 @@ test_github_still_forwards_sha_arg() {
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
+test_github_agreeing_queue_rules_keep_retry_guidance
+test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses

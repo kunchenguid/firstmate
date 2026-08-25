@@ -326,8 +326,14 @@ github_urlencode_path_segment() {
   printf '%s' "$encoded"
 }
 
+FM_PR_GITHUB_QUEUE_METHOD=
+FM_PR_GITHUB_QUEUE_AMBIGUOUS=false
+FM_PR_GITHUB_QUEUE_METHODS=
 github_read_queue_method() {
-  local methods line method='' count=0 branch_path
+  local methods line method='' candidate count=0 branch_path
+  FM_PR_GITHUB_QUEUE_METHOD=
+  FM_PR_GITHUB_QUEUE_AMBIGUOUS=false
+  FM_PR_GITHUB_QUEUE_METHODS=
   branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
   if ! methods=$(gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
@@ -338,18 +344,32 @@ github_read_queue_method() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      merge_method=*) method=${line#merge_method=} ;;
+      merge_method=*)
+        candidate=${line#merge_method=}
+        case "$candidate" in
+          MERGE|SQUASH|REBASE) ;;
+          *) return 1 ;;
+        esac
+        if [ -z "$method" ]; then
+          method=$candidate
+          FM_PR_GITHUB_QUEUE_METHODS=$candidate
+        elif [ "$method" != "$candidate" ]; then
+          FM_PR_GITHUB_QUEUE_AMBIGUOUS=true
+          case ",$FM_PR_GITHUB_QUEUE_METHODS," in
+            *",$candidate,"*) ;;
+            *) FM_PR_GITHUB_QUEUE_METHODS="$FM_PR_GITHUB_QUEUE_METHODS, $candidate" ;;
+          esac
+        fi
+        ;;
       *) return 1 ;;
     esac
     count=$((count + 1))
   done <<METHODS
 $methods
 METHODS
-  [ "$count" -eq 1 ] || return 1
-  case "$method" in
-    MERGE|SQUASH|REBASE) FM_PR_GITHUB_QUEUE_METHOD=$method ;;
-    *) return 1 ;;
-  esac
+  [ "$count" -gt 0 ] || return 1
+  [ "$FM_PR_GITHUB_QUEUE_AMBIGUOUS" = false ] || return 1
+  FM_PR_GITHUB_QUEUE_METHOD=$method
 }
 
 record_pr_metadata() {
@@ -377,6 +397,9 @@ github_report_unmerged_outcome() {
     esac
     printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
       "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
+  elif [ "$FM_PR_GITHUB_QUEUE_AMBIGUOUS" = true ]; then
+    printf 'error: base branch %s has conflicting merge queue methods (%s); exact retry flags are ambiguous\n' \
+      "$FM_PR_GITHUB_BASE" "$FM_PR_GITHUB_QUEUE_METHODS" >&2
   fi
 }
 
