@@ -955,3 +955,23 @@ Evidence produced 2026-08-23 on macOS 26.5.0 arm64, Node v24.14.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.84.1 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+## omp (session-lock identity)
+
+`bin/fm-session-lock-lib.sh`'s recognition of omp (Oh My Pi) as Claude-identified, scoped to session-lock ownership only, depends on two vendor-controlled facts: that a real omp process's own `comm`/`argv[0]` report base name `omp`, and that a real omp session's own process environment carries `CLAUDECODE=1`.
+
+Evidence produced 2026-08-25 on macOS 26.5.0 arm64, omp 18.0.4:
+
+```sh
+FM_OMP_LOCK_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-session-lock-live-e2e.test.sh
+```
+
+```text
+ok - omp session-lock live guard: a real omp session's own process environment carries CLAUDECODE=1
+ok - omp session-lock live guard: a real omp process's own comm reports base name 'omp'
+ok - omp session-lock live guard: the real (unfaked) classifier recognizes a live omp process from its own ancestry without extending past it
+```
+
+The observed live process reported `comm=/opt/homebrew/bin/omp` and its own bash tool echoed `CLAUDECODE=1` back from its own environment.
+macOS `ps` does not expose another process's environment (neither `ps -wwE` nor `ps eww` show it for a child spawned by this same guard), so the `CLAUDECODE` fact can only be confirmed by asking omp itself, through its own bash tool, to report it - a genuine bounded model turn, not a static read.
+Refresh this record after every omp upgrade by re-running the command above.

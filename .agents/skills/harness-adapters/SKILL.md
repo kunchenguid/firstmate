@@ -58,8 +58,9 @@ For stuck recovery, the target window's harness is recorded as `harness=` in `st
 Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 `bin/fm-session-lock-lib.sh` separately recognizes an `omp` (Oh My Pi) process as Claude-identified for session-lock ownership only, gated strictly on `CLAUDECODE=1` (never a bare `omp` name match), because omp runs on the same underlying Claude Agent SDK but is not itself a verified harness.
+`CLAUDECODE` is only ever read from the calling process's own environment, so the gate applies only while identifying the caller's own ancestry (`self=1`); a foreign lock-holder pid is verified against the persisted marker `bin/fm-lock.sh` records at acquisition time, never the checker's own ambient environment, and the ancestry walk deliberately does not extend past omp's own process.
 This is scoped narrowly to lock identity: omp's Stop/PreToolUse hook firing, watcher auto-rearm, and busy-state detection are unverified, and `omp` is not added to `FM_HARNESS_RE`/`FM_HARNESS_NAMES` or any verified-harness table used for spawning crewmates/secondmates.
-See `bin/fm-session-lock-lib.sh` and `tests/fm-session-lock-ancestry.test.sh`.
+See `bin/fm-session-lock-lib.sh`, `tests/fm-session-lock-ancestry.test.sh`, the live guard `tests/fm-omp-session-lock-live-e2e.test.sh`, and [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) "omp (session-lock identity)".
 
 ## Primary turn-end guard
 
