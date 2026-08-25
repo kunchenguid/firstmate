@@ -32,7 +32,8 @@ make_tools() { # <world>
   mkdir -p "$fake"
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+printf 'state: %s · source: %s · %s\n' "${FM_FAKE_CREW_STATE:-unknown}" \
+  "${FM_FAKE_CREW_SOURCE:-fake}" "${FM_FAKE_CREW_DETAIL:-detail}"
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -315,9 +316,57 @@ test_scan_marker_replaces_symlink_safely() {
   pass "scan marker replaces a symlink without overwriting its target"
 }
 
+# A provider-quota kill is the one run-step state fm-crew-state.sh reclassifies
+# out of failed. The killed agent appends nothing further, so this scan is its
+# only surfacing path: it must stay terminal here or the change that names the
+# stall would be the change that hides it.
+test_run_step_blocked_quota_kill_is_terminal() {
+  make_world quota-kill; write_child "$MAIN" child 'working: validating'
+  FM_FAKE_CREW_STATE='blocked' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='provider quota limit hit during test: resets 7:40pm (Europe/Paris) - run failed, needs re-run when quota returns' \
+    run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "quota-killed crew did not wake the supervisor"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "quota-killed crew did not retain a terminal outcome record"
+  grep -Fq 'child=child state=blocked' "$MAIN/state/.wake-queue" \
+    || fail "quota-killed crew was not reported as blocked"
+  pass "a run-step-sourced blocked quota kill stays a terminal outcome"
+}
+
+# The parent's status stream is a decision ledger, not a log: a `blocked` verb
+# there OPENS a durable keyed decision, and nothing on this path ever emits its
+# resolution. So the blocked classification stays local while the upward report
+# carries a terminal verb the fold never opens - with the state and the quota
+# detail still in the line so the parent can see why the child failed.
+test_blocked_parent_report_opens_no_decision() {
+  local record open
+  make_world quota-parent; bind_secondmate local
+  write_child "$MATE" child 'working: validating'
+  FM_FAKE_CREW_STATE='blocked' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='provider quota limit hit during test: resets 7:40pm (Europe/Paris) - run failed, needs re-run when quota returns' \
+    run_reconcile "$MATE" --startup
+
+  grep -Fq 'inactive terminal child=child' "$MAIN/state/mate.status" \
+    || fail "quota-killed child was never reported upward"
+  open=$(FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_open_decisions "$2"' _ "$ROOT" "$MAIN/state/mate.status")
+  [ -z "$open" ] || fail "upward quota-kill report opened a decision nothing can close: $open"
+
+  grep -Fq 'state=blocked' "$MAIN/state/mate.status" \
+    || fail "parent report dropped the blocked classification from its text"
+  grep -Fq 'detail=provider quota limit hit during test' "$MAIN/state/mate.status" \
+    || fail "parent report dropped the quota detail"
+  record=$(find "$MATE/state/terminal-outcomes" -type f -name '*.reported' | head -1)
+  [ -n "$record" ] || fail "quota-killed child produced no durable receipt"
+  grep -Fxq 'state=blocked' "$record" || fail "local record lost the blocked classification"
+  pass "an upward quota-kill report opens no decision and keeps its state and detail"
+}
+
 test_nonterminal_and_captain_held_states_do_not_report() {
   local state
-  for state in working paused parked unknown; do
+  for state in working paused parked unknown blocked; do
     make_world "nonterminal-$state"; write_child "$MAIN" child 'working: still active'
     FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
     [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$state produced a terminal outcome"
@@ -454,6 +503,8 @@ test_legacy_metadata_rewrite_keeps_receipt_identity
 test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
+test_run_step_blocked_quota_kill_is_terminal
+test_blocked_parent_report_opens_no_decision
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses

@@ -24,10 +24,25 @@
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
-# captain-held work retain their existing supervision semantics.
+# Only a done, failed, or run-step-sourced blocked state is suspicious enough to
+# create a durable terminal outcome record or wake the supervisor.
+# A run-step-sourced blocked is terminal in exactly the same sense as failed: it
+# is the provider-quota kill fm-crew-state.sh reclassifies out of failed, whose
+# run does not resume by itself and needs a re-run once quota returns. The
+# killed agent appends nothing further, so this scan is its only surfacing path.
+# A blocked state from any other source is a captain-relevant status-log append
+# that surfaces on its own, and stays outside this scan.
+# Working, paused, parked, non-run-step blocked, unknown, persistent
+# secondmates, and captain-held work retain their existing supervision
+# semantics.
+#
+# The blocked state is local to this home. Upward, the parent-channel append
+# carries only done or failed, because the parent's status stream is folded by
+# fm-classify-lib.sh's decision fold where blocked OPENS a durable keyed
+# decision and nothing on this path ever emits its resolution. The precise
+# state and the quota detail ride along in that line's text instead, so the
+# parent sees WHY the child failed without inheriting a decision it cannot
+# close. parent_report_verb owns that invariant.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -313,8 +328,26 @@ append_once() { # <path> <line>
   printf '%s\n' "$line" >> "$path"
 }
 
-report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
-  local self=$1 task=$2 state=$3 outcome_key=$4 fingerprint=$5 pr=$6 parent_record destination line
+# Verb this report may carry into the parent's status stream, which is folded by
+# fm-classify-lib.sh's decision fold: `needs-decision` and `blocked` OPEN a
+# durable keyed decision there, and only the resolve or captain-held verb closes
+# one. Nothing on this path ever emits a resolution, so a verb that opens a
+# decision would sit in the parent ledger forever - after the child is re-run,
+# after it ships. Upward, therefore, every terminal outcome reports as `done` or
+# `failed`, the two the fold never opens; the precise state stays on the local
+# record and rides along in this line's text. This is the invariant of the
+# append, not of any one caller, so a state added to the scan later cannot
+# reopen the hole.
+parent_report_verb() { # <state>
+  case "$1" in
+    done) printf 'done' ;;
+    *) printf 'failed' ;;
+  esac
+}
+
+report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr> [detail]
+  local self=$1 task=$2 state=$3 outcome_key=$4 fingerprint=$5 pr=$6 detail=${7:-} \
+    parent_record destination line verb
   parent_record="$FM_HOME/.fm-secondmate-parent"
   fm_secondmate_parent_record_parse "$parent_record" || return 1
   case "$FM_SECONDMATE_PARENT_ROUTE" in
@@ -327,13 +360,24 @@ report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
       ;;
     *) return 1 ;;
   esac
-  line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
+  verb=$(parent_report_verb "$state")
+  line="$verb [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
+  [ -z "$detail" ] || line="$line state=$state detail=$detail"
   append_once "$destination" "$line"
 }
 
+# Detail field of a fm-crew-state.sh line ("state: X · source: Y · <detail>"),
+# sanitized for a status append. Empty when the line carries no detail.
+state_line_detail() { # <state-line>
+  local rest=${1#*" · source: "}
+  case "$rest" in
+    *" · "*) clean_field "${rest#*" · "}" ;;
+  esac
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state detail pr incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -346,9 +390,14 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  detail=''
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    'state: blocked · source: run-step'*)
+      state='blocked'
+      detail=$(state_line_detail "$state_line")
+      ;;
     *) return 0 ;;
   esac
   pr=$(pr_for_task "$meta" "$status")
@@ -362,7 +411,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
-    if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
+    if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr" "$detail"; then
       mark_reported "$RECORD_PENDING" || return 1
     else
       payload="inactive terminal outcome needs parent report: child=$id state=$state"
