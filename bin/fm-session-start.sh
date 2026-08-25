@@ -382,21 +382,17 @@ print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
-# print_captain_style <path> <label>: like print_file_or_absent, but a
-# present, non-empty file is run through `fm-helm.sh show` first so the same
-# schema check /helm enforces on write (JSON object, string
-# "language"/"response_tone" fields) also gates what reaches the standing
-# session context - a file that /helm would refuse is never surfaced as if it
-# were an active preference.
+# print_captain_style <path> <label>: like print_file_or_absent, but any
+# present file (including an empty one) is run through `fm-helm.sh show`
+# first so the same schema check /helm enforces on write (JSON object,
+# string "language"/"response_tone" fields) also gates what reaches the
+# standing session context - a file that /helm would refuse, empty or
+# otherwise, is never surfaced as if it were an active preference.
 print_captain_style() {
   local path=$1 label=$2
   subsection "$label"
   if [ ! -f "$path" ]; then
     printf 'ABSENT\n'
-    return
-  fi
-  if [ ! -s "$path" ]; then
-    printf '(present, empty)\n'
     return
   fi
   local out

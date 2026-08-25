@@ -737,6 +737,30 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+test_context_digest_empty_captain_style_is_invalid_not_blank() {
+  local rec root home fakebin out cap_section
+  rec=$(new_world context-digest-empty-captain-style)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/config"
+  : > "$home/config/captain-style.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  cap_section=$(printf '%s\n' "$out" | awk '/^config\/captain-style\.json \(/{flag=1;next}flag&&/^-{10,}$/{next}flag&&/^$/{exit}flag')
+  assert_contains "$cap_section" "INVALID" \
+    "a zero-byte captain-style.json must fail /helm's schema validation, not print as a neutral empty record"
+  case "$cap_section" in
+    *'(present, empty)'*) fail "empty captain-style.json bypassed schema validation and printed as a neutral empty record: $cap_section" ;;
+  esac
+
+  pass "context digest treats a zero-byte captain-style.json as invalid, not as an empty-but-present record"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -2458,6 +2482,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_empty_captain_style_is_invalid_not_blank
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
