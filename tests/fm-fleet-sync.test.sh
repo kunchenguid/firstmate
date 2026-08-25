@@ -491,7 +491,7 @@ test_worktree_added_between_proof_and_delete_is_left_alone() {
 cat > "$fakegit/git" <<'EOF'
 #!/bin/sh
 if [ "$1" = "-C" ] && [ "$3" = "worktree" ] \
-  && [ "$4" = "add" ] && [ "$5" = "--detach" ]; then
+  && [ "$4" = "add" ]; then
   "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
 fi
 exec "$REAL_GIT" "$@"
@@ -509,6 +509,42 @@ EOF
   [ "$(git -C "$worktree" symbolic-ref --short HEAD)" = "fm/task-worktree-race" ] \
     || fail "concurrent-worktree-checkout: linked worktree did not retain the task branch"
   pass "a worktree checkout between merged proof and deletion leaves the branch intact"
+}
+
+test_worktree_checkout_at_final_delete_is_refused() {
+  local home clone fakegit real_git worktree marker
+  home=$(new_home)
+  clone=$(build_pair "$home" final_worktree_race)
+  ff_merge_task_branch "$clone" fm/task-final-worktree feature.txt merged
+  fakegit="$home/fake-git"; mkdir -p "$fakegit"
+  worktree="$home/active-final-task-worktree"
+  marker="$home/final-worktree-status"
+  real_git=$(command -v git)
+  cat > "$fakegit/git" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
+  && [ "$3" = "update-ref" ] && [ "$4" = "-d" ] \
+  && [ "$5" = "refs/heads/$RACE_BRANCH" ]; then
+  "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH" >/dev/null 2>&1
+  printf '%s\n' "$?" > "$RACE_MARKER"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$fakegit/git"
+
+  PATH="$fakegit:$PATH" REAL_GIT="$real_git" RACE_REPO="$clone" \
+    RACE_BRANCH=fm/task-final-worktree RACE_WORKTREE="$worktree" RACE_MARKER="$marker" \
+    bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-final-worktree refs/heads/main' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
+    || fail "final-worktree-checkout: deletion unexpectedly failed"
+
+  [ "$(cat "$marker")" -ne 0 ] \
+    || fail "final-worktree-checkout: a concurrent worktree checkout succeeded during deletion"
+  branch_exists "$clone" fm/task-final-worktree \
+    && fail "final-worktree-checkout: eligible branch was not deleted"
+  [ ! -e "$worktree/.git" ] \
+    || fail "final-worktree-checkout: rejected checkout left an active worktree"
+  pass "the temporary branch checkout excludes a concurrent final-window worktree"
 }
 
 test_gone_upstream_task_branch_is_pruned() {
@@ -848,6 +884,7 @@ test_local_only_skipped
 test_branch_update_between_proof_and_delete_is_left_alone
 test_branch_rewind_at_delete_is_left_alone
 test_worktree_added_between_proof_and_delete_is_left_alone
+test_worktree_checkout_at_final_delete_is_refused
 test_gone_upstream_task_branch_is_pruned
 test_routine_prune_defaults_on_and_allows_disable
 test_checked_out_task_branch_is_left_alone

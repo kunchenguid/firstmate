@@ -97,9 +97,7 @@ fm_branch_is_safely_gone() {
 }
 
 # fm_branch_delete_local_proven_tip <repo> <branch> <expected_tip>: delete the
-# exact local tip a caller has already proved landed. The final ref deletion
-# compares the expected old value atomically after rechecking that no worktree
-# has the branch checked out.
+# exact local tip a caller has already proved landed.
 fm_branch_delete_local_proven_tip() {
   local repo=$1 branch=$2 expected_tip=$3 prune_worktree delete_status tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
@@ -108,11 +106,7 @@ fm_branch_delete_local_proven_tip() {
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   prune_worktree=$(mktemp -d /tmp/fm-branch-prune.XXXXXX) || return 1
   rmdir "$prune_worktree" || return 1
-  git -C "$repo" worktree add --detach -q "$prune_worktree" "$expected_tip" || return 1
-  fm_branch_worktree_has_branch "$repo" "$branch" && {
-    git -C "$repo" worktree remove "$prune_worktree" >/dev/null 2>&1 || true
-    return 1
-  }
+  git -C "$repo" worktree add -q "$prune_worktree" "$branch" || return 1
   git -C "$repo" update-ref -d "refs/heads/$branch" "$expected_tip" >/dev/null 2>&1
   delete_status=$?
   git -C "$repo" worktree remove "$prune_worktree" >/dev/null 2>&1 || true
