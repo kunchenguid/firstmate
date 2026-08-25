@@ -363,26 +363,34 @@ SH
 }
 
 test_persisted_omp_claude_marker_lets_a_foreign_checker_see_a_live_omp_session() {
-  local dir fakebin marker
+  local dir fakebin marker no_proc lstart_original lstart_reused
   dir="$TMP_ROOT/omp-persisted-marker"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
   marker="$dir/state/.lock.omp-claude"
-  cat > "$fakebin/ps" <<'SH'
+  # A nonexistent /proc root forces fm_harness_omp_pid_identity onto its
+  # `ps -o lstart=` fallback on every platform, including Linux CI where a
+  # real /proc would otherwise take the numeric-starttime branch this fixture
+  # cannot fake through `ps`.
+  no_proc="$dir/no-proc"
+  lstart_original='Mon Jan  1 00:00:00 2024'
+  lstart_reused='Tue Jan  2 00:00:00 2024'
+  cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
 field= pid=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) field=$2; shift 2 ;;
-    -p) pid=$2; shift 2 ;;
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
     *) shift ;;
   esac
 done
-case "$pid:$field" in
+case "\$pid:\$field" in
   500:comm=) printf '%s\n' omp ;;
   500:args=) printf '%s\n' omp ;;
   500:ppid=) printf '%s\n' 1 ;;
+  500:lstart=) printf '%s\n' "\${FM_TEST_PID500_LSTART:-$lstart_original}" ;;
   650:comm=) printf '%s\n' claude ;;
   650:args=) printf '%s\n' claude ;;
   650:ppid=) printf '%s\n' 1 ;;
@@ -402,40 +410,54 @@ SH
 
   # fm_harness_record_omp_claude, called from the writer's own context where
   # CLAUDECODE=1 is sound evidence about pid 500, is what produces that record.
-  CLAUDECODE=1 lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 500"
-  [ "$(cat "$marker" 2>/dev/null || true)" = 500 ] \
+  FM_PROC_ROOT_OVERRIDE="$no_proc" CLAUDECODE=1 lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 500"
+  [ "$(sed -n '1p' "$marker" 2>/dev/null || true)" = 500 ] \
     || fail "fm_harness_record_omp_claude did not persist the verified omp pid"
+  [ "$(sed -n '2p' "$marker" 2>/dev/null || true)" = "lstart=$lstart_original" ] \
+    || fail "fm_harness_record_omp_claude did not persist a pid-reuse identity fingerprint alongside the pid"
 
   # Without the marker, this foreign checker correctly still cannot confirm
   # pid 500 - this is the pre-existing fail-closed behavior and must not
   # regress.
   rm -f "$marker"
-  if lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
+  if FM_PROC_ROOT_OVERRIDE="$no_proc" lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
     fail "a foreign omp pid was seen as alive with no persisted marker present"
   fi
 
   # With the persisted marker in place, this foreign checker now correctly
   # sees the live omp session as alive, without needing its own CLAUDECODE.
-  printf '500\n' > "$marker"
-  lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'" \
+  printf '500\nlstart=%s\n' "$lstart_original" > "$marker"
+  FM_PROC_ROOT_OVERRIDE="$no_proc" lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'" \
     || fail "a live, marker-verified omp session held by a different session tree was classified as stale"
 
   # A marker naming a different pid than the one being checked - the
   # signature of a reused pid number after the verified session exited -
   # must never be trusted for this pid.
-  printf '999\n' > "$marker"
-  if lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
+  printf '999\nlstart=%s\n' "$lstart_original" > "$marker"
+  if FM_PROC_ROOT_OVERRIDE="$no_proc" lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
     fail "a marker naming a different pid was accepted as evidence for pid 500"
+  fi
+
+  # The kernel can hand pid 500 to an unrelated later process before this
+  # marker is ever refreshed: a bare pid match must not be enough. The marker
+  # still names pid 500 with the ORIGINAL verified session's start time, but
+  # the live process ps now reports for pid 500 carries a different start
+  # time - the signature of that reuse - so it must be rejected even though
+  # the pid number itself matches.
+  printf '500\nlstart=%s\n' "$lstart_original" > "$marker"
+  if FM_TEST_PID500_LSTART="$lstart_reused" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    lib_eval "$fakebin" "fm_harness_pid_alive 500 '$dir/state'"; then
+    fail "a pid whose live start time no longer matches the marker's recorded identity was accepted as the verified session"
   fi
 
   # fm_harness_record_omp_claude must also clear a stale marker when the pid
   # it is now given is not omp, so a later non-omp acquisition never leaves a
   # foreign checker trusting a leftover record for a reused pid number.
-  printf '500\n' > "$marker"
-  lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 650"
+  printf '500\nlstart=%s\n' "$lstart_original" > "$marker"
+  FM_PROC_ROOT_OVERRIDE="$no_proc" lib_eval "$fakebin" "fm_harness_record_omp_claude '$dir/state' 650"
   [ -e "$marker" ] && fail "fm_harness_record_omp_claude left a stale marker after a non-omp pid was recorded"
 
-  pass "session-lock: a foreign checker trusts the lock writer's persisted omp+CLAUDECODE record, never its own ambient marker"
+  pass "session-lock: a foreign checker trusts the lock writer's persisted omp+CLAUDECODE record, never its own ambient marker, and rejects a reused pid whose identity no longer matches"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -598,6 +620,7 @@ case "$field" in
   comm=) printf '%s\n' omp ;;
   args=) printf '%s\n' omp ;;
   ppid=) printf '%s\n' 1 ;;
+  lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2024' ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -616,6 +639,71 @@ SH
   pass "session-lock e2e: a failed omp-identity marker write fails the whole acquisition instead of leaving an unverifiable lock"
 }
 
+# A real fm-lock.sh is run to a controlled stopping point - the ps call
+# fm_harness_record_omp_claude issues right after $LOCK is written - and
+# killed there with SIGTERM, the same signal an interrupted terminal or a
+# supervisor's graceful shutdown would send. The fake ps only sleeps once
+# state/.lock already exists, so the delay lands exactly in the publication
+# gap between writing $LOCK and persisting its omp-identity marker, never
+# during the earlier ancestry walk that resolves $me.
+test_e2e_interrupted_omp_publication_does_not_leave_an_unverifiable_lock() {
+  local dir fakebin pid i rc lock_after
+  dir="$TMP_ROOT/e2e-omp-interrupted-publication"
+  mkdir -p "$dir/state"
+  install_autoarm_scripts "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$field" = comm= ] && [ -f "$FM_HOME/state/.lock" ]; then
+  sleep 0.5
+fi
+case "$field" in
+  comm=) printf '%s\n' omp ;;
+  args=) printf '%s\n' omp ;;
+  ppid=) printf '%s\n' 1 ;;
+  lstart=) printf '%s\n' 'Mon Jan  1 00:00:00 2024' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  CLAUDECODE=1 PATH="$fakebin:$PATH" FM_HOME="$dir" "$dir/bin/fm-lock.sh" \
+    >"$dir/out" 2>&1 &
+  pid=$!
+
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$dir/state/.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ ! -f "$dir/state/.lock" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "fm-lock.sh never reached the session-lock write within the timeout"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  rc=$?
+
+  [ "$rc" -ne 0 ] \
+    || fail "an interrupted fm-lock.sh acquisition reported success: $(cat "$dir/out" 2>/dev/null)"
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  [ -z "$lock_after" ] \
+    || fail "an omp acquisition interrupted before its identity marker was persisted left the session lock claiming pid $lock_after, unverifiable by any foreign session"
+  [ -e "$dir/state/.lock.omp-claude" ] \
+    && fail "an interrupted omp acquisition left a stale omp-identity marker behind"
+  pass "session-lock e2e: an omp acquisition interrupted between writing the lock and persisting its identity marker rolls the lock back instead of leaving it unverifiable"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_omp_is_claude_identified_only_with_claudecode_marker
@@ -628,3 +716,4 @@ test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_e2e_omp_marker_write_failure_fails_the_whole_acquisition
+test_e2e_interrupted_omp_publication_does_not_leave_an_unverifiable_lock
