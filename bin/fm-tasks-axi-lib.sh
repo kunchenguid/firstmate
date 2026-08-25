@@ -122,12 +122,20 @@ fm_tasks_axi_backend_available() {
   fm_tasks_axi_compatible
 }
 
-# fm_tasks_axi_show <home> <archive-path-or-empty> <id>
+# fm_tasks_axi_show <home> <id>
 # `tasks-axi show <id> --full`, checked against the active backlog first and,
 # when the id was pruned out of it (tasks-axi prune, or a done row aging past
 # done_keep), against the archive file next. A resolved-and-archived captain
 # hold must still resolve here, or every completion gate and idempotent
 # replay built on this lookup reports it as permanently absent.
+#
+# The archive path is derived from <home>, not taken as a separate argument:
+# tasks-axi itself resolves the active backlog relative to cwd (this function
+# runs it with cwd=<home>) with no knowledge of FM_DATA_OVERRIDE, so a second,
+# independently-computed archive argument could diverge from it - the archive
+# half of the lookup pointed at a different directory than the active-backlog
+# half ever checked. Deriving both from the same <home> makes that
+# impossible.
 #
 # tasks-axi's own markdown parser only recognizes "in flight", "queued", and
 # "done"-prefixed section headers; the archive's literal "## Archived
@@ -142,12 +150,13 @@ fm_tasks_axi_backend_available() {
 # otherwise a missed active-backlog probe would leak its error text ahead of
 # a successful archive result.
 fm_tasks_axi_show() {
-  local home=$1 archive=$2 id=$3 out normalized
+  local home=$1 id=$2 archive out normalized
   if out=$(cd "$home" && tasks-axi show "$id" --full 2>/dev/null); then
     printf '%s\n' "$out"
     return 0
   fi
-  [ -n "$archive" ] && [ -f "$archive" ] || return 1
+  archive="$home/data/done-archive.md"
+  [ -f "$archive" ] || return 1
   normalized=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tasks-axi-archive.XXXXXX") || return 1
   if ! sed 's/^## Archived .*/## Done/' "$archive" > "$normalized" 2>/dev/null; then
     rm -f -- "$normalized"

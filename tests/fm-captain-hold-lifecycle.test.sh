@@ -992,6 +992,49 @@ test_id_resolution_finds_an_archived_hold() {
   pass "the completion gate and the shim's resolve replay both find a hold after it archives"
 }
 
+# A Greptile review of the archive-lookup fix (PR #3066) flagged that the
+# active-backlog half of task_show is resolved against FM_HOME (tasks-axi
+# itself runs with cwd=FM_HOME and knows nothing of FM_DATA_OVERRIDE) while an
+# earlier version of the archive half was resolved against FM_DATA_OVERRIDE -
+# one lookup split across two bases that can diverge. The completion gate
+# must still find an archived hold when FM_DATA_OVERRIDE points somewhere
+# other than FM_HOME/data.
+test_archive_lookup_ignores_a_diverged_data_override() {
+  local home id decoy
+  home=$(make_home diverged-data-override)
+  id=sample-diverged-review
+  tasks_in "$home" add "$id" "Investigate sample divergence" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin fixture"
+  write_origin_meta "$home" "$id"
+
+  run_captain "$home" hold sample-diverged-call \
+    --title "Choose the sample diverged option" --reason "captain diverged choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain call"
+  printf 'Use the diverged option.\n' > "$home/diverged.txt"
+  run_captain "$home" answer sample-diverged-call --decision-file "$home/diverged.txt" >/dev/null \
+    || fail "could not answer the captain call before archiving"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not force the resolved call into the archive"
+  assert_grep "sample-diverged-call" "$home/data/done-archive.md" \
+    "setup error: the resolved call did not land in the archive"
+  printf 'decisions_reviewed=1\ndecision_keys=sample-diverged-call\n' >> "$home/state/$id.meta"
+
+  # A decoy data directory with its own (unrelated) archive file: if the
+  # lookup ever again followed FM_DATA_OVERRIDE instead of FM_HOME, this is
+  # what it would find - or fail to find the real one behind.
+  decoy="$home/unrelated-data"
+  mkdir -p "$decoy"
+  printf '## Archived 2026-01-01\n- [x] decoy-only-id - Unrelated (repo: sample) (done 2026-01-01)\n' \
+    > "$decoy/done-archive.md"
+
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$decoy" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" verify "$id" >/dev/null \
+    || fail "the completion gate followed a diverged FM_DATA_OVERRIDE instead of FM_HOME"
+  pass "the archive lookup resolves against FM_HOME even when FM_DATA_OVERRIDE diverges"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -1248,6 +1291,7 @@ test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_id_resolution_finds_an_archived_hold
+test_archive_lookup_ignores_a_diverged_data_override
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
