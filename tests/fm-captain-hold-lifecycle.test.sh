@@ -984,7 +984,10 @@ SH
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
-  assert_contains "$(cat "$home/send.log")" "go with option A" "the answer text never reached the worker"
+  # The answer rides fm-send's durable inbox plane: the record carries the
+  # text while the typed channel carries only the doorbell.
+  grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
+    || fail "the answer text never reached the worker's durable inbox record"
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"

@@ -26,6 +26,10 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
+# deliberately restricted, so a case that needs jq exposes this one rather than
+# depending on the host keeping jq in one of those four directories.
+REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -2886,15 +2890,27 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path addresses the forge the URL names, and never the other one.
+  # This fixture's glab answers with the field output the poll reads, so the
+  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
+  # state it could not read.
   write_task_meta "$dir" task-c
+  : > "$dir/glab.log"
+  # The merge path needs jq before it reads anything, so this case supplies it
+  # and the refusal below is the unreadable state rather than a missing tool.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
+  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the state it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
+  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+    || fail "merge wrapper did not read the merge request through glab at its own instance"
+  ! grep -qF ' mr merge ' "$dir/glab.log" \
+    || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
@@ -2981,6 +2997,97 @@ test_merged_poll_retires_once() {
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "handled merged notification remained queued after acknowledgement"
   pass "validated merged polls notify once and retire before the next watcher cycle"
+}
+
+# A poll's own retirement state is scoped to ONE registration, so it cannot by
+# itself catch a poll re-registered for a task whose merge was already
+# surfaced (e.g. bin/fm-pr-check.sh re-armed after the fact). The per-task
+# merge-notified marker (bin/fm-pr-lib.sh) is what stops that re-registration
+# from producing a second main-blocking wake for the identical merge, while a
+# genuinely first notification (test_merged_poll_retires_once above) still
+# reaches main.
+test_merged_poll_reregistration_after_notification_is_absorbed() {
+  local dir state rc first
+  dir=$(make_case merged-reregistration-absorbed)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  first=$(cat "$dir/watch-1.out")
+  case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merge confirmation was not delivered: $first" ;; esac
+  ack_watcher_cycle "$state" || fail "first merge confirmation acknowledgement failed"
+  assert_poll_absent "$state" task-a
+  [ -f "$state/task-a.pr-poll-merge-notified" ] || fail "the merge-notified marker was not recorded"
+
+  # Re-registration: fm-pr-check.sh re-armed for a task whose PR is already
+  # merged (a fresh check.sh/pr-poll/pr-poll-registration, a distinct
+  # retirement identity from the one just retired).
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  rm -f "$state/.last-check"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "the re-registered duplicate did not fall through to the next check: $(cat "$dir/watch-2.out")" ;;
+  esac
+  ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
+    || fail "a repeat identical merged poll opened a main-blocking row: $(cat "$dir/watch-2.out")"
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "the absorbed duplicate merge notice was queued as a main-blocking row"
+  assert_poll_absent "$state" task-a
+  pass "a repeat identical merged poll for an already-notified task is absorbed, never queued as a main-blocking row"
+}
+
+test_different_merged_pr_for_same_task_is_not_absorbed() {
+  local dir state rc
+  dir=$(make_case different-merged-pr-not-absorbed)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "first PR merge confirmation was not delivered: $(cat "$dir/watch-1.out")" ;;
+  esac
+  ack_watcher_cycle "$state" || fail "first PR merge confirmation acknowledgement failed"
+  assert_poll_absent "$state" task-a
+
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/2
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/2
+  rm -f "$state/.last-check"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "different-PR watcher cycle failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "a different PR merge was absorbed: $(cat "$dir/watch-2.out")" ;;
+  esac
+  grep -F "$(printf '\tcheck\t%s/task-a.check.sh\t' "$state")" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "the different PR merge did not create a main-blocking wake row"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 2 \
+    || fail "the marker was not advanced to the different PR identity"
+  ! fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
+    || fail "the marker still matched the superseded PR identity"
+  assert_poll_absent "$state" task-a
+  pass "a different merged PR for the same task gets its own first notification"
 }
 
 test_persistent_secondmate_retirement_is_poll_only() {
@@ -3359,6 +3466,8 @@ test_gitlab_merged_poll_retires() {
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
+test_merged_poll_reregistration_after_notification_is_absorbed
+test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll

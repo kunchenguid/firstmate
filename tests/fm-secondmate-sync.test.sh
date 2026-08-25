@@ -51,7 +51,7 @@ new_world() {
   git init -q -b main "$w/main"
   # Mirror the real repo: the gitignored operational dirs never dirty a worktree,
   # so a secondmate home's data/state/projects can never block its fast-forward.
-  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\n' > "$w/main/.gitignore"
+  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\nscratchpad*\n' > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
@@ -186,6 +186,25 @@ test_ff_dirty() {
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty edit was discarded"
   pass "T3 dirty: an uncommitted home is skipped, its edit preserved"
+}
+
+# --- scratchpad2 must not trip the dirty-home sync guard ----------------------
+test_scratchpad2_does_not_dirty_home() {
+  local w c1 base
+  w=$(new_world scratchpad2-clean)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  mkdir -p "$w/sm/scratchpad2"
+  printf 'notes\n' > "$w/sm/scratchpad2/notes.txt"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated, got '$FF_STATUS' (scratchpad2/ must not dirty the home)"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "home did not fast-forward past an ignored scratchpad2/ directory"
+  grep -q notes "$w/sm/scratchpad2/notes.txt" || fail "scratchpad2 contents were discarded"
+  pass "scratchpad2/ does not mark a secondmate home dirty for the sync guard"
 }
 
 # --- T4: diverged - a home with its own commit is skipped, commit preserved --
@@ -405,9 +424,14 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   assert_not_contains "$out" "NUDGE_SECONDMATES:" "successful nudge must not leave a firstmate action item"
   assert_not_contains "$out" "sm-readme" "readme-only advance is not nudged"
   assert_not_contains "$out" "sm-current" "already-current secondmate is not nudged"
-  assert_contains "$(cat "$log")" "[fm-from-firstmate]" "nudge send should use the marked fm-send secondmate path"
-  assert_contains "$(cat "$log")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
-    "nudge send should type the exact re-read message"
+  # The nudge rides fm-send's durable inbox plane: the marked message lands in
+  # the secondmate task's steering-inbox record while only the doorbell is typed.
+  assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" "[fm-from-firstmate]" \
+    "nudge send should use the marked fm-send secondmate path"
+  assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
+    "nudge send should enqueue the exact re-read message"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" \
+    "nudge send should ring the doorbell at the secondmate pane"
   marker_dir="$w/home/state/.secondmate-nudge-pending"
   [ ! -e "$marker_dir/sm-instr.pending" ] || fail "successful nudge should clear its retry marker"
 
@@ -441,7 +465,7 @@ test_bootstrap_nudge_send_uses_state_override() {
     "nudge send should resolve fm-sm-instr through the effective state dir"
   assert_not_contains "$out" "NUDGE_SECONDMATES:" \
     "effective-state nudge should not fail through FM_HOME/state"
-  assert_contains "$(cat "$log")" "[fm-from-firstmate]" \
+  assert_contains "$(cat "$override_state/sm-instr.inbox/001.msg")" "[fm-from-firstmate]" \
     "effective-state nudge should still use secondmate marker metadata"
   marker="$override_state/.secondmate-nudge-pending/sm-instr.pending"
   assert_absent "$marker" "successful effective-state nudge should clear its retry marker"
@@ -493,9 +517,12 @@ test_bootstrap_nudge_failure_records_retry_marker() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   fakebin=$(make_fake_toolchain "$w")
+  # A real local send failure on the inbox plane is an unwritable steer record
+  # (a keystroke failure alone no longer fails a durably enqueued nudge).
+  : > "$w/home/state/sm-instr.inbox"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
   assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
@@ -515,15 +542,17 @@ test_bootstrap_nudge_retry_is_idempotent() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   fakebin=$(make_fake_toolchain "$w")
+  : > "$w/home/state/sm-instr.inbox"   # block the steer record: a real local failure
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
     "precondition: first nudge should fail"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "precondition: failed nudge should leave marker"
 
+  rm -f "$w/home/state/sm-instr.inbox"   # unblock: the steer record can be written again
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
@@ -543,9 +572,10 @@ test_bootstrap_nudge_retry_refuses_changed_home() {
   add_sm_worktree "$w" sm-instr "$c1"
   bump_primary "$w" instr
   fakebin=$(make_fake_toolchain "$w")
+  : > "$w/home/state/sm-instr.inbox"   # block the steer record: a real local failure
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_FAIL_LITERAL=1 \
+    FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
     "precondition: first nudge should fail"
@@ -659,13 +689,20 @@ SH
     FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
-    "stale herdr endpoint should surface a failed immediate nudge"
+  # The nudge now rides the durable inbox: a stale endpoint can only swallow
+  # the best-effort doorbell, never the steer itself, so the nudge is SENT
+  # (recorded) rather than failed, no retry marker is owed, and the watcher's
+  # re-ring ladder owns delivery against the respawned fresh endpoint.
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+    "a stale herdr endpoint must not fail a durably enqueued nudge"
+  assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" \
+    "please re-read your AGENTS.md" \
+    "the nudge should be durably recorded despite the stale endpoint"
 
   window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$window" = "$fresh" ] || fail "respawn stub did not rotate meta window to '$fresh' (got '$window')"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
-  assert_present "$marker" "failed stale herdr nudge should leave a retry marker"
+  assert_absent "$marker" "a durably enqueued nudge owes no retry marker"
 
   # shellcheck disable=SC2016  # $0/$1 belong to the inner bash -c process.
   resolved=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_resolve_selector fm-sm-instr "$1"' "$ROOT" "$w/home/state")
@@ -681,7 +718,7 @@ SH
     '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_send_literal "$1" "nudge"' "$ROOT" "$fresh" 2>/dev/null; printf '%s' "$?")
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
 
-  pass "T8b stale herdr nudge failures leave a retry marker after respawn rotates fm-<id> metadata"
+  pass "T8b a stale herdr endpoint cannot lose a durably enqueued nudge, and fm-<id> resolves through post-respawn metadata"
 }
 
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
@@ -854,6 +891,7 @@ test_seed_marker_does_not_mask_real_dirt() {
 test_ff_updated
 test_ff_current
 test_ff_dirty
+test_scratchpad2_does_not_dirty_home
 test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
