@@ -21,4 +21,5 @@ exec python3.11 -m unittest -v \
   tests.test_bridge_cutover_transaction \
   tests.test_bridge_sealed_adoption \
   tests.test_prepare_bridge_cutover \
-  tests.test_bridge_worker_state_transaction
+  tests.test_bridge_worker_state_transaction \
+  tests.test_fm_crosscheck_ledger

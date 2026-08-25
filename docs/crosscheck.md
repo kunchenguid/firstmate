@@ -80,9 +80,15 @@ Pi is launched through the resolved installed executable at `xhigh` with JSON ev
 The prompt is passed by `@file` so repository and claim size cannot exceed the process argument limit.
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
 That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
-Crosscheck accepts exactly one verdict tool call from the successful final attempt and preserves usage across Pi auto-retries.
-If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral minimal-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
-The repair is attempted once, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
+The local regular GLM lane runs a fixed two-pass full-diff protocol: an isolated advisory challenge followed by an authoritative synthesis that independently inspects the same exact-base/exact-head diff and receives only a bounded projection of the challenge's untrusted hypotheses.
+Only the synthesis supplies the ledger verdict, and it must reproduce any challenge concern it carries forward rather than treating the challenge as execution proof.
+The two passes never wait or sleep to affect timing, and Crosscheck aggregates their token, cost, turn, and reviewer-latency telemetry without inventing unavailable values.
+The regular-lane reviewer record binds `review_depth_passes: "2"`, `review_depth_mode: two-pass-independent-synthesis-v1`, and the terminal provider/model readback to the registered regular cross-family lane.
+Successful current-contract `clear` and `blocking` records, including reusable records, fail validation when any of those fields is missing or contradictory.
+Failed `tool-failure`, `unreviewed`, and `cannot-certify` attempts may omit terminal and depth evidence they never earned, so their ledgers remain reloadable for a later retry; they are never reusable.
+Crosscheck accepts exactly one verdict tool call from each successful pass and preserves usage across Pi auto-retries.
+If an otherwise completed pass makes zero, multiple, or malformed verdict calls, the same isolated reviewer session receives one fixed verdict-only repair prompt and retains the exact-head packet plus that pass's reasoning without repeating the review.
+The repair is attempted once per pass, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 Provider terminal-error diagnostics are whitespace-normalized, stripped of non-printable characters, and limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
@@ -135,7 +141,7 @@ It fetches `refs/pull/<number>/head` from the base repository into a disposable 
 New run records carry additive telemetry for input, output, cache-read, and cache-write tokens when Pi reports them.
 The record keeps provider-reported cost, Pi-calculated cost, and cost recomputed from the pinned declared rates as separate fields with explicit provenance.
 Pi events do not currently expose a provider-reported billing value, so that field remains null instead of relabeling Pi's calculated value.
-The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance.
+The same record carries completed turns, reviewer latency, outcome, normalized failure category, finding disposition, and optional reuse provenance; regular-lane totals aggregate both full-diff passes.
 Use `bin/fm-crosscheck.sh economics <task-id>` for a read-only per-run table and totals.
 
 Crosscheck can reuse an already accepted original review without another provider request only when the exact head SHA, reviewed base, stable claims digest, reviewer credential identity, and byte-derived review-contract digest are unchanged.

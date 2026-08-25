@@ -164,9 +164,30 @@ placement_world() {
   local target=$1 prefix=$2 profiles=$3 fm_placement_root
   fm_test_tmproot_into fm_placement_root "$prefix" || return 1
   mkdir -p "$fm_placement_root/home/state" "$fm_placement_root/home/data" \
-    "$fm_placement_root/fakebin"
+    "$fm_placement_root/fakebin" "$fm_placement_root/fakepython"
   write_recording_provider "$fm_placement_root/provider.py"
   write_forbidden_az "$fm_placement_root/fakebin"
+  cat > "$fm_placement_root/fakepython/sitecustomize.py" <<'PY'
+import os
+import pathlib
+import tempfile
+import time
+
+original_mkstemp = tempfile.mkstemp
+
+
+def synchronized_mkstemp(*args, **kwargs):
+    handle, path = original_mkstemp(*args, **kwargs)
+    marker = os.environ.get("FM_TEST_PROJECTION_BARRIER")
+    if marker and "/azure-workers/accounts/" in path:
+        pathlib.Path(marker).touch()
+        while True:
+            time.sleep(1)
+    return handle, path
+
+
+tempfile.mkstemp = synchronized_mkstemp
+PY
   python3 - "$fm_placement_root/pool/auth.json" "$profiles" <<'PY' || return 1
 import json
 import pathlib
@@ -228,6 +249,7 @@ run_placement() {  # <world> <args...>
     PROVIDER_CALL_LOG="$world/provider-calls.log" \
     CONTROLLER_PATH="$CONTROLLER" \
     AZ_CALL_LOG="$world/az-calls.log" \
+    PYTHONPATH="$world/fakepython" \
     PATH="$world/fakebin:$PATH" \
     python3 "$CONTROLLER" "$@"
 }
@@ -250,6 +272,7 @@ run_placement_exec() {  # <world> <args...>
     PROVIDER_CALL_LOG="$world/provider-calls.log" \
     CONTROLLER_PATH="$CONTROLLER" \
     AZ_CALL_LOG="$world/az-calls.log" \
+    PYTHONPATH="$world/fakepython" \
     PATH="$world/fakebin:$PATH" \
     python3 "$CONTROLLER" "$@"
 }
@@ -415,35 +438,36 @@ a_withdrawn_placement_returns_its_account() {
 }
 
 a_killed_placement_never_orphans_an_account() {
-  # More accounts than attempts, so a kill that lands after the lease is a
-  # genuine survivor rather than a placement the pool would have refused anyway.
-  local world index attempts=24 delay
-  placement_world world fm-placement-crash 30 || fail "world setup failed"
-  for index in $(seq 1 "$attempts"); do
-    placement_task "$world" "$world/home" "task-$index" "gen-$index" \
-      || fail "task-$index authorities were not seeded"
+  local world victim observed=0 index
+  placement_world world fm-placement-crash 3 || fail "world setup failed"
+  placement_task "$world" "$world/home" task-1 gen-1 || fail "task-1 authorities were not seeded"
+  placement_task "$world" "$world/home" task-2 gen-2 || fail "task-2 authorities were not seeded"
+  # The fixture barrier stops at the real atomic-write boundary. Observing its
+  # marker proves the request selected an account and entered projection,
+  # without guessing at scheduler timing.
+  FM_TEST_PROJECTION_BARRIER="$world/projection-entered" \
+    run_placement_exec "$world" request --task task-1 \
+    --task-generation gen-1 --owner-kind primary --eligible > /dev/null 2>&1 &
+  victim=$!
+  for index in $(seq 1 5000); do
+    if [ -e "$world/projection-entered" ]; then
+      observed=1
+      break
+    fi
+    kill -0 "$victim" 2>/dev/null || break
+    sleep 0.001
   done
-  # Calibrate the kill window against a real, uninterrupted request, then spread
-  # the kills across it. A fixed sleep longer than the request would kill only
-  # already-finished processes and prove nothing.
-  local baseline
-  placement_task "$world" "$world/home" calibrate cgen || fail "calibration task not seeded"
-  baseline=$( { time -p run_placement "$world" request --task calibrate \
-    --task-generation cgen --owner-kind primary --eligible > /dev/null 2>&1 ; } 2>&1 \
-    | awk '/^real/ {print $2}')
-  case "$baseline" in ''|*[!0-9.]*) fail "could not time an uninterrupted placement" ;; esac
-  echo "# uninterrupted placement takes ${baseline}s; kills are spread across that window"
-  for index in $(seq 1 "$attempts"); do
-    delay=$(python3 -c "import random,sys; print(round(random.uniform(0.0, float(sys.argv[1]) * 1.1), 4))" "$baseline")
-    run_placement_exec "$world" request --task "task-$index" \
-      --task-generation "gen-$index" --owner-kind primary --eligible \
-      > /dev/null 2>&1 &
-    local victim=$!
-    python3 -c "import time,sys; time.sleep(float(sys.argv[1]))" "$delay"
+  [ "$observed" -eq 1 ] || {
     kill -9 "$victim" 2>/dev/null || true
     wait "$victim" 2>/dev/null || true
-  done
-  python3 - "$world/home/state/azure-workers/controller.json" "$world/home" "$attempts" <<'PY' \
+    fail "the placement never exposed its atomic credential-write boundary"
+  }
+  kill -9 "$victim" 2>/dev/null || fail "the placement escaped before the synchronized kill"
+  wait "$victim" 2>/dev/null || true
+  run_placement "$world" request --task task-2 --task-generation gen-2 \
+    --owner-kind primary --eligible > /dev/null 2>"$world/survivor.err" \
+    || fail "the uninterrupted placement was refused: $(cat "$world/survivor.err")"
+  python3 - "$world/home/state/azure-workers/controller.json" "$world/home" <<'PY' \
     || fail "a killed placement orphaned an account"
 import json
 import pathlib
@@ -451,23 +475,10 @@ import sys
 
 controller = pathlib.Path(sys.argv[1])
 home = pathlib.Path(sys.argv[2])
-attempts = int(sys.argv[3])
 state = json.loads(controller.read_text(encoding="utf-8")) if controller.exists() else {"queue": {}}
 items = [item for item in state.get("queue", {}).values() if item.get("status") != "complete"]
 held = [item["account_profile"] for item in items]
-# The kills have to have LANDED. If every attempt survived, the window was
-# never entered and this unit would be a proxy assertion rather than a test.
-# The FLOOR is one: at least one kill must have landed inside the window and at
-# least one placement must have survived it. That is deliberately the weakest
-# non-vacuous floor rather than a rate, because the pass condition must not
-# depend on how loaded the machine is; with the window calibrated against a real
-# uninterrupted request just above, roughly half of the attempts land in
-# practice (10 of 24 on a recent local run).
-# `calibrate` is the uninterrupted timing run and is not one of the attempts.
-attempted = [item for item in items if item["task"] != "calibrate"]
-assert 0 < len(attempted) < attempts, (
-    "the kill window was never hit: {} of {} attempts survived".format(
-        len(attempted), attempts))
+assert [item["task"] for item in items] == ["task-2"], items
 # The lease IS the queue entry: every account that is held is held BY a visible
 # entry, so a kill can leave work queued but can never leave an account held by
 # nothing. Duplicates would mean two entries share an account.

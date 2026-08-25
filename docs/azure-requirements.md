@@ -1064,13 +1064,14 @@ message.
 
 Status: REMEDIATION IMPLEMENTED; LIVE ACCEPTANCE PENDING; NOT ACCEPTED.
 C1 remains NOT ACCEPTED until a fresh post-merge adversarial review from clean public `main` completes in 20 to 30 minutes and retains its phase breakdown.
-The two accepted baseline measurements remain misses: 35m33s and 44m25s total, with 99.7 percent and 99.6 percent respectively inside `reviewer`.
+The first fresh released regular GLM 5.2 measurement also missed below the band: a substantive 19-file PR completed clear in 654.190 seconds total, with 649.119 seconds inside `reviewer`.
+The two earlier accepted baseline measurements missed above the band at 35m33s and 44m25s total, with 99.7 percent and 99.6 percent respectively inside `reviewer`.
 
 ### Measured critical path
 
 The original 75-minute premise has no retained phase breakdown and is historical context only.
-The instrumented 35m33s and 44m25s local-lane runs are the relevant baseline because both carry `durations_ms`.
-They put effectively the whole clock inside the synchronous model reviewer rather than snapshot, proof execution, or ledger work.
+The instrumented 35m33s, 44m25s, and 654.190-second local-lane runs are the relevant baselines because they carry `durations_ms`.
+All three put effectively the whole clock inside the synchronous model reviewer rather than snapshot, proof execution, or ledger work.
 Warm Azure VMs, a faster Azure SKU, and additional lanes do not shorten that measured critical path: they affect compartment startup or concurrency, not one local reviewer's model turns.
 The family that produced those two historical readings was not retained, so this document does not manufacture an attribution for them.
 
@@ -1085,6 +1086,12 @@ The reasoning level remains `xhigh`, the complete exact-base/exact-head review s
 The final Pi terminal event must report the exact `fireworks-glm` provider and regular selector requested by the roster before its verdict is accepted.
 A terminal event reporting the historical Fast selector, another provider, or no model identity becomes a tool failure.
 The same readback check runs in both the local Pi lane and the Azure model guest.
+
+The 654.190-second measurement established that one regular full-diff pass falls below the owner-set floor, so the local regular lane now performs the smallest fixed substantive depth: one isolated full-diff challenge followed by one authoritative full-diff synthesis.
+The synthesis receives only bounded untrusted hypotheses from the challenge, independently inspects the complete diff, and must reproduce every concern it carries forward.
+Only the synthesis supplies the ledger verdict.
+The reviewer record binds the two-pass depth mode and exact terminal provider/model readback fail-closed to the registered regular cross-family lane.
+Token, cost, completed-turn, and reviewer-latency telemetry aggregate both passes, while exact-head reuse remains available only under its existing unchanged contract.
 
 The former Fast selector remains readable only as historical provenance, including local and Azure ledgers written before this change.
 It is not in the new-review allowlist and cannot silently continue serving from an old roster.
@@ -1103,7 +1110,7 @@ A missing phase means the work did not run rather than that it took zero time, a
 `bin/fm-crosscheck.sh economics <task-id>` is the parallel read-only table for tokens, costs, turns, reviewer latency, finding disposition, outcomes, and reuse provenance.
 
 After this implementation lands on public `main`, the acceptance owner must update the operator roster and the dedicated `models.json` to the exact regular selector, compat, and declared costs, then read `bin/fm-crosscheck.sh status` back before launch.
-The owner must run one real fresh adversarial review of a current exact PR head, retain the complete phase breakdown, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, and cross-family primary identity.
+The owner must run one real fresh adversarial review of a current exact PR head under the fixed two-pass protocol, retain the complete phase breakdown and aggregated economics, and verify the final ledger still carries the exact-head clear or blocking verdict, evidence execution, mutation proof where required, cross-family primary identity, terminal route, and review-depth fields.
 Only a genuine 20-to-30-minute completion closes C1.
 A run below 20 minutes or above 30 minutes is recorded honestly and leaves C1 NOT MET.
 The implementation never sleeps to enter the band, truncates work, narrows the diff, lowers reasoning, or weakens a gate.
