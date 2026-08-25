@@ -635,6 +635,9 @@ def load_state(env):
     state.setdefault("executions", {})
     state.setdefault("pending_actions", {})
     state.setdefault("revision", 0)
+    for worker in state["workers"].values():
+        if isinstance(worker, dict):
+            worker.setdefault("placement", "azure")
     legacy = state.get("pending_action")
     if legacy is not None and legacy != LEGACY_PENDING_SENTINEL and not isinstance(legacy, dict):
         # The old binary refused this shape loudly; paving it over with the
@@ -1792,6 +1795,7 @@ def create_worker_record(env, state, slot, item, reservation):
     sku, family = SKU_PLAN[slot]
     record = {
         "slot": slot,
+        "placement": "azure",
         "role": item.get("role", "author"),
         "sku": sku,
         "sku_family": family,

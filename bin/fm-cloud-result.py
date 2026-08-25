@@ -411,13 +411,12 @@ def branch_custody(worktree, task, result, kind):
 
 
 def merge_status(local_path, raw_status, terminal):
-    local_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     existing = ""
     if local_path.exists():
         if local_path.is_symlink() or not local_path.is_file():
             raise ReturnError("local status trail is redirected")
         existing = local_path.read_text(encoding="utf-8")
-    additions = []
+    merged = [line for line in existing.splitlines() if line != terminal]
     if raw_status:
         try:
             remote_lines = raw_status.decode("utf-8").splitlines()
@@ -431,16 +430,25 @@ def merge_status(local_path, raw_status, terminal):
                 raise ReturnError("returned status trail contains a malformed event")
             if TERMINAL_LINE.match(line):
                 continue
-            if line not in existing.splitlines() and line not in additions:
-                additions.append(line)
-    if terminal not in existing.splitlines():
-        additions.append(terminal)
-    if additions:
-        with local_path.open("a", encoding="utf-8") as handle:
-            for line in additions:
-                handle.write(line + "\n")
+            if line not in merged:
+                merged.append(line)
+    merged.append(terminal)
+    body = "".join(line + "\n" for line in merged)
+    if body == existing:
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=".fm-cloud-status-", dir=str(local_path.parent))
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
+        os.replace(temporary, local_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def collect(args):

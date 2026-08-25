@@ -5577,6 +5577,24 @@ with (sub / "state" / "child-1.meta").open("a") as stream:
     )
 
 receipt_path = root / "child-receipts.json"
+metadata_path = sub / "state" / "child-1.meta"
+metadata_text = metadata_path.read_text()
+metadata_variants = {
+    "missing placement": metadata_text.replace("placement=azure\n", ""),
+    "duplicate placement": metadata_text + "placement=azure\n",
+    "conflicting placement": metadata_text.replace("placement=azure\n", "placement=local\n"),
+    "missing kind": metadata_text.replace("kind=ship\n", ""),
+    "duplicate kind": metadata_text + "kind=ship\n",
+    "malformed kind": metadata_text.replace("kind=ship\n", "kind=unknown\n"),
+}
+for label, variant in metadata_variants.items():
+    metadata_path.write_text(variant)
+    refused_metadata = run(
+        "authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+        "--assignment-generation", assignment, "--output", str(receipt_path), check=False)
+    assert refused_metadata.returncode != 0, "{} metadata selected release authority".format(label)
+    assert not receipt_path.exists(), "{} metadata wrote release receipts".format(label)
+metadata_path.write_text(metadata_text)
 missing_return = run(
     "authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
     "--assignment-generation", assignment, "--output", str(receipt_path), check=False)

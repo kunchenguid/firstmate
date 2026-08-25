@@ -1017,7 +1017,7 @@ def main():
     if worker["assignment_generation"] != args.assignment_generation:
         raise AuthorityError("worker assignment generation differs")
     kind_entries = values.get("kind", [])
-    if len(kind_entries) > 1:
+    if len(kind_entries) != 1:
         raise AuthorityError("task metadata kind identity is not exact")
     # WHICH evidence semantics apply is a release-safety decision, so it may
     # not rest on the task metadata alone: `kind` is a local, operator-writable
@@ -1029,6 +1029,16 @@ def main():
     # released. Both directions refuse, fail closed, before any evidence runs.
     meta_kind = kind_entries[0] if kind_entries else ""
     worker_role = worker.get("role", "author")
+    worker_placement = worker.get("placement")
+    metadata_placement = values.get("placement", [])
+    if worker_placement == "azure":
+        if metadata_placement != ["azure"]:
+            raise AuthorityError("task metadata placement differs from the controller-owned worker placement")
+    elif worker_placement is None:
+        if metadata_placement:
+            raise AuthorityError("task metadata placement has no controller-owned worker authority")
+    else:
+        raise AuthorityError("controller-owned worker placement is unsupported")
     if meta_kind == "secondmate" and worker_role != "secondmate":
         raise AuthorityError(
             "task metadata claims a secondmate compartment but the controller-owned worker "
@@ -1037,6 +1047,8 @@ def main():
         raise AuthorityError(
             "the controller-owned worker role is secondmate but the task metadata kind is "
             "{!r}; ordinary evidence is refused for a compartment".format(meta_kind))
+    if worker_role != "secondmate" and meta_kind not in ("ship", "scout"):
+        raise AuthorityError("task metadata kind is not an exact ship or scout authority")
     if worker_role == "secondmate":
         # The secondmate compartment evidence mode (design B.7): same bundle,
         # same five receipt names, compartment semantics. The bundle still
@@ -1050,7 +1062,7 @@ def main():
         worktree_info, worktree = worktree_evidence(args.task, values)
         ordinary_kind = meta_kind if meta_kind in ("ship", "scout") else "ship"
         report_authority = lambda: report_evidence(home, args.task, ordinary_kind)
-        if values.get("placement", []) == ["azure"]:
+        if worker_placement == "azure":
             landing_authority = lambda: cloud_return_evidence(
                 home, args.task, generation, args.assignment_generation,
                 ordinary_kind, worktree, worker["bindings"]["repository_generation"],

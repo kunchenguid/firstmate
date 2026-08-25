@@ -213,6 +213,26 @@ PY
   pass "scout return preserves uncommitted-only scratch and replays its report bundle exactly"
 }
 
+test_terminal_status_stays_last_on_replay() {
+  local record root home repo id out first_digest second_digest
+  id=cloud-return-terminal-last
+  record=$(make_return_case terminal-last "$id" scout yes no no)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  printf 'done: cloud outcome returned to local custody\n' > "$home/state/$id.status"
+  out=$(run_collect "$home" "$id" 2>&1) || fail "status merge should preserve release authority: $out"
+  test "$(tail -n 1 "$home/state/$id.status")" = "done: cloud outcome returned to local custody" \
+    || fail "synthesized terminal status was not kept last"
+  test "$(grep -c '^working: remote task ran$' "$home/state/$id.status")" -eq 1 \
+    || fail "returned nonterminal status was not merged exactly once"
+  first_digest=$(shasum -a 256 "$home/state/$id.status" | awk '{print $1}')
+  out=$(run_collect "$home" "$id" 2>&1) || fail "status replay should remain idempotent: $out"
+  second_digest=$(shasum -a 256 "$home/state/$id.status" | awk '{print $1}')
+  test "$first_digest" = "$second_digest" || fail "status replay changed byte-stable terminal ordering"
+  pass "status replay keeps one terminal event last and remains byte-stable"
+}
+
 test_absent_report_blocks_collection() {
   local record root home repo id out status
   id=cloud-return-no-report
@@ -542,6 +562,7 @@ SH
 
 test_ship_success_and_replay
 test_scout_success_with_uncommitted_scratch
+test_terminal_status_stays_last_on_replay
 test_absent_report_blocks_collection
 test_empty_report_section_blocks_collection
 test_local_divergence_retains_custody
