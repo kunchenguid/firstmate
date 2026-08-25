@@ -49,7 +49,8 @@ fm_harness_path_name() {  # <path>
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
 # Evidence, in order:
-#   1. the basename of the reported command name, against FM_HARNESS_RE.
+#   1. the basename of the reported command name, lower-cased, against
+#      FM_HARNESS_RE.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
@@ -59,11 +60,17 @@ fm_harness_path_name() {  # <path>
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base base_lower argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+  # Fold the reported command name before matching: a macOS app bundle reports a
+  # capitalized executable name (the Claude desktop app reports "Claude"), and a
+  # case-sensitive test there finds no harness in the ancestry, so the session is
+  # refused its own home lock. FM_HARNESS_RE itself stays unchanged so the ^pi$
+  # and ^pi-signed$ anchors keep their exact meaning.
+  base_lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+  if printf '%s' "$base_lower" | grep -qE "$FM_HARNESS_RE"; then
+    case "$base_lower" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   argv0=${args%% *}

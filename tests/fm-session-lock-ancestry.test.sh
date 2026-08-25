@@ -220,6 +220,104 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_capitalized_command_name_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/capitalized"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  # The macOS Claude desktop app reports its executable as "Claude", so the
+  # whole session runs behind a capitalized command name.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  500:comm=) printf '%s\n' Claude ;;
+  500:args=) printf '%s\n' Claude ;;
+  500:ppid=) printf '%s\n' 510 ;;
+  510:comm=) printf '%s\n' Claude ;;
+  510:args=) printf '%s\n' Claude ;;
+  510:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 500 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # Resolving the OUTERMOST pid of the contiguous run is the observable proof
+  # that the capitalized name was recognized as Claude specifically: only a
+  # Claude match keeps the walk climbing past the innermost harness process.
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a capitalized harness command name was not found in the ancestry at all"
+  [ "$got" = 510 ] \
+    || fail "a capitalized Claude run resolved '$got', expected the outermost session pid 510"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 500' \
+    || fail "a live capitalized harness process was not recognized as a harness"
+  printf '510\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a session running under a capitalized harness name could not claim its own home lock"
+  pass "session-lock: a capitalized harness command name is identified as its harness"
+}
+
+test_anchored_names_stay_anchored_under_the_case_fold() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/anchored"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  520:comm=) printf '%s\n' "${FM_TEST_NAME_SHAPE:-pi}" ;;
+  520:args=) printf '%s\n' "${FM_TEST_NAME_SHAPE:-pi} --once" ;;
+  520:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=) printf '%s\n' 520 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '520\n' > "$dir/state/.lock"
+
+  # Folding the reported name must not relax FM_HARNESS_RE's anchors, and must
+  # not turn an unrelated command into a harness.
+  for shape in pi Pi pi-signed PI-SIGNED; do
+    got=$(FM_TEST_NAME_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: an exact harness name was not found in the ancestry"
+    [ "$got" = 520 ] || fail "$shape: ancestry resolved '$got', expected the harness pid 520"
+    FM_TEST_NAME_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the harness holding the lock did not recognize itself as the owner"
+  done
+  for shape in pip Pip pipeline zsh ZSH; do
+    if FM_TEST_NAME_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "$shape: a non-harness command name was treated as a harness process"
+    fi
+    if FM_TEST_NAME_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 520'; then
+      fail "$shape: a non-harness command name passed the harness-liveness predicate"
+    fi
+    if FM_TEST_NAME_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: a non-harness command name claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: the command-name fold keeps anchored harness names exact and non-harness names out"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +458,8 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_capitalized_command_name_is_identified
+test_anchored_names_stay_anchored_under_the_case_fold
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
