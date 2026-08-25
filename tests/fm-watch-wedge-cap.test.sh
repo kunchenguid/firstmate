@@ -614,7 +614,32 @@ test_wedge_cap_validates_invalid_override() {
   ack_stopped_cycle "$state" || true
   grep -F "FM_WEDGE_MAX_ESCALATIONS='abc'" "$state/.watch-triage.log" 2>/dev/null >/dev/null || fail "validation warning not logged for FM_WEDGE_MAX_ESCALATIONS=abc"
   unset FM_FAKE_CREW_STATE
-  pass "FM_WEDGE_MAX_ESCALATIONS rejects 0 and non-integer values, falling back to default 10"
+
+  # FM_CAP_HORIZON_SECS validation: reject 0 and non-integer.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_CAP_HORIZON_SECS=0 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher with FM_CAP_HORIZON_SECS=0 failed"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  grep -F "FM_CAP_HORIZON_SECS=0" "$state/.watch-triage.log" 2>/dev/null >/dev/null || fail "validation warning not logged for FM_CAP_HORIZON_SECS=0"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_CAP_HORIZON_SECS=abc "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    wait_for_exit "$pid" 100 || true
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  grep -F "FM_CAP_HORIZON_SECS='abc'" "$state/.watch-triage.log" 2>/dev/null >/dev/null || fail "validation warning not logged for FM_CAP_HORIZON_SECS=abc"
+  unset FM_FAKE_CREW_STATE
+  pass "FM_WEDGE_MAX_ESCALATIONS and FM_CAP_HORIZON_SECS both reject 0 and non-integer values, falling back to defaults"
 }
 
 test_wedge_cap_fires_permanently_wedged_after_max_escalations

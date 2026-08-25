@@ -814,7 +814,10 @@ esac
 # manually for immediate re-engagement.
 FM_CAP_HORIZON_SECS=${FM_CAP_HORIZON_SECS:-86400}
 case "$FM_CAP_HORIZON_SECS" in
-  ''|*[!0-9]*) FM_CAP_HORIZON_SECS=86400 ;;
+  ''|*[!0-9]*) triage_log "FM_CAP_HORIZON_SECS='$FM_CAP_HORIZON_SECS' is not a positive integer, falling back to 86400 (local patch 2026-08-19)"
+              FM_CAP_HORIZON_SECS=86400 ;;
+  0)            triage_log "FM_CAP_HORIZON_SECS=0 would expire the cap immediately and let the cap re-fire every stale interval, falling back to 86400 (local patch 2026-08-19)"
+              FM_CAP_HORIZON_SECS=86400 ;;
 esac
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
