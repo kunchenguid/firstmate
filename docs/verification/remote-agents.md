@@ -47,6 +47,9 @@ bin/fm-test-run.sh tests/fm-remote-agent.test.sh
 bin/fm-test-run.sh tests/fm-aime-cloud-worker.test.sh
 ```
 
+Re-verified on 2026-08-25 against base `c51ed3d33c1ebc8eaa3e4478e263e600626a2c22` with GNU Bash 5.2.15 and the repository-pinned ShellCheck 0.11.0.
+The focused iDA command above completed with the exact terminal assertion `# fm-remote-agent.test.sh: all assertions passed` and summary fields `total=1`, `failed=0`, and `skipped_gate=0`.
+
 `fm-remote-agent.test.sh` supplies a fake `bytedcli` executable and exercises public dispatch, state, adoption, cancellation, retirement, and process-event entry points.
 It verifies:
 
@@ -61,6 +64,7 @@ It verifies:
 - the timeout case where a provider accepted submission but the client timed out, followed by exact session-marker reconciliation and adoption without a second create;
 - same-content idempotent re-storage of a normalized artifact at an unchanged revision after an interrupted handler;
 - idempotent process-event replay after acknowledgement, without a second state transition or status application;
+- source-local coalescing of identical nonterminal transient iDA read failures before a second captured generation, including bounded exponential retry timing, restart recovery from the state-linked observation, reset on successful or changed state, authorization, materially different error and terminal bypass, and idempotent handling of an earlier queued generation;
 - captain-authorized abandonment of a wedged ambiguous task after an authoritative complete non-truncated zero-match session list, its refusal without the authorization flag and on duplicate markers, and decision-gated retirement of the abandoned record;
 - normalized terminal result capture and a state-bound mode-`0600` report;
 - legacy durable iDA version metadata remaining informational through state read, adoption, reconciliation, process-event handling, cancellation, report generation, and decision-gated retirement;
@@ -74,8 +78,10 @@ The shared runner's changed-file coverage maps both suites to the remote-agent o
 
 New native tasks publish `executor=remote-agent` and `provider=aime|ida`.
 `fm-task-state.sh`, session start, and fleet snapshot use provider-aware reads and report no local endpoint.
-The process-event source remains the existing durable notification and restart boundary; iDA adds no timer or control plane.
+The process-event source remains the existing durable notification and restart boundary; iDA adds no second notification control plane, and its retry delay stays inside the registered source waiter.
 An idle or processing provider session maps to healthy working state, while unavailable observation remains distinct from terminal failure.
+Repeated identical nonterminal transient read failures remain inside the adapter's current waiter after the first applied generation and therefore do not create a second notification identity.
+The adapter keeps no per-attempt log or unbounded retry state; the state-linked normalized observation is the restart anchor, and any semantic change resumes ordinary durable capture and application.
 
 iDA submission records `firstmate:<task-id>:<instruction-digest-prefix>` before the only permitted create.
 The adapter lists sessions and exact-matches that marker before creation and after uncertain completion.

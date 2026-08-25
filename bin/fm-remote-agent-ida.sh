@@ -20,7 +20,9 @@
 # `cancel` is a destructive provider write and therefore requires the explicit
 # --authorize-provider-cancel flag at the call site. A successful close response
 # is not treated as terminal cancellation until authoritative session readback
-# confirms it. `interrupt-wait` stops only Firstmate's local waiter.
+# confirms it. After that confirmation, the command replaces any older local
+# waiter before the normalized terminal observation enters durable capture.
+# `interrupt-wait` stops only Firstmate's local waiter.
 #
 # `abandon` is the only escape for an ambiguous or submission-unknown task
 # whose session marker authoritatively yields a complete non-truncated
@@ -224,6 +226,7 @@ cmd_cancel() (
   "$SCRIPT_DIR/fm-procevent-ida.sh" observe "$id" >"$observation" || die "cannot read back iDA cancellation"
   if jq -e '.terminal==true and (.error_class=="provider-cancelled" or (.provider_status|ascii_downcase|test("cancel|closed|stopped|shutdown")))' "$observation" >/dev/null; then
     source=$(fm_remote_source_id ida "$id")
+    "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || die "cannot replace the pre-cancellation iDA waiter"
     "$SCRIPT_DIR/fm-procevent.sh" register ida "$source" -- "$SCRIPT_DIR/fm-procevent-ida.sh" observe "$id" >/dev/null
     "$SCRIPT_DIR/fm-procevent.sh" start "$source" >/dev/null || die "cannot apply terminal cancellation observation"
     printf 'cancelled: %s session=%s\n' "$id" "$IDA_STATE_SESSION_ID"

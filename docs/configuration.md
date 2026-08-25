@@ -153,6 +153,10 @@ Restart adoption and startup recovery use the durable marker and session id and 
 
 `bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.
 Provider-running or idle-but-processing state is healthy.
+After the first nonterminal transient read failure is durably captured, published, and applied, the iDA source keeps only semantically identical retries inside the same waiter and polls with bounded exponential backoff.
+The comparison binds task and provider identity, normalized local phase and provider status, result availability, and error class to the state-linked prior observation; a successful or materially changed observation leaves the retry loop immediately and resets the next source to its initial delay.
+Terminal results, available answers, cancellation, ambiguous identity, submission uncertainty, authorization or unsupported-operation failures, materially different errors, state transitions, and the first actionable failure are never coalesced.
+Suppressed attempts create no new captured generation, task artifact, notification, or event log, while every generation captured before the suppression boundary and every already queued notification remains intact and generation-keyed.
 Terminal success, failure, and provider-confirmed cancellation produce a mode-`0600` `data/<id>/report.md` bound by task state.
 The report preserves `available`, exact `zero`, `unavailable`, and `error` distinctions and includes normalized session, remote-task, agent, model, outcome, and error-class fields when available.
 If an existing durable iDA task contains `bytedcli_version`, a report may label it as legacy informational metadata; the value never participates in state validity or a lifecycle decision.
@@ -161,6 +165,7 @@ iDA document mode does not imply AIME's Feishu creation contract; the durable re
 
 `interrupt-wait` stops only local waiting and may leave the provider session running.
 Provider cancellation uses official `chat completion close`, requires current destructive-action authority plus `--authorize-provider-cancel`, and does not become terminal until session readback confirms a cancelled/closed state.
+After that confirmation, the command retires only the older local waiter before routing a fresh normalized terminal observation through durable capture, publication, and automatic application.
 An ambiguous or submission-unknown task whose marker yields an authoritative complete non-truncated zero-match session list can leave its permanent blocked state only through the explicit `abandon` command with `--authorize-abandon`; abandonment fail-terminals the durable record, performs no provider write, never retries or recreates, and any future execution requires a separate explicit dispatch.
 Retirement requires normalized terminal state, a safe bound report, retired process-event supervision, and the ordinary decision-hold completion gate.
 Disabling the config blocks new submission but does not erase, cancel, or make an existing record unreadable.
@@ -694,6 +699,8 @@ FM_REMOTE_MAX_INSTRUCTION_BYTES=262144    # maximum private instruction-file siz
 FM_REMOTE_RESULT_MAX_CHARS=131072         # maximum redacted iDA final-answer characters captured into normalized state/report artifacts
 FM_IDA_SESSION_PAGE_SIZE=100             # bounded SG raw session list used for exact marker reconciliation
 FM_IDA_DEEP_RESEARCH_TIMEOUT_MS=900000   # official iDA Deep Research MCP timeout passed to the provider tool
+FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=5000 # initial retry delay for an identical nonterminal transient iDA observation
+FM_IDA_TRANSIENT_BACKOFF_MAX_MS=60000    # maximum retry delay after bounded exponential increase
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
