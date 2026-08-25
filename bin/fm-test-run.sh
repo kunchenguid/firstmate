@@ -1038,6 +1038,12 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
+    bin/fm-tracker*)
+      # The GitHub Issues project layer and its comment wake. Named as a script
+      # rather than a family: tests/fm-tracker.test.sh is the only coverage, and
+      # it is unclassified, so a family selection would not reach it.
+      printf '%s\n' "__script__:fm-tracker.test.sh"
+      ;;
     bin/fm-browser-reaper.sh)
       # Two consumers: teardown's per-task reap (pr-forge) and bootstrap's
       # detect-only leak line (session-bootstrap), plus the reaper's own
