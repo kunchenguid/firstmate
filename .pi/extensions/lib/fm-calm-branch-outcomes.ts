@@ -15,11 +15,9 @@
 // The tool's own empty-store text (fm-branch-supervision.ts owns the string).
 const NO_OUTCOMES_TEXT = "(no branch outcomes recorded)";
 
-// One line Calm keeps on screen in place of the collapsed row. `glyph` marks the
-// lines Calm authored from a recognized record, which the caller prints with the
-// supervision branch's own glyph; a line Calm did not recognize is carried
-// through unchanged and unmarked. The glyph itself stays with the branch
-// extension that owns it, so this module never has to name it.
+// One line Calm keeps on screen in place of the collapsed row. `glyph` tells the
+// caller to print the supervision branch's own glyph. The glyph itself stays
+// with the branch extension that owns it, so this module never has to name it.
 export type CalmBranchOutcomeLine = {
   glyph: boolean;
   text: string;
@@ -31,6 +29,8 @@ type BranchOutcomeRecord = {
   summary: string;
 };
 
+const OUTCOME_KEYS = new Set(["seq", "epoch", "task", "wake", "verdict", "summary", "silent"]);
+
 function parseOutcomeRecord(line: string): BranchOutcomeRecord | undefined {
   let parsed: unknown;
   try {
@@ -40,8 +40,17 @@ function parseOutcomeRecord(line: string): BranchOutcomeRecord | undefined {
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
-  if (typeof record.task !== "string" || typeof record.summary !== "string") return undefined;
+  const hasSilent = Object.prototype.hasOwnProperty.call(record, "silent");
+  const keys = Object.keys(record);
+  if (keys.length !== (hasSilent ? 7 : 6) || keys.some((key) => !OUTCOME_KEYS.has(key))) {
+    return undefined;
+  }
+  if (typeof record.seq !== "number" || !Number.isInteger(record.seq) || record.seq < 1) return undefined;
+  if (typeof record.epoch !== "number" || !Number.isInteger(record.epoch) || record.epoch < 0) return undefined;
+  if (typeof record.task !== "string" || typeof record.wake !== "string") return undefined;
+  if (typeof record.summary !== "string") return undefined;
   if (record.verdict !== "routine" && record.verdict !== "captain") return undefined;
+  if (hasSilent && typeof record.silent !== "boolean") return undefined;
   return { task: record.task, verdict: record.verdict, summary: record.summary };
 }
 
@@ -59,18 +68,18 @@ export function calmBranchOutcomeAttention(
   output: string,
   isError: boolean,
 ): CalmBranchOutcomeLine[] {
-  const text = output.trim();
+  const trimmedOutput = output.trim();
   if (isError) {
-    return [{ glyph: true, text: text || "could not read the outcome store" }];
+    return [{ glyph: true, text: trimmedOutput || "could not read the outcome store" }];
   }
-  if (!text || text === NO_OUTCOMES_TEXT) return [];
+  if (!trimmedOutput || trimmedOutput === NO_OUTCOMES_TEXT) return [];
 
   const lines: CalmBranchOutcomeLine[] = [];
-  for (const rawLine of text.split("\n")) {
+  for (const rawLine of output.split("\n")) {
     if (rawLine.trim() === "") continue;
     const record = parseOutcomeRecord(rawLine.trim());
     if (!record) {
-      lines.push({ glyph: false, text: rawLine });
+      lines.push({ glyph: true, text: rawLine });
       continue;
     }
     if (record.verdict !== "captain") continue;
