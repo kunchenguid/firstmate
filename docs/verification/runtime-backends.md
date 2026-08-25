@@ -435,6 +435,33 @@ The projected spawn in that run used the historical empty opt-in file, so a home
 One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
+### Completed task views
+
+The default-off completed-view lifecycle was verified portably on 2026-08-25 through the public cleanup and view-management commands with a stateful Herdr protocol fixture:
+
+```sh
+tests/fm-completed-view.test.sh
+```
+
+Observed output:
+
+```text
+ok - completed-task views default off and an unsupported backend keeps ordinary cleanup
+ok - opt-in teardown parks only a bounded sanitized summary, retires active monitoring, and supports exact list/dismiss
+ok - completed-task view retention is hard-bounded without implicit eviction
+```
+
+The opt-in case proves a fresh static tab is created outside the disposable worktree, the original endpoint is confirmed stopped, and a second process-cwd scan completes before Treehouse return.
+It also proves that active task metadata and status leave monitoring, while the retained summary contains the full PR URL, delivered head, and finite checks result but excludes an arbitrary secret-bearing status line.
+The list and dismiss assertions execute `bin/fm-completed-view.sh`; dismissal closes the exact no-agent pane and removes only its bound record and summary.
+The default-off and full-cap cases create no static tab, and the cap preserves all eight existing records rather than evicting one.
+
+Backend applicability was inspected across every supported runtime adapter.
+Herdr alone has a verified workspace/tab identity, no-focus creation, no-agent query, exact pane close, and named-session presentation lock that can retain this view without changing cleanup authority.
+Tmux and Zellij could host a terminal but have no completed-view implementation or shared cross-home identity record; cmux could host a workspace but has distinct last-workspace close semantics; Orca couples terminal and worktree ownership.
+All four therefore take the explicit ordinary-cleanup fallback when the Herdr-only setting is enabled, and an unknown or ambiguous backend still stops at shared endpoint validation before this feature is considered.
+No real Herdr lifecycle was needed for this portable run; the existing focus-preserving exact-pane primitives remain covered by the guarded live suites below, and any future live completed-view probe must use `bin/fm-herdr-lab.sh` with a named non-default session.
+
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
 ```sh

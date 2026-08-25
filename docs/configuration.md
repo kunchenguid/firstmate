@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, opt-in Herdr completed-view records and summaries under `state/completed-task-views/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
@@ -108,6 +108,28 @@ cmux has no session layer at all - one workspace per task, in whatever cmux wind
 The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+
+### Completed task views (config/herdr-completed-task-views)
+
+Completed-task views are off unless a home has a regular local `config/herdr-completed-task-views` file containing exactly `on` after case-folding and whitespace removal.
+Enable it only after the Firstmate version that documents this setting has landed, for example with `printf 'on\n' > "$FM_HOME/config/herdr-completed-task-views"` in that home's local configuration.
+Write `off` or remove the file to stop creating new views; existing views remain until explicitly dismissed.
+This preference is deliberately not inherited into secondmate homes, so each home requires its own opt-in.
+
+The feature applies only to successful non-forced ship and scout cleanup on Herdr.
+Tmux, Zellij, Orca, cmux, unknown backends, forced cleanup, secondmate retirement, unavailable process inspection, unsafe state, and capacity exhaustion continue through ordinary cleanup without retaining a view.
+A retained tab is created outside the disposable worktree, receives only a deterministic summary assembled from trusted completion state, and never copies terminal scrollback.
+The summary can include the task id, outcome class, canonical full PR URL, scout report path, delivered commit, and a finite validation result when those references are available.
+Teardown then stops and confirms the original agent pane and rechecks that no process has a current working directory under the worktree before returning it to Treehouse.
+The task's ordinary metadata, status-monitoring cursor, transition state, and other active records are retired exactly as in ordinary cleanup.
+
+At most eight completed views are retained per home.
+Reaching the cap preserves all existing views and performs ordinary cleanup for the new completion rather than silently evicting an older view.
+Use `bin/fm-completed-view.sh list` to inspect retained exact identities and `bin/fm-completed-view.sh dismiss <task-id>` to remove one explicitly.
+Dismissal refuses an incomplete or mismatched record, an ambiguous Herdr response, a registered agent, or a currently focused target whose removal cannot preserve focus.
+Switch to another tab before retrying that last case.
+`bin/fm-completed-view-lib.sh` owns the config parser, bounded summary, record schema, retention limit, and exact dismissal contract.
+[`herdr-backend.md`](herdr-backend.md#completed-task-views) owns the Herdr lifecycle details.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

@@ -172,6 +172,37 @@ Operational compromises:
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 
+## Completed task views
+
+A home can opt in to parked completed-task views with `config/herdr-completed-task-views=on`; the shared default is off.
+[`configuration.md`](configuration.md#completed-task-views-configherdr-completed-task-views) owns the operator-facing setting, supported fallbacks, retention bound, and commands.
+The setting is local to one home and is not inherited into secondmate homes.
+
+The feature enters only from `fm-teardown.sh`, after the existing landed-work, clean-worktree, scout-report, unresolved-captain-decision, public-follow-up, and endpoint-identity checks have passed.
+Forced cleanup and secondmate retirement are ineligible.
+When enabled for an ordinary Herdr task, cleanup creates a fresh no-focus tab in the task's exact recorded workspace with its cwd under `state/completed-task-views/`.
+That tab renders only a bounded deterministic summary from selected durable fields and never captures or copies the task pane's terminal scrollback.
+The task id, outcome class, validated full PR URL, report path, delivered head, and finite validation verdict are the only eligible summary fields.
+
+The Herdr session presentation lock serializes view creation, original-pane closure, and dismissal.
+After the replacement tab is verified against its response-derived workspace, tab, pane, token-derived label, no-agent state, and outside-worktree cwd, teardown stops and confirms the original endpoint, repeats the strict process-cwd scan, and only then returns the disposable worktree.
+The existing exact-pane close, focus restoration, presentation-journal correlation, and structured-not-found requirements remain unchanged.
+The replacement tab is not task metadata and does not participate in send, capture, recovery, or active monitoring; ordinary task records are retired on the existing path.
+A failed worktree return removes the prepared view when that exact cleanup remains provable, while ambiguous creation or removal preserves its record and the task for inspection.
+
+`state/completed-task-views/<task-id>.view` is a non-authoritative exact-identity record and `<task-id>.summary` is the bounded rendered text.
+`bin/fm-completed-view-lib.sh` is the single owner of both formats and of the hard limit of eight records per home.
+A full registry refuses a new view and leaves its existing views untouched, so successful retained views disappear only through explicit `bin/fm-completed-view.sh dismiss <task-id>`.
+Dismissal acquires the registry lock before the same named-session presentation lock, validates every bound identity and the absence of a registered agent, closes only the exact pane, confirms structured absence, and then removes its record and summary.
+A focused completed tab is left intact until the operator switches away, preserving the existing no-focus-change safety boundary.
+
+Herdr is the only supported completed-view backend.
+Tmux, Zellij, and cmux share Treehouse but have no implementation for this retained static topology, while Orca owns and removes its worktree with its terminal; all four explicitly keep ordinary cleanup semantics when the setting is on.
+Unknown or ambiguous runtime identity is already refused by the shared endpoint validator and can never become view authority.
+
+`tests/fm-completed-view.test.sh` exercises default-off behavior, the unsupported-backend fallback, exact create-before-stop-before-return ordering, sanitized summary output, active-record retirement, the retention cap, list, and explicit dismiss through public commands.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#completed-task-views) records the current verification entry point.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
