@@ -183,6 +183,7 @@ block_stop() {
 }
 
 # --- identity: a home owned by another live session is advisory, not blockable -
+# (--claude mode only; see the CLAUDE_MODE guard below)
 # Mirrors the auto-arm's identity gate (bin/fm-claude-stop-autoarm.sh): when
 # state/.lock names a LIVE harness that is not this session's ancestor, the
 # auto-arm exits 0 without ever claiming this home, so this session is
@@ -193,6 +194,13 @@ block_stop() {
 # than silence: a genuinely unsupervised home stays visible to the operator.
 # A missing, malformed, or dead-owner lock is uncertainty rather than evidence
 # of another live owner, and keeps the unchanged blocking behaviour.
+# Only Claude Code's stop_hook_active cap turns a futile re-block into the
+# catastrophic spin this fix addresses (9 consecutive blocks force an
+# override); Codex, Grok, OpenCode, and Pi adapters never read this stdout
+# systemMessage, so emitting it there would let the turn through with the
+# advisory going nowhere - a silent true negative for a home that may
+# genuinely be unsupervised. A visible block is strictly better than a silent
+# allow for those harnesses, so they keep the unchanged block_stop() path.
 FOREIGN_HOME_PID=
 foreign_home_owner() {
   local lock_pid
@@ -208,7 +216,7 @@ foreign_home_owner() {
   return 0
 }
 
-if foreign_home_owner; then
+if [ "$CLAUDE_MODE" -eq 1 ] && foreign_home_owner; then
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
     foreign_need="$FM_SUP_IN_FLIGHT task(s) in flight"
   elif [ "$FM_SUP_SOURCES" -gt 0 ]; then

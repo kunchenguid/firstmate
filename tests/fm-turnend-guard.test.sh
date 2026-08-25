@@ -365,8 +365,10 @@ test_hook_blocks_when_unhealthy_in_primary() {
 
 # A home whose state/.lock names a LIVE harness outside this session's ancestry
 # cannot be armed by this session: bin/fm-claude-stop-autoarm.sh exits 0 without
-# claiming it. Blocking would demand an impossible repair, so the guard must
-# advise instead - and must still name the owner rather than fall silent.
+# claiming it. Blocking would demand an impossible repair, so --claude mode
+# must advise instead - and must still name the owner rather than fall silent.
+# Non-claude harnesses (Codex, Grok, OpenCode, Pi) never read this advisory's
+# stdout systemMessage, so they keep the unchanged blocking behaviour.
 test_hook_foreign_live_home_owner_is_advisory_not_block() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-owner")
@@ -375,14 +377,31 @@ test_hook_foreign_live_home_owner_is_advisory_not_block() {
   "$dir/claude" 300 &
   pid=$!
   printf '%s\n' "$pid" > "$dir/state/.lock"
-  out=$(run_hook "$dir" false); status=$?
+  out=$(run_hook_claude "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  expect_code 0 "$status" "hook must not block a home owned by another live session"
+  expect_code 0 "$status" "--claude mode must not block a home owned by another live session"
   assert_contains "$out" "SUPERVISION ADVISORY" "advisory banner must be emitted"
   assert_contains "$out" "$pid" "advisory must name the owning pid"
   assert_not_contains "$out" "TURN WOULD END BLIND" "foreign home must not raise the blocking alarm"
-  pass "fm-turnend-guard: a home owned by another live session advises instead of blocking"
+  pass "fm-turnend-guard --claude: a home owned by another live session advises instead of blocking"
+}
+
+test_hook_foreign_live_home_owner_still_blocks_outside_claude_mode() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-owner-non-claude")
+  : > "$dir/state/task1.meta"
+  cp "$(command -v sleep)" "$dir/claude"
+  "$dir/claude" 300 &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "non-claude harnesses must still block a home owned by another live session"
+  assert_contains "$out" "TURN WOULD END BLIND" "non-claude foreign-owner stop must raise the blocking alarm"
+  assert_not_contains "$out" "SUPERVISION ADVISORY" "non-claude foreign-owner stop must not emit the claude-only advisory"
+  pass "fm-turnend-guard: a home owned by another live session still blocks outside --claude mode"
 }
 
 # Uncertainty is not evidence of another live owner: a dead, malformed, or
@@ -1593,6 +1612,7 @@ test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_foreign_live_home_owner_is_advisory_not_block
+test_hook_foreign_live_home_owner_still_blocks_outside_claude_mode
 test_hook_unowned_or_malformed_lock_still_blocks
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
