@@ -833,7 +833,7 @@ class Stub:
         self.raises = raises
         self.replies = 0
         self.failed = False
-        self.ended = asyncio.Event()
+        self.ended = None
         self.turn = {}
         self.calls = []
 
@@ -856,6 +856,8 @@ options = relay.parse_args(["--serve"])
 async def drive(session, items):
     down = Down()
     serving = True
+    if session.ended is None:
+        session.ended = asyncio.Event()
     for kind, payload in items:
         session, serving = await relay.handle_uplink_frame(
             kind, payload, session, options, down)

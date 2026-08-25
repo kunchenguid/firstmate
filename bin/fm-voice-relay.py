@@ -396,7 +396,8 @@ class Credentials:
         self._source = None
         self._resolved = None
         self._ambient_spent = False
-        self._lock = asyncio.Lock()
+        self._lock = None
+        self._lock_loop = None
 
     def _usable(self):
         if self._creds is None:
@@ -408,12 +409,18 @@ class Credentials:
         return time.time() + self.REFRESH_MARGIN < self._expires
 
     async def get(self):
+        loop = asyncio.get_running_loop()
+        if self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
         async with self._lock:
             if not self._usable():
                 spend = self._source == FROM_ENVIRONMENT and bool(self.profile)
-                creds, expires, source = await asyncio.to_thread(
-                    resolve_credentials, self.profile, self.verbose,
-                    self.REFRESH_MARGIN, not (self._ambient_spent or spend))
+                creds, expires, source = await (
+                    asyncio.get_running_loop().run_in_executor(
+                        None, resolve_credentials, self.profile, self.verbose,
+                        self.REFRESH_MARGIN,
+                        not (self._ambient_spent or spend)))
                 # Latched only now, and only if the profile is what answered. A
                 # profile that cannot answer raises out of the line above or is
                 # answered for by the environment, and latching either of those
@@ -839,12 +846,12 @@ class Session:
                 # Off the loop like the handover below it: the model is told to
                 # call this on every question, and its directory and file reads
                 # would otherwise stop the relay reading the captain's audio.
-                result = await asyncio.to_thread(
-                    records.fleet_status, self.home, self.scope)
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None, records.fleet_status, self.home, self.scope)
             elif name == "hand_over_to_firstmate":
                 request = (arguments.get("request") or "").strip()
-                result = await asyncio.to_thread(
-                    records.queue_request, request, self.home, self.root)
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None, records.queue_request, request, self.home, self.root)
                 self.down.send_json(frame.NOTICE, {
                     "event": "queued", "request": request,
                     "note_id": result.get("note_id", "")})
