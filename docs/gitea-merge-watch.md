@@ -186,10 +186,12 @@ It calls `tea pulls merge` directly and trusts the exit code, the same way the G
 ## A missing tool, or an unresolvable login, produces no wake and no merge - never a guess
 
 The poll is silent on every error by design, so a missing `tea` or `jq` would otherwise be indistinguishable from a pull request that is never merged, and an ambiguous login would otherwise risk answering from the wrong server entirely.
-`tests/fm-pr-check-security.test.sh`'s `test_gitea_merge_watch` proves, hermetically, that the poll stays silent when `tea` is absent from `PATH`, when `jq` is absent from `PATH`, when the parsed host resolves to zero configured logins, and when it resolves to more than one; `bin/fm-pr-check.sh` refuses to arm a watch under the first condition (the one point where a missing tool can still be reported) with:
+`tests/fm-pr-check-security.test.sh`'s `test_gitea_merge_watch` proves, hermetically, that an already-armed poll stays silent when `tea` is absent from `PATH`, when `jq` is absent from `PATH`, when the parsed host resolves to zero configured logins, and when it resolves to more than one; `bin/fm-pr-check.sh` refuses to arm a watch in the first place under either missing-tool condition (the one point where a missing tool can still be reported) with:
 
 ```
 error: watching a Gitea pull request requires tea on PATH
+error: watching a Gitea pull request requires jq on PATH
+error: watching a Gitea pull request requires tea and jq on PATH
 ```
 
 `tests/fm-pr-merge.test.sh`'s `test_gitea_missing_tool_refuses_before_recording` and `test_gitea_ambiguous_login_refuses_before_recording` prove the equivalent refusals on the merge path, before anything is recorded:
