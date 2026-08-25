@@ -99,18 +99,12 @@ fm_branch_is_safely_gone() {
 # fm_branch_delete_local_proven_tip <repo> <branch> <expected_tip>: delete the
 # exact local tip a caller has already proved landed.
 fm_branch_delete_local_proven_tip() {
-  local repo=$1 branch=$2 expected_tip=$3 prune_worktree delete_status tip
+  local repo=$1 branch=$2 expected_tip=$3 tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   [ "$tip" = "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
-  prune_worktree=$(mktemp -d /tmp/fm-branch-prune.XXXXXX) || return 1
-  rmdir "$prune_worktree" || return 1
-  git -C "$repo" worktree add -q "$prune_worktree" "$branch" || return 1
-  git -C "$repo" update-ref -d "refs/heads/$branch" "$expected_tip" >/dev/null 2>&1
-  delete_status=$?
-  git -C "$repo" worktree remove "$prune_worktree" >/dev/null 2>&1 || true
-  return "$delete_status"
+  git -C "$repo" branch -D -- "$branch" >/dev/null 2>&1
 }
 
 # fm_branch_delete_if_safely_merged <repo> <branch> <merged_into_ref>: delete
@@ -163,23 +157,17 @@ fm_branch_fetch_remote_tip() {
 # changes after inspection, and the worktree guard applies even though a remote
 # delete would otherwise allow deleting the branch under a live task.
 fm_branch_delete_remote_proven_tip() {
-  local repo=$1 remote=$2 branch=$3 expected_tip=$4 current local_tip hold
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4 current local_tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   current=$(fm_branch_remote_tip "$repo" "$remote" "$branch") || return 1
   [ "$current" = "$expected_tip" ] || return 1
   local_tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" || true)
-  if [ "$local_tip" = "$expected_tip" ]; then
-    hold=$(mktemp -d /tmp/fm-branch-remote.XXXXXX) || return 1
-    rmdir "$hold" || return 1
-    git -C "$repo" worktree add -q "$hold" "$branch" || return 1
-  fi
+  [ -z "$local_tip" ] || [ "$local_tip" = "$expected_tip" ] || return 1
+  [ -z "$local_tip" ] || fm_branch_delete_local_proven_tip "$repo" "$branch" "$expected_tip" || return 1
   git -C "$repo" push --quiet \
     --force-with-lease="refs/heads/$branch:$expected_tip" \
     "$remote" ":refs/heads/$branch" >/dev/null 2>&1
-  current=$?
-  [ -z "${hold:-}" ] || git -C "$repo" worktree remove "$hold" >/dev/null 2>&1 || true
-  return "$current"
 }
 
 fm_branch_pr_number_from_branch() {
