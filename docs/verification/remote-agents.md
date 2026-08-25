@@ -57,6 +57,7 @@ It verifies:
 - required-command discovery through domain-restricted MCP plus the exact parent-position `ida --region sg deep-research create` command through `run_command`, with refusal evidence if that placement drifts;
 - raw-session reconciliation after provider-driven renaming, exact private first-message marker verification, and structured empty-result identity normalization;
 - completed visible type-8 `deep_research_content.finalAnswer` readback with one file part and one inline-data part, normalized as an available artifact through the executable observe and process-event boundaries without creation, continuation, cancellation, or raw-content leakage;
+- failed, cancelled, and closed sessions that still carry a visible type-8 text answer: the legacy redacted text payload stays a `text` result while availability remains `error` or `unavailable`, and readback reaches its terminal outcome without wedging;
 - explicit safe failures for malformed and unsupported structured final-answer forms, while exact-empty supported forms remain `zero`;
 - iDA running, successful, failed, cancelled, unavailable, ambiguous, exact-zero, and error outcomes;
 - private prompt carriage through MCP stdin, with no prompt in argv, state, normalized artifacts, or report, plus redaction of credential, OECID, long-id, and email shapes before the final answer crosses the adapter boundary;

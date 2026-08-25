@@ -167,9 +167,10 @@ bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
     row=$(head -1 "$sessions" 2>/dev/null || true); [ -n "$row" ] || { error HTTP_404 'not found'; exit 1; }
     name=$(printf '%s' "$row" | cut -f2); status=$(printf '%s' "$row" | cut -f3); marker=$(printf '%s' "$row" | cut -f4)
     [ -n "$marker" ] || marker=$name
-    case "$mode" in running) status=running ;; failed) status=failed ;; cancelled) status=cancelled ;; ambiguous-status) status=mystery_state ;; zero|structured-artifact|structured-empty|structured-malformed|structured-unsupported) status=completed ;; esac
+    case "$mode" in running) status=running ;; failed) status=failed ;; cancelled) status=cancelled ;; ambiguous-status) status=mystery_state ;; zero|structured-artifact|structured-empty|structured-malformed|structured-unsupported) status=completed ;; failed-answered) status=failed ;; cancelled-answered) status=cancelled ;; closed-answered) status=closed ;; esac
     user="[Firstmate session marker: $marker]"$'\n\n'"PRIVATE_PROMPT_alpha OECID_sensitive"
-    if [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] && [ "${mode#structured-}" = "$mode" ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
+    if { [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] && [ "${mode#structured-}" = "$mode" ]; } \
+      || [ "$mode" = failed-answered ] || [ "$mode" = cancelled-answered ] || [ "$mode" = closed-answered ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
     jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" --arg answer "$answer" --arg mode "$mode" '
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
        messages:([{id:90,type:0,status:0,visible:true,text:$user}]
@@ -401,6 +402,48 @@ test_structured_final_answer_readback() {
   assert_contains "$replay" 'duplicate=true' "structured result replay was applied twice"
   [ "$(jq -r '.revision' "$(state_file "$home" "$id")")" = "$revision" ] || fail "structured replay mutated terminal state"
   pass "completed structured final answers are privately recovered as artifacts without provider mutation or content leakage"
+}
+
+test_terminal_outcomes_with_visible_answer() {
+  local home fakebin id mode phase availability class status outcome sha marker provider result
+  home=$(new_home answered-terminal); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  for id in ida-failed-answered ida-cancelled-answered ida-closed-answered; do
+    case "$id" in
+      ida-failed-answered) mode=failed-answered; phase=terminal-failure; availability=error; class=provider-terminal-failure; status=failed; outcome=failed ;;
+      ida-cancelled-answered) mode=cancelled-answered; phase=terminal-cancelled; availability=unavailable; class=provider-cancelled; status=cancelled; outcome=cancelled ;;
+      ida-closed-answered) mode=closed-answered; phase=terminal-cancelled; availability=unavailable; class=provider-cancelled; status=closed; outcome=cancelled ;;
+    esac
+    new_task "$home" "$id"; : >"$home/bytedcli.log"
+    sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}'); marker="firstmate:$id:${sha:0:16}"
+    printf '%s\t%s\tcompleted\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+    provider=$(jq -cn --arg marker "$marker" '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",agent_id:"9001",agent_name:"iDA Test",model:"ida-research-test",provider_status:"completed"}')
+    FM_HOME="$home" bash -c '
+      set -u
+      . "$1/bin/fm-remote-agent-lib.sh"
+      STATE="$2/state"; DATA="$2/data"
+      fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 10
+      fm_remote_meta_write "$3" ida research || exit 11
+    ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "answered-terminal state fixture failed for $id"
+    FM_IDA_FAKE_MODE="$mode" run_ida "$home" "$fakebin" adopt "$id" >/dev/null \
+      || fail "$id adoption failed with a visible terminal answer"
+    wait_phase "$home" "$id" "$phase" || fail "$id with a visible answer did not reach $phase"
+    result=$(find "$home/state/procevent-inbox" -name "ida-$id.*.result" -print -quit)
+    jq -e --arg availability "$availability" --arg class "$class" --arg status "$status" '
+      .terminal == true and .ambiguous == false
+      and .result_availability == $availability and .result_kind == "text"
+      and .error_class == $class and .provider_status == $status
+      and (.answer | startswith("Verified iDA answer.") and contains("[REDACTED"))
+      and .artifact_reference == null
+    ' "$result" >/dev/null || fail "$id lost its legacy redacted text answer or distinct non-available outcome"
+    # shellcheck disable=SC2016 # Backticks are literal Markdown.
+    assert_grep "Outcome: \`$outcome\`" "$home/data/$id/report.md" "$id report outcome drifted"
+    # shellcheck disable=SC2016 # Backticks are literal Markdown.
+    assert_grep 'Result kind: `text`' "$home/data/$id/report.md" "$id report lost its text result kind"
+    if grep -R -E 'top-secret|123456789012345678|user@example\.com' "$home/state" "$home/data/$id/report.md" >/dev/null; then
+      fail "$id legacy answer payload leaked unredacted into state or report"
+    fi
+  done
+  pass "failed, cancelled, and closed sessions keep visible text answers terminal without wedging readback"
 }
 
 test_provider_states_and_zero_result() {
@@ -638,6 +681,7 @@ test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result
 test_structured_final_answer_readback
+test_terminal_outcomes_with_visible_answer
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
 test_artifact_store_idempotency

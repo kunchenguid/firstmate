@@ -175,8 +175,8 @@ fm_ida_observation_validate() {
         and all(.[]; . == "file" or . == "data"))
     ))
     and (
-      if .result_kind == "text" then .result_availability == "available" and (.answer | type == "string" and length > 0) and .artifact_reference == null
-      elif .result_kind == "artifact" then .result_availability == "available" and .answer == null and (.artifact_reference | type == "object")
+      if .result_kind == "text" then (.answer | type == "string" and length > 0) and .artifact_reference == null
+      elif .result_kind == "artifact" then .answer == null and (.artifact_reference | type == "object")
       elif has("result_kind") then .answer == null and .artifact_reference == null
       else true
       end
