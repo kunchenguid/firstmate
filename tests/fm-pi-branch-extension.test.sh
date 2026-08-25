@@ -214,6 +214,40 @@ if (!process.env.FM_TEST_SKIP_LOCK) {
   writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 }
 
+// Stubbed model surface: Pi's own catalog and selector dialog, scripted.
+// registryModels is what ctx.modelRegistry serves, uiSelections queues the
+// captain's answers to ctx.ui.select, and notices records what the command
+// told the captain.
+const registryModels = [];
+const uiSelections = [];
+const uiPrompts = [];
+const notices = [];
+const commands = new Map();
+let mainModel = { provider: "anthropic", id: "main-model" };
+const modelRegistry = {
+  getAvailable: () => registryModels.slice(),
+  find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
+  hasConfiguredAuth: (model) => model.auth !== false,
+};
+function makeCtx(extra) {
+  return {
+    modelRegistry,
+    get model() {
+      return mainModel;
+    },
+    ui: {
+      select(title, options) {
+        uiPrompts.push({ title, options });
+        return Promise.resolve(uiSelections.shift());
+      },
+      notify(message, type) {
+        notices.push({ message, type });
+      },
+    },
+    ...(extra ?? {}),
+  };
+}
+
 const busHandlers = new Map();
 const bus = {
   on(channel, handler) {
@@ -237,7 +271,9 @@ const pi = {
   registerTool(tool) {
     mainTools.push(tool);
   },
-  registerCommand() {},
+  registerCommand(name, options) {
+    commands.set(name, options);
+  },
   registerMessageRenderer(customType, renderer) {
     renderers.set(customType, renderer);
   },
@@ -1033,6 +1069,199 @@ EOF
   pass "branch session persists across process restarts through the recorded pointer"
 }
 
+test_branch_model_pin_applies_and_absent_pin_keeps_the_default() {
+  local repo home out status
+  repo="$TMP_ROOT/modelpin-root"
+  home="$TMP_ROOT/modelpin-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
+import { rmSync, writeFileSync } from "node:fs";
+
+registryModels.push({ provider: "anthropic", id: "main-model" }, { provider: "openai", id: "cheap-1" });
+
+// 1. No pin: the branch build passes no model at all, so Pi keeps choosing
+// the branch's model exactly as it did before the pin existed.
+fire("session_start", {}, makeCtx());
+dispatch("signal: unpinned probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unpinned branch build");
+if ("model" in globalThis.__fmSessions[0].options) {
+  throw new Error(`an absent pin must not pass a model option: ${JSON.stringify(globalThis.__fmSessions[0].options.model)}`);
+}
+
+// 2. Pin present: the very next build carries exactly that model, resolved
+// out of Pi's own catalog.
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: pinned probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "pinned branch build");
+const pinned = globalThis.__fmSessions[1].options.model;
+if (!pinned || pinned.provider !== "openai" || pinned.id !== "cheap-1") {
+  throw new Error(`pinned build did not use the pinned model: ${JSON.stringify(pinned)}`);
+}
+
+// 3. The reopen path (/new, /resume, /fork, reload all replace the session
+// in-process) reopens the SAME persistent branch conversation and still
+// applies the pin.
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: reopened probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 3, "reopened branch build");
+const reopened = globalThis.__fmSessions[2].options.model;
+if (!reopened || reopened.provider !== "openai" || reopened.id !== "cheap-1") {
+  throw new Error(`reopened build did not use the pinned model: ${JSON.stringify(reopened)}`);
+}
+const manager = globalThis.__fmSessions[2].options.sessionManager;
+if (!manager.opened) throw new Error("reopen did not continue the persistent branch conversation");
+
+// 4. Removing the pin returns the branch to the untouched default path.
+rmSync(`${home}/config/supervision-branch-model`);
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: unpinned again");
+await settle(() => (globalThis.__fmSessions ?? []).length === 4, "post-clear branch build");
+if ("model" in globalThis.__fmSessions[3].options) {
+  throw new Error("clearing the pin must restore the no-model-option default path");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the supervision model pin must bind every branch build and stay absent by default: $out"
+  pass "supervision model pin binds branch create and reopen, and an absent pin keeps the default"
+}
+
+test_supervision_model_command_persists_and_rebinds_the_live_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/modelcmd-root"
+  home="$TMP_ROOT/modelcmd-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home }; })()`);
+const { fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home } = globalThis.__t;
+import { existsSync, readFileSync, statSync } from "node:fs";
+
+registryModels.push({ provider: "anthropic", id: "main-model" }, { provider: "openai", id: "cheap-1" });
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+
+fire("session_start", {}, makeCtx());
+dispatch("signal: before the pick");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pre-pick branch build");
+const firstSession = globalThis.__fmSessions[0];
+if ("model" in firstSession.options) throw new Error("the branch started pinned before any pick");
+
+// The picker offers Pi's own catalog plus following main, and the captain's
+// pick is persisted as the one-line config value.
+uiSelections.push("openai/cheap-1");
+await command.handler("", makeCtx());
+const offered = uiPrompts[0];
+if (offered.options[0] !== "Follow main (anthropic/main-model)") {
+  throw new Error(`the picker must offer following main first: ${JSON.stringify(offered.options)}`);
+}
+if (!offered.options.includes("openai/cheap-1") || !offered.options.includes("anthropic/main-model")) {
+  throw new Error(`the picker must offer Pi's own available models: ${JSON.stringify(offered.options)}`);
+}
+const pinFile = `${home}/config/supervision-branch-model`;
+if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") {
+  throw new Error(`unexpected persisted pin: ${JSON.stringify(readFileSync(pinFile, "utf8"))}`);
+}
+if ((statSync(pinFile).mode & 0o777) !== 0o600) throw new Error("the pin must be written private to the operator");
+if (!notices.some((notice) => notice.message.includes("openai/cheap-1"))) {
+  throw new Error(`the captain was not told which model the branch now uses: ${JSON.stringify(notices)}`);
+}
+
+// The live branch is released, so the pick binds on the next wake instead of
+// waiting for a session replacement - and the same persistent conversation
+// comes back under the new model.
+await settle(() => firstSession.disposed, "live branch release after the pick");
+dispatch("signal: after the pick");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "post-pick branch build");
+const repinned = globalThis.__fmSessions[1];
+if (!repinned.options.model || repinned.options.model.id !== "cheap-1") {
+  throw new Error(`the pick did not bind the next branch build: ${JSON.stringify(repinned.options.model)}`);
+}
+if (!repinned.options.sessionManager.opened) throw new Error("the pick must keep the branch conversation, not start a new one");
+
+// Following main again clears the file and restores the default path.
+uiSelections.push("Follow main (anthropic/main-model)");
+await command.handler("", makeCtx());
+if (existsSync(pinFile)) throw new Error("following main must remove the pin file");
+await settle(() => repinned.disposed, "live branch release after clearing");
+dispatch("signal: after clearing");
+await settle(() => (globalThis.__fmSessions ?? []).length === 3, "post-clear branch build");
+if ("model" in globalThis.__fmSessions[2].options) {
+  throw new Error("following main must restore the no-model-option default path");
+}
+
+// A cancelled picker changes nothing.
+uiSelections.push("openai/cheap-1");
+await command.handler("", makeCtx());
+if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("re-pick did not persist");
+uiSelections.push(undefined);
+await command.handler("", makeCtx());
+if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("a cancelled picker must not change the pin");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the supervision-model command must persist the pick and rebind the live branch: $out"
+  pass "supervision-model command persists the captain's pick and rebinds the live branch"
+}
+
+test_unusable_model_pin_falls_back_to_main() {
+  local repo home out status
+  repo="$TMP_ROOT/modelbad-root"
+  home="$TMP_ROOT/modelbad-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, mainUserMessages, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, mainUserMessages, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+registryModels.push({ provider: "anthropic", id: "main-model" });
+
+// A pin Pi cannot hand back is never a silent downgrade onto main's model:
+// it degrades exactly like any other unreachable branch, delivering the wake
+// to main with the reason.
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/retired-model\n");
+fire("session_start", {}, makeCtx());
+dispatch("signal: unusable pin probe");
+await settle(() => mainUserMessages.length === 1, "fallback to main");
+const delivered = mainUserMessages[0].content;
+if (!delivered.includes("openai/retired-model") || !delivered.includes("supervision model pin")) {
+  throw new Error(`the fallback did not name the unusable pin: ${delivered}`);
+}
+if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("an unusable pin must not build a branch session");
+
+// An unparseable file is simply no pin, so supervision keeps working.
+writeFileSync(`${home}/config/supervision-branch-model`, "not-a-model-reference\n");
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: unparseable pin probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unparseable-pin branch build");
+if ("model" in globalThis.__fmSessions[0].options) {
+  throw new Error("an unparseable pin must fall through to the untouched default path");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an unusable model pin must fall back to main and an unparseable one must be no pin: $out"
+  pass "an unusable model pin falls back to main and an unparseable one is treated as no pin"
+}
+
 test_replacement_activation_cleans_leases_and_retries_failure() {
   local repo home fakebin out status real_bash
   repo="$TMP_ROOT/activation-root"
@@ -1567,6 +1796,9 @@ test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
+test_branch_model_pin_applies_and_absent_pin_keeps_the_default
+test_supervision_model_command_persists_and_rebinds_the_live_branch
+test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership

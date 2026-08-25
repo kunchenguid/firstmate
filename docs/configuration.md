@@ -46,6 +46,18 @@ Homes on any other primary harness never load this feature and are entirely unaf
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
+## Pi supervision branch model (config/supervision-branch-model)
+
+Supervision is an easier job than the captain's own conversation, so the branch can run on a cheaper model than main.
+The Pi `/supervision-model` command opens Pi's own selector over Pi's own catalog of models with configured credentials, plus a first "Follow main" entry, and persists the pick in gitignored `config/supervision-branch-model` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+Firstmate keeps no model catalog of its own; the list is whatever Pi reports at the moment the picker opens.
+The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
+An absent, unreadable, or unparseable file means no pin, which is exactly today's behavior: the branch takes Pi's own default model, the same one main takes.
+Picking "Follow main" removes the file, and the command replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
+The branch resolves the pin on every branch build - the first wake of a cold start and the reopen after `/new`, `/resume`, `/fork`, or reload - so the choice survives all of them, and picking also releases the live branch so the next wake reopens the same persistent branch conversation under the new model without waiting for a session replacement.
+A pin naming a model Pi cannot hand back, because the model is unknown or has no configured credentials, is never silently downgraded onto main's model: the branch refuses to build and the wake falls back to the captain-facing main path naming the unusable pin, exactly as any other unreachable branch does.
+This choice is local to each Firstmate home and is not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model with its own `/supervision-model`.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

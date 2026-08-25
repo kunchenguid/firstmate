@@ -6,7 +6,12 @@
 # definitions must be accepted by the real tool registry, the session file and
 # pointer must persist on disk, and - because the isolated agent dir carries no
 # credentials and no models - the branch's first prompt must fail fast and
-# prove the never-lose-a-wake fallback to main against the real SDK.
+# prove the never-lose-a-wake fallback to main against the real SDK. It also
+# reads the supervision-branch model pin through the REAL ModelRegistry, so a
+# pin the vendor cannot resolve is proven to refuse the build rather than
+# silently running the branch on main's model. A second probe pins the vendor
+# contract that pin rests on: an explicit model must beat the model a reopened
+# session recorded, proven against a local, never-contacted fake provider.
 #
 # No credentials are read and no provider call leaves the machine: the guard
 # points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
@@ -48,7 +53,7 @@ ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 # Stock macOS Bash 3.2 cannot reliably parse JavaScript template literals in a
 # heredoc nested inside command substitution, so capture through a file.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-  PI_CODING_AGENT_DIR="$agentdir" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+  PI_CODING_AGENT_DIR="$agentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -87,8 +92,24 @@ const pi = {
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+// The real model surface, built from the same empty agent dir: no
+// credentials are read and no catalog is fetched, so every model lookup is
+// genuinely empty by construction.
+const { ModelRegistry, ModelRuntime } = await import(
+  pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href
+);
+const modelRegistry = new ModelRegistry(
+  await ModelRuntime.create({
+    authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+    modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+  }),
+);
+if (typeof modelRegistry.getAvailable !== "function" || typeof modelRegistry.hasConfiguredAuth !== "function") {
+  throw new Error("the real ModelRegistry no longer exposes the model surface the supervision pin reads");
+}
 const sessionCtx = {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
+  modelRegistry,
 };
 for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
 if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
@@ -136,6 +157,34 @@ if (!pointer.startsWith(`${home}/state/branch-session/`) || !pointer.endsWith(".
 if (!existsSync(`${home}/state/branch-session`)) {
   throw new Error("branch session store directory was not created");
 }
+
+// A model pin the REAL registry cannot resolve must refuse the build and
+// return the wake to main naming the pin, rather than silently running the
+// branch on whatever model main would have used.
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/no-such-live-model\n");
+for (const handler of piHandlers.get("session_shutdown") ?? []) await handler({}, sessionCtx);
+for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
+writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tlive-probe.status\tsignal: live pin probe\n");
+const pinOffer = {
+  message: "signal: live pin probe",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  accept() {
+    pinOffer.accepted = true;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", pinOffer);
+if (!pinOffer.accepted) throw new Error("branch did not accept the pinned wake offer");
+for (let i = 0; i < 600 && mainUserMessages.length === 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (mainUserMessages.length !== 2) throw new Error("pinned wake was lost: no fallback reached main");
+const pinFallback = mainUserMessages[1].content;
+if (!pinFallback.includes("openai/no-such-live-model") || !pinFallback.includes("supervision model pin")) {
+  throw new Error(`the real-SDK fallback did not name the unusable pin: ${pinFallback}`);
+}
 console.log("LIVE_OK");
 process.exit(0);
 EOF
@@ -145,3 +194,90 @@ if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
+
+# Second probe: the vendor contract the supervision-branch model pin rests on.
+# An explicit model must beat the model a reopened session recorded, or a pin
+# would silently stop applying the first time the branch reopens. Proven with
+# a local, never-contacted fake provider so no credential is read and no
+# request leaves the machine.
+modeldir="$TMP_ROOT/model-agent-dir"
+mkdir -p "$modeldir" "$TMP_ROOT/model-sessions"
+cat > "$modeldir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-fake": {
+      "baseUrl": "http://127.0.0.1:9/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-a", "name": "fm live a", "contextWindow": 8192, "maxTokens": 512 },
+        { "id": "fm-live-b", "name": "fm live b", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+PI_PACKAGE_DIR="$PI_PACKAGE_DIR" PI_CODING_AGENT_DIR="$modeldir" FM_LIVE_SESSIONS="$TMP_ROOT/model-sessions" \
+  node --input-type=module > "$TMP_ROOT/model-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const pkg = pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href;
+const { ModelRegistry, ModelRuntime, SessionManager, createAgentSession } = await import(pkg);
+const runtime = await ModelRuntime.create({
+  authPath: `${process.env.PI_CODING_AGENT_DIR}/auth.json`,
+  modelsPath: `${process.env.PI_CODING_AGENT_DIR}/models.json`,
+});
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+
+// The pin resolves through the same registry calls the extension makes.
+const first = registry.find("fm-live-fake", "fm-live-a");
+const second = registry.find("fm-live-fake", "fm-live-b");
+if (!first || !second) throw new Error("the real registry did not resolve the locally declared models");
+if (!registry.hasConfiguredAuth(first)) throw new Error("hasConfiguredAuth rejected a locally declared model with a key");
+if (!registry.getAvailable().some((model) => model.id === "fm-live-a")) {
+  throw new Error("getAvailable no longer lists a model with configured credentials, so the picker would be empty");
+}
+
+const cwd = process.cwd();
+const sessions = process.env.FM_LIVE_SESSIONS;
+const creating = SessionManager.create(cwd, sessions);
+const created = await createAgentSession({ cwd, sessionManager: creating, modelRuntime: runtime, model: first, tools: [] });
+if (created.session.model?.id !== "fm-live-a") {
+  throw new Error(`a pinned model was not applied on create: ${created.session.model?.id}`);
+}
+const sessionFile = creating.getSessionFile();
+
+// Reopen the SAME session with a different pin: the explicit model must win
+// over the one the session recorded.
+const repinned = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(sessionFile, sessions),
+  modelRuntime: runtime,
+  model: second,
+  tools: [],
+});
+if (repinned.session.model?.id !== "fm-live-b") {
+  throw new Error(`a reopened session ignored the pin and kept its recorded model: ${repinned.session.model?.id}`);
+}
+
+// With no pin the reopened session restores its own recorded model, which is
+// the untouched behavior an absent pin must keep.
+const unpinned = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.open(sessionFile, sessions),
+  modelRuntime: runtime,
+  tools: [],
+});
+if (unpinned.session.model?.id !== "fm-live-a") {
+  throw new Error(`an unpinned reopen did not restore the session's own model: ${unpinned.session.model?.id}`);
+}
+console.log("MODEL_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/model-output")
+if [ "$status" -ne 0 ] || [ "$out" != "MODEL_OK" ]; then
+  fail "real-SDK model-pin precedence guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION applies an explicit branch model on create and over a reopened session's recorded model"
