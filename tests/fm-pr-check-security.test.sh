@@ -3070,8 +3070,9 @@ EOF
   [ -z "$out" ] || fail "Gitea poll emitted with tea absent from PATH"
 
   # A missing jq must produce no wake either: reading hasMerged out of tea's
-  # JSON needs it, and the poll degrades the same silent way it does for
-  # every other read failure, rather than requiring jq to arm or merge.
+  # JSON needs it, and an already-armed poll degrades the same silent way it
+  # does for every other read failure. Arming a fresh watch is a separate
+  # point later below where a missing jq is instead refused, exactly like tea.
   nojq="$dir/nojq"
   mkdir -p "$nojq"
   while IFS= read -r bindir; do
@@ -3120,6 +3121,24 @@ EOF
     *) fail "arming a Gitea watch with tea absent did not report the missing CLI" ;;
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused Gitea arming left a poll armed"
+
+  # A missing jq must refuse arming too, exactly like a missing tea: the poll
+  # now depends on jq unconditionally, so a watch armed without it could never
+  # detect a merge and would be indistinguishable from a pull request that
+  # stays open forever.
+  write_task_meta "$dir" task-c
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
+    "$PR_CHECK" task-c "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with jq absent"
+  case "$out" in
+    *"requires jq on PATH"*) ;;
+    *) fail "arming a Gitea watch with jq absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-c.check.sh" ] || fail "refused Gitea arming left a poll armed"
 
   pass "Gitea pull requests are followed on any instance and never wake falsely"
 }

@@ -50,18 +50,27 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab or Gitea watch with no glab/tea on PATH. The poll is
-# silent on every error by design, so a missing CLI would be indistinguishable
-# from a merge/pull request that is never merged. Arming is the one point
-# where that can be reported, so the absent tool stops the watch here instead
-# of watching nothing.
+# Refuse to arm a GitLab or Gitea watch with no glab/tea (and, for Gitea, jq)
+# on PATH. The poll is silent on every error by design, so a missing CLI
+# would be indistinguishable from a merge/pull request that is never merged.
+# Arming is the one point where that can be reported, so the absent tool
+# stops the watch here instead of watching nothing. The Gitea poll reads a
+# single pull request's JSON view with jq (bin/fm-pr-poll.sh), unlike the
+# plain-text GitLab poll, so jq is required there too.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
-if [ "$PROVIDER" = gitea ] && ! command -v tea >/dev/null 2>&1; then
-  echo "error: watching a Gitea pull request requires tea on PATH" >&2
-  exit 1
+if [ "$PROVIDER" = gitea ]; then
+  GITEA_ARM_MISSING=
+  command -v tea >/dev/null 2>&1 || GITEA_ARM_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    GITEA_ARM_MISSING="${GITEA_ARM_MISSING:+$GITEA_ARM_MISSING and }jq"
+  fi
+  if [ -n "$GITEA_ARM_MISSING" ]; then
+    echo "error: watching a Gitea pull request requires $GITEA_ARM_MISSING on PATH" >&2
+    exit 1
+  fi
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
