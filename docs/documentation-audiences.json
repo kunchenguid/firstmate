@@ -361,6 +361,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/nm-run-attribution.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },

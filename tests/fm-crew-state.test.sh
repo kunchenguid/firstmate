@@ -14,6 +14,8 @@
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
+#   (e2) an in-flight run whose pipeline head is absent from this object
+#        database is never answered with a stale same-branch failed run
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -55,7 +57,10 @@ make_repo_on_branch() {  # <dir> <branch>
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# FM_FAKE_RUNS_LIST verbatim. `axi sync --check` serves FM_FAKE_AXI_SYNC: the
+# one read-only surface that reports the run's submitted_head (its launch
+# anchor), used to bind a run whose pipeline-advanced head is absent from the
+# worktree's object database.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -72,6 +77,8 @@ case "${1:-}" in
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+      sync)
+        printf '%s\n' "${FM_FAKE_AXI_SYNC:-}" ;;
     esac
     ;;
   runs)
@@ -162,6 +169,7 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_SYNC=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -170,7 +178,7 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_SYNC FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1389,6 +1397,216 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# --- pipeline-advanced run heads -------------------------------------------
+# The pipeline commits its own fixes and pushes them to the configured target,
+# so an in-flight run's head is a REAL commit that this worktree never fetched:
+# `git rev-parse` cannot resolve it at all. That is not evidence against the run,
+# and the shape below is the exact live condition (2026-08-18) in which it was
+# read as the opposite of the truth - a healthy running validation reported as
+# `failed`, which routes firstmate into recovery and can restart a run that is
+# working. The branch's own newest row was rejected on the unresolvable head, and
+# the newest STALE row underneath it - failed, recorded at the very head the
+# worktree still holds, because those runs died before advancing it - answered
+# instead. An unresolvable run head is UNKNOWN identity, never a mismatch.
+
+# `no-mistakes axi sync --check` shape (the one read-only surface reporting the
+# run's launch anchor), trimmed to the fields the helper reads.
+sync_pipeline() {  # <submitted-head> <current-head>
+  cat <<EOF
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: ${FM_FAKE_SYNC_BRANCH:-fm/feat-sync}
+    head: $1
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    phase: ci
+    submitted_head: $1
+    current_head: $2
+    pushed_head: $2
+  relation: pipeline_ahead
+  safety: ok
+EOF
+}
+
+# A 40-hex commit-shaped SHA that is absent from any throwaway fixture repo, so
+# `git rev-parse --verify` fails on it exactly as it does for a real
+# pipeline-side head that was pushed but never fetched here.
+UNFETCHED_HEAD=dead1eafdead1eafdead1eafdead1eafdead1eaf
+
+# (e2) The live reproduction, primary path: this branch's own running run,
+# reported at a head this worktree cannot resolve, with older failed runs of the
+# same branch still sitting at the worktree head.
+test_advanced_pipeline_head_is_not_reported_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case advanced-head-running)
+  make_repo_on_branch "$d/wt" fm/feat-advhead
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/advhead.meta" "window=fm:fm-advhead" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$UNFETCHED_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-advhead)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-advhead ${UNFETCHED_HEAD:0:8}  2026-08-18 02:22  https://github.com/o/r/pull/9
+  failed     fm/feat-advhead ${short}  2026-08-18 02:13
+  failed     fm/feat-advhead ${short}  2026-08-18 02:05
+  failed     fm/feat-advhead ${short}  2026-08-18 01:45
+EOF
+)"
+  out=$(run_crew_state "$d" advhead)
+  assert_not_contains "$out" "state: failed" "a live run must never be answered by a stale failed run"
+  assert_contains "$out" "state: working" "the branch's own in-flight run is current"
+  assert_contains "$out" "source: run-step" "the in-flight run remains the authoritative source"
+  assert_contains "$out" "unverified run head" "an unbindable head is disclosed, not hidden"
+  pass "pipeline-advanced run head is not reported as a stale failure"
+}
+
+# (e2) Same shape reached through the coarse runs list, when the repo-wide
+# `axi status` answer belongs to another crew's branch.
+test_coarse_advanced_pipeline_head_is_not_reported_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case advanced-head-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-advcoarse
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/advcoarse.meta" "window=fm:fm-advcoarse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-18 02:30
+  running    fm/feat-advcoarse ${UNFETCHED_HEAD:0:8}  2026-08-18 02:22
+  failed     fm/feat-advcoarse ${short}  2026-08-18 02:13
+EOF
+)"
+  out=$(run_crew_state "$d" advcoarse)
+  assert_not_contains "$out" "state: failed" "the coarse walk must not fall through to a superseded failed row"
+  assert_contains "$out" "state: working" "the branch's newest row is its current run"
+  assert_contains "$out" "source: run-step" "coarse-resolved run remains run-step sourced"
+  pass "coarse walk stops at the branch's newest row instead of a stale failure"
+}
+
+# The run's submitted head - the head it was LAUNCHED against, which is what the
+# worktree still holds while the pipeline advances its own - establishes identity
+# outright, so a genuine failure reported at an advanced head is still `failed`.
+test_advanced_head_bound_by_submitted_head_reports_failed() {
+  reset_fakes
+  local d head out
+  d=$(new_case advanced-head-submitted)
+  make_repo_on_branch "$d/wt" fm/feat-submitted
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/submitted.meta" "window=fm:fm-submitted" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$UNFETCHED_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-submitted)"
+  FM_FAKE_SYNC_BRANCH=fm/feat-submitted
+  FM_FAKE_AXI_SYNC="$(sync_pipeline "$head" "$UNFETCHED_HEAD")"
+  export FM_FAKE_SYNC_BRANCH
+  out=$(run_crew_state "$d" submitted)
+  assert_contains "$out" "state: failed" "an identity-bound terminal failure is still reported failed"
+  assert_contains "$out" "source: run-step" "identity-bound run remains run-step sourced"
+  assert_not_contains "$out" "unverified" "a bound run head is not reported as unverified"
+  pass "submitted head binds an advanced-head run and preserves its terminal verdict"
+}
+
+# With no way to bind the run to this code, a terminal verdict is withheld:
+# `unknown` is a distinct and safer answer than a confident wrong `failed`.
+test_unbindable_terminal_run_reports_unknown_not_failed() {
+  reset_fakes
+  local d out
+  d=$(new_case unbindable-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-unbindable
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unbindable.meta" "window=fm:fm-unbindable" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$UNFETCHED_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unbindable)"
+  FM_FAKE_AXI_SYNC=""
+  out=$(run_crew_state "$d" unbindable)
+  assert_not_contains "$out" "state: failed" "an unbindable run must not produce a confident failure"
+  assert_contains "$out" "state: unknown" "an unbindable terminal run is unknown"
+  assert_contains "$out" "run head unverifiable" "the reason the verdict was withheld is stated"
+  pass "terminal verdict is withheld when run identity cannot be established"
+}
+
+# The same withholding on the coarse path, and proof the walk does not rescue the
+# verdict from an older row underneath.
+test_coarse_unbindable_terminal_row_reports_unknown() {
+  reset_fakes
+  local d short out
+  d=$(new_case unbindable-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-unbcoarse
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unbcoarse.meta" "window=fm:fm-unbcoarse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-unbcoarse ${UNFETCHED_HEAD:0:8}  2026-08-18 02:22
+  running    fm/feat-unbcoarse ${short}  2026-08-18 01:40
+EOF
+)"
+  out=$(run_crew_state "$d" unbcoarse)
+  assert_not_contains "$out" "state: failed" "an unbindable coarse failure is not a confident failure"
+  assert_not_contains "$out" "state: working" "nor is it rescued by an older superseded row"
+  assert_contains "$out" "state: unknown" "an unbindable coarse terminal row is unknown"
+  pass "coarse terminal verdict is withheld when identity cannot be established"
+}
+
+# A genuine failure recorded at the worktree's current head is still `failed`
+# through the coarse path - the direction the newest-row-wins change must keep.
+test_coarse_failed_run_at_current_head_still_reports_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-genuine-failed)
+  make_repo_on_branch "$d/wt" fm/feat-genfail
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/genfail.meta" "window=fm:fm-genfail" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-genfail ${short}  2026-08-18 02:13
+EOF
+)"
+  out=$(run_crew_state "$d" genfail)
+  assert_contains "$out" "state: failed" "a genuine failure at the current head is still failed"
+  assert_contains "$out" "source: run-step" "genuine coarse failure remains run-step sourced"
+  pass "genuine failed run at the current head is still reported failed"
+}
+
+# A newest row whose head is RESOLVABLE and diverged is still a provable
+# mismatch, and the walk must not reach past it to an older row that happens to
+# sit at the worktree head.
+test_coarse_diverged_newest_row_blocks_older_row() {
+  reset_fakes
+  local d short diverged out
+  d=$(new_case coarse-diverged-newest)
+  make_repo_on_branch "$d/wt" fm/feat-divnewest
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q --orphan tmp-diverged
+  git -C "$d/wt" commit -q --allow-empty -m 'diverged line of history'
+  diverged=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/feat-divnewest
+  [ "$short" != "$diverged" ] || fail "diverged fixture did not produce a second head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/divnewest.meta" "window=fm:fm-divnewest" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation in progress\n' > "$d/state/divnewest.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-divnewest ${diverged}  2026-08-18 02:22
+  failed     fm/feat-divnewest ${short}  2026-08-18 01:40
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" divnewest
+  out=$(run_crew_state "$d" divnewest)
+  assert_not_contains "$out" "source: run-step" "a provably diverged newest row is not attributed"
+  assert_not_contains "$out" "state: failed" "nor is an older superseded row used instead"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources"
+  pass "provably diverged newest row blocks attribution instead of falling through"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1461,5 +1679,12 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_advanced_pipeline_head_is_not_reported_failed
+test_coarse_advanced_pipeline_head_is_not_reported_failed
+test_advanced_head_bound_by_submitted_head_reports_failed
+test_unbindable_terminal_run_reports_unknown_not_failed
+test_coarse_unbindable_terminal_row_reports_unknown
+test_coarse_failed_run_at_current_head_still_reports_failed
+test_coarse_diverged_newest_row_blocks_older_row
 
 echo "all fm-crew-state tests passed"

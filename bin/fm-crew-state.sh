@@ -31,10 +31,18 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      Code identity is TERNARY (bin/fm-nm-run-lib.sh's fm_nm_head_identity):
+#      a run matches when its head equals the worktree HEAD or the worktree HEAD
+#      is an ancestor of it; local work that advanced past the run head, or
+#      diverged from it, is a mismatch and invalidates attribution; and a run
+#      head this worktree cannot resolve AT ALL is `unverified` - the routine
+#      shape of a live run, whose pipeline-side fix commits were pushed but
+#      never fetched here. An unverified run is attributed (it is this branch's
+#      current run) but may only carry an IN-FLIGHT reading: any terminal
+#      verdict it would produce becomes `unknown`, because `failed` routes
+#      firstmate into recovery and `done` into teardown. The coarse runs list is
+#      newest-first and the first row for this branch is its current run, so the
+#      walk never falls through to an older, superseded row.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -380,11 +388,13 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+# is a run for THIS branch active right now. Echoes that row's status word
+# (running/completed/cancelled/failed) and how its head bound to this worktree,
+# as "<status>|<identity>"; empty when the branch has no run within
+# FM_CREW_STATE_RUNS_LIMIT rows, or when its current row is provably not this
+# worktree's code.
+nm_runs_status_for_branch() {  # <branch> -> "<status>|<identity>", or empty
+  local branch=$1 out row st rest br sha identity
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -398,12 +408,18 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
+      # NEWEST ROW WINS: the list is newest-first, so the first row for this
+      # branch is its current run and the walk stops here either way. A run
+      # superseded by a newer run on the same branch is never current, so
+      # continuing past this row to an older one can only ever answer with a
+      # stale verdict - which is exactly how a live run came to be reported as
+      # failed: its own row was rejected on a head this worktree does not hold,
+      # and the newest STALE row underneath it (failed at the very head the
+      # worktree still had) matched instead.
+      identity=$(nm_coarse_head_identity "$sha")
+      case "$identity" in
+        match|unverified) printf '%s|%s' "$st" "$identity" ;;
+      esac
       return 0
     fi
   done <<< "$out"
@@ -414,20 +430,39 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
-  run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+# The run's launch anchor (submitted head), read at most once per invocation and
+# only when the cheap local rule could not decide - the probe is a bounded CLI
+# call, so it is never paid on the ordinary path where the run head resolves
+# here. Owner of the command and its no-answer contract: fm_nm_submitted_head.
+NM_SUBMITTED_HEAD=""
+NM_SUBMITTED_HEAD_PROBED=0
+nm_submitted_head() {
+  if [ "$NM_SUBMITTED_HEAD_PROBED" = 0 ]; then
+    NM_SUBMITTED_HEAD_PROBED=1
+    NM_SUBMITTED_HEAD=$(fm_nm_submitted_head "$WT" "$NM_TIMEOUT")
+  fi
+  printf '%s' "$NM_SUBMITTED_HEAD"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+# Ternary code identity (match|mismatch|unverified|unbound) of a run head
+# against this worktree. Branch match is a precondition (caller). Rule owned by
+# fm_nm_head_identity in bin/fm-nm-run-lib.sh; the submitted-head anchor is only
+# consulted for a run head this worktree cannot resolve at all.
+nm_head_identity() {  # <run-head>
+  local identity
+  identity=$(fm_nm_head_identity "$WT" "$1")
+  [ "$identity" = unverified ] || { printf '%s' "$identity"; return; }
+  fm_nm_head_identity "$WT" "$1" "$(nm_submitted_head)"
+}
+
+# Identity of the active axi-status run's head field.
+nm_run_head_identity() {
+  nm_head_identity "$(strip_quotes "$(nm_field head)")"
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...".
+nm_coarse_head_identity() {  # <short-sha>
+  nm_head_identity "$1"
 }
 
 HAVE_RUN=0
@@ -437,15 +472,25 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# HEAD_IDENTITY records how the attributed run was bound to this worktree's code:
+# `match` is a verified binding, `unverified` means a real run head that this
+# worktree cannot resolve and no launch anchor confirmed. An unverified run may
+# report an in-flight state but never a terminal verdict (see the gate below the
+# run-step block).
+HEAD_IDENTITY=match
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-    else
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      case "$(nm_run_head_identity)" in
+        match)      HAVE_RUN=1 ;;
+        unverified) HAVE_RUN=1; HEAD_IDENTITY=unverified ;;
+      esac
+    fi
+    if [ "$HAVE_RUN" = 0 ]; then
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
@@ -453,8 +498,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      coarse_row=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$coarse_row" ]; then
+        COARSE_STATUS=${coarse_row%%|*}
+        HEAD_IDENTITY=${coarse_row#*|}
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
@@ -543,6 +590,23 @@ if [ "$HAVE_RUN" = 1 ]; then
         esac
       fi
     fi
+  fi
+
+  # A run whose code identity could not be established may carry an in-flight
+  # reading, but never a terminal verdict. `failed` routes firstmate straight
+  # into recovery (AGENTS.md section 8) and `done` into teardown, so a confident
+  # wrong answer in either direction costs far more than saying it is unknown -
+  # and unlike `failed`, `unknown` is not itself an instruction to act.
+  if [ "$HEAD_IDENTITY" = unverified ]; then
+    case "$RUN_STATE" in
+      "done"|failed)
+        RUN_DETAIL="$RUN_DETAIL${SEP}run head unverifiable against this copy"
+        RUN_STATE=unknown
+        ;;
+      *)
+        RUN_DETAIL="$RUN_DETAIL (unverified run head)"
+        ;;
+    esac
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
