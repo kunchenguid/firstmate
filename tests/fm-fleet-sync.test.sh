@@ -498,26 +498,31 @@ test_gone_unmerged_task_branch_is_left_alone() {
   pass "the gone-upstream sweep leaves an unmerged fm/* branch untouched"
 }
 
-test_routine_prune_requires_explicit_opt_in() {
+test_routine_prune_defaults_on_and_allows_disable() {
   local home clone remote out
   home=$(new_home)
-  clone=$(build_pair "$home" opt_in_prune)
-  remote="$home/remotes/opt_in_prune.git"
-  ff_merge_task_branch "$clone" fm/task-opt-in feature.txt landed
-  git -C "$clone" push -q -u origin fm/task-opt-in
-  git --git-dir="$remote" update-ref -d refs/heads/fm/task-opt-in
+  clone=$(build_pair "$home" routine_prune)
+  remote="$home/remotes/routine_prune.git"
+  ff_merge_task_branch "$clone" fm/task-default feature.txt landed
+  git -C "$clone" push -q -u origin fm/task-default
+  git --git-dir="$remote" update-ref -d refs/heads/fm/task-default
   git -C "$clone" fetch -q --prune origin
 
   out=$(run_sync "$home" "$clone")
-  assert_not_contains "$out" "pruned fm/task-opt-in" "routine sync must not prune without captain opt-in"
-  branch_exists "$clone" fm/task-opt-in \
-    || fail "routine-prune-opt-in: default fleet sync deleted a landed task branch"
+  assert_contains "$out" "pruned fm/task-default" "routine sync must prune an eligible branch by default"
+  branch_exists "$clone" fm/task-default \
+    && fail "routine-prune-default: default fleet sync left an eligible branch"
 
-  out=$(FM_FLEET_PRUNE=1 run_sync "$home" "$clone")
-  assert_contains "$out" "pruned fm/task-opt-in" "explicit fleet prune opt-in deletes an eligible branch"
-  branch_exists "$clone" fm/task-opt-in \
-    && fail "routine-prune-opt-in: opted-in fleet sync left an eligible branch"
-  pass "routine branch pruning requires explicit opt-in"
+  ff_merge_task_branch "$clone" fm/task-disabled disabled.txt landed
+  git -C "$clone" push -q -u origin fm/task-disabled
+  git --git-dir="$remote" update-ref -d refs/heads/fm/task-disabled
+  git -C "$clone" fetch -q --prune origin
+
+  out=$(FM_FLEET_PRUNE=0 run_sync "$home" "$clone")
+  assert_not_contains "$out" "pruned fm/task-disabled" "explicit fleet prune opt-out must preserve the branch"
+  branch_exists "$clone" fm/task-disabled \
+    || fail "routine-prune-disable: disabled fleet sync deleted an eligible branch"
+  pass "routine branch pruning defaults on and honors the explicit disable switch"
 }
 
 test_checked_out_task_branch_is_left_alone() {
@@ -811,7 +816,7 @@ test_local_only_skipped
 test_branch_update_between_proof_and_delete_is_left_alone
 test_worktree_added_between_proof_and_delete_is_left_alone
 test_gone_unmerged_task_branch_is_left_alone
-test_routine_prune_requires_explicit_opt_in
+test_routine_prune_defaults_on_and_allows_disable
 test_checked_out_task_branch_is_left_alone
 test_prune_never_targets_the_default_branch
 test_single_project_by_bare_name_resolves

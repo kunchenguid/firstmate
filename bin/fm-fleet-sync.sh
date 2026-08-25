@@ -25,7 +25,7 @@
 # Anything else is reported as "skipped: not a clone root" naming the repository
 # that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
-# worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=1 to opt in.
+# worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -224,9 +224,8 @@ prune_gone_branches() {
   # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
   # this fleet are squash-merged, so a merged branch is never an ancestor and
   # such a check would prune nothing. The no-worktree guard is the real safety
-  # net. It is deliberately opt-in because fleet sync otherwise runs as routine
-  # maintenance and can now also remove matching remote audit refs.
-  [ "${FM_FLEET_PRUNE:-0}" = "1" ] || return 0
+  # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
+  [ "${FM_FLEET_PRUNE:-1}" != "0" ] || return 0
 
   local refline branch track tip
 
