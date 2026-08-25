@@ -248,7 +248,7 @@ fm_harness_omp_pid_identity() {  # <pid>
 fm_harness_record_omp_claude() {  # <state> <pid>
   local state=$1 pid=$2 comm marker identity
   marker=$(fm_harness_omp_claude_marker_path "$state")
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || comm=""
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   if [ "$(basename -- "$comm")" = omp ] && [ "${CLAUDECODE:-}" = "1" ]; then
     identity=$(fm_harness_omp_pid_identity "$pid") || return 1
     { printf '%s\n' "$pid" && printf '%s\n' "$identity"; } > "$marker" 2>/dev/null
