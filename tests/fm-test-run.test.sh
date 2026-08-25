@@ -386,6 +386,19 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_coverage_guard_is_locale_independent() {
+  local out rc
+  # The guard's comm comparisons must match the LC_ALL=C sort that built its
+  # temp files. en_US.UTF-8 collates '-' and '_' differently from C, so it
+  # both exists on common Linux images and reliably exposes a comm call that
+  # forgot to pin its own locale.
+  rc=0
+  out=$(LC_ALL=en_US.UTF-8 "$RUNNER" --check-coverage 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "coverage guard failed under LC_ALL=en_US.UTF-8 (rc=$rc): $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under en_US.UTF-8"
+  pass "coverage guard succeeds under a non-C locale"
+}
+
 test_portable_serial_shards_partition_the_serial_lane() {
   local lanes count serial shard listed union dups shard_lane total cap
   lanes=$("$RUNNER" --list-lanes)
@@ -715,6 +728,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_is_locale_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
