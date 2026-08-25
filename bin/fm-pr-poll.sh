@@ -155,20 +155,37 @@ case "$provider" in
 $logins
 LOGINS
     [ "$matches" -eq 1 ] && [ -n "$login" ] || exit 0
-    raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --output tsv \
-      --fields index,state --state all 2>/dev/null) || exit 0
+    # tea pulls list paginates (30 rows per page by default) and this poll's
+    # watched pull request can sit anywhere in the repository's full history,
+    # so an unpaginated single-page read silently misses a merge on any
+    # repository with more than one page of pull requests. Every page is
+    # scanned in index order until the target is found or a short page marks
+    # the end of the list; a hard page ceiling keeps a pathological server
+    # from wedging this poll on one invocation instead of retrying next cycle.
+    limit=50
+    page=1
+    max_pages=1000
     state=
-    header=1
-    while IFS=$'\t' read -r idx st; do
-      if [ "$header" = 1 ]; then
-        header=0
-        continue
-      fi
-      [ "$idx" = "$number" ] || continue
-      state=$st
-    done <<ROWS
+    while [ "$page" -le "$max_pages" ]; do
+      raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --output tsv \
+        --fields index,state --state all --page "$page" --limit "$limit" 2>/dev/null) || exit 0
+      rows=0
+      header=1
+      while IFS=$'\t' read -r idx st; do
+        if [ "$header" = 1 ]; then
+          header=0
+          continue
+        fi
+        rows=$((rows + 1))
+        [ "$idx" = "$number" ] || continue
+        state=$st
+      done <<ROWS
 $raw
 ROWS
+      [ -n "$state" ] && break
+      [ "$rows" -eq "$limit" ] || break
+      page=$((page + 1))
+    done
     [ "$state" = merged ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;

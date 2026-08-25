@@ -117,10 +117,10 @@ $ tea pulls 1 --login verifyhost --repo tester/testrepo --output json
 }
 ```
 
-The byte-static poll never calls this single-index view (it would need `jq` to extract `headSha`/`hasMerged` reliably from pretty-printed JSON), and instead reads `tea pulls list --output tsv --fields index,state --state all`, filtered to the matching index in a plain read loop, mirroring how the GitLab poll reads `glab`'s field output instead of its JSON:
+The byte-static poll never calls this single-index view (it would need `jq` to extract `headSha`/`hasMerged` reliably from pretty-printed JSON), and instead reads `tea pulls list --output tsv --fields index,state --state all`, filtered to the matching index in a plain read loop, mirroring how the GitLab poll reads `glab`'s field output instead of its JSON. `tea pulls list` paginates (30 rows per page by default), so the watched pull request can sit past the first page in a repository with enough history; the poll requests successive `--page`/`--limit` pages, in index order, until it finds the target or a short page marks the end of the list:
 
 ```
-$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all
+$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all --page 1 --limit 50
 index	state
 3	open
 2	open
@@ -134,7 +134,7 @@ $ tea pulls merge 1 --login verifyhost --repo tester/testrepo --style squash
 $ echo $?
 0
 
-$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all
+$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all --page 1 --limit 50
 index	state
 3	open
 2	open

@@ -116,7 +116,29 @@ printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
 [ "${FM_TEST_TEA_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_TEA_SLEEP"
 case " $* " in
   *" logins list "*) printf '%s\n' "$FM_TEST_TEA_LOGINS_TSV" ;;
-  *" pulls list "*) printf '%s\n' "$FM_TEST_TEA_PULLS_TSV" ;;
+  *" pulls list "*)
+    # Reproduces the real CLI's --page/--limit pagination of FM_TEST_TEA_PULLS_TSV
+    # (header line, then one data line per record) so a test can prove the
+    # caller scans every page rather than only tea's default first page.
+    page=1
+    limit=0
+    prev=
+    for arg in "$@"; do
+      case "$prev" in
+        --page) page=$arg ;;
+        --limit) limit=$arg ;;
+      esac
+      prev=$arg
+    done
+    sed -n '1p' <<<"$FM_TEST_TEA_PULLS_TSV"
+    if [ "$limit" -gt 0 ] 2>/dev/null; then
+      start=$(((page - 1) * limit + 2))
+      end=$((page * limit + 1))
+      sed -n "${start},${end}p" <<<"$FM_TEST_TEA_PULLS_TSV"
+    else
+      sed -n '2,$p' <<<"$FM_TEST_TEA_PULLS_TSV"
+    fi
+    ;;
 esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/tea"
@@ -2985,6 +3007,19 @@ tea_pulls_tsv() {  # <number> <state>
   printf 'index\tstate\n%s\t%s' "$1" "$2"
 }
 
+# Builds a multi-row tea pulls list fixture with <filler> unrelated open rows
+# ahead of the target row, so the target lands past tea's first page when
+# filler exceeds the poll's page size.
+tea_pulls_tsv_paged() {  # <number> <state> <filler>
+  local number=$1 state=$2 filler=$3 i=1 out='index	state'
+  while [ "$i" -le "$filler" ]; do
+    out="$out
+$((i + 100000))	open"
+    i=$((i + 1))
+  done
+  printf '%s\n%s\t%s' "$out" "$number" "$state"
+}
+
 test_gitea_merge_watch() {
   local dir state out rc url login logins_tsv value notea entry bindir name
   dir=$(make_case gitea-merge-watch)
@@ -3017,6 +3052,26 @@ group/project
   [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line"
   out=$(FM_TEST_TEA_FAIL=1 FM_TEST_TEA_LOGINS_TSV="$logins_tsv" run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted after a tea failure"
+
+  # tea paginates pulls list (30 rows per page by default); the watched pull
+  # request can sit anywhere in a repository's full history, so a merge on any
+  # page past the first must still be found rather than silently missed.
+  : > "$dir/tea.log"
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv_paged 7 merged 55)" \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea poll did not find a merged pull request past tea's first page"
+  grep -qF -- '--page 2 --limit 50' "$dir/tea.log" \
+    || fail "Gitea poll did not request a second page to find a pull request past the first"
+  grep -qF -- '--page 3 --limit 50' "$dir/tea.log" \
+    && fail "Gitea poll requested a third page after already finding the pull request on the second"
+  : > "$dir/tea.log"
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv_paged 999999 open 55)" \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a pull request absent from every page"
+  grep -qF -- '--page 2 --limit 50' "$dir/tea.log" \
+    || fail "Gitea poll did not scan a second page before giving up"
+  grep -qF -- '--page 3 --limit 50' "$dir/tea.log" \
+    && fail "Gitea poll kept requesting pages after the last (short) page was exhausted"
 
   # A host resolving to zero or more than one configured login must never
   # guess which one to use.
