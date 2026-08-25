@@ -797,7 +797,7 @@ if (handlers.has("input")) {
 }
 if (
   calmCommand.description !==
-  "Toggle Firstmate's supported conversation-only transcript presentation."
+  "Schaltet Firstmates Calm-Gesprächsdarstellung um."
 ) {
   throw new Error(`unexpected calm command description: ${calmCommand.description}`);
 }
