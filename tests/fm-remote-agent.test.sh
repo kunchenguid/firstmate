@@ -45,7 +45,6 @@ enabled=true
 region=sg
 identity=user
 agent_id=9001
-model=ida-research-test
 EOF
   chmod 0600 "$1/config/ida-remote-agent"
 }
@@ -108,10 +107,11 @@ case "$args" in
           tool=$(printf '%s\n' "$line" | jq -r '.params.name')
           printf 'tool:%s\n' "$tool" >>"$log"
           if [ "$tool" = list_commands ]; then
-            text=$(printf '%s' 'bytedcli ida deep-research create — Options: --content <text> --name <name> --timeout-ms <milliseconds>
+            if [ "${FM_IDA_FAKE_NO_MODEL_CAPABILITY:-0}" = 1 ]; then model_option=; else model_option=' --model <name>'; fi
+            text=$(printf 'bytedcli ida deep-research create — Options: --content <text> --name <name>%s --timeout-ms <milliseconds>
 bytedcli ida session raw list — Options: --agent-id <id>
 bytedcli ida session get — Options: --session-id <id>
-bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
+bytedcli ida chat completion close — Options: --session-id <id>' "$model_option" | jq -Rs .)
             printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":%s}],"isError":false}}\n' "$request_id" "$text"
             continue
           fi
@@ -128,7 +128,15 @@ bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
             }
           marker=$9
           case "$7" in "[Firstmate session marker: $marker]"$'\n\n'*) ;; *) exit 20 ;; esac
+          selected_model=
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --model) selected_model=$2; shift 2 ;;
+              *) shift ;;
+            esac
+          done
           printf 'command:ida-region-sg-deep-research-create\n' >>"$log"
+          printf 'create-model:%s\n' "${selected_model:-omitted}" >>"$log"
           case "$mode" in
             timeout-created) printf '%s\t%s\trunning\t%s\n' "$session" "$marker" "$marker" >"$sessions"; exit 124 ;;
             timeout-zero) exit 124 ;;
@@ -150,6 +158,9 @@ bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
     ;;
   *" ida --region sg agent get "*)
     success '{"id":9001,"name":"iDA Test","deep_research_enabled":true}'
+    ;;
+  *" ida --region sg model list "*)
+    success '{"models":[{"name":"ida-research-test"},{"name":"ida-explicit-test"}]}'
     ;;
   *" ida --region sg session raw list "*)
     case "$mode" in list-unavailable) error HTTP_503 'service unavailable'; exit 1 ;; esac
@@ -198,11 +209,82 @@ run_ida() {
 
 dispatch_ida() {
   local home=$1 fakebin=$2 id=$3
+  shift 3
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
   FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
   FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
   FM_IDA_FAKE_MODE="${FM_IDA_FAKE_MODE:-success}" PATH="$fakebin:$BASE_PATH" \
-    "$DISPATCH" remote-agent/ida "$id" --instructions "$home/data/$id/instructions.txt"
+    "$DISPATCH" remote-agent/ida "$id" --instructions "$home/data/$id/instructions.txt" "$@"
+}
+
+test_dispatch_model_selection_and_validation() {
+  local home fakebin id state creates rc
+  home=$(new_home model-selection); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+
+  id=ida-explicit-model; new_task "$home" "$id"
+  dispatch_ida "$home" "$fakebin" "$id" --model ida-explicit-test >/dev/null \
+    || fail "explicit-model iDA dispatch failed"
+  wait_phase "$home" "$id" terminal-success || fail "explicit-model dispatch did not complete"
+  state=$(state_file "$home" "$id")
+  [ "$(jq -r '.provider_state.model' "$state")" = ida-explicit-test ] \
+    || fail "explicit model did not round-trip through private state"
+  # shellcheck disable=SC2016 # Backticks are literal Markdown.
+  assert_grep 'Model: `ida-explicit-test`' "$home/data/$id/report.md" "explicit model did not survive result readback"
+  creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 1 ] || fail "explicit model did not reach exactly one create call"
+  assert_grep 'create-model:ida-explicit-test' "$home/bytedcli.log" "explicit model did not reach the official create request"
+
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  printf 'model=ida-research-test\n' >>"$home/config/ida-remote-agent"
+  id=ida-provider-default; new_task "$home" "$id"
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "provider-default iDA dispatch failed"
+  wait_phase "$home" "$id" terminal-success || fail "provider-default dispatch did not complete"
+  jq -e '.provider_state.model == null' "$(state_file "$home" "$id")" >/dev/null \
+    || fail "omitted model materialized a config or guessed default"
+  assert_grep 'create-model:omitted' "$home/bytedcli.log" "omitted model changed the old create request"
+  assert_no_grep 'ida --region sg model list' "$home/bytedcli.log" "omitted model unexpectedly queried the model catalog"
+
+  for id in ida-model-empty ida-model-malformed ida-model-position ida-model-duplicate; do new_task "$home" "$id"; done
+  : >"$home/bytedcli.log"; rc=0
+  dispatch_ida "$home" "$fakebin" ida-model-empty --model '' >"$home/empty.out" 2>"$home/empty.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "empty iDA model was accepted"
+  assert_grep 'non-empty value' "$home/empty.err" "empty model error was not actionable"
+  rc=0; dispatch_ida "$home" "$fakebin" ida-model-malformed --model 'bad model' >"$home/malformed.out" 2>"$home/malformed.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed iDA model was accepted"
+  assert_grep 'malformed iDA model' "$home/malformed.err" "malformed model error was not actionable"
+  rc=0; dispatch_ida "$home" "$fakebin" ida-model-position --model=ida-explicit-test >"$home/position.out" 2>"$home/position.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsupported iDA model argument form was accepted"
+  assert_grep "use '--model <value>' exactly once" "$home/position.err" "unsupported model argument error was not actionable"
+  rc=0; dispatch_ida "$home" "$fakebin" ida-model-duplicate --model ida-explicit-test --model ida-research-test >"$home/duplicate.out" 2>"$home/duplicate.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate iDA model flags were accepted"
+  assert_grep 'duplicate --model' "$home/duplicate.err" "duplicate model error was not actionable"
+  [ ! -s "$home/bytedcli.log" ] || fail "invalid model input made a provider call"
+
+  id=ida-model-unsupported; new_task "$home" "$id"; rc=0
+  dispatch_ida "$home" "$fakebin" "$id" --model ida-not-in-catalog >"$home/unsupported.out" 2>"$home/unsupported.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsupported iDA model was accepted"
+  assert_grep 'unsupported iDA model' "$home/unsupported.err" "unsupported model error was not actionable"
+  creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 0 ] || fail "unsupported model reached provider mutation"
+  assert_absent "$home/state/$id.meta" "unsupported model published task metadata"
+
+  id=ida-model-incompatible; new_task "$home" "$id"; : >"$home/bytedcli.log"; rc=0
+  FM_IDA_FAKE_NO_MODEL_CAPABILITY=1 dispatch_ida "$home" "$fakebin" "$id" --model ida-explicit-test \
+    >"$home/incompatible.out" 2>"$home/incompatible.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "provider-incompatible iDA model selection was accepted"
+  assert_grep 'does not support --model' "$home/incompatible.err" "provider-incompatible model error was not actionable"
+  assert_no_grep 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" "provider-incompatible model reached provider mutation"
+  assert_absent "$home/state/$id.meta" "provider-incompatible model published task metadata"
+
+  state=$(state_file "$home" ida-explicit-model)
+  jq 'del(.provider_state.model)' "$state" >"$home/legacy-model-state.json"
+  chmod 0600 "$home/legacy-model-state.json"
+  mv "$home/legacy-model-state.json" "$state"
+  run_ida "$home" "$fakebin" state ida-explicit-model >"$home/legacy-model.out" \
+    || fail "legacy state without a model field became unreadable"
+  assert_grep 'state: done' "$home/legacy-model.out" "legacy model-less state did not preserve terminal state"
+  pass "iDA dispatch validates an optional model, preserves omission, and round-trips explicit intent"
 }
 
 test_dispatch_success_and_redaction() {
@@ -452,7 +534,7 @@ test_cancellation_and_retirement_authority() {
 }
 
 test_aime_compatibility_and_local_unchanged() {
-  local home fakebin out
+  local home fakebin out rc=0
   home=$(new_home compatibility); fakebin=$(make_fake_bytedcli "$home")
   mkdir -p "$home/state/cloud-tasks/legacy-aime"
   cat >"$home/state/legacy-aime.meta" <<EOF
@@ -478,6 +560,15 @@ SH
   # The public dispatch wrapper uses its sibling, so verify unchanged local
   # behavior through the existing dedicated AIME suite's stubbed ROOT copy.
   [ "$($DISPATCH unsupported/task sample 2>&1 || true)" = 'error: unsupported task executor: unsupported/task' ] || fail "executor error behavior drifted"
+  new_task "$home" aime-model-refused
+  : >"$home/bytedcli.log"
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    "$DISPATCH" remote-agent/aime aime-model-refused \
+      --instructions "$home/data/aime-model-refused/instructions.txt" --model ida-explicit-test \
+      >"$home/aime-model.out" 2>"$home/aime-model.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "AIME silently accepted the iDA-only model option"
+  assert_grep 'supported only by remote-agent/ida' "$home/aime-model.err" "AIME model refusal was not actionable"
+  [ ! -s "$home/bytedcli.log" ] || fail "AIME model refusal reached a provider call"
   pass "legacy cloud-worker/AIME records remain readable and unrelated executor routing stays fail-closed"
 }
 
@@ -521,6 +612,7 @@ SH
   pass "new AIME tasks explicitly select remote-agent while the legacy schema and lifecycle remain intact"
 }
 
+test_dispatch_model_selection_and_validation
 test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result

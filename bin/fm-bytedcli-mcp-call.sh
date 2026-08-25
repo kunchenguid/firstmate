@@ -12,7 +12,9 @@
 # and never appears in this process's argv. `capabilities` verifies that the
 # domain-restricted MCP server advertises the required official iDA command.
 # Raw JSON-RPC, private request bytes, and raw command listings are never
-# emitted.
+# emitted. The capability check includes the official optional --model field so
+# an explicit dispatch selection cannot reach an older incompatible create
+# parser.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,14 +115,14 @@ if [ "$mode" = capabilities ]; then
   capability_ready=true
   if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then capability_ready=false; fi
   for required in \
-      'bytedcli ida deep-research create' '--content' '--name' '--timeout-ms' \
+      'bytedcli ida deep-research create' '--content' '--name' '--model' '--timeout-ms' \
       'bytedcli ida session raw list' '--agent-id' \
       'bytedcli ida session get' '--session-id' \
       'bytedcli ida chat completion close'; do
     case "$text" in *"$required"*) ;; *) capability_ready=false ;; esac
   done
   if [ "$capability_ready" = true ]; then
-    jq -cn '{status:"success",data:{command:"bytedcli ida deep-research create",required_options:["--content","--name","--timeout-ms"]},error:null}'
+    jq -cn '{status:"success",data:{command:"bytedcli ida deep-research create",required_options:["--content","--name","--model","--timeout-ms"]},error:null}'
   else
     jq -n '{status:"error",data:null,error:{code:"MCP_CAPABILITY_UNSUPPORTED",message:"required iDA deep-research create command is unavailable"}}'
     exit 1

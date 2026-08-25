@@ -93,6 +93,8 @@ The supported AIME surface has no proven provider cancellation operation.
 ## iDA procedure
 
 iDA requires a valid enabled `config/ida-remote-agent`, `region=sg`, `identity=user`, the installed `bytedcli` executable, a successful structured SG read, and the required Deep Research command capability.
+Pass `--model <name>` only on `bin/fm-task-dispatch.sh remote-agent/ida` when the captain explicitly selects one current SG model name; omission leaves the official create request model-free for provider-default selection.
+The dispatcher validates an explicit name against the current official SG model list before task publication or provider mutation, while legacy config model fields never select a new task model.
 Do not pin or refresh a bytedcli version for iDA.
 A legacy `bytedcli_version` in config or durable iDA task state is readable informational metadata only; absence, staleness, and mismatch never block any lifecycle operation.
 The adapter submits only through official domain-restricted `bytedcli --as user mcp --allow-domains ida` and `run_command`, with `ida --region sg deep-research create` constructed inside a mode-`0600` stdin request so private arguments never enter argv.

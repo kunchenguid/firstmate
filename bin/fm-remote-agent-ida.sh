@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-remote-agent-ida.sh probe
-#   fm-remote-agent-ida.sh dispatch <task-id> --instructions <private-file> [--document]
+#   fm-remote-agent-ida.sh dispatch <task-id> --instructions <private-file> [--model <name>] [--document]
 #   fm-remote-agent-ida.sh adopt <task-id>
 #   fm-remote-agent-ida.sh state <task-id>
 #   fm-remote-agent-ida.sh interrupt-wait <task-id>
@@ -13,9 +13,13 @@
 #
 # New dispatches require config/ida-remote-agent, whose schema is owned by
 # fm-ida-remote-lib.sh, and always use region=sg. `dispatch` durably records the
-# task/provider identity and session marker, then arms the process-event adapter;
+# task/provider identity, optional validated model, and session marker, then
+# arms the process-event adapter;
 # it does not block on Deep Research. The adapter reconciles that unique marker
 # before the sole allowed create and after every ambiguous submission.
+# Omit --model to leave the official create request unchanged and let iDA use
+# its provider default. Explicit values must exactly match the name from the
+# current SG `bytedcli ida model list` response.
 #
 # `cancel` is a destructive provider write and therefore requires the explicit
 # --authorize-provider-cancel flag at the call site. A successful close response
@@ -91,20 +95,56 @@ cmd_probe() {
     rm -rf -- "$root"
     return 1
   fi
-  jq -n --arg agent "$agent_id" --arg model "$IDA_CONFIG_MODEL" \
-    '{schema:"fm-ida-probe.v1",outcome:"ready",error_class:null,provider:"ida",region:"sg",identity:"user",agent_id:$agent,model:$model,capabilities:["deep-research.create","session.list","session.get","chat.completion.close"]}'
+  jq -n --arg agent "$agent_id" \
+    '{schema:"fm-ida-probe.v1",outcome:"ready",error_class:null,provider:"ida",region:"sg",identity:"user",agent_id:$agent,capabilities:["deep-research.create","deep-research.model-selection","session.list","session.get","chat.completion.close"]}'
+  rm -rf -- "$root"
+}
+
+validate_dispatch_model() { # <model>
+  local model=$1 root out err capability class
+  root=$(temp_root); out="$root/models.out"; err="$root/models.err"; capability="$root/capability.json"
+  if ! "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities >"$capability" 2>"$err" \
+      || ! fm_ida_structured_success "$capability" \
+      || ! jq -e '.data.required_options | index("--model") != null' "$capability" >/dev/null 2>&1; then
+    rm -rf -- "$root"
+    die "installed iDA create command does not support --model; update bytedcli or omit the selection"
+  fi
+  if fm_ida_run_bytedcli --json --as user ida --region sg model list >"$out" 2>"$err"; then :; else
+    fm_ida_normalize_error "$out" "$err" "$root/error.json"
+    class=$(fm_remote_error_classify "$root/error.json")
+    rm -rf -- "$root"
+    die "cannot validate iDA model '$model': $class; run 'bytedcli --json --as user ida --region sg model list'"
+  fi
+  if ! fm_ida_structured_success "$out" \
+      || ! jq -e '.data.models | type == "array" and all(.[]; .name | type == "string")' "$out" >/dev/null 2>&1; then
+    rm -rf -- "$root"
+    die "cannot validate iDA model '$model': provider returned an invalid model catalog"
+  fi
+  if ! jq -e --arg model "$model" '.data.models | any(.[]; .name == $model)' "$out" >/dev/null 2>&1; then
+    rm -rf -- "$root"
+    die "unsupported iDA model '$model'; choose an exact name from 'bytedcli --json --as user ida --region sg model list'"
+  fi
   rm -rf -- "$root"
 }
 
 cmd_dispatch() {
-  local id=${1-} instructions='' task_type=research sha marker provider_state lock rc agent_id model
+  local id=${1-} instructions='' task_type=research model='' model_seen=false
+  local sha marker provider_state lock rc agent_id
   [ -n "$id" ] || usage; shift
   fm_remote_task_id_valid "$id" || die "invalid task id"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --instructions) [ "$#" -ge 2 ] || usage; instructions=$2; shift 2 ;;
+      --model)
+        [ "$model_seen" = false ] || die "duplicate --model; select exactly one iDA model"
+        [ "$#" -ge 2 ] && [ -n "$2" ] || die "--model requires a non-empty value from 'bytedcli --json --as user ida --region sg model list'"
+        case "$2" in --*) die "--model requires a value before the next option" ;; esac
+        fm_ida_safe_token "$2" || die "malformed iDA model '$2'; use an exact name from 'bytedcli --json --as user ida --region sg model list'"
+        model=$2; model_seen=true; shift 2
+        ;;
+      --model=*) die "use '--model <value>' exactly once for iDA dispatch" ;;
       --document) task_type=document; shift ;;
-      *) usage ;;
+      *) die "unsupported iDA dispatch argument: $1" ;;
     esac
   done
   [ -n "$instructions" ] || die "dispatch requires --instructions <private-file>"
@@ -113,10 +153,10 @@ cmd_dispatch() {
   fm_ida_config_load || die "iDA remote agent is disabled: config is missing or invalid"
   [ "$IDA_CONFIG_ENABLED" = true ] || die "iDA remote agent is disabled in config"
   command -v bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
+  [ -z "$model" ] || validate_dispatch_model "$model"
   sha=$(fm_remote_sha256_file "$instructions") || die "cannot hash iDA instruction"
   marker=$(fm_ida_session_marker "$id" "$sha") || die "cannot derive iDA session marker"
   [ "$IDA_CONFIG_AGENT_ID" = default ] && agent_id= || agent_id=$IDA_CONFIG_AGENT_ID
-  [ "$IDA_CONFIG_MODEL" = default ] && model= || model=$IDA_CONFIG_MODEL
   provider_state=$(jq -cn --arg marker "$marker" --arg agent_id "$agent_id" --arg model "$model" \
     '{region:"sg",identity:"user",session_marker:$marker,session_id:null,task_id:null,
       agent_id:(if $agent_id=="" then null else $agent_id end),agent_name:null,
