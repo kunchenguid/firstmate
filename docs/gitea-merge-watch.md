@@ -47,7 +47,7 @@ $ tea logins list --output json
 ]
 ```
 
-The byte-static watcher poll (`bin/fm-pr-poll.sh`) cannot depend on `jq` any more than the GitHub or GitLab cases do, so it reads the same login table through `tea logins list --output tsv` instead, a plain tab-separated table with no JSON processor required:
+The byte-static watcher poll (`bin/fm-pr-poll.sh`) resolves the login the same way but without a JSON processor for that step, reading `tea logins list --output tsv` instead, a plain tab-separated table:
 
 ```
 $ tea logins list --output tsv
@@ -117,14 +117,11 @@ $ tea pulls 1 --login verifyhost --repo tester/testrepo --output json
 }
 ```
 
-The byte-static poll never calls this single-index view (it would need `jq` to extract `headSha`/`hasMerged` reliably from pretty-printed JSON), and instead reads `tea pulls list --output tsv --fields index,state --state all`, filtered to the matching index in a plain read loop, mirroring how the GitLab poll reads `glab`'s field output instead of its JSON. `tea pulls list` paginates (30 rows per page by default), so the watched pull request can sit past the first page in a repository with enough history; the poll requests successive `--page`/`--limit` pages, in index order, until it finds the target or a short page marks the end of the list:
+The byte-static poll calls this exact single-index view and reads `hasMerged` out of it with `jq`, the same field `bin/fm-pr-check.sh`'s optional `pr_head` lookup already reads `headSha` from above. A list-based read was considered first, to keep the poll free of a JSON processor the way the GitHub and GitLab polls are, but `tea pulls list` paginates (30 rows per page by default) with no resume checkpoint, so the watched pull request's offset from page 1 grows with every newer pull request created in the repository while it stays open; a single-index lookup by contrast never lists anything; there is no page ordering to account for at all, so the poll depends on `jq` for this one read instead. Every other Gitea code path in this project already requires `jq` unconditionally for the login table lookup (`fm_pr_gitea_resolve_login`), so this costs no new dependency:
 
 ```
-$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all --page 1 --limit 50
-index	state
-3	open
-2	open
-1	open
+$ tea pulls 1 --login verifyhost --repo tester/testrepo --output json | jq -r '.hasMerged // empty'
+false
 ```
 
 Merging is silent on success and reports a generic failure on any refusal, distinguishable by exit code rather than message text:
@@ -134,11 +131,8 @@ $ tea pulls merge 1 --login verifyhost --repo tester/testrepo --style squash
 $ echo $?
 0
 
-$ tea pulls list --login verifyhost --repo tester/testrepo --output tsv --fields index,state --state all --page 1 --limit 50
-index	state
-3	open
-2	open
-1	merged
+$ tea pulls 1 --login verifyhost --repo tester/testrepo --output json | jq -r '.hasMerged // empty'
+true
 
 $ tea pulls merge 1 --login verifyhost --repo tester/testrepo --style squash
 Error: failed to merge PR, is it still open?
@@ -191,8 +185,8 @@ It calls `tea pulls merge` directly and trusts the exit code, the same way the G
 
 ## A missing tool, or an unresolvable login, produces no wake and no merge - never a guess
 
-The poll is silent on every error by design, so a missing `tea` would otherwise be indistinguishable from a pull request that is never merged, and an ambiguous login would otherwise risk answering from the wrong server entirely.
-`tests/fm-pr-check-security.test.sh`'s `test_gitea_merge_watch` proves, hermetically, that the poll stays silent when `tea` is absent from `PATH`, when the parsed host resolves to zero configured logins, and when it resolves to more than one; `bin/fm-pr-check.sh` refuses to arm a watch under the first condition (the one point where a missing tool can still be reported) with:
+The poll is silent on every error by design, so a missing `tea` or `jq` would otherwise be indistinguishable from a pull request that is never merged, and an ambiguous login would otherwise risk answering from the wrong server entirely.
+`tests/fm-pr-check-security.test.sh`'s `test_gitea_merge_watch` proves, hermetically, that the poll stays silent when `tea` is absent from `PATH`, when `jq` is absent from `PATH`, when the parsed host resolves to zero configured logins, and when it resolves to more than one; `bin/fm-pr-check.sh` refuses to arm a watch under the first condition (the one point where a missing tool can still be reported) with:
 
 ```
 error: watching a Gitea pull request requires tea on PATH

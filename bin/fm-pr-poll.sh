@@ -155,44 +155,17 @@ case "$provider" in
 $logins
 LOGINS
     [ "$matches" -eq 1 ] && [ -n "$login" ] || exit 0
-    # tea pulls list paginates (30 rows per page by default) and this poll's
-    # watched pull request can sit anywhere in the repository's full history,
-    # so an unpaginated single-page read silently misses a merge on any
-    # repository with more than one page of pull requests. Every page is
-    # scanned in index order until the target is found or a short page marks
-    # the end of the list. A page ceiling alone would trade one silent-miss
-    # boundary for another (any repository whose watched pull request sits
-    # beyond it is stranded on every future cycle, never just delayed), so
-    # the ceiling here is sized far past any real Gitea repository's pull
-    # request count instead of a plausibly reachable one, and a wall-clock
-    # deadline is the actual backstop against a pathological server wedging
-    # this single invocation.
-    limit=50
-    page=1
-    max_pages=20000
-    deadline=$((SECONDS + 60))
-    state=
-    while [ "$page" -le "$max_pages" ] && [ "$SECONDS" -lt "$deadline" ]; do
-      raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --output tsv \
-        --fields index,state --state all --page "$page" --limit "$limit" 2>/dev/null) || exit 0
-      rows=0
-      header=1
-      while IFS=$'\t' read -r idx st; do
-        if [ "$header" = 1 ]; then
-          header=0
-          continue
-        fi
-        rows=$((rows + 1))
-        [ "$idx" = "$number" ] || continue
-        state=$st
-      done <<ROWS
-$raw
-ROWS
-      [ -n "$state" ] && break
-      [ "$rows" -eq "$limit" ] || break
-      page=$((page + 1))
-    done
-    [ "$state" = merged ] && printf '%s\n' merged
+    # tea addresses a single pull request directly by its index, the same
+    # shape gh's view and glab's view already use above, so there is no list
+    # to page through and no list ordering to reason about. hasMerged is read
+    # out of tea's JSON with jq, which every other Gitea code path in this
+    # project already requires unconditionally for the login table lookup, so
+    # this costs no dependency the operator did not already need; a missing
+    # jq, like a missing tea or an unreadable pull request, degrades silently
+    # rather than reporting a merge.
+    raw=$(tea pulls "$number" --login "$login" --repo "$owner/$repo" --output json 2>/dev/null) || exit 0
+    state=$(printf '%s' "$raw" | jq -r '.hasMerged // empty' 2>/dev/null) || exit 0
+    [ "$state" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

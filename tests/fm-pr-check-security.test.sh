@@ -104,11 +104,11 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   # Plain tea, reproducing the real CLI's contract for the two poll-relevant
-  # subcommands: a tab-separated header row plus one row per record on stdout,
-  # exit 0 on success, and a non-zero exit with no stdout on any failure. tea
-  # has no field selector for `logins list`, so the fixture answers verbatim
-  # for whichever subcommand ran, driven entirely by env vars so no test has
-  # to leak state into a shared runner.
+  # subcommands: `logins list --output tsv` answers with a tab-separated
+  # header row plus one row per record, and `pulls <n> --output json` answers
+  # with a single pull request's JSON object, both exit 0 on success and a
+  # non-zero exit with no stdout on any failure, driven entirely by env vars
+  # so no test has to leak state into a shared runner.
   cat > "$fakebin/tea" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
@@ -116,29 +116,7 @@ printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
 [ "${FM_TEST_TEA_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_TEA_SLEEP"
 case " $* " in
   *" logins list "*) printf '%s\n' "$FM_TEST_TEA_LOGINS_TSV" ;;
-  *" pulls list "*)
-    # Reproduces the real CLI's --page/--limit pagination of FM_TEST_TEA_PULLS_TSV
-    # (header line, then one data line per record) so a test can prove the
-    # caller scans every page rather than only tea's default first page.
-    page=1
-    limit=0
-    prev=
-    for arg in "$@"; do
-      case "$prev" in
-        --page) page=$arg ;;
-        --limit) limit=$arg ;;
-      esac
-      prev=$arg
-    done
-    sed -n '1p' <<<"$FM_TEST_TEA_PULLS_TSV"
-    if [ "$limit" -gt 0 ] 2>/dev/null; then
-      start=$(((page - 1) * limit + 2))
-      end=$((page * limit + 1))
-      sed -n "${start},${end}p" <<<"$FM_TEST_TEA_PULLS_TSV"
-    else
-      sed -n '2,$p' <<<"$FM_TEST_TEA_PULLS_TSV"
-    fi
-    ;;
+  *" pulls "*" --output json "*) printf '%s\n' "$FM_TEST_TEA_PULL_JSON" ;;
 esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/tea"
@@ -3003,25 +2981,12 @@ tea_logins_tsv() {  # <login> <host>
   printf 'Name\tURL\tSSHHost\tUser\tDefault\n%s\thttps://%s\t%s\tuser\tfalse' "$1" "$2" "$2"
 }
 
-tea_pulls_tsv() {  # <number> <state>
-  printf 'index\tstate\n%s\t%s' "$1" "$2"
-}
-
-# Builds a multi-row tea pulls list fixture with <filler> unrelated open rows
-# ahead of the target row, so the target lands past tea's first page when
-# filler exceeds the poll's page size.
-tea_pulls_tsv_paged() {  # <number> <state> <filler>
-  local number=$1 state=$2 filler=$3 i=1 out='index	state'
-  while [ "$i" -le "$filler" ]; do
-    out="$out
-$((i + 100000))	open"
-    i=$((i + 1))
-  done
-  printf '%s\n%s\t%s' "$out" "$number" "$state"
+tea_pull_json() {  # <hasMerged JSON literal: true|false|null>
+  printf '{"hasMerged":%s}' "$1"
 }
 
 test_gitea_merge_watch() {
-  local dir state out rc url login logins_tsv value notea entry bindir name
+  local dir state out rc url login logins_tsv value notea nojq entry bindir name
   dir=$(make_case gitea-merge-watch)
   state="$dir/home/state"
   url=https://gitea.example/group/project/pulls/7
@@ -3040,58 +3005,43 @@ gitea.example
 group/project
 7" ] || fail "published Gitea sidecar bytes were not exact"
 
-  # Only an exact merged state wakes firstmate. Every other reading, including
-  # an unreadable pull request and a changed output format, stays silent.
-  for value in open closed '' not-a-state MERGED merged-but-not; do
-    out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 "$value")" \
+  # Only an exact hasMerged:true reading wakes firstmate. Every other reading,
+  # including an unreadable pull request and a changed field shape, stays
+  # silent.
+  for value in false null; do
+    out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json "$value")" \
       run_poll "$dir")
-    [ -z "$out" ] || fail "Gitea poll emitted for a non-merged state ('$value')"
+    [ -z "$out" ] || fail "Gitea poll emitted for a non-merged hasMerged reading ('$value')"
   done
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" \
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON='{}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a pull view missing hasMerged"
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON='not json' run_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for unparseable pull view JSON"
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
     run_poll "$dir")
   [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line"
   out=$(FM_TEST_TEA_FAIL=1 FM_TEST_TEA_LOGINS_TSV="$logins_tsv" run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted after a tea failure"
 
-  # tea paginates pulls list (30 rows per page by default); the watched pull
-  # request can sit anywhere in a repository's full history, so a merge on any
-  # page past the first must still be found rather than silently missed.
-  : > "$dir/tea.log"
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv_paged 7 merged 55)" \
-    run_poll "$dir")
-  [ "$out" = merged ] || fail "Gitea poll did not find a merged pull request past tea's first page"
-  grep -qF -- '--page 2 --limit 50' "$dir/tea.log" \
-    || fail "Gitea poll did not request a second page to find a pull request past the first"
-  grep -qF -- '--page 3 --limit 50' "$dir/tea.log" \
-    && fail "Gitea poll requested a third page after already finding the pull request on the second"
-  : > "$dir/tea.log"
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv_paged 999999 open 55)" \
-    run_poll "$dir")
-  [ -z "$out" ] || fail "Gitea poll emitted for a pull request absent from every page"
-  grep -qF -- '--page 2 --limit 50' "$dir/tea.log" \
-    || fail "Gitea poll did not scan a second page before giving up"
-  grep -qF -- '--page 3 --limit 50' "$dir/tea.log" \
-    && fail "Gitea poll kept requesting pages after the last (short) page was exhausted"
-
   # A host resolving to zero or more than one configured login must never
   # guess which one to use.
   out=$(FM_TEST_TEA_LOGINS_TSV="$(printf 'Name\tURL\tSSHHost\tUser\tDefault')" \
-    FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" run_poll "$dir")
+    FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted with no configured login for the host"
   out=$(FM_TEST_TEA_LOGINS_TSV="$(printf 'Name\tURL\tSSHHost\tUser\tDefault\na\thttps://gitea.example\tgitea.example\tuser\tfalse\nb\thttps://gitea.example\tgitea.example\tuser\tfalse')" \
-    FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" run_poll "$dir")
+    FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted with an ambiguous login for the host"
 
-  # tea is addressed by the resolved login and owner/repository slug, never a
-  # pull request URL, which the real CLI cannot resolve without a checkout the
-  # watcher does not have.
+  # tea is addressed by the resolved login, owner/repository slug, and pull
+  # request number directly, never a pull request URL, which the real CLI
+  # cannot resolve without a checkout the watcher does not have.
   : > "$dir/tea.log"
-  FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" \
+  FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
     run_poll "$dir" >/dev/null
   grep -qF -- 'logins list --output tsv' "$dir/tea.log" \
     || fail "Gitea poll did not resolve the login through tea's own login table"
-  grep -qF -- "pulls list --login $login --repo group/project --output tsv --fields index,state --state all" \
-    "$dir/tea.log" || fail "Gitea poll did not address tea by the resolved login and owner/repository slug"
+  grep -qF -- "pulls 7 --login $login --repo group/project --output json" "$dir/tea.log" \
+    || fail "Gitea poll did not address tea by the resolved login, owner/repository slug, and pull number"
   ! grep -qF -- "$url" "$dir/tea.log" \
     || fail "Gitea poll passed a pull request URL to tea"
 
@@ -3114,21 +3064,45 @@ $(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
 EOF
   ! PATH="$notea" command -v tea >/dev/null 2>&1 \
     || fail "the tea-free search path still resolved tea"
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" \
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
     PATH="$notea" \
     bash "$state/task-a.check.sh")
   [ -z "$out" ] || fail "Gitea poll emitted with tea absent from PATH"
+
+  # A missing jq must produce no wake either: reading hasMerged out of tea's
+  # JSON needs it, and the poll degrades the same silent way it does for
+  # every other read failure, rather than requiring jq to arm or merge.
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
+    PATH="$nojq" \
+    bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Gitea poll emitted with jq absent from PATH"
 
   # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
   # the stored URL exactly.
   printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" elsewhere.example group/project 7 \
     > "$state/task-a.pr-poll"
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" \
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
     run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose host was swapped"
   printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" gitea.example group/other 7 \
     > "$state/task-a.pr-poll"
-  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULLS_TSV="$(tea_pulls_tsv 7 merged)" \
+  out=$(FM_TEST_TEA_LOGINS_TSV="$logins_tsv" FM_TEST_TEA_PULL_JSON="$(tea_pull_json true)" \
     run_poll "$dir")
   [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose project was swapped"
 
@@ -3159,7 +3133,7 @@ test_gitea_merged_poll_retires() {
   seed_canonical_poll "$dir" task-a "$url"
   set +e
   FM_TEST_TEA_LOGINS_TSV=$(tea_logins_tsv fm-gitea gitea.example) \
-    FM_TEST_TEA_PULLS_TSV=$(tea_pulls_tsv 17 merged) \
+    FM_TEST_TEA_PULL_JSON=$(tea_pull_json true) \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
