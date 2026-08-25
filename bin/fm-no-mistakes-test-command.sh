@@ -14,11 +14,27 @@ run_local_required() {
   tmux -V
   printf 'no-mistakes: local host set files=%s source=tests/test-capabilities.tsv; complete behavior inventory is required in CI\n' \
     "${#herdr_tests[@]}"
-  local rc=0
-  "$ROOT/tests/run.sh" "${herdr_tests[@]}" || rc=1
-  uv run --directory "$ROOT/tools/agent-fleet" --locked pytest || rc=1
-  uv run --directory "$ROOT/tools/agent-fleet" --locked python -m compileall -q src || rc=1
-  return "$rc"
+  local lane_dir herdr_pid agent_fleet_pid herdr_rc=0 agent_fleet_rc=0
+  lane_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-local-test-lanes.XXXXXX") || return 1
+  "$ROOT/tests/run.sh" "${herdr_tests[@]}" >"$lane_dir/herdr.log" 2>&1 &
+  herdr_pid=$!
+  (
+    rc=0
+    uv run --directory "$ROOT/tools/agent-fleet" --locked pytest || rc=1
+    uv run --directory "$ROOT/tools/agent-fleet" --locked python -m compileall -q src || rc=1
+    exit "$rc"
+  ) >"$lane_dir/agent-fleet.log" 2>&1 &
+  agent_fleet_pid=$!
+  wait "$herdr_pid" || herdr_rc=$?
+  wait "$agent_fleet_pid" || agent_fleet_rc=$?
+  printf '%s\n' '== local Herdr lane ==' && cat "$lane_dir/herdr.log"
+  printf '%s\n' '== local Agent Fleet lane ==' && cat "$lane_dir/agent-fleet.log"
+  rm -rf "$lane_dir"
+  if [ "$herdr_rc" -ne 0 ] || [ "$agent_fleet_rc" -ne 0 ]; then
+    printf 'no-mistakes local test lanes failed: herdr=%s agent-fleet=%s\n' \
+      "$herdr_rc" "$agent_fleet_rc" >&2
+    return 1
+  fi
 }
 
 # A daemon step inherits no FM_* selection variables from the operator. Ask the

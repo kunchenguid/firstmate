@@ -1076,6 +1076,14 @@ exit 0
 SH
   cat >"$root/tests/run.sh" <<SH
 #!/bin/sh
+if [ -n "\${FM_TEST_CONCURRENCY_DIR:-}" ]; then
+  touch "\$FM_TEST_CONCURRENCY_DIR/herdr.started"
+  i=0
+  while [ ! -e "\$FM_TEST_CONCURRENCY_DIR/agent-fleet.started" ]; do
+    i=\$((i + 1)); [ "\$i" -lt 100 ] || exit 95
+    sleep 0.05
+  done
+fi
 {
   printf 'call'
   for arg do printf '\t%s' "\$arg"; done
@@ -1285,6 +1293,14 @@ exit 0
 SH
   cat >"$fakebin/uv" <<'SH'
 #!/bin/sh
+if [ -n "${FM_TEST_CONCURRENCY_DIR:-}" ] && [ "${5:-}" = pytest ]; then
+  touch "$FM_TEST_CONCURRENCY_DIR/agent-fleet.started"
+  i=0
+  while [ ! -e "$FM_TEST_CONCURRENCY_DIR/herdr.started" ]; do
+    i=$((i + 1)); [ "$i" -lt 100 ] || exit 95
+    sleep 0.05
+  done
+fi
 exit 0
 SH
   chmod +x "$fakebin/tmux" "$fakebin/uv"
@@ -1504,13 +1520,18 @@ SH
   # capability-derived host set and records why the class ran locally.
   write_test_routing '{"classes":{"lint":"validation-standard"}}'
   rm -f "$fixture/captured" "$fixture/local-runs"
+  concurrency_dir="$tmp/local-concurrency"
+  mkdir -p "$concurrency_dir"
   out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
+    FM_TEST_CONCURRENCY_DIR="$concurrency_dir" \
     "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
     || fail "an unselected per-run test class did not preserve local host execution"
   [ ! -e "$fixture/captured" ] || fail "an unselected per-run test class reached the runner"
   assert_capability_derived_local_host_set "$fixture/local-runs"
   assert_contains "$out" "executed LOCALLY (routing=present-not-selected, env=absent)" \
     "an unselected per-run test class emitted no local-execution proof"
+  [ -e "$concurrency_dir/herdr.started" ] && [ -e "$concurrency_dir/agent-fleet.started" ] \
+    || fail "the local Herdr and Agent Fleet lanes did not overlap"
   [ "$(routing_dispatch_count)" -eq 0 ] \
     || fail "an unselected per-run test class spent a dispatch budget slot"
 

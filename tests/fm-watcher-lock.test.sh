@@ -14,6 +14,8 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervise-daemon.sh
+. "$ROOT/bin/fm-supervise-daemon.sh"
 
 fm_test_tmproot_into TMP_ROOT fm-watcher-lock-tests
 
@@ -961,6 +963,34 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_watcher_bounded_command_reaped_on_owner_shutdown() {
+  local dir marker owner child i
+  dir=$(make_case bounded-owner-shutdown)
+  marker="$dir/child.pid"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    run_bounded 30 bash -c '\''echo "$$" > "$1"; sleep 30'\'' _ "$2"
+  ' _ "$WATCH" "$marker" &
+  owner=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$marker" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$marker" ] || { kill "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true; fail "bounded watcher command never started"; }
+  child=$(cat "$marker")
+  fm_super_stop_watcher "$owner"
+  wait "$owner" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$child"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$child" \
+    || { kill -KILL "$child" 2>/dev/null || true; fail "watcher shutdown orphaned bounded child $child"; }
+  pass "watcher shutdown terminates and reaps its bounded command tree"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = self-evict ]; then
   test_watcher_self_evicts_on_lock_takeover
   exit 0
@@ -971,8 +1001,14 @@ if [ "${FM_TEST_FOCUSED:-}" = stale-steal-chain ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = bounded-owner-shutdown ]; then
+  test_watcher_bounded_command_reaped_on_owner_shutdown
+  exit 0
+fi
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_watcher_bounded_command_reaped_on_owner_shutdown
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

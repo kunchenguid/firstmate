@@ -1314,6 +1314,17 @@ trim_log() {
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
 # ============================================================================
 
+fm_super_stop_watcher() {  # <watcher-pid>
+  local watcher_pid=$1 child current_parent
+  while read -r child; do
+    [ -n "$child" ] || continue
+    current_parent=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]')
+    [ "$current_parent" = "$watcher_pid" ] || continue
+    kill -TERM "$child" 2>/dev/null || true
+  done < <(ps -axo pid=,ppid= | awk -v parent="$watcher_pid" '$2 == parent { print $1 }')
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+}
+
 fm_super_main() {
   local STATE DELIVERY BACKEND TARGET backend_source target_source
   STATE="$(_state_root)"
@@ -1457,7 +1468,7 @@ fm_super_main() {
       escalate_flush "$STATE" 2>/dev/null || true
     fi
     if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
+      fm_super_stop_watcher "$WATCHER_PID"
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then
