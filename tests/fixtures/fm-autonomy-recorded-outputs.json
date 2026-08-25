@@ -1,0 +1,716 @@
+{
+  "schema": "fm-autonomy-recorded-outputs.v1",
+  "capturedAt": "2026-08-25T00:00:00.000Z",
+  "outputs": [
+    {
+      "caseId": "same-repository-disjoint-evidence",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-f7eb74e6540720f34058c978",
+        "batchId": "batch-d8b428ed9ebf3c252511a3bc",
+        "action": "wake",
+        "eventIds": [
+          "heldout:same-repository-disjoint-evidence:0",
+          "heldout:same-repository-disjoint-evidence:1"
+        ],
+        "summary": "Production-interface classifier recording for same-repository-disjoint-evidence.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-a",
+            "issueIdentifier": "ENG-1",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/alpha.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "alphaHandler"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "alpha-flow"
+            ],
+            "evidence": [
+              "The issue names src/alpha.ts and alphaHandler."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-b",
+            "issueIdentifier": "ENG-2",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/beta.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "betaHandler"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "beta-flow"
+            ],
+            "evidence": [
+              "The issue names src/beta.ts and betaHandler."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "glob-overlap-serializes",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-9850f30c309c04ca35988159",
+        "batchId": "batch-73368f2de1910236ab734331",
+        "action": "wake",
+        "eventIds": [
+          "heldout:glob-overlap-serializes:0",
+          "heldout:glob-overlap-serializes:1"
+        ],
+        "summary": "Production-interface classifier recording for glob-overlap-serializes.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-c",
+            "issueIdentifier": "ENG-3",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [],
+            "predictedGlobs": [
+              "src/auth/**"
+            ],
+            "predictedSymbols": [
+              "authenticate"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "auth-flow"
+            ],
+            "evidence": [
+              "The issue changes the auth module."
+            ],
+            "validation": "heavy",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-d",
+            "issueIdentifier": "ENG-4",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/auth/token.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "refreshToken"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "token-flow"
+            ],
+            "evidence": [
+              "The issue names src/auth/token.ts."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "cross-repository-shared-resource",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-b5b93f0bb85f58096a39aedd",
+        "batchId": "batch-c3f2ebe4c7bfacbaf210d48a",
+        "action": "wake",
+        "eventIds": [
+          "heldout:cross-repository-shared-resource:0",
+          "heldout:cross-repository-shared-resource:1"
+        ],
+        "summary": "Production-interface classifier recording for cross-repository-shared-resource.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-e",
+            "issueIdentifier": "OPS-1",
+            "repository": "service-a",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/config.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "queueName"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [
+              "queue:billing-events"
+            ],
+            "semanticCoupling": [
+              "billing-publish"
+            ],
+            "evidence": [
+              "The issue changes the billing event queue producer."
+            ],
+            "validation": "light",
+            "surface": "internal",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-f",
+            "issueIdentifier": "OPS-2",
+            "repository": "service-b",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/consumer.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "consumeBilling"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [
+              "queue:billing-events"
+            ],
+            "semanticCoupling": [
+              "billing-consume"
+            ],
+            "evidence": [
+              "The issue changes the billing event queue consumer."
+            ],
+            "validation": "light",
+            "surface": "internal",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "dependency-serializes",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-2cb61ee85127b2a18b05a08e",
+        "batchId": "batch-5c4abcb2717c4295d301e184",
+        "action": "wake",
+        "eventIds": [
+          "heldout:dependency-serializes:0",
+          "heldout:dependency-serializes:1"
+        ],
+        "summary": "Production-interface classifier recording for dependency-serializes.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-g",
+            "issueIdentifier": "ENG-7",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/base.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "baseApi"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "base-contract"
+            ],
+            "evidence": [
+              "The issue defines baseApi."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-h",
+            "issueIdentifier": "ENG-8",
+            "repository": "app",
+            "dependencies": [
+              "issue-g"
+            ],
+            "predictedFiles": [
+              "src/client.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "clientApi"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "client-contract"
+            ],
+            "evidence": [
+              "Linear records issue-g as a blocker."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "unknown-scope-escalates-and-serializes",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-31f972965aa220018adcf595",
+        "batchId": "batch-a1a5fb15b0fa15b2f970ee0f",
+        "action": "wake",
+        "eventIds": [
+          "heldout:unknown-scope-escalates-and-serializes:0",
+          "heldout:unknown-scope-escalates-and-serializes:1"
+        ],
+        "summary": "Production-interface classifier recording for unknown-scope-escalates-and-serializes.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-i",
+            "issueIdentifier": "ENG-9",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [],
+            "predictedGlobs": [],
+            "predictedSymbols": [],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [],
+            "evidence": [
+              "The issue supplies no repository scope evidence."
+            ],
+            "validation": "heavy",
+            "surface": "unknown",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": true,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-j",
+            "issueIdentifier": "ENG-10",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/known.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "known"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "known-flow"
+            ],
+            "evidence": [
+              "The issue names src/known.ts."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "heavy-validation-capacity",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-7b622adc935e1013d0185dd7",
+        "batchId": "batch-f5e121afce8d873ec91824a0",
+        "action": "wake",
+        "eventIds": [
+          "heldout:heavy-validation-capacity:0",
+          "heldout:heavy-validation-capacity:1",
+          "heldout:heavy-validation-capacity:2"
+        ],
+        "summary": "Production-interface classifier recording for heavy-validation-capacity.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-k",
+            "issueIdentifier": "ENG-11",
+            "repository": "a",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/a.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "a"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "a"
+            ],
+            "evidence": [
+              "Bounded A scope."
+            ],
+            "validation": "heavy",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-l",
+            "issueIdentifier": "ENG-12",
+            "repository": "b",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/b.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "b"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "b"
+            ],
+            "evidence": [
+              "Bounded B scope."
+            ],
+            "validation": "heavy",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          },
+          {
+            "issueId": "issue-m",
+            "issueIdentifier": "ENG-13",
+            "repository": "c",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/c.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "c"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "c"
+            ],
+            "evidence": [
+              "Bounded C scope."
+            ],
+            "validation": "light",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "quoted-production-is-not-an-operation",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-9c2f2b69ff66c6d1e4f6dfc1",
+        "batchId": "batch-1a244b06a265be4f82071168",
+        "action": "wake",
+        "eventIds": [
+          "heldout:quoted-production-is-not-an-operation:0"
+        ],
+        "summary": "Production-interface classifier recording for quoted-production-is-not-an-operation.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-n",
+            "issueIdentifier": "DOC-1",
+            "repository": "docs",
+            "dependencies": [],
+            "predictedFiles": [
+              "docs/production-example.md"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "docs-example"
+            ],
+            "evidence": [
+              "The acceptance criteria only change a quoted documentation example and execute nothing."
+            ],
+            "validation": "light",
+            "surface": "internal",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": false,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "security-small-change-still-escalates",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-b76a6cbf4e0247f680aa6e0b",
+        "batchId": "batch-a18ed55601d7c1490225bc0e",
+        "action": "wake",
+        "eventIds": [
+          "heldout:security-small-change-still-escalates:0"
+        ],
+        "summary": "Production-interface classifier recording for security-small-change-still-escalates.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": [
+          {
+            "issueId": "issue-o",
+            "issueIdentifier": "SEC-1",
+            "repository": "app",
+            "dependencies": [],
+            "predictedFiles": [
+              "src/auth/policy.ts"
+            ],
+            "predictedGlobs": [],
+            "predictedSymbols": [
+              "authorize"
+            ],
+            "migrationOrSchema": false,
+            "sharedExternalResources": [],
+            "semanticCoupling": [
+              "authorization-policy"
+            ],
+            "evidence": [
+              "The issue changes authorization policy."
+            ],
+            "validation": "heavy",
+            "surface": "product",
+            "boundaries": {
+              "destructive": false,
+              "irreversible": false,
+              "production": false,
+              "migration": false,
+              "release": false,
+              "credentials": false,
+              "securitySensitive": true,
+              "ambiguous": false,
+              "redValidation": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "routine-context-waits-for-next-turn",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-7acd957a0680b4e603173d6a",
+        "batchId": "batch-51bbeece0e6f65dd2c6e609c",
+        "action": "nextTurn",
+        "eventIds": [
+          "heldout:routine-context-waits-for-next-turn:0"
+        ],
+        "summary": "Production-interface classifier recording for routine-context-waits-for-next-turn.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": []
+      }
+    },
+    {
+      "caseId": "exact-duplicate-coalesces",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-98e96f46ccacfdab867e4660",
+        "batchId": "batch-7ad5627a10777d603f8e0bff",
+        "action": "coalesce",
+        "eventIds": [
+          "heldout:exact-duplicate-coalesces:0"
+        ],
+        "summary": "Production-interface classifier recording for exact-duplicate-coalesces.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": []
+      }
+    },
+    {
+      "caseId": "routine-operation-still-wakes",
+      "decision": {
+        "schema": "fm-autonomy-decision.v1",
+        "id": "decision-ea5a86e5f86118726c9c9598",
+        "batchId": "batch-65cdd4422ba7071ed4921ac2",
+        "action": "wake",
+        "eventIds": [
+          "heldout:routine-operation-still-wakes:0"
+        ],
+        "summary": "Production-interface classifier recording for routine-operation-still-wakes.",
+        "reasonCodes": [
+          "recorded-classifier-output"
+        ],
+        "workClaims": []
+      }
+    }
+  ]
+}

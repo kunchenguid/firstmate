@@ -20,9 +20,11 @@ mkdir -p \
   "$home/state" "$home/config" "$home/data" "$home/projects/app"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/lib/fm-autonomy.ts" "$repo/.pi/extensions/lib/fm-autonomy.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
 git -C "$home/projects/app" init -q
+git -C "$home/projects/app" remote add origin https://github.com/acme/app.git
 
 cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
@@ -31,6 +33,10 @@ cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
 import { mkdirSync, writeFileSync } from "node:fs";
 
 export function getAgentDir() { return "/fixture-agent"; }
+export function getMarkdownTheme() { return {}; }
+export class UserMessageComponent {
+  constructor(content, theme) { this.content = content; this.theme = theme; }
+}
 export class ModelRuntime {
   static async create() { globalThis.__modelRuntimeCreates = (globalThis.__modelRuntimeCreates ?? 0) + 1; return new ModelRuntime(); }
   async getAvailable(provider) {
@@ -123,6 +129,8 @@ cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
 JSON
 cat > "$repo/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
 export class Text { constructor(text, paddingX, paddingY) { this.text = text; this.paddingX = paddingX; this.paddingY = paddingY; } }
+export class Box { constructor(...children) { this.children = children; } }
+export class Container { constructor(...children) { this.children = children; } }
 JS
 cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
@@ -364,8 +372,18 @@ assert.equal(JSON.stringify(collision).includes("fixture-secret-never-logged"), 
 assert.equal(process.env.FM_TEST_LINEAR_KEY, undefined, "main-provider credential collision restored the Linear token to ambient model env");
 delete globalThis.__fixtureModelAuth;
 
+const configPath = `${home}/config/pi-autonomy.json`;
+writeFileSync(configPath, readFileSync(configPath, "utf8").replace("FM_TEST_LINEAR_KEY", "FM_TEST_LINEAR_KEY_B"));
+process.env.FM_TEST_LINEAR_KEY_B = "fixture-second-secret-never-logged";
+await fire("model_select", { model: expensiveMainModel }, { sessionManager: mainSessionManager, model: expensiveMainModel, ui: { notify() {} } });
+const reconfigured = JSON.parse((await autonomyTool.execute("reconfigured-status", { action: "status" })).content[0].text);
+assert.equal(reconfigured.active, true, JSON.stringify(reconfigured));
+assert.equal(process.env.FM_TEST_LINEAR_KEY, undefined, "prior Linear credential returned to ambient env after reconfiguration");
+assert.equal(process.env.FM_TEST_LINEAR_KEY_B, undefined, "current Linear credential remained in ambient env after reconfiguration");
+
 await fire("session_shutdown");
 assert.equal(process.env.FM_TEST_LINEAR_KEY, "fixture-secret-never-logged", "session shutdown did not restore the parent Pi process environment for replacement activation");
+assert.equal(process.env.FM_TEST_LINEAR_KEY_B, "fixture-second-secret-never-logged", "session shutdown did not restore the reconfigured Linear credential");
 console.log("ok - active Pi autonomy uses one read-only cheaper-model brain, safe delivery, and silent visible transcript commits");
 JS
 

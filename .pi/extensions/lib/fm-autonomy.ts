@@ -239,6 +239,14 @@ export interface JournalStatus {
   };
 }
 
+export interface JournalAppendSpec {
+  kind: string;
+  key: string;
+  data: JsonValue;
+  recordId: string;
+  at?: string;
+}
+
 export interface ConflictEdge {
   left: string;
   right: string;
@@ -298,7 +306,7 @@ export interface LinearAdapter {
   setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string): Promise<{ evidence: string }>;
   linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }>;
   completeIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }>;
-  reconcileClaim(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<"owned" | "missing" | "conflict">;
+  reconcileClaim(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, phase?: "active" | "post-merge"): Promise<"owned" | "missing" | "conflict">;
 }
 
 export interface DispatchProfile {
@@ -854,16 +862,20 @@ export class DurableJournal {
     return records;
   }
 
-  append(kind: string, key: string, data: JsonValue, recordId = stableId("record", { kind, key, data })): { record: JournalRecord; deduped: boolean } {
+  transact<T>(operation: (records: readonly JournalRecord[]) => { value: T; append?: JournalAppendSpec }): T {
     const release = this.acquireLock();
     try {
       const records = this.read();
-      const existing = records.find((record) => record.recordId === recordId);
-      if (existing) return { record: existing, deduped: true };
+      const transaction = operation(records);
+      if (!transaction.append) return transaction.value;
+      const { kind, key, data, recordId, at } = transaction.append;
+      if (records.some((record) => record.recordId === recordId)) {
+        throw new AutonomyError("journal-transaction-conflict", `atomic journal record ${recordId} already exists`);
+      }
       const record: JournalRecord = {
         schema: JOURNAL_SCHEMA,
         seq: records.length + 1,
-        at: this.clock.now().toISOString(),
+        at: at ?? this.clock.now().toISOString(),
         recordId,
         kind,
         key,
@@ -893,10 +905,27 @@ export class DurableJournal {
       try {
         chmodSync(this.path, 0o600);
       } catch {}
-      return { record, deduped: false };
+      return transaction.value;
     } finally {
       release();
     }
+  }
+
+  append(kind: string, key: string, data: JsonValue, recordId = stableId("record", { kind, key, data })): { record: JournalRecord; deduped: boolean } {
+    return this.transact((records) => {
+      const existing = records.find((record) => record.recordId === recordId);
+      if (existing) return { value: { record: existing, deduped: true } };
+      const record: JournalRecord = {
+        schema: JOURNAL_SCHEMA,
+        seq: records.length + 1,
+        at: this.clock.now().toISOString(),
+        recordId,
+        kind,
+        key,
+        data: canonicalize(data),
+      };
+      return { value: { record, deduped: false }, append: { kind, key, data, recordId, at: record.at } };
+    });
   }
 
   appendEvent(event: LoopEvent): { record: JournalRecord; deduped: boolean } {
@@ -1657,7 +1686,7 @@ export class LinearGraphqlClient implements LinearAdapter {
     return { evidence: marker };
   }
 
-  async reconcileClaim(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<"owned" | "missing" | "conflict"> {
+  async reconcileClaim(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, phase: "active" | "post-merge" = "active"): Promise<"owned" | "missing" | "conflict"> {
     const scope = this.scope(config, issue);
     const snapshot = await this.issueClaimSnapshot(config, issue.id);
     const markers = this.claimMarkers(snapshot.comments);
@@ -1666,7 +1695,10 @@ export class LinearGraphqlClient implements LinearAdapter {
     if (snapshot.issue.teamId !== issue.teamId || snapshot.issue.projectId !== issue.projectId ||
         !scope.labels.required.every((label) => snapshot.issue.labelIds.includes(label)) ||
         scope.labels.blocked.some((label) => snapshot.issue.labelIds.includes(label))) return "conflict";
-    const ownedState = [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed].includes(snapshot.issue.stateId);
+    const allowedStates = phase === "post-merge"
+      ? [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed]
+      : [scope.statuses.claimed, scope.statuses.inProgress];
+    const ownedState = allowedStates.includes(snapshot.issue.stateId);
     return markers.includes(ours) && ownedState ? "owned" : "missing";
   }
 
@@ -1841,24 +1873,34 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { raw, mode: mode as "no-mistakes" | "direct-PR" | "local-only", yolo, registered };
   }
 
-  private secondmateProjects(): Set<string> {
+  private secondmateScopes(): string[] {
     const registry = join(this.data, "secondmates.md");
-    if (!existsSync(registry)) return new Set();
-    const projects = new Set<string>();
+    if (!existsSync(registry)) return [];
+    const scopes: string[] = [];
     for (const line of readFileSync(registry, "utf8").split(/\r?\n/)) {
-      const match = line.match(/(?:^|;\s*)projects:\s*([^;)]+)/);
-      for (const project of match?.[1].split(",") ?? []) {
-        const normalized = project.trim();
-        if (normalized) projects.add(normalized);
-      }
+      const match = line.match(/;\s*scope:\s*(.*);\s*projects:\s*[^;)]*;\s*added\s+[0-9]{4}-[0-9]{2}-[0-9]{2}\)\s*$/);
+      const scope = match?.[1].trim();
+      if (scope) scopes.push(scope);
     }
-    return projects;
+    return scopes;
+  }
+
+  private secondmateScopeMatchesIssue(scope: string, issue: LinearIssue): boolean {
+    const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const normalizedScope = normalize(scope);
+    const issueText = normalize(`${issue.identifier} ${issue.title} ${issue.description}`);
+    if (!normalizedScope || !issueText) return false;
+    if (issueText.includes(normalizedScope)) return true;
+    const ignored = new Set(["and", "the", "for", "with", "from", "into", "work", "tasks", "project", "projects", "responsibility", "responsibilities"]);
+    const terms = normalizedScope.split(" ").filter((term) => term.length >= 3 && !ignored.has(term));
+    return terms.length > 0 && terms.every((term) => new RegExp(`(?:^| )${term}(?: |$)`).test(issueText));
   }
 
   assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void {
-    const mapping = this.mapping(config, issue);
-    if (this.secondmateProjects().has(mapping.firstmateProject)) {
-      throw new AutonomyError("secondmate-route", `${mapping.firstmateProject} is assigned to a secondmate; primary Pi autonomy must not claim or dispatch it`);
+    this.mapping(config, issue);
+    const matchingScope = this.secondmateScopes().find((scope) => this.secondmateScopeMatchesIssue(scope, issue));
+    if (matchingScope) {
+      throw new AutonomyError("secondmate-route", `issue ${issue.identifier} matches registered secondmate scope ${JSON.stringify(matchingScope)}; primary Pi autonomy must not claim or dispatch it`);
     }
   }
 
@@ -1930,9 +1972,6 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     const diagnostics: string[] = [];
     for (const mapping of config.repositories) {
       try {
-        if (this.secondmateProjects().has(mapping.firstmateProject)) {
-          diagnostics.push(`${mapping.firstmateProject} is assigned to a secondmate; primary Pi autonomy is refused`);
-        }
         const checkout = this.checkout(mapping);
         if (!existsSync(checkout)) {
           diagnostics.push(`mapped checkout projects/${mapping.checkout} is missing`);
@@ -2121,6 +2160,35 @@ interface FoldedClaim {
   dispatchResult?: DispatchResult;
 }
 
+interface IssueOperationLease {
+  operationId: string;
+  owner: string;
+  fence: number;
+  expiresAt: string;
+  released: boolean;
+}
+
+function currentIssueOperationLease(records: readonly JournalRecord[], issueId: string): IssueOperationLease | undefined {
+  let current: IssueOperationLease | undefined;
+  for (const record of records) {
+    if (record.key !== issueId || !["operation-lease-acquired", "operation-lease-renewed", "operation-lease-released"].includes(record.kind)) continue;
+    const data = record.data as unknown as Partial<IssueOperationLease>;
+    if (typeof data.operationId !== "string" || typeof data.owner !== "string" || !Number.isSafeInteger(data.fence) || Number(data.fence) < 1) continue;
+    if (record.kind === "operation-lease-acquired") {
+      if (typeof data.expiresAt !== "string" || !Number.isFinite(Date.parse(data.expiresAt))) continue;
+      if (!current || Number(data.fence) > current.fence) current = { operationId: data.operationId, owner: data.owner, fence: Number(data.fence), expiresAt: data.expiresAt, released: false };
+      continue;
+    }
+    if (!current || current.operationId !== data.operationId || current.owner !== data.owner || current.fence !== Number(data.fence)) continue;
+    if (record.kind === "operation-lease-renewed" && typeof data.expiresAt === "string" && Number.isFinite(Date.parse(data.expiresAt))) {
+      current = { ...current, expiresAt: data.expiresAt };
+    } else if (record.kind === "operation-lease-released") {
+      current = { ...current, released: true };
+    }
+  }
+  return current;
+}
+
 export interface AutonomyOrchestratorOptions {
   resolution: ConfigResolution;
   journal: DurableJournal;
@@ -2230,20 +2298,75 @@ export class AutonomyOrchestrator {
     const gate = new Promise<void>((resolveGatePromise) => { resolveGate = resolveGatePromise; });
     this.activeIssueOperations.set(issueId, gate);
     try {
-      const now = this.clock.now();
-      const records = this.journal.read().filter((record) => record.key === issueId && (record.kind === "operation-lease-acquired" || record.kind === "operation-lease-released"));
-      const latest = records.at(-1);
-      const latestData = latest?.data as { operationId?: unknown; owner?: unknown; expiresAt?: unknown } | undefined;
-      if (latest?.kind === "operation-lease-acquired" && latestData?.owner !== this.operationOwner &&
-          typeof latestData?.expiresAt === "string" && Date.parse(latestData.expiresAt) > now.getTime()) {
-        throw new AutonomyError("issue-operation-busy", `issue ${issueId} has an unexpired durable operation lease`, true);
-      }
       const operationId = stableId("issue-operation", { issueId, owner: this.operationOwner, nonce: randomUUID() });
-      const expiresAt = new Date(now.getTime() + this.config().supervision.limits.maxTurnMilliseconds * 2).toISOString();
-      this.journal.append("operation-lease-acquired", issueId, { operationId, owner: this.operationOwner, expiresAt }, `operation-lease-acquired:${operationId}`);
+      const leaseMilliseconds = Math.max(600000, this.config().supervision.limits.maxTurnMilliseconds * 2);
+      const lease = this.journal.transact<IssueOperationLease>((records) => {
+        const now = this.clock.now();
+        const current = currentIssueOperationLease(records, issueId);
+        if (current && !current.released && Date.parse(current.expiresAt) > now.getTime()) {
+          throw new AutonomyError("issue-operation-busy", `issue ${issueId} has an unexpired durable operation lease`, true);
+        }
+        const fence = records
+          .filter((record) => record.key === issueId && record.kind === "operation-lease-acquired")
+          .reduce((highest, record) => Math.max(highest, Number((record.data as { fence?: unknown }).fence) || 0), 0) + 1;
+        const acquired: IssueOperationLease = {
+          operationId,
+          owner: this.operationOwner,
+          fence,
+          expiresAt: new Date(now.getTime() + leaseMilliseconds).toISOString(),
+          released: false,
+        };
+        return {
+          value: acquired,
+          append: {
+            kind: "operation-lease-acquired",
+            key: issueId,
+            data: acquired as unknown as JsonValue,
+            recordId: `operation-lease-acquired:${operationId}`,
+          },
+        };
+      });
+      const renew = (): void => {
+        this.journal.transact((records) => {
+          const current = currentIssueOperationLease(records, issueId);
+          if (!current || current.released || current.operationId !== lease.operationId || current.owner !== lease.owner || current.fence !== lease.fence) {
+            throw new AutonomyError("issue-operation-fenced", `issue ${issueId} operation lease lost fence ${lease.fence}`);
+          }
+          const renewed = { ...lease, expiresAt: new Date(this.clock.now().getTime() + leaseMilliseconds).toISOString() };
+          lease.expiresAt = renewed.expiresAt;
+          return {
+            value: undefined,
+            append: {
+              kind: "operation-lease-renewed",
+              key: issueId,
+              data: renewed as unknown as JsonValue,
+              recordId: `operation-lease-renewed:${operationId}:${renewed.expiresAt}`,
+            },
+          };
+        });
+      };
+      const renewalTimer = setInterval(() => {
+        try {
+          renew();
+        } catch {}
+      }, Math.max(1000, Math.min(30000, Math.floor(leaseMilliseconds / 3))));
+      renewalTimer.unref?.();
       return () => {
         try {
-          this.journal.append("operation-lease-released", issueId, { operationId, owner: this.operationOwner }, `operation-lease-released:${operationId}`);
+          clearInterval(renewalTimer);
+          this.journal.transact((records) => {
+            const current = currentIssueOperationLease(records, issueId);
+            if (!current || current.released || current.operationId !== lease.operationId || current.owner !== lease.owner || current.fence !== lease.fence) return { value: undefined };
+            return {
+              value: undefined,
+              append: {
+                kind: "operation-lease-released",
+                key: issueId,
+                data: { operationId: lease.operationId, owner: lease.owner, fence: lease.fence },
+                recordId: `operation-lease-released:${lease.operationId}`,
+              },
+            };
+          });
         } finally {
           if (this.activeIssueOperations.get(issueId) === gate) this.activeIssueOperations.delete(issueId);
           resolveGate?.();
@@ -2666,6 +2789,10 @@ export class AutonomyOrchestrator {
   }
 
   async landAndComplete(issueId: string, prUrl: string): Promise<LandingResult> {
+    return this.withIssueOperation(issueId, () => this.landAndCompleteUnlocked(issueId, prUrl));
+  }
+
+  private async landAndCompleteUnlocked(issueId: string, prUrl: string): Promise<LandingResult> {
     assertCanonicalPullRequestUrl(prUrl);
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
@@ -2681,6 +2808,8 @@ export class AutonomyOrchestrator {
     if (ownershipBeforeMerge !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownershipBeforeMerge} before merge; landing refused`);
     const prepared = await this.firstmate.prepareLanding(this.config(), folded.issue, folded.taskId, prUrl);
     if (!/^[0-9a-f]{40,64}$/i.test(prepared.expectedHead)) throw new AutonomyError("pr-head-missing", "landing preparation did not produce one valid expected head");
+    const ownershipImmediatelyBeforeMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "active");
+    if (ownershipImmediatelyBeforeMerge !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownershipImmediatelyBeforeMerge} immediately before merge; landing refused`);
     const mergeIntent = stableId("merge", { issueId, taskId: folded.taskId, prUrl, expectedHead: prepared.expectedHead });
     this.journal.append("merge-intent", issueId, {
       mergeIntent,
@@ -2711,7 +2840,7 @@ export class AutonomyOrchestrator {
       throw new AutonomyError("landing-unconfirmed", "merge result did not prove current-head green landing; Linear remains open");
     }
     this.journal.append("merge-confirmed", issueId, { mergeIntent, taskId: folded.taskId, prUrl, claimId: folded.claimId, landing } as unknown as JsonValue, `merge-confirmed:${mergeIntent}`);
-    const ownershipAfterMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId);
+    const ownershipAfterMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "post-merge");
     if (ownershipAfterMerge !== "owned") {
       this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: `claim reconciled as ${ownershipAfterMerge} after landing; Linear left open`, landing, prUrl } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
       throw new AutonomyError("claim-conflict", `work landed but Linear claim reconciled as ${ownershipAfterMerge}; issue remains open for main`);
@@ -2804,7 +2933,7 @@ export class AutonomyOrchestrator {
             throw new AutonomyError("landing-unconfirmed", "durable merge confirmation no longer matches live forge evidence");
           }
           confirmed = { ...confirmed, landing: verifiedLanding };
-          const ownership = await this.linear.reconcileClaim(this.resolution.config, folded.issue, folded.claimId, folded.taskId);
+          const ownership = await this.linear.reconcileClaim(this.resolution.config, folded.issue, folded.claimId, folded.taskId, "post-merge");
           if (ownership !== "owned") {
             this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: `claim reconciled as ${ownership} after landing; Linear left open`, landing: confirmed.landing, prUrl: confirmed.prUrl } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
             conflicts += 1;
@@ -2929,6 +3058,11 @@ export interface HeldOutEvaluation {
   failed: number;
 }
 
+export interface RecordedHeldOutDecision {
+  caseId: string;
+  decision: SupervisionDecision;
+}
+
 function heldOutBatch(testCase: HeldOutCase): PendingBatch {
   const events: LoopEvent[] = testCase.claims.length > 0
     ? testCase.claims.map((claim, index) => ({
@@ -2981,17 +3115,14 @@ export async function evaluateHeldOutClassifier(cases: HeldOutCase[], classifier
   return evaluateHeldOutDecisions(cases, decisions);
 }
 
-export function evaluateHeldOutCorpus(cases: HeldOutCase[]): HeldOutEvaluation {
+export function evaluateHeldOutRecordedOutputs(cases: HeldOutCase[], outputs: RecordedHeldOutDecision[]): HeldOutEvaluation {
+  if (outputs.length !== cases.length || new Set(outputs.map((output) => output.caseId)).size !== outputs.length) {
+    throw new AutonomyError("heldout-recording-invalid", "recorded held-out outputs must contain exactly one decision per case");
+  }
   const decisions = cases.map((testCase) => {
-    const batch = heldOutBatch(testCase);
-    return createDecision({
-      batchId: batch.id,
-      action: testCase.routing.expectedAction,
-      eventIds: batch.events.map((event) => event.id),
-      summary: `Recorded held-out classifier output for ${testCase.id}.`,
-      reasonCodes: ["recorded-heldout-output"],
-      workClaims: testCase.claims,
-    });
+    const output = outputs.find((candidate) => candidate.caseId === testCase.id);
+    if (!output) throw new AutonomyError("heldout-recording-missing", `recorded held-out output ${testCase.id} is missing`);
+    return validateDecision(output.decision, heldOutBatch(testCase));
   });
   return evaluateHeldOutDecisions(cases, decisions);
 }

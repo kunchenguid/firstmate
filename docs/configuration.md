@@ -127,7 +127,7 @@ The switch prevents new intake and claims while preserving and reconciling every
 It is not discard or cleanup authority.
 
 `bin/fm-autonomy.sh status` prints sanitized local status and usage totals without requiring a model turn.
-`bin/fm-autonomy.sh eval` compares the decision contract and stable prompt against the accepted held-out routing and collision baseline.
+`bin/fm-autonomy.sh eval` validates captured classifier decisions through the production decision contract, then compares their routing/collision results, the recorded-output digest, and the stable prompt against the accepted held-out baseline.
 Run eval before changing the autonomy prompt, model-selection policy, structured tool schema, collision procedure, or stronger-boundary routing.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)

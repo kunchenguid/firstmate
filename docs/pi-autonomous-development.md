@@ -150,4 +150,4 @@ Add a new event source by implementing the event adapter and preserving stable e
 Add a tracker by implementing the issue adapter without changing the supervision tool's authority.
 Add a forge by extending the existing guarded Firstmate landing helper rather than merging inside the supervision session.
 Do not add a second journal, task lifecycle, worker launcher, validation owner, or merge path.
-Any prompt, default model policy, or tool-schema change must run `bin/fm-autonomy.sh eval` against the held-out corpus and update the accepted baseline only with retained disconfirming cases and explicit review.
+Any prompt, default model policy, or tool-schema change must capture fresh classifier outputs through the production decision interface, run `bin/fm-autonomy.sh eval` against those held-out recordings, run the environment-gated configured-model guard, and update the accepted baseline only with retained disconfirming cases and explicit review.

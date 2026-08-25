@@ -429,6 +429,8 @@ export default function (pi: ExtensionAPI) {
   let autonomyTurnIndex = 0;
   let successfulBranchReports = 0;
   const retainedLinearCredentials = new Map<string, string>();
+  const knownLinearCredentialNames = new Set<string>();
+  const knownLinearCredentialValues = new Set<string>();
   let unsubscribeBranchUsage: (() => void) | null = null;
 
   function restoreRetainedLinearCredentials(): void {
@@ -440,15 +442,17 @@ export default function (pi: ExtensionAPI) {
 
   function safeScriptEnv(): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...scriptEnv };
-    const credentialName = autonomyResolution.config?.linear.credential.env;
-    if (credentialName) delete env[credentialName];
+    for (const name of knownLinearCredentialNames) delete env[name];
+    for (const name of retainedLinearCredentials.keys()) delete env[name];
     return env;
   }
 
   function redactRuntimeCredential(text: string): string {
-    const credentialName = autonomyResolution.config?.linear.credential.env;
-    const credential = credentialName ? retainedLinearCredentials.get(credentialName) ?? process.env[credentialName] : undefined;
-    return credential ? text.replaceAll(credential, "[redacted runtime credential]") : text;
+    let redacted = text;
+    for (const credential of knownLinearCredentialValues) {
+      if (credential) redacted = redacted.replaceAll(credential, "[redacted runtime credential]");
+    }
+    return redacted;
   }
 
   function generationOwnsLock(expectedGeneration: number): boolean {
@@ -612,6 +616,12 @@ export default function (pi: ExtensionAPI) {
     autonomyResolution = loadAutonomyConfiguration(autonomyConfigFile, autonomyKillSwitch, configEnvironment);
     autonomyProcessGeneration = `${Date.now()}:${expectedGeneration}:${expectedConfigurationGeneration}`;
     const configValue = autonomyResolution.config;
+    const resolvedCredentialName = configValue?.linear.credential.env;
+    if (resolvedCredentialName) {
+      knownLinearCredentialNames.add(resolvedCredentialName);
+      const resolvedCredential = configEnvironment[resolvedCredentialName];
+      if (resolvedCredential) knownLinearCredentialValues.add(resolvedCredential);
+    }
     if (!configValue || !autonomyResolution.valid || !autonomyResolution.credentialPresent) {
       restoreRetainedLinearCredentials();
       return;
@@ -761,9 +771,9 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return result;
       },
-      async reconcileClaim(config, issue, claimId, taskId) {
+      async reconcileClaim(config, issue, claimId, taskId, phase) {
         assertRuntimeOwner();
-        const result = await rawLinear.reconcileClaim(config, issue, claimId, taskId);
+        const result = await rawLinear.reconcileClaim(config, issue, claimId, taskId, phase);
         assertRuntimeOwner();
         return result;
       },
@@ -837,7 +847,7 @@ export default function (pi: ExtensionAPI) {
         ? (inputTokens, outputTokens) => uncachedBatchCost(selectedModelCost, inputTokens, outputTokens) * configValue.supervision.limits.maxIterationsPerBatch
         : undefined,
       killSwitchPath: autonomyKillSwitch,
-      redactedValues: token ? [token] : [],
+      redactedValues: [...knownLinearCredentialValues],
     });
     autonomyTimer = setInterval(() => {
       void runAutonomyTick(expectedGeneration, true);

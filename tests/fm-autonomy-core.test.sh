@@ -16,6 +16,7 @@ TMP_ROOT=$(fm_test_tmproot fm-autonomy-core)
 MODULE="$ROOT/.pi/extensions/lib/fm-autonomy.ts" \
 CORPUS="$ROOT/tests/fixtures/fm-autonomy-heldout.json" \
 BASELINE="$ROOT/tests/fixtures/fm-autonomy-baseline.json" \
+RECORDED="$ROOT/tests/fixtures/fm-autonomy-recorded-outputs.json" \
 LINEAR_FIXTURE="$ROOT/tests/fixtures/fm-linear-api.json" \
 PROMPT_SCRIPT="$ROOT/bin/fm-autonomy-prompt.sh" \
 TMP_ROOT="$TMP_ROOT" \
@@ -31,6 +32,7 @@ const m = await import(pathToFileURL(process.env.MODULE).href);
 const temp = process.env.TMP_ROOT;
 const corpusEnvelope = JSON.parse(readFileSync(process.env.CORPUS, "utf8"));
 const baseline = JSON.parse(readFileSync(process.env.BASELINE, "utf8"));
+const recordedOutputs = JSON.parse(readFileSync(process.env.RECORDED, "utf8"));
 const linearFixture = JSON.parse(readFileSync(process.env.LINEAR_FIXTURE, "utf8"));
 
 const limits = {
@@ -117,28 +119,24 @@ assert(subprocessCredentials.length > 0);
 assert(subprocessCredentials.every((value) => value === undefined), "Linear credential propagated to a Firstmate subprocess");
 
 // Held-out routing/collision baseline, including disconfirming cases.
-const evaluation = m.evaluateHeldOutCorpus(corpusEnvelope.cases);
+const evaluation = m.evaluateHeldOutRecordedOutputs(corpusEnvelope.cases, recordedOutputs.outputs);
 assert.equal(evaluation.failed, 0, JSON.stringify(evaluation, null, 2));
 const classifierEvaluation = await m.evaluateHeldOutClassifier(corpusEnvelope.cases, {
   async classify(batch) {
     const caseId = batch.events[0].id.split(":").slice(1, -1).join(":");
-    const testCase = corpusEnvelope.cases.find((candidate) => candidate.id === caseId);
-    return m.createDecision({
-      batchId: batch.id,
-      action: testCase.routing.expectedAction,
-      eventIds: batch.events.map((item) => item.id),
-      summary: `Recorded classifier output for ${caseId}.`,
-      reasonCodes: ["recorded-heldout-output"],
-      workClaims: testCase.claims,
-    });
+    return structuredClone(recordedOutputs.outputs.find((candidate) => candidate.caseId === caseId).decision);
   },
 });
 assert.equal(classifierEvaluation.failed, 0, JSON.stringify(classifierEvaluation, null, 2));
+const oracleDrift = structuredClone(corpusEnvelope.cases);
+oracleDrift[0].routing.expectedAction = oracleDrift[0].routing.expectedAction === "wake" ? "nextTurn" : "wake";
+assert.equal(m.evaluateHeldOutRecordedOutputs(oracleDrift, recordedOutputs.outputs).failed, 1, "recorded classifier outputs were derived from changed expectations");
 assert.equal(evaluation.passed, baseline.passed);
 assert.equal(evaluation.contractFingerprint, baseline.contractFingerprint);
 assert.equal(m.AUTONOMY_DECISION_CONTRACT_VERSION, baseline.decisionContractVersion);
 const prompt = execFileSync("bash", [process.env.PROMPT_SCRIPT]);
 assert.equal(createHash("sha256").update(prompt).digest("hex"), baseline.promptSha256);
+assert.equal(createHash("sha256").update(readFileSync(process.env.RECORDED)).digest("hex"), baseline.recordedOutputsSha256);
 for (const id of baseline.requiredDisconfirmingCases) {
   const found = corpusEnvelope.cases.find((item) => item.id === id);
   assert(found?.disconfirming, `required disconfirming case ${id} is absent`);
@@ -178,9 +176,11 @@ assert.throws(
   () => shellAdapter.assertPullRequestRepository(resolution.config, issues[0], "https://github.com/acme/other/pull/99"),
   (error) => error.code === "pr-repository-mismatch",
 );
-writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; projects: app; added 2026-08-25)\n");
+writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: unrelated billing reports; projects: app; added 2026-08-25)\n");
+shellAdapter.assertProjectOwnership(resolution.config, issues[0]);
+assert.deepEqual(shellAdapter.doctor(resolution.config), [], "non-exclusive secondmate clone membership disabled primary autonomy");
+writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: change src one ts; projects: app; added 2026-08-25)\n");
 assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0]), (error) => error.code === "secondmate-route");
-assert(shellAdapter.doctor(resolution.config).some((line) => line.includes("assigned to a secondmate")));
 rmSync(join(shellHome, "data", "secondmates.md"));
 assert.deepEqual(issues[1].blockedByIssueIds, ["issue-1"]);
 const priorityPage = structuredClone(linearFixture.responses.page1);
@@ -314,6 +314,10 @@ await claimClient.setProgress(
 assert.equal(remoteClaim.stateId, "status-progress");
 assert(remoteClaim.comments.some((body) => body.includes("&lt;!-- firstmate-claim")), "progress body preserved an injectable claim marker");
 assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue, "claim-fixture", "task-fixture"), "owned");
+remoteClaim.stateId = "status-complete";
+assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue, "claim-fixture", "task-fixture"), "missing");
+assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", "post-merge"), "owned");
+remoteClaim.stateId = "status-progress";
 const fixturePr = "https://github.com/acme/app/pull/99";
 await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr);
 await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr);
@@ -537,9 +541,16 @@ let redLanding = false;
 let capacityBlocked = false;
 const mergedHeads = new Map();
 const remoteDependencies = new Map();
+const remoteStates = new Map();
+let completeDuringPrepare = false;
+let claimPause;
+let resumeClaim;
+let getIssuePause;
+let resumeGetIssue;
 const linearMock = {
   async listEligibleIssues() { return []; },
   async getIssue(_config, issueId) {
+    if (getIssuePause && issueId === "issue-1") await getIssuePause;
     const source = issueId === "issue-1" ? issueEvent.payload : issueId === "issue-2" ? secondEvent?.payload ?? issueEvent.payload : issueEvent.payload;
     return {
       id: issueId,
@@ -552,17 +563,27 @@ const linearMock = {
       url: source.url,
       teamId: "team-1",
       projectId: "project-1",
-      stateId: claimed.has(issueId) ? "status-claimed" : "status-todo",
+      stateId: remoteStates.get(issueId) ?? "status-todo",
       labelIds: ["label-auto"],
       blockedByIssueIds: remoteDependencies.get(issueId) ?? [],
       blocksIssueIds: [],
     };
   },
-  async claimIssue(_config, issue, claimId, taskId) { operationLog.push(`claim:${issue.id}`); claimed.add(issue.id); return { evidence: `${claimId}:${taskId}` }; },
-  async setProgress(_config, issue) { operationLog.push(`progress:${issue.id}`); return { evidence: "progress" }; },
+  async claimIssue(_config, issue, claimId, taskId) {
+    operationLog.push(`claim:${issue.id}`);
+    if (claimPause && issue.id === "issue-1") await claimPause;
+    claimed.add(issue.id);
+    remoteStates.set(issue.id, "status-claimed");
+    return { evidence: `${claimId}:${taskId}` };
+  },
+  async setProgress(_config, issue) { operationLog.push(`progress:${issue.id}`); remoteStates.set(issue.id, "status-progress"); return { evidence: "progress" }; },
   async linkPullRequest(_config, issue) { operationLog.push(`link:${issue.id}`); return { evidence: "link" }; },
-  async completeIssue(_config, issue) { operationLog.push(`complete:${issue.id}`); return { evidence: "complete" }; },
-  async reconcileClaim(_config, issue) { operationLog.push(`reconcile:${issue.id}`); return claimed.has(issue.id) ? "owned" : "missing"; },
+  async completeIssue(_config, issue) { operationLog.push(`complete:${issue.id}`); remoteStates.set(issue.id, "status-complete"); return { evidence: "complete" }; },
+  async reconcileClaim(_config, issue, _claimId, _taskId, phase = "active") {
+    operationLog.push(`reconcile:${issue.id}`);
+    if (!claimed.has(issue.id)) return "missing";
+    return remoteStates.get(issue.id) === "status-complete" && phase !== "post-merge" ? "missing" : "owned";
+  },
 };
 const firstmateMock = {
   capacity() { return capacityBlocked ? { activeIssues: 1, activeWorkers: 1, activeHeavyValidations: 0 } : { activeIssues: 0, activeWorkers: 0, activeHeavyValidations: 0 }; },
@@ -575,6 +596,7 @@ const firstmateMock = {
   taskPullRequest(taskId) { return taskPrs.get(taskId); },
   async prepareLanding(_config, issue) {
     operationLog.push(`prepare:${issue.id}`);
+    if (completeDuringPrepare) remoteStates.set(issue.id, "status-complete");
     return { expectedHead: "a".repeat(40), evidence: "prepared current green head" };
   },
   async verifyMerged(_config, issue, _taskId, _prUrl, expectedHead) {
@@ -620,13 +642,41 @@ const issueDecision = m.createDecision({
 claimsJournal.append("decision", issueDecision.id, issueDecision, `decision:${issueDecision.id}`);
 const killPath = join(temp, "claims", "KILL");
 const claimOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
-const [dispatched, concurrentDispatch] = await Promise.all([
-  claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
-  claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
-]);
+claimPause = new Promise((resolve) => { resumeClaim = resolve; });
+const firstDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+while (!operationLog.includes("claim:issue-1")) await new Promise((resolve) => setTimeout(resolve, 0));
+const competingOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
+await assert.rejects(
+  () => competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+  (error) => error.code === "issue-operation-busy" && error.retryable,
+);
+const concurrentLocalDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+resumeClaim();
+claimPause = undefined;
+const [dispatched, concurrentDispatch] = await Promise.all([firstDispatch, concurrentLocalDispatch]);
 assert.equal(concurrentDispatch.taskId, dispatched.taskId);
 assert.equal(operationLog.filter((entry) => entry === "claim:issue-1").length, 1, "concurrent dispatch duplicated the Linear claim");
 assert.equal(operationLog.filter((entry) => entry === "dispatch:issue-1").length, 1, "concurrent reconciliation duplicated Firstmate dispatch");
+const firstLease = claimsJournal.read().find((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1");
+assert.equal(firstLease.data.fence, 1);
+getIssuePause = new Promise((resolve) => { resumeGetIssue = resolve; });
+const fencedDispatch = competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+while (claimsJournal.read().filter((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1").length < 2) {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+claimsJournal.append("operation-lease-released", "issue-1", {
+  operationId: firstLease.data.operationId,
+  owner: firstLease.data.owner,
+  fence: firstLease.data.fence,
+}, `stale-release:${firstLease.data.operationId}`);
+const thirdOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
+await assert.rejects(
+  () => thirdOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+  (error) => error.code === "issue-operation-busy",
+);
+resumeGetIssue();
+getIssuePause = undefined;
+assert.equal((await fencedDispatch).taskId, dispatched.taskId);
 assert(tasks.has(dispatched.taskId));
 const beforeIdempotent = operationLog.length;
 const dispatchedAgain = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
@@ -658,6 +708,12 @@ await assert.rejects(() => claimOrchestrator.dispatchIssue(secondDecision.id, "i
 // Existing owned work may still land while the kill switch prevents new work.
 taskPrs.set(dispatched.taskId, "https://github.com/acme/app/pull/1");
 await claimOrchestrator.linkPullRequest("issue-1", "https://github.com/acme/app/pull/1");
+completeDuringPrepare = true;
+const mergesBeforeCompletedStatus = operationLog.filter((entry) => entry === "merge:issue-1").length;
+await assert.rejects(() => claimOrchestrator.landAndComplete("issue-1", "https://github.com/acme/app/pull/1"), (error) => error.code === "claim-conflict");
+assert.equal(operationLog.filter((entry) => entry === "merge:issue-1").length, mergesBeforeCompletedStatus, "completed Linear issue passed the fresh pre-merge status check");
+completeDuringPrepare = false;
+remoteStates.set("issue-1", "status-progress");
 const landing = await claimOrchestrator.landAndComplete("issue-1", "https://github.com/acme/app/pull/1");
 assert.equal(landing.green, true);
 assert(operationLog.indexOf("merge:issue-1") < operationLog.indexOf("complete:issue-1"), "Linear closed before landing confirmation");

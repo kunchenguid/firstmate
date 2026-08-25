@@ -194,7 +194,7 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
-    fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-opencode-primary-live-e2e.test.sh|fm-pi-autonomy-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -969,7 +969,7 @@ families_for_changed_path() {
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-autonomy.ts|\
     bin/fm-autonomy.sh|bin/fm-autonomy-prompt.sh|\
-    tests/fixtures/fm-autonomy-heldout.json|tests/fixtures/fm-autonomy-baseline.json|\
+    tests/fixtures/fm-autonomy-heldout.json|tests/fixtures/fm-autonomy-recorded-outputs.json|tests/fixtures/fm-autonomy-baseline.json|\
     tests/fixtures/fm-linear-api.json)
       printf '%s\n' pure-contract-unit
       case "$path" in

@@ -18,9 +18,11 @@ Accepted on 2026-08-25.
 - Decision contract version: `2026-08-25.10`.
 - Contract fingerprint: `contract-d790ac73dac4fb4af15f15d0`.
 - Stable prompt SHA-256: `a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22`.
+- Recorded classifier outputs SHA-256: `664a96544e7d9416851d0a84e033d2f1ea3c5c70b11a617a6b3109078d30236c`.
 - Model policy: the selected supervision model must be runtime-authenticated without any Linear-credential collision, fit the configured context ceiling, remain distinct and strictly cheaper across main-model changes, and preflight each bounded turn against the cost window, while worker dispatch preserves Firstmate's existing reasoning policy.
 - Cases: 11 passed, 0 failed.
 - Corpus: `tests/fixtures/fm-autonomy-heldout.json`.
+- Production-interface recordings: `tests/fixtures/fm-autonomy-recorded-outputs.json`.
 - Baseline: `tests/fixtures/fm-autonomy-baseline.json`.
 
 The retained disconfirming cases prove seven easy-to-miss directions.
@@ -90,9 +92,18 @@ The existing credential-free real-SDK guard remains the on-demand construction c
 FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
 ```
 
+The active-autonomy guard uses the installed Pi SDK, configured provider authentication, a real cheaper-model `AgentSession`, and the production `fm_supervision_decide` contract. It performs one model classification against a no-claim held-out event and never constructs a Linear, Firstmate project, forge, dispatch, or merge adapter:
+
+```sh
+FM_PI_AUTONOMY_LIVE_E2E=1 \
+FM_PI_AUTONOMY_LIVE_PROVIDER=<provider> \
+FM_PI_AUTONOMY_LIVE_MODEL=<model-id> \
+bin/fm-test-run.sh tests/fm-pi-autonomy-live-e2e.test.sh
+```
+
 On 2026-08-25 against Pi SDK 0.84.2 it printed `ok - real Pi SDK 0.84.2 accepts the branch session construction and preserves an unpromptable wake`.
 That guard intentionally has no autonomy config or credential, so it proves the default path stays unchanged and inert.
-A live active-mode model call and a live Linear mutation are deliberately not part of repository validation.
+A live Linear mutation is deliberately not part of repository validation.
 They belong to the captain's post-merge activation check.
 
 ## Supported primary and runtime consequences

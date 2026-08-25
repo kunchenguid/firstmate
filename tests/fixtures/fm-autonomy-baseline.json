@@ -4,6 +4,7 @@
   "contractFingerprint": "contract-d790ac73dac4fb4af15f15d0",
   "decisionContractVersion": "2026-08-25.10",
   "promptSha256": "a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22",
+  "recordedOutputsSha256": "664a96544e7d9416851d0a84e033d2f1ea3c5c70b11a617a6b3109078d30236c",
   "modelPolicy": "runtime-authenticated-no-linear-credential-collision-context-fitting-distinct-strictly-cheaper-at-configured-uncached-ceiling-and-main-model-change; preflight-bounded-turn-cost; preserve-main-reasoning-policy-for-workers",
   "corpus": "tests/fixtures/fm-autonomy-heldout.json",
   "cases": 11,

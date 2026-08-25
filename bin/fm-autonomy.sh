@@ -122,12 +122,15 @@ if (action === "kill-on" || action === "kill-off") {
   }
 } else if (action === "eval") {
   const corpusPath = join(root, "tests", "fixtures", "fm-autonomy-heldout.json");
+  const recordedOutputsPath = join(root, "tests", "fixtures", "fm-autonomy-recorded-outputs.json");
   const baselinePath = join(root, "tests", "fixtures", "fm-autonomy-baseline.json");
   const corpus = JSON.parse(readFileSync(corpusPath, "utf8"));
+  const recordedOutputs = JSON.parse(readFileSync(recordedOutputsPath, "utf8"));
   const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
-  const evaluation = autonomy.evaluateHeldOutCorpus(corpus.cases);
+  const evaluation = autonomy.evaluateHeldOutRecordedOutputs(corpus.cases, recordedOutputs.outputs);
   const prompt = execFileSync("bash", [join(root, "bin", "fm-autonomy-prompt.sh")]);
   const promptSha256 = createHash("sha256").update(prompt).digest("hex");
+  const recordedOutputsSha256 = createHash("sha256").update(readFileSync(recordedOutputsPath)).digest("hex");
   const requiredCasesPresent = baseline.requiredDisconfirmingCases.every(
     (id) => corpus.cases.some((testCase) => testCase.id === id && testCase.disconfirming),
   );
@@ -137,8 +140,9 @@ if (action === "kill-on" || action === "kill-off") {
     autonomy.AUTONOMY_DECISION_CONTRACT_VERSION === baseline.decisionContractVersion &&
     autonomy.AUTONOMY_MODEL_POLICY === baseline.modelPolicy &&
     promptSha256 === baseline.promptSha256 &&
+    recordedOutputsSha256 === baseline.recordedOutputsSha256 &&
     requiredCasesPresent;
-  console.log(JSON.stringify({ ...evaluation, promptSha256, accepted }));
+  console.log(JSON.stringify({ ...evaluation, promptSha256, recordedOutputsSha256, accepted }));
   if (!accepted) process.exitCode = 1;
 } else {
   const resolution = autonomy.loadAutonomyConfiguration(configPath, killPath, process.env);
