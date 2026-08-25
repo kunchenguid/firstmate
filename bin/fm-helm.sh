@@ -18,10 +18,11 @@
 # Both fields must be non-empty (after trimming leading/trailing whitespace)
 # when set; `set` with neither flag is a usage error. An existing file must
 # be a JSON object whose "language"/"response_tone" keys, if present, are
-# strings; a non-object root or a structured (non-string) field value is
-# refused by both `show` and `set` even though it is syntactically valid
-# JSON. The write is atomic: a temp file in the same directory is renamed
-# into place, so a failed write never leaves a partial
+# non-blank strings; a non-object root, a structured (non-string) field
+# value, or a whitespace-only string is refused by both `show` and `set`
+# even though it is syntactically valid JSON. The write is atomic: a temp
+# file in the same directory is renamed into place, so a failed write never
+# leaves a partial
 # config/captain-style.json behind.
 set -eu
 
@@ -32,7 +33,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STYLE_FILE="$CONFIG/captain-style.json"
 
 usage() {
-  sed -n '2,25{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,26{s/^# \{0,1\}//;p;}' "$0"
 }
 
 print_error() {
@@ -54,10 +55,10 @@ trim() {
 }
 
 # validate_shape <file>: true only when the file is a JSON object and any
-# present "language"/"response_tone" keys are strings. Rejects a non-object
-# root (array, number, string, null) and structured (non-string) field
-# values, both of which are syntactically valid JSON that `jq -e .` alone
-# would accept.
+# present "language"/"response_tone" keys are non-blank strings. Rejects a
+# non-object root (array, number, string, null), structured (non-string)
+# field values, and whitespace-only string values, all of which are
+# syntactically valid JSON that `jq -e .` alone would accept.
 validate_shape() {
   jq -e '
     type == "object"
