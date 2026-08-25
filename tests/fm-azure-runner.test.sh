@@ -34,6 +34,16 @@ runner() {
     FM_AZURE_DEPLOYMENT_GENERATION=gen-one FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID="$PE_GUID" "$RUNNER" "$@"
 }
 
+python_311() {
+  if python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
+    command -v python3
+  elif command -v uv >/dev/null 2>&1; then
+    uv python find '>=3.11'
+  else
+    return 1
+  fi
+}
+
 environment_mode_defaults() {
   local home
   home=$(mktemp -d)
@@ -452,7 +462,7 @@ agent_fleet_offline_install_contract() {
   mkdir -p "$project/src"
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" "$project/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$project/src/"
-  python=$(uv python find '>=3.11') \
+  python=$(python_311) \
     || fail "could not resolve Python 3.11+ for the hermetic Agent Fleet installer"
   "$python" -m venv --without-pip "$project/.venv" \
     || fail "could not create the hermetic Agent Fleet installer venv"
@@ -1388,7 +1398,7 @@ PY
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" \
     "$fixture/tools/agent-fleet/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$fixture/tools/agent-fleet/src/"
-  python=$(uv python find '>=3.11') \
+  python=$(python_311) \
     || fail "could not resolve Python 3.11+ for the remote-command fixture"
   "$python" -m venv --without-pip "$fixture/tools/agent-fleet/.venv" >/dev/null \
     || fail "the remote-command fixture could not create its Agent Fleet venv"
