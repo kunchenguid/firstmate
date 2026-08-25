@@ -874,15 +874,30 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # failure during wake-append leaves no marker, so the next poll retries
         # - the only durable state we depend on is the wake queue record, not
         # the marker.
+        # v4 (2026-08-25): the v3 marker write was unchecked and `wake` `exit 0`s
+        # mid-script, so a fs failure on the marker write persisted nothing and
+        # the cap kept firing every ~STALE_ESCALATE_SECS. v4 writes the marker
+        # FIRST with an explicit check, and rolls the marker back on fm_wake_append
+        # failure. Either error path exits 1 with no marker AND no queue entry,
+        # so the next poll retries the cap from scratch - loud, observable,
+        # not silently suppressed. Success path leaves both marker and queue
+        # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this hash until pane recovers; local patch 2026-08-19)"
-          fm_wake_append stale "$win" "$reason" || exit 1
+          if [ -n "$permanent_marker" ]; then
+            if ! date +%s > "$permanent_marker" 2>/dev/null; then
+              triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
+              exit 1
+            fi
+          fi
+          if ! fm_wake_append stale "$win" "$reason"; then
+            rm -f "$permanent_marker"
+            triage_log "wedge fm_wake_append FAILED after marker write, rolled back $permanent_marker"
+            exit 1
+          fi
           rm -f "$since_file"
           clear_write_tracking "$(window_key "$win")"
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
-          if [ -n "$permanent_marker" ]; then
-            date +%s > "$permanent_marker"
-          fi
           wake "$reason"
           return 0
         fi
