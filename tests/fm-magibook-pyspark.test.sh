@@ -276,12 +276,15 @@ fake_cli = root / "fake-magibook"
 fake_cli.write_text(
     r'''#!/usr/bin/env python3
 import json
+import fcntl
 import os
 from pathlib import Path
 import sys
 
 
 state_path = Path(os.environ["FAKE_MAGIBOOK_STATE"])
+lock_handle = Path(str(state_path) + ".lock").open("a+", encoding="utf-8")
+fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
 state = json.loads(state_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
 if args[:1] == ["--region"]:
@@ -363,7 +366,7 @@ if args[:2] == ["cell", "task-status"]:
         statuses = ["failed"]
     elif scenario == "serialized" and cell_id == "1":
         statuses = ["running", "running", "success"]
-    elif scenario == "serialized" and cell_id == "2":
+    elif scenario == "serialized":
         statuses = ["queued", "queued", "running", "success"]
     elif scenario == "interrupted":
         statuses = ["running"]
@@ -385,6 +388,7 @@ fake_cli.chmod(fake_cli.stat().st_mode | stat.S_IXUSR)
 class RecordingPopen:
     def __init__(self):
         self.calls = []
+        self.lifecycle = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(
@@ -393,7 +397,35 @@ class RecordingPopen:
                 "shell": kwargs.get("shell"),
             }
         )
-        return subprocess.Popen(argv, **kwargs)
+        self.lifecycle.append(("start", argv))
+        return RecordingProcess(subprocess.Popen(argv, **kwargs), argv, self.lifecycle)
+
+
+class RecordingProcess:
+    def __init__(self, process, argv, lifecycle):
+        self._process = process
+        self._argv = argv
+        self._lifecycle = lifecycle
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+        self.pid = process.pid
+
+    def poll(self):
+        return self._process.poll()
+
+    def terminate(self):
+        return self._process.terminate()
+
+    def kill(self):
+        return self._process.kill()
+
+    def wait(self, timeout=None):
+        self._lifecycle.append(("wait", self._argv))
+        return self._process.wait(timeout=timeout)
+
+    @property
+    def returncode(self):
+        return self._process.returncode
 
 
 class InterruptingSleep:
@@ -549,6 +581,14 @@ check("bounded_all_success", aggregate["overallStatus"] == "success")
 check("bounded_remote_tasks", aggregate["capability"]["maxObservedActiveTasks"] == 2)
 check("bounded_concurrency_observed", aggregate["capability"]["mode"] == "concurrent-observed")
 check("no_unmeasured_speedup_claim", aggregate["capability"]["speedupClaimed"] is False)
+submit_lifecycle = [
+    event
+    for event in recorder.lifecycle
+    if event[1][3:5] == ["cell", "run"]
+]
+check("bounded_children_started_before_wait",
+    [event[0] for event in submit_lifecycle[:3]] == ["start", "start", "wait"]
+)
 check("every_submit_has_task", all(
     child["taskId"] for child in aggregate["children"] if child["purpose"] == "submit-query"
 ))
@@ -738,17 +778,17 @@ check(
     detached_cli.children and detached_cli.children[0]["timedOut"] is True,
 )
 
-# Queued overlap downgrades remaining work to sequential execution.
+# Queued overlap downgrades only remaining work to sequential execution.
 aggregate, serialized_state, _, _ = run_case(
-    "serialized", "serialized", queries(3), 3
+    "serialized", "serialized", queries(4), 3
 )
 check("serialized_fallback", aggregate["capability"]["mode"] == "serialized-fallback")
 events = serialized_state["events"]
-third_submit = next(
+fourth_submit = next(
     (
         index
         for index, event in enumerate(events)
-        if event["args"][:2] == ["cell", "run"] and event["args"][3] == "3"
+        if event["args"][:2] == ["cell", "run"] and event["args"][3] == "4"
     ),
     -1,
 )
@@ -762,7 +802,7 @@ second_terminal = max(
     ),
     default=-1,
 )
-check("serialized_third_waited", third_submit > second_terminal)
+check("serialized_remaining_waited", fourth_submit > second_terminal)
 check("serialized_all_success", aggregate["overallStatus"] == "success")
 
 # Interruption reconciles known tasks and reports remote work without cancelling it.

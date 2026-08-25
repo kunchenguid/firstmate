@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -223,8 +224,8 @@ class MagiBookCLI:
             timed_out,
         )
 
-    def invoke_json(self, purpose, query_key, task_id, *args):
-        """Run one exact MagiBook command and return its JSON object plus audit."""
+    def start_json(self, purpose, query_key, task_id, *args):
+        """Start one exact MagiBook command without waiting for it."""
         argv = [self.executable, "--region", self.region, *(str(arg) for arg in args)]
         started = self.monotonic()
         try:
@@ -252,6 +253,13 @@ class MagiBookCLI:
             "timedOut": False,
         }
         self.children.append(record)
+        return {"process": process, "record": record, "started": started}
+
+    def finish_json(self, child):
+        """Collect one started command and return its JSON object plus audit."""
+        process = child["process"]
+        record = child["record"]
+        started = child["started"]
         try:
             returncode, stdout, stderr, stdout_size, stderr_size, timed_out = (
                 self._collect_bounded(process)
@@ -295,6 +303,11 @@ class MagiBookCLI:
                 "MagiBook CLI returned invalid JSON: {}".format(exc.msg),
             ) from exc
         return payload, record
+
+    def invoke_json(self, purpose, query_key, task_id, *args):
+        """Run one exact MagiBook command and return its JSON object plus audit."""
+        child = self.start_json(purpose, query_key, task_id, *args)
+        return self.finish_json(child)
 
 
 def _write_protected(path, content):
@@ -639,21 +652,13 @@ def _run_parallel_queries_locked(
                 )
             pending.clear()
 
-        def submit_one(query):
+        def record_submission(query, outcome):
             nonlocal submitted_count, stop_reason, capability_mode
             entry = registry["queries"][query.key]
-            entry["phase"] = "submitting"
-            _atomic_write_registry(state_path, registry)
             try:
-                payload, record = cli.invoke_json(
-                    "submit-query",
-                    query.key,
-                    None,
-                    "cell",
-                    "run",
-                    book_uuid,
-                    query.cell_id,
-                )
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                payload, record = outcome
             except KeyboardInterrupt:
                 entry["phase"] = "submission-unknown"
                 _atomic_write_registry(state_path, registry)
@@ -730,6 +735,45 @@ def _run_parallel_queries_locked(
             active[query.key] = {"query": query, "entry": entry}
             submitted_count += 1
 
+        def submit_batch(batch):
+            """Start the bounded batch before collecting any submission child."""
+            nonlocal stop_reason
+            started_children = []
+            for index, query in enumerate(batch):
+                entry = registry["queries"][query.key]
+                entry["phase"] = "submitting"
+                _atomic_write_registry(state_path, registry)
+                try:
+                    child = cli.start_json(
+                        "submit-query",
+                        query.key,
+                        None,
+                        "cell",
+                        "run",
+                        book_uuid,
+                        query.cell_id,
+                    )
+                except CLICommandError as exc:
+                    record_submission(query, exc)
+                    pending[0:0] = batch[index + 1 :]
+                    break
+                started_children.append((query, child))
+
+            if not started_children:
+                return
+            with ThreadPoolExecutor(max_workers=len(started_children)) as executor:
+                futures = {
+                    executor.submit(cli.finish_json, child): query
+                    for query, child in started_children
+                }
+                for future in as_completed(futures):
+                    query = futures[future]
+                    try:
+                        outcome = future.result()
+                    except (CLICommandError, KeyboardInterrupt) as exc:
+                        outcome = exc
+                    record_submission(query, outcome)
+
         def finalize_success(query, entry):
             try:
                 output, _ = cli.invoke_json(
@@ -797,12 +841,13 @@ def _run_parallel_queries_locked(
                 if capability_mode == "concurrent-observed":
                     capacity = max_parallel - len(active)
                 elif capability_mode == "probing":
-                    capacity = min(2, max_parallel) - len(active)
+                    capacity = max_parallel - len(active)
                 else:
                     capacity = 1 if not active else 0
-                while pending and capacity > 0 and not stop_reason:
-                    submit_one(pending.pop(0))
-                    capacity -= 1
+                if pending and capacity > 0:
+                    batch = pending[:capacity]
+                    del pending[:capacity]
+                    submit_batch(batch)
                     max_active = max(max_active, len(active))
 
             observations = {}
@@ -908,7 +953,7 @@ def _run_parallel_queries_locked(
                 waiting = [key for key, state in observations.items() if state == "waiting"]
                 if len(running) >= 2:
                     capability_mode = "concurrent-observed"
-                elif running and waiting:
+                elif len(waiting) >= 2 or (running and waiting):
                     if probe_started is None:
                         probe_started = monotonic()
                     if monotonic() - probe_started >= capability_probe_seconds:

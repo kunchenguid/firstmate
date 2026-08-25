@@ -79,7 +79,9 @@ If a prior submission is still pending or running, the helper polls that exact t
 If a submission may have reached MagiBook but returned no task id, ownership is ambiguous and the helper refuses to retry it automatically.
 
 Set `max_parallel` to the highest concurrency authorized for the queue.
-The helper probes overlap with no more than two tasks, expands only after it observes simultaneous running states, and falls back to sequential submission when overlap stays queued.
+For each parallel batch, the helper starts one distinct `magibook cell run` child process per Cell up to `max_parallel` before it waits for any submission child to finish.
+The helper uses argv arrays with `shell=False`, records each returned task id against its exact query and Cell, and polls every task independently.
+It falls back to sequential submission for remaining Cells only after observed task states show that the shared Book, kernel, or queue is serializing work.
 An overlap rejection or ambiguous task state stops further submission and returns a clear capability result.
 The aggregate always retains individual success, failure, cancellation, timeout, and interruption outcomes, and any partial failure makes the overall result non-success.
 On failure or interruption the helper does not kill unrelated Spark work, and `remoteWorkRemaining` identifies every exact task that was not proven terminal.
@@ -110,6 +112,7 @@ queries = [
         sql="SELECT 2 AS metric",
     ),
 ]
+max_parallel = 2
 
 aggregate = run_parallel_queries(
     queries,
@@ -120,7 +123,8 @@ aggregate = run_parallel_queries(
     ),
     book_uuid="<BOOK_UUID>",
     state_path=Path("<PRIVATE_PERSISTENT_QUERY_STATE_FILE>"),
-    max_parallel=int("<MAX_PARALLEL>"),
+    # One distinct cell-run child starts per query up to this explicit bound.
+    max_parallel=max_parallel,
     query_timeout=float("<QUERY_TIMEOUT_SECONDS>"),
     overall_timeout=float("<OVERALL_TIMEOUT_SECONDS>"),
 )
