@@ -55,7 +55,7 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   type CalmPresentationState,
@@ -748,6 +748,30 @@ ${context.command}
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  type OutcomesToolShellState = {
+    shell?: Box;
+    call?: Text;
+    result?: Text | Container;
+  };
+  const refreshOutcomesToolShell = (
+    shellState: OutcomesToolShellState,
+    theme: Parameters<NonNullable<ToolDefinition["renderCall"]>>[1],
+    context: Parameters<NonNullable<ToolDefinition["renderCall"]>>[2],
+  ): Box => {
+    const background = context.isPartial
+      ? (text: string) => theme.bg("toolPendingBg", text)
+      : context.isError
+        ? (text: string) => theme.bg("toolErrorBg", text)
+        : (text: string) => theme.bg("toolSuccessBg", text);
+    const shell = shellState.shell ?? new Box(1, 1, background);
+    shellState.shell = shell;
+    shell.setBgFn(background);
+    shell.clear();
+    if (shellState.call) shell.addChild(shellState.call);
+    if (shellState.result) shell.addChild(shellState.result);
+    return shell;
+  };
+
   pi.registerTool?.({
     name: "fm_branch_outcomes",
     label: "Read supervision branch outcomes",
@@ -758,17 +782,24 @@ ${context.command}
       recent: Type.Optional(Type.Number({ description: "How many most-recent outcomes to read (default 20)" })),
     }),
     renderShell: "self",
-    renderCall: (_args, theme) => {
+    renderCall: (_args, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
-      return new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
+      return refreshOutcomesToolShell(shellState, theme, context);
     },
-    renderResult: (result, _options, theme) => {
+    renderResult: (result, _options, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("tool-result")) return new Container();
       const output = result.content
         .filter((item) => item.type === "text")
         .map((item) => item.text)
         .join("\n");
-      return output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      refreshOutcomesToolShell(shellState, theme, context);
+      return new Container();
     },
     execute: async (_toolCallId, params) => {
       const recentRaw = (params as { recent?: unknown }).recent;

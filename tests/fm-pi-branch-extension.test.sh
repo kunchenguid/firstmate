@@ -135,8 +135,29 @@ export class Text {
 }
 
 export class Container {
+  constructor() {
+    this.children = [];
+  }
+  addChild(child) {
+    this.children.push(child);
+  }
+  clear() {
+    this.children = [];
+  }
   render() {
-    return [];
+    return this.children.flatMap((child) => child.render?.() ?? []);
+  }
+}
+
+export class Box extends Container {
+  constructor(paddingX, paddingY, bgFn) {
+    super();
+    this.paddingX = paddingX;
+    this.paddingY = paddingY;
+    this.bgFn = bgFn;
+  }
+  setBgFn(bgFn) {
+    this.bgFn = bgFn;
   }
 }
 JS
@@ -397,17 +418,18 @@ const outcomesTool = mainTools.find((tool) => tool.name === "fm_branch_outcomes"
 if (!outcomesTool) throw new Error("fm_branch_outcomes was not registered on main");
 const renderTheme = {
   fg(_color, text) { return text; },
+  bg(_color, text) { return text; },
   bold(text) { return text; },
 };
 const renderContext = { state: {}, isError: false, isPartial: false };
 const stockResult = { content: [{ type: "text", text: "OUTCOME_DUMP" }] };
 const calmOffCall = outcomesTool.renderCall({}, renderTheme, renderContext);
 const calmOffResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
-if (calmOffCall.constructor.name !== "Text" || calmOffCall.text !== "fm_branch_outcomes") {
-  throw new Error("fm_branch_outcomes changed its ordinary call rendering");
+if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calmOffCall.paddingY !== 1) {
+  throw new Error("fm_branch_outcomes changed its ordinary shell rendering");
 }
-if (calmOffResult.constructor.name !== "Text" || calmOffResult.text !== "OUTCOME_DUMP") {
-  throw new Error("fm_branch_outcomes changed its ordinary result rendering");
+if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
+  throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 const calmOnCall = outcomesTool.renderCall({}, renderTheme, renderContext);
@@ -416,12 +438,24 @@ if (calmOnCall.constructor.name !== "Container" || calmOnCall.render(100).length
   throw new Error("fm_branch_outcomes remained visible while Calm was on");
 }
 pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
-if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Text" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Text") {
+if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Box" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Container") {
   throw new Error("fm_branch_outcomes did not restore ordinary rendering when Calm was turned off");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
-if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Text" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Text") {
-  throw new Error("fm_branch_outcomes was hidden during stock export rendering");
+let exportCallFellBack = false;
+let exportResultFellBack = false;
+try {
+  outcomesTool.renderCall({}, renderTheme, renderContext);
+} catch {
+  exportCallFellBack = true;
+}
+try {
+  outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
+} catch {
+  exportResultFellBack = true;
+}
+if (!exportCallFellBack || !exportResultFellBack) {
+  throw new Error("fm_branch_outcomes replaced Pi stock export rendering");
 }
 const listed = await outcomesTool.execute("call-4", { recent: 2 }, undefined, undefined, {});
 const listedText = listed.content[0].text;
@@ -1416,6 +1450,112 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+test_outcomes_tool_uses_stock_execution_and_export_consumers() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi outcomes rendering test"
+    return
+  fi
+  local package_dir fixture out status
+  package_dir=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+  if [ ! -f "$package_dir/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return
+  fi
+  fixture="$TMP_ROOT/stock-render-consumers"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$package_dir/node_modules/typebox" "$fixture/node_modules/typebox"
+
+  out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$package_dir" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ ToolExecutionComponent }, { createToolHtmlRenderer }, { initTheme, theme }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+]);
+initTheme("dark");
+
+const listeners = new Map();
+const tools = [];
+const pi = {
+  events: {
+    on(name, listener) {
+      listeners.set(name, [...(listeners.get(name) ?? []), listener]);
+    },
+    emit(name, data) {
+      for (const listener of listeners.get(name) ?? []) listener(data);
+    },
+  },
+  on() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  registerTool(tool) { tools.push(tool); },
+  sendMessage() {},
+  sendUserMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?consumer=${Date.now()}`);
+extension.default(pi);
+const actualDefinition = tools.find((tool) => tool.name === "fm_branch_outcomes");
+if (!actualDefinition) throw new Error("fm_branch_outcomes was not registered");
+const stockDefinition = { ...actualDefinition };
+delete stockDefinition.renderShell;
+delete stockDefinition.renderCall;
+delete stockDefinition.renderResult;
+
+const args = { recent: 2 };
+const result = {
+  content: [{ type: "text", text: "OUTCOME_ONE\nOUTCOME_TWO" }],
+  details: { ok: true },
+  isError: false,
+};
+const ui = { requestRender() {} };
+const stockRow = new ToolExecutionComponent("fm_branch_outcomes", "stock", args, { showImages: false }, stockDefinition, ui, process.cwd());
+const actualRow = new ToolExecutionComponent("fm_branch_outcomes", "actual", args, { showImages: false }, actualDefinition, ui, process.cwd());
+for (const row of [stockRow, actualRow]) {
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult(result);
+}
+if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+actualRow.invalidate();
+if (actualRow.render(100).length !== 0) {
+  throw new Error("Calm-on ToolExecutionComponent row remained visible");
+}
+pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+actualRow.invalidate();
+if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+  throw new Error("ToolExecutionComponent rendering did not restore after live toggle");
+}
+
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
+const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, theme, cwd: process.cwd() });
+const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, theme, cwd: process.cwd() });
+const stockCall = stockHtml.renderCall("stock-html", "fm_branch_outcomes", args);
+const actualCall = actualHtml.renderCall("actual-html", "fm_branch_outcomes", args);
+const stockResult = stockHtml.renderResult("stock-html", "fm_branch_outcomes", result.content, result.details, false);
+const actualResult = actualHtml.renderResult("actual-html", "fm_branch_outcomes", result.content, result.details, false);
+if (actualCall !== undefined || actualResult !== undefined || stockCall !== undefined || stockResult !== undefined) {
+  throw new Error("stock export rendering did not delegate to Pi's structured fallback");
+}
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "Pi outcomes rendering consumers must preserve stock behavior: $out"
+  [ -z "$out" ] || fail "Pi outcomes rendering consumer test printed output: $out"
+  pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
+}
+
+test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable

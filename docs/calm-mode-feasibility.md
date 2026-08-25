@@ -196,6 +196,20 @@ Returning from stock export rendering instead invalidates only the tool rows Cal
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
 Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden operational custom messages.
 
+## Firstmate Pi tool audit
+
+Every tool registered or supplied by Firstmate under `.pi/extensions` has this disposition:
+
+| Tool | Registration surface | Calm disposition |
+| --- | --- | --- |
+| `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | Calm wrappers for Pi's seven main-session built-ins | Their call and text-result shells hide while Calm is active; ordinary and stock export rendering delegate to Pi's original renderers. |
+| `fm_watch_arm_pi` | Main-session custom tool in `fm-primary-pi-watch.ts` | Its complete self-rendered shell hides while Calm is active and returns unchanged when Calm is off or stock export rendering is active. |
+| `fm_branch_outcomes` | Main-session custom tool in `fm-branch-supervision.ts` | Its complete self-rendered shell hides while Calm is active; the self-renderer reconstructs Pi's ordinary boxed fallback shell when visible, while stock export rendering deliberately falls through to Pi's structured fallback. |
+| `fm_branch_report` | Branch-session custom tool supplied directly to `createAgentSession` | It has no main-session `ToolExecutionComponent`; its result is persisted to the outcome store and merged through the separately audited branch-note delivery path, so it cannot emit a dump-shaped row in the captain's transcript. |
+| branch-local `bash` override | Branch-session replacement supplied directly to `createAgentSession` | It has no main-session `ToolExecutionComponent`; it only injects branch identity into branch commands, so it cannot emit a row in the captain's transcript. |
+
+No other `.pi/extensions` file registers or supplies a tool. Commands, lifecycle handlers, custom message renderers, and presentation adapters are not tool registrations and remain covered by the transcript taxonomy below.
+
 ## Complete currently reachable Pi transcript taxonomy
 
 The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
