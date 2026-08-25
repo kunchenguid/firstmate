@@ -33,6 +33,7 @@ WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 WATCH_DELIVERY_PROGRESS="$STATE/.watch-delivery-progress"
 WATCH_DELIVERY_PROGRESS_LOCK="$STATE/.watch-delivery-progress.lock"
+WATCH_DELIVERY_INFLIGHT_MAX_AGE=5
 WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
 WATCH_DELIVERY_KEEP_LINES=${FM_WATCH_DELIVERY_KEEP_LINES:-64}
 case "$WATCH_DELIVERY_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_DELIVERY_MAX_BYTES=65536 ;; esac
@@ -46,12 +47,21 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+watch_delivery_lock_acquire_bounded() {
+  local lock=$1 i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+}
+
 watch_delivery_serialization_acquire() {
   case "$FM_WAKE_QUEUE_LOCK_HELD:$FM_WAKE_PROGRESS_LOCK_HELD" in
     0:0)
-      fm_lock_acquire_wait "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+      watch_delivery_lock_acquire_bounded "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
       FM_WAKE_PROGRESS_LOCK_HELD=1
-      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+      watch_delivery_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" || {
         fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
         FM_WAKE_PROGRESS_LOCK_HELD=0
         return 1
@@ -82,36 +92,34 @@ watch_delivery_progress_watermark_locked() {
 }
 
 watch_delivery_progress_publish_locked() {
-  local watermark=$1 transition previous previous_transition previous_watermark extra tab tmp status=0
+  local state=$1 watermark=$2 transition previous previous_state previous_transition previous_watermark previous_pid extra tab tmp status=0 pid
+  case "$state" in inflight|committed) ;; *) return 1 ;; esac
   case "$watermark" in ''|*[!0-9]*) return 1 ;; esac
   transition=$(date +%s 2>/dev/null) || return 1
   case "$transition" in ''|*[!0-9]*) return 1 ;; esac
+  pid=${BASHPID:-$$}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   previous=$(awk -F '\t' '
-    NR == 1 && NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { value = $1 "\t" $2 }
+    NR == 1 && NF == 4 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { value = $0 }
     END { if (NR == 1) print value }
   ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
   tab=$(printf '\t')
-  IFS="$tab" read -r previous_transition previous_watermark extra <<EOF
+  IFS="$tab" read -r previous_state previous_transition previous_watermark previous_pid extra <<EOF
 $previous
 EOF
-  case "$previous_transition" in
-    ''|*[!0-9]*) ;;
-    *)
-      case "$previous_watermark" in
-        ''|*[!0-9]*) ;;
-        *)
-          if [ -z "$extra" ]; then
-            if [ "$previous_transition" -gt "$transition" ]; then
-              transition=$previous_transition
-            fi
-          fi
-          ;;
-      esac
-      ;;
-  esac
+  if [ -z "$extra" ] && { [ "$previous_state" = inflight ] || [ "$previous_state" = committed ]; }; then
+    case "$previous_transition:$previous_watermark:$previous_pid" in
+      *[!0-9:]*) ;;
+      *)
+        if [ "$previous_transition" -gt "$transition" ]; then
+          transition=$previous_transition
+        fi
+        ;;
+    esac
+  fi
   tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || status=1
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\n' "$transition" "$watermark" > "$tmp" || status=1
+    printf '%s\t%s\t%s\t%s\n' "$state" "$transition" "$watermark" "$pid" > "$tmp" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || status=1
@@ -166,34 +174,41 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0 progress_watermark
+  local output_status=0 progress_watermark=0 serialized=0 inflight=0
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  watch_delivery_serialization_acquire || {
-    printf 'fm-watch: could not serialize actionable wake progress.\n' >&2
-    exit 1
-  }
-  progress_watermark=$(watch_delivery_progress_watermark_locked)
+  if watch_delivery_serialization_acquire; then
+    serialized=1
+    progress_watermark=$(watch_delivery_progress_watermark_locked)
+    if watch_delivery_progress_publish_locked inflight "$progress_watermark"; then
+      inflight=1
+    else
+      printf 'fm-watch: could not publish in-flight actionable wake progress.\n' >&2
+    fi
+  else
+    printf 'fm-watch: actionable wake progress serialization unavailable.\n' >&2
+  fi
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
-  if fm_run_timed 2 bash -c "printf '%s' \"\$1\" && sleep 0.02 && printf '\\n'" _ "$1"; then
-    if watch_delivery_progress_publish_locked "$progress_watermark"; then
-      output_status=0
-      # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
-      FM_WATCH_DELIVERED_REASON=$1
-    else
-      printf 'fm-watch: could not publish actionable wake progress.\n' >&2
-      output_status=1
+  if fm_run_timed "$((WATCH_DELIVERY_INFLIGHT_MAX_AGE - 3))" bash -c "printf '%s' \"\$1\" && sleep 0.02 && printf '\\n'" _ "$1"; then
+    output_status=0
+    # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
+    FM_WATCH_DELIVERED_REASON=$1
+    if [ "$inflight" -eq 1 ] && ! watch_delivery_progress_publish_locked committed "$progress_watermark"; then
+      printf 'fm-watch: could not commit actionable wake progress.\n' >&2
     fi
   else
     output_status=1
+    if [ "$inflight" -eq 1 ]; then
+      rm -f -- "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true
+    fi
   fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
   fi
-  watch_delivery_serialization_release
+  [ "$serialized" -eq 0 ] || watch_delivery_serialization_release
   if [ "$output_status" -eq 0 ]; then
     watch_delivery_publish "$1" || true
   fi

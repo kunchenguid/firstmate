@@ -319,7 +319,7 @@ SH
 }
 
 test_secondmate_stall_follows_actionable_handoff_progress() {
-  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready
+  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready lock_pid lock_ready lock_release queue_pid queue_ready queue_release inflight_pid
   dir=$(make_case secondmate-stall-handoff)
   state="$dir/state"
   sub="$dir/secondmate"
@@ -434,7 +434,80 @@ SH
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/post-handoff.out" 2> "$dir/post-handoff.err" || true
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=12' "$dir/post-handoff.out" >/dev/null \
     || fail "a row following a same-second handoff was blinded: $(cat "$dir/post-handoff.out"); err=$(cat "$dir/post-handoff.err")"
-  pass "foreign queue stalls distinguish causal handoffs from same-second appends"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check abandoned-inflight "check: abandoned in-flight publication"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the abandoned in-flight append failed"
+  sleep 5 &
+  inflight_pid=$!
+  printf 'inflight\t%s\t13\t%s\n' "$same" "$inflight_pid" > "$sub/state/.watch-delivery-progress"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/active-inflight.out" 2> "$dir/active-inflight.err" || true
+  ! grep -F 'secondmate wake-loop stalled: mate=mate row=13' "$dir/active-inflight.out" >/dev/null \
+    || fail "an active in-flight publication alerted before it could commit: $(cat "$dir/active-inflight.out")"
+  kill "$inflight_pid" 2>/dev/null || true
+  wait "$inflight_pid" 2>/dev/null || true
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/abandoned-inflight.out" 2> "$dir/abandoned-inflight.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=13' "$dir/abandoned-inflight.out" >/dev/null \
+    || fail "an abandoned in-flight publication blinded its row: $(cat "$dir/abandoned-inflight.out"); err=$(cat "$dir/abandoned-inflight.err")"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check blocked-progress "check: blocked progress lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the blocked-progress append failed"
+  lock_ready="$dir/progress-lock-ready"
+  lock_release="$dir/progress-lock-release"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.watch-delivery-progress.lock"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.02; done; fm_lock_release "$STATE/.watch-delivery-progress.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$lock_ready" "$lock_release" &
+  lock_pid=$!
+  while [ ! -e "$lock_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; wake "check: bounded progress fallback"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/bounded-fallback.out" \
+    || fail "the actionable wake failed when progress serialization was unavailable"
+  grep -Fx 'check: bounded progress fallback' "$dir/bounded-fallback.out" >/dev/null \
+    || fail "the actionable wake was not delivered through bounded progress fallback"
+  kill -0 "$lock_pid" 2>/dev/null \
+    || fail "the actionable wake waited for the blocked progress lock instead of falling back"
+  touch "$lock_release"
+  wait "$lock_pid" || fail "the progress-lock holder failed"
+  queue_ready="$dir/queue-lock-ready"
+  queue_release="$dir/queue-lock-release"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.wake-queue.lock"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.02; done; fm_lock_release "$STATE/.wake-queue.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$queue_ready" "$queue_release" &
+  queue_pid=$!
+  while [ ! -e "$queue_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; wake "check: bounded queue fallback"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/bounded-queue-fallback.out" \
+    || fail "the actionable wake failed when queue serialization was unavailable"
+  grep -Fx 'check: bounded queue fallback' "$dir/bounded-queue-fallback.out" >/dev/null \
+    || fail "the actionable wake was not delivered through bounded queue fallback"
+  kill -0 "$queue_pid" 2>/dev/null \
+    || fail "the actionable wake waited for the blocked queue lock instead of falling back"
+  touch "$queue_release"
+  wait "$queue_pid" || fail "the queue-lock holder failed"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/blocked-progress.out" 2> "$dir/blocked-progress.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=14' "$dir/blocked-progress.out" >/dev/null \
+    || fail "unavailable progress serialization published optimistic state: $(cat "$dir/blocked-progress.out"); err=$(cat "$dir/blocked-progress.err")"
+  pass "foreign queue stalls distinguish committed handoffs from abandoned progress"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {

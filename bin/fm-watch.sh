@@ -407,7 +407,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress progress_epoch progress_seq extra tab reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress progress_state _progress_epoch progress_seq progress_pid progress_age extra tab reason
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -445,25 +445,35 @@ EOF
     progress=
     if [ -f "$home/state/.watch-delivery-progress" ] && [ ! -L "$home/state/.watch-delivery-progress" ]; then
       progress=$(awk -F '\t' '
-        NR == 1 && NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { value = $1 "\t" $2 }
+        NR == 1 && NF == 4 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { value = $0 }
         END { if (NR == 1) print value }
       ' "$home/state/.watch-delivery-progress" 2>/dev/null || true)
     fi
     tab=$(printf '\t')
-    IFS="$tab" read -r progress_epoch progress_seq extra <<EOF
+    IFS="$tab" read -r progress_state _progress_epoch progress_seq progress_pid extra <<EOF
 $progress
 EOF
-    case "$progress_epoch" in
+    case "$progress_seq" in
       ''|*[!0-9]*) ;;
       *)
-        case "$progress_seq" in
-          ''|*[!0-9]*) ;;
-          *)
-            if [ -z "$extra" ] && [ "$progress_seq" -ge "$seq" ]; then
+        if [ -z "$extra" ] && [ "$progress_seq" -ge "$seq" ]; then
+          case "$progress_state" in
+            committed)
               continue
-            fi
-            ;;
-        esac
+              ;;
+            inflight)
+              progress_age=$(fm_path_age "$home/state/.watch-delivery-progress")
+              case "$progress_age" in
+                ''|*[!0-9]*) ;;
+                *)
+                  if [ "$progress_age" -lt "$WATCH_DELIVERY_INFLIGHT_MAX_AGE" ] && fm_pid_alive "$progress_pid"; then
+                    continue
+                  fi
+                  ;;
+              esac
+              ;;
+          esac
+        fi
         ;;
     esac
     row_key="$epoch-$seq"
