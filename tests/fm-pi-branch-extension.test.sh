@@ -1110,56 +1110,78 @@ import { rmSync, writeFileSync } from "node:fs";
 
 registryModels.push({ provider: "anthropic", id: "main-model" }, { provider: "openai", id: "cheap-1" });
 
-// 1. No pin: the branch build passes no model at all, so Pi keeps choosing
-// the branch's model exactly as it did before the pin existed.
-fire("session_start", {}, makeCtx());
-dispatch("signal: unpinned probe");
-await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unpinned branch build");
+// 1. No pin and main's model not known yet: the build falls back to the
+// pre-feature path of passing no override rather than refusing to build, so
+// a wake is never lost over model choice.
+fire("session_start", {});
+dispatch("signal: main model unknown");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unknown-main-model branch build");
 if ("model" in globalThis.__fmSessions[0].options) {
-  throw new Error(`an absent pin must not pass a model option: ${JSON.stringify(globalThis.__fmSessions[0].options.model)}`);
+  throw new Error("an unknown main model must fall back to passing no model override");
 }
 
-// 2. Pin present: the very next build carries exactly that model, resolved
+// 2. No pin, main's model known: the branch follows MAIN's own model,
+// applied explicitly.
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: unpinned probe");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "unpinned branch build");
+const unpinned = globalThis.__fmSessions[1].options.model;
+if (!unpinned || unpinned.provider !== "anthropic" || unpinned.id !== "main-model") {
+  throw new Error(`an absent pin must follow main's own model: ${JSON.stringify(unpinned)}`);
+}
+
+// 3. Pin present: the very next build carries exactly that model, resolved
 // out of Pi's own catalog.
 writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
 dispatch("signal: pinned probe");
-await settle(() => (globalThis.__fmSessions ?? []).length === 2, "pinned branch build");
-const pinned = globalThis.__fmSessions[1].options.model;
+await settle(() => (globalThis.__fmSessions ?? []).length === 3, "pinned branch build");
+const pinned = globalThis.__fmSessions[2].options.model;
 if (!pinned || pinned.provider !== "openai" || pinned.id !== "cheap-1") {
   throw new Error(`pinned build did not use the pinned model: ${JSON.stringify(pinned)}`);
 }
 
-// 3. The reopen path (/new, /resume, /fork, reload all replace the session
+// 4. The reopen path (/new, /resume, /fork, reload all replace the session
 // in-process) reopens the SAME persistent branch conversation and still
 // applies the pin.
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
 dispatch("signal: reopened probe");
-await settle(() => (globalThis.__fmSessions ?? []).length === 3, "reopened branch build");
-const reopened = globalThis.__fmSessions[2].options.model;
+await settle(() => (globalThis.__fmSessions ?? []).length === 4, "reopened branch build");
+const reopened = globalThis.__fmSessions[3].options.model;
 if (!reopened || reopened.provider !== "openai" || reopened.id !== "cheap-1") {
   throw new Error(`reopened build did not use the pinned model: ${JSON.stringify(reopened)}`);
 }
-const manager = globalThis.__fmSessions[2].options.sessionManager;
+const manager = globalThis.__fmSessions[3].options.sessionManager;
 if (!manager.opened) throw new Error("reopen did not continue the persistent branch conversation");
 
-// 4. Removing the pin returns the branch to the untouched default path.
+// 5. Clearing the pin makes the REOPENED branch follow main again. This is
+// the case Pi's own session restore would otherwise get wrong: the branch
+// conversation still records the pinned model, so only an explicit override
+// keeps "follow main" honest.
 rmSync(`${home}/config/supervision-branch-model`);
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
 dispatch("signal: unpinned again");
-await settle(() => (globalThis.__fmSessions ?? []).length === 4, "post-clear branch build");
-if ("model" in globalThis.__fmSessions[3].options) {
-  throw new Error("clearing the pin must restore the no-model-option default path");
+await settle(() => (globalThis.__fmSessions ?? []).length === 5, "post-clear branch build");
+const cleared = globalThis.__fmSessions[4];
+if (!cleared.options.sessionManager.opened) {
+  throw new Error("the post-clear build must still reopen the persistent branch conversation");
+}
+if (cleared.options.model?.id === "cheap-1") {
+  throw new Error("clearing the pin left the branch on the previously pinned model");
+}
+if (cleared.options.model?.provider !== "anthropic" || cleared.options.model?.id !== "main-model") {
+  throw new Error(`clearing the pin did not return the branch to main's model: ${JSON.stringify(cleared.options.model)}`);
 }
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "the supervision model pin must bind every branch build and stay absent by default: $out"
-  pass "supervision model pin binds branch create and reopen, and an absent pin keeps the default"
+  expect_code 0 "$status" "the current pin state must decide the model on every branch build: $out"
+  pass "the current pin state binds every branch create and reopen, and clearing it returns the branch to main's model"
 }
 
 test_supervision_model_command_persists_and_rebinds_the_live_branch() {
@@ -1187,7 +1209,9 @@ fire("session_start", {}, makeCtx());
 dispatch("signal: before the pick");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pre-pick branch build");
 const firstSession = globalThis.__fmSessions[0];
-if ("model" in firstSession.options) throw new Error("the branch started pinned before any pick");
+if (firstSession.options.model?.id !== "main-model") {
+  throw new Error(`the branch started on something other than main's model before any pick: ${JSON.stringify(firstSession.options.model)}`);
+}
 
 // The picker offers Pi's branch-runnable catalog plus following main, and the
 // captain's pick is persisted as the one-line config value.
@@ -1227,15 +1251,23 @@ if (repinned.options.model.authKind !== "oauth") {
 }
 if (!repinned.options.sessionManager.opened) throw new Error("the pick must keep the branch conversation, not start a new one");
 
-// Following main again clears the file and restores the default path.
+// Following main again clears the file and actually returns the branch to
+// main's model, rather than letting the reopened session restore the pin.
+const clearNoticeCount = notices.length;
 uiSelections.push("Follow main (anthropic/main-model)");
 await command.handler("", makeCtx());
 if (existsSync(pinFile)) throw new Error("following main must remove the pin file");
+const clearNotices = notices.slice(clearNoticeCount);
+if (clearNotices.length !== 1 || clearNotices[0].type !== "info" || !clearNotices[0].message.includes("anthropic/main-model")) {
+  throw new Error(`following main did not report the model actually applied: ${JSON.stringify(clearNotices)}`);
+}
 await settle(() => repinned.disposed, "live branch release after clearing");
 dispatch("signal: after clearing");
 await settle(() => (globalThis.__fmSessions ?? []).length === 3, "post-clear branch build");
-if ("model" in globalThis.__fmSessions[2].options) {
-  throw new Error("following main must restore the no-model-option default path");
+const followed = globalThis.__fmSessions[2].options.model;
+if (followed?.id === "cheap-oauth") throw new Error("following main left the branch on the cleared pin's model");
+if (followed?.provider !== "anthropic" || followed?.id !== "main-model") {
+  throw new Error(`following main did not apply main's own model: ${JSON.stringify(followed)}`);
 }
 
 // A pick made while the old-model branch build is in flight invalidates that
@@ -1253,7 +1285,7 @@ releaseCreate();
 await settle(() => (globalThis.__fmSessions ?? []).length === 5, "replacement build after in-flight pick");
 const staleBuild = globalThis.__fmSessions[3];
 const winningBuild = globalThis.__fmSessions[4];
-if (!staleBuild.disposed || "model" in staleBuild.options) {
+if (!staleBuild.disposed || staleBuild.options.model?.id === "cheap-oauth") {
   throw new Error("the in-flight old-model build was adopted after the pick");
 }
 if (winningBuild.options.model?.id !== "cheap-oauth") {
@@ -1315,14 +1347,16 @@ if (!delivered.includes("dynamic/extension-only") || !delivered.includes("superv
 }
 if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("an unusable pin must not build a branch session");
 
-// An unparseable file is simply no pin, so supervision keeps working.
+// An unparseable file is simply no pin, so supervision keeps working and the
+// branch follows main's own model.
 writeFileSync(`${home}/config/supervision-branch-model`, "not-a-model-reference\n");
 fire("session_shutdown", {});
 fire("session_start", {}, makeCtx());
 dispatch("signal: unparseable pin probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unparseable-pin branch build");
-if ("model" in globalThis.__fmSessions[0].options) {
-  throw new Error("an unparseable pin must fall through to the untouched default path");
+const unparseable = globalThis.__fmSessions[0].options.model;
+if (unparseable?.provider !== "anthropic" || unparseable?.id !== "main-model") {
+  throw new Error(`an unparseable pin must be treated as no pin and follow main: ${JSON.stringify(unparseable)}`);
 }
 process.exit(0);
 EOF

@@ -39,8 +39,9 @@
 // pin a cheaper model for the branch alone with /supervision-model, which
 // picks from Pi's own catalog and persists one line under this home's
 // config/. docs/configuration.md owns that file's operator-facing schema. No
-// pin means no model override at all: Pi restores a reopened branch's
-// recorded model or gives a new branch the same default model main takes.
+// pin means the branch follows main's own model, applied explicitly on every
+// build so a reopened branch cannot restore a model an earlier pin left in
+// its session.
 //
 // Threat model (captain-decided): the branch's actor identity is
 // CONFUSED-AGENT-GRADE - deterministic spawnHook env injection plus a
@@ -134,14 +135,14 @@ function afkActive(): boolean {
 // One model the runtime can hand back, without importing pi-ai directly.
 type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
+type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
 
 // The supervision-branch model pin, owned operator-side by
 // docs/configuration.md: one "<provider>/<model-id>" line under this home's
-// config/. An absent, unreadable, or unparseable file means no pin, which
-// keeps today's behavior exactly - Pi restores a reopened branch's recorded
-// model or gives a new branch the same default model main takes. Only the
-// FIRST "/" separates the two halves, so a
-// provider-qualified model id such as openrouter/anthropic/claude survives.
+// config/. An absent, unreadable, or unparseable file means no pin, and the
+// branch then follows main's own model. Only the FIRST "/" separates the two
+// halves, so a provider-qualified model id such as
+// openrouter/anthropic/claude survives.
 function readModelPin(): { provider: string; modelId: string } | null {
   let stored: string;
   try {
@@ -317,23 +318,54 @@ export default function (pi: ExtensionAPI) {
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
   let modelSelectionRevision = 0;
+  // Main's own current model, tracked from the contexts Pi already hands this
+  // extension plus its model_select event, because createBranch runs at wake
+  // time with no context of its own. It is what "follow main" applies.
+  let mainModel: { provider: string; id: string } | null = null;
 
-  async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
-    const label = `${pin.provider}/${pin.modelId}`;
-    const modelRuntime = await ModelRuntime.create();
-    const model = modelRuntime.getModel(pin.provider, pin.modelId) as BranchModel | undefined;
-    if (!model) {
-      throw new Error(`supervision model pin ${label} is unavailable to the isolated branch runtime`);
-    }
-    if (!modelRuntime.hasConfiguredAuth(pin.provider)) {
-      throw new Error(`supervision model pin ${label} has no configured credentials in the isolated branch runtime`);
-    }
-    return { model, modelRuntime };
+  function rememberMainModel(ctx?: { model?: { provider: string; id: string } }): void {
+    if (ctx?.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
   }
 
-  async function pinnedBranchModel(): Promise<PinnedBranchModel | undefined> {
+  // Resolves one model against the isolated branch runtime using only the
+  // credentials that runtime already holds - the branch runs in the same home
+  // and same user as main, so stored credentials keep their own semantics
+  // (OAuth stays OAuth, an API key stays an API key) and nothing is ever
+  // installed, converted, derived, or overwritten here.
+  async function resolveBranchModel(provider: string, modelId: string): Promise<BranchModelResolution> {
+    const label = `${provider}/${modelId}`;
+    const modelRuntime = await ModelRuntime.create();
+    const model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
+    if (!modelRuntime.hasConfiguredAuth(provider)) {
+      return { ok: false, reason: `${label} has no configured credentials in the isolated branch runtime` };
+    }
+    return { ok: true, selection: { model, modelRuntime } };
+  }
+
+  async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
+    const resolved = await resolveBranchModel(pin.provider, pin.modelId);
+    if (!resolved.ok) {
+      throw new Error(`supervision model pin ${resolved.reason} (config/supervision-branch-model)`);
+    }
+    return resolved.selection;
+  }
+
+  // The pin file's CURRENT state decides the model on every branch build,
+  // create and reopen alike, and it overrides Pi's restore of whatever model
+  // a reopened branch session recorded. With a pin, that model. With no pin,
+  // main's own model is applied EXPLICITLY - otherwise clearing the pin would
+  // report that the branch follows main while the reopened session quietly
+  // restored the model an earlier pin left behind. Only when main's model is
+  // genuinely unknown, or the isolated runtime cannot run it, does the build
+  // fall back to passing no override at all, which is the pre-feature
+  // behavior; the branch is never refused over model choice alone.
+  async function branchModelSelection(): Promise<PinnedBranchModel | undefined> {
     const pin = readModelPin();
-    return pin ? preparePinnedBranchModel(pin) : undefined;
+    if (pin) return preparePinnedBranchModel(pin);
+    if (!mainModel) return undefined;
+    const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
+    return resolved.ok ? resolved.selection : undefined;
   }
 
   function generationOwnsLock(expectedGeneration: number): boolean {
@@ -514,11 +546,8 @@ export default function (pi: ExtensionAPI) {
     // honor must fail before this build leaves anything behind. Every branch
     // build goes through here - first wake of a cold start, and the reopen
     // after /new, /resume, /fork, or reload - so resolving it here is what
-    // makes the captain's choice survive all of them. With no pin the option
-    // stays undefined and Pi picks the branch's model exactly as it did
-    // before this existed: restored from the reopened branch session, else
-    // the same default main takes.
-    const pinned = await pinnedBranchModel();
+    // makes the captain's current choice authoritative on all of them.
+    const pinned = await branchModelSelection();
     const prompt = spawnSync("bash", [promptScript], {
       cwd: fmRoot,
       encoding: "utf8",
@@ -805,6 +834,7 @@ ${context.command}
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
+    rememberMainModel(ctx);
     if (!actingAsOwner()) return;
     try {
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
@@ -821,11 +851,19 @@ ${context.command}
   // cursor, and releases the branch session; a replacement session_start
   // re-arms, and the next wake reopens the persistent branch from its
   // recorded pointer. Terminal quit simply never fires another session_start.
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (_event, ctx) => {
+    rememberMainModel(ctx);
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
     actingAsOwner(generation);
+  });
+
+  // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
+  // the authoritative signal that "follow main" now means a different model.
+  pi.on?.("model_select", (event) => {
+    const selected = (event as { model?: { provider: string; id: string } }).model;
+    if (selected) mainModel = { provider: selected.provider, id: selected.id };
   });
 
   pi.on?.("session_shutdown", () => {
@@ -852,6 +890,7 @@ ${context.command}
   pi.registerCommand?.("supervision-model", {
     description: "Pick the model Firstmate's Pi supervision branch uses, or follow main's.",
     handler: async (_args, ctx) => {
+      rememberMainModel(ctx);
       const pin = readModelPin();
       const current = pin ? `${pin.provider}/${pin.modelId}` : "follows main";
       const followMain = `Follow main${ctx.model ? ` (${modelLabel(ctx.model)})` : ""}`;
@@ -889,11 +928,22 @@ ${context.command}
       }
       modelSelectionRevision += 1;
       releaseBranchForModelChange();
+      if (picked !== followMain) {
+        ctx.ui.notify(`Supervision branch model: ${picked}.`, "info");
+        return;
+      }
+      // Clearing the pin only follows main if main's model can actually be
+      // applied to the branch; say what will really happen rather than
+      // reporting a state that did not take effect.
+      const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
+      if (following?.ok) {
+        ctx.ui.notify(`Supervision branch follows main's model (${modelLabel(following.selection.model)}).`, "info");
+        return;
+      }
+      const why = following ? following.reason : "main's model is not known yet";
       ctx.ui.notify(
-        picked === followMain
-          ? "Supervision branch follows main's model."
-          : `Supervision branch model: ${picked}.`,
-        "info",
+        `Supervision branch pin cleared, but main's model could not be applied (${why}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+        "warning",
       );
     },
   });
