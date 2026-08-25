@@ -294,6 +294,8 @@ def run(argv: list[str]) -> int:
         "with submit_crosscheck_verdict."
     )
     repair_prompt = result.with_name("repair-prompt.txt")
+    session_dir = result.with_name("pi-session")
+    session_dir.mkdir(mode=0o700)
     attempt_telemetry: list[dict[str, Any]] = []
     for attempt in range(2):
         active_prompt = prompt if attempt == 0 else repair_prompt
@@ -311,16 +313,17 @@ def run(argv: list[str]) -> int:
             "--model",
             model,
             "--thinking",
-            effort,
+            effort if attempt == 0 else "minimal",
             "--tools",
             "submit_crosscheck_verdict",
             "--extension",
             str(extension),
             "--system-prompt",
             system_prompt,
+            "--session-dir",
+            str(session_dir),
             "--session-id",
             session_id(model, extension),
-            "--no-session",
             "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
@@ -350,13 +353,11 @@ def run(argv: list[str]) -> int:
                     f"{exc}; one bounded verdict repair was exhausted"
                 ) from exc
             repair_prompt.write_text(
-                prompt.read_text(encoding="utf-8")
-                + "\n\nVERDICT PROTOCOL REPAIR (trusted controller instruction):\n"
-                + "The preceding isolated attempt did not produce exactly one valid "
-                + "submit_crosscheck_verdict call. Re-evaluate this same exact-head "
-                + "packet. Do not end with prose and do not call the tool more than "
-                + "once. Submit the complete schema-valid verdict through "
-                + "submit_crosscheck_verdict exactly once.\n",
+                "VERDICT PROTOCOL REPAIR (trusted controller instruction):\n"
+                "Continue from the preceding attempt in this isolated session. "
+                "Do not repeat the review or restate its analysis. Do not end with "
+                "prose and do not call the tool more than once. Submit the complete "
+                "schema-valid verdict through submit_crosscheck_verdict exactly once.\n",
                 encoding="utf-8",
             )
             continue

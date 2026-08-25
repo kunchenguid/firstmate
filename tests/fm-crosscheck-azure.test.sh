@@ -2928,6 +2928,13 @@ import sys
 
 capture_path = Path(os.environ["CAPTURE"])
 captures = json.loads(capture_path.read_text()) if capture_path.exists() else []
+session_dir = Path(sys.argv[sys.argv.index("--session-dir") + 1])
+session_marker = session_dir / "continued-session"
+if captures:
+    assert session_marker.read_text() == "ready"
+else:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_marker.write_text("ready")
 captures.append({
     "argv": sys.argv[1:],
     "account": os.environ.get("PI_CODING_AGENT_DIR"),
@@ -2984,6 +2991,9 @@ message = {
 if effective == "internal-retry":
     message["content"] = [{**call, "id": ""}]
     message["stopReason"] = "error"
+elif effective == "length":
+    message["content"] = []
+    message["stopReason"] = "length"
 print(json.dumps({"type": "turn_end", "message": message}))
 print(json.dumps({"type": "agent_end"}))
 if effective == "internal-retry":
@@ -3047,11 +3057,12 @@ def assert_launch(captured, account, prompt, schema, attempts=1):
         active_prompt = prompt if index == 0 else prompt.parent / "repair-prompt.txt"
         assert launch["argv"] == [
             "--mode", "json", "--offline", "--provider", provider,
-            "--model", model, "--thinking", "xhigh",
+            "--model", model, "--thinking", "xhigh" if index == 0 else "minimal",
             "--tools", "submit_crosscheck_verdict",
             "--extension", str(extension),
             "--system-prompt", system_prompt,
-            "--session-id", session, "--no-session", "--no-extensions",
+            "--session-dir", str(prompt.parent / "pi-session"),
+            "--session-id", session, "--no-extensions",
             "--no-skills", "--no-prompt-templates", "--no-themes",
             "--no-context-files", "--no-approve", f"@{active_prompt}",
         ], launch["argv"]
@@ -3059,7 +3070,9 @@ def assert_launch(captured, account, prompt, schema, attempts=1):
         assert launch["schema"] == str(schema), launch
     if attempts == 2:
         repair = captured[1]["prompt_text"]
-        assert repair.startswith("PROMPT BY FILE\n\nVERDICT PROTOCOL REPAIR"), repair
+        assert repair.startswith("VERDICT PROTOCOL REPAIR"), repair
+        assert "PROMPT BY FILE" not in repair, repair
+        assert "Do not repeat the review" in repair, repair
         assert "submit_crosscheck_verdict exactly once" in repair, repair
 
 
@@ -3085,7 +3098,10 @@ assert completed.returncode == 0 and value["verdict"] == outer["verdict"], (
 )
 assert_launch(captured, account, prompt, schema)
 
-for scenario in ("missing-then-valid", "multiple-then-valid", "multiple-json-then-valid"):
+for scenario in (
+    "missing-then-valid", "multiple-then-valid", "multiple-json-then-valid",
+    "length-then-valid",
+):
     completed, captured, value, account, prompt, schema = run(scenario)
     assert completed.returncode == 0 and value["verdict"] == outer["verdict"], (
         scenario, completed.returncode, completed.stderr, value,

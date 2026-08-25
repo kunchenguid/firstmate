@@ -81,7 +81,7 @@ The prompt is passed by `@file` so repository and claim size cannot exceed the p
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
 That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
 Crosscheck accepts exactly one verdict tool call from the successful final attempt and preserves usage across Pi auto-retries.
-If an otherwise completed attempt makes zero, multiple, or malformed verdict calls, the same isolated reviewer identity receives one fresh, fixed repair prompt containing the same exact-head packet.
+If an otherwise completed attempt makes zero, multiple, or malformed verdict calls, the same isolated reviewer session receives one fixed verdict-only repair prompt and retains the exact-head packet plus the first attempt's reasoning without repeating the review.
 The repair is attempted once, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.

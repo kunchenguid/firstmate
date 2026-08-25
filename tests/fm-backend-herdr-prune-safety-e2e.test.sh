@@ -28,6 +28,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
+wait_for_marker_growth() {
+  baseline=$1
+  attempts=0
+  while [ "$attempts" -lt 100 ]; do
+    current=0
+    if [ -f "$MARKER" ]; then
+      current=$(wc -l < "$MARKER" | tr -d '[:space:]')
+    fi
+    [ "${current:-0}" -gt "$baseline" ] && return 0
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
@@ -83,8 +97,7 @@ MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
   || fail "could not start the live heartbeat process in the startup workspace's pane"
-sleep 2
-[ -s "$MARKER" ] || fail "the live heartbeat process did not start writing its marker file"
+wait_for_marker_growth 0 || fail "the live heartbeat process did not start writing its marker file"
 BEFORE_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 pass "repro setup: a live long-running process is running in the startup workspace's single tab (label '1'), heartbeating to a marker file"
 
@@ -112,7 +125,8 @@ fi
 if ! herdr pane get "$LIVE_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION (2026-07-02 self-kill): the live startup-workspace pane was CLOSED by create_task"
 fi
-sleep 2
+wait_for_marker_growth "$BEFORE_COUNT" \
+  || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"
 AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] \
   || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"
