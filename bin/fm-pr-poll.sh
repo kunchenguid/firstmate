@@ -160,13 +160,19 @@ LOGINS
     # so an unpaginated single-page read silently misses a merge on any
     # repository with more than one page of pull requests. Every page is
     # scanned in index order until the target is found or a short page marks
-    # the end of the list; a hard page ceiling keeps a pathological server
-    # from wedging this poll on one invocation instead of retrying next cycle.
+    # the end of the list. A page ceiling alone would trade one silent-miss
+    # boundary for another (any repository whose watched pull request sits
+    # beyond it is stranded on every future cycle, never just delayed), so
+    # the ceiling here is sized far past any real Gitea repository's pull
+    # request count instead of a plausibly reachable one, and a wall-clock
+    # deadline is the actual backstop against a pathological server wedging
+    # this single invocation.
     limit=50
     page=1
-    max_pages=1000
+    max_pages=20000
+    deadline=$((SECONDS + 60))
     state=
-    while [ "$page" -le "$max_pages" ]; do
+    while [ "$page" -le "$max_pages" ] && [ "$SECONDS" -lt "$deadline" ]; do
       raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --output tsv \
         --fields index,state --state all --page "$page" --limit "$limit" 2>/dev/null) || exit 0
       rows=0
