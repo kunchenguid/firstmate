@@ -791,6 +791,19 @@ clear_write_tracking() {  # <window-key>
 # to act, short enough to bound the burn. Tracked for revert: see
 # PATCHES.md (patch-wedge-cap-2026-08-19).
 FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-10}
+# v3 (2026-08-25): validate the override. A non-positive integer (0, negative)
+# would fire the cap on the very first wedge escalation, silencing fresh wakes
+# before the demand-deep-inspection marker ever surfaces; a non-integer would
+# make the `[ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]` integer compare error
+# silently (no `set -e` here) and the cap would never fire. Either way the
+# safety floor the patch exists to provide is broken. Reject both, log a
+# warning so the bad config is visible, and fall back to the default.
+case "$FM_WEDGE_MAX_ESCALATIONS" in
+  ''|*[!0-9]*) triage_log "FM_WEDGE_MAX_ESCALATIONS='$FM_WEDGE_MAX_ESCALATIONS' is not a positive integer, falling back to 10 (local patch 2026-08-19)"
+              FM_WEDGE_MAX_ESCALATIONS=10 ;;
+  0)            triage_log "FM_WEDGE_MAX_ESCALATIONS=0 would cap on the first escalation, falling back to 10 (local patch 2026-08-19)"
+              FM_WEDGE_MAX_ESCALATIONS=10 ;;
+esac
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
@@ -853,23 +866,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # stop. Durable STATE/.wedge-permanent-<key>-<hash12> marker so subsequent
         # polls for the SAME stale hash short-circuit (see return at top of
         # function) without silencing fresh stale hashes in the same window.
-        # ORDERING INVARIANT: write the marker AFTER `wake` succeeds. If we
-        # wrote it before the wake and the script were killed (or `wake` failed
-        # non-fatally) between marker-write and wake-publish, the pane would be
-        # silently wedged forever - the marker would suppress retries for a
-        # terminal escalation that never actually surfaced. Writing last means
-        # a crash mid-flow leaves no marker, and the next poll re-enters the
-        # cap-reached branch and tries again.
+        # ORDERING INVARIANT: write the marker AFTER `fm_wake_append` succeeds
+        # but BEFORE `wake` runs. wake() is sourced from fm-push-transition-lib
+        # and `exit 0`s at the end (this watcher only emits one wake per cycle),
+        # so a marker written after `wake` would be dead code and the cap would
+        # never persist. Writing after fm_wake_append (not before) means a fs
+        # failure during wake-append leaves no marker, so the next poll retries
+        # - the only durable state we depend on is the wake queue record, not
+        # the marker.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this hash until pane recovers; local patch 2026-08-19)"
           fm_wake_append stale "$win" "$reason" || exit 1
           rm -f "$since_file"
           clear_write_tracking "$(window_key "$win")"
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
-          wake "$reason"
           if [ -n "$permanent_marker" ]; then
             date +%s > "$permanent_marker"
           fi
+          wake "$reason"
           return 0
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
