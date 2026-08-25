@@ -247,6 +247,7 @@ family_for_basename() {
       printf '%s\n' secondmate
       ;;
     fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-pi-compaction-context.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -553,6 +554,7 @@ tests/fm-opencode-primary-live-e2e.test.sh 22
 tests/fm-operational-input.test.sh 246
 tests/fm-peek-remote.test.sh 848
 tests/fm-pending-reply.test.sh 19488
+tests/fm-pi-compaction-context.test.sh 15183
 tests/fm-pi-primary-live-e2e.test.sh 41
 tests/fm-pi-watch-extension.test.sh 17979
 tests/fm-pr-check-security.test.sh 250417

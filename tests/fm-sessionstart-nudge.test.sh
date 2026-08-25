@@ -933,6 +933,124 @@ JS
   pass "Pi retains a bounded digest prefix and loudly marks oversized preflight delivery"
 }
 
+test_pi_compact_refresh_is_nontriggering_bounded_and_restorable() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi compact-refresh behavior test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-compact-refresh"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'CURRENT AGENTS.md - INSTRUCTION REFRESH\n'
+printf 'COMPACT_REFRESH_CURRENT_INSTRUCTIONS\n'
+head -c 260000 /dev/zero | tr '\0' D
+SH
+  for script in fm-turnend-guard.sh fm-arm-pretool-check.sh fm-cd-pretool-check.sh; do
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  const sent = [];
+  const entries = [];
+  return {
+    handlers,
+    sent,
+    entries,
+    api: {
+      on(event, handler) { handlers.set(event, handler); },
+      sendMessage(message, options) { sent.push({ message, options }); },
+      sendUserMessage() {},
+      appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
+      getActiveTools() { return ["read", "bash"]; },
+      getAllTools() {
+        return [
+          { name: "read", description: "Read a file", parameters: { type: "object" } },
+          { name: "bash", description: "Run a command", parameters: { type: "object" } },
+        ];
+      },
+    },
+  };
+}
+
+const first = makePi();
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?compact=${Date.now()}`);
+extension.default(first.api);
+const sessionCtx = {
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getBranch: () => [],
+  },
+  hasUI: false,
+};
+await first.handlers.get("session_start")({ reason: "startup" }, sessionCtx);
+if (first.sent.length !== 1) throw new Error(`startup sent ${first.sent.length} messages`);
+if (first.sent[0].options?.triggerTurn !== false) throw new Error("startup delivery was not explicitly non-triggering");
+first.sent.length = 0;
+await first.handlers.get("session_before_compact")({
+  preparation: { settings: { reserveTokens: 1024, keepRecentTokens: 512 } },
+});
+await first.handlers.get("session_compact")({}, sessionCtx);
+if (first.sent.length !== 0) throw new Error("session_compact queued or persisted a model message");
+if (first.entries.length !== 1) throw new Error(`expected one durable refresh entry, got ${first.entries.length}`);
+const contextCtx = {
+  model: { contextWindow: 65536 },
+  getContextUsage: () => ({ tokens: null, contextWindow: 65536, percent: null }),
+  getSystemPrompt: () => "S".repeat(4000),
+  hasUI: false,
+};
+const contextEvent = {
+  messages: [{ role: "user", content: [{ type: "text", text: "next prompt" }], timestamp: Date.now() }],
+};
+const result = await first.handlers.get("context")(contextEvent, contextCtx);
+if (!result || result.messages.length !== 2) throw new Error("compact refresh did not reach model context");
+const refresh = result.messages[1];
+if (!refresh.content.includes("COMPACT_REFRESH_CURRENT_INSTRUCTIONS")) throw new Error("current instruction prefix was lost");
+if (!refresh.content.includes("PI POST-COMPACTION REFRESH TRUNCATED FOR CONTEXT SAFETY")) throw new Error("bounded omission was not model-readable");
+if (!refresh.content.includes("/AGENTS.md completely")) throw new Error("omitted instruction pointer was lost");
+const budget = refresh.details?.budget;
+if (!budget || budget.omitted !== true) throw new Error("bounded delivery accounting was absent");
+if (budget.deliveredTokens > budget.availableTokens) throw new Error("delivery exceeded the selected model budget");
+if (first.sent.length !== 0) throw new Error("context delivery triggered a model turn");
+
+const restored = makePi();
+const restoredExtension = await import(`${pathToFileURL(process.env.EXT).href}?restore=${Date.now()}`);
+restoredExtension.default(restored.api);
+const branch = [
+  { type: "compaction" },
+  first.entries[0],
+  { type: "message", message: { role: "assistant" } },
+];
+await restored.handlers.get("session_start")(
+  { reason: "reload" },
+  { sessionManager: { getHeader: () => ({ timestamp: new Date().toISOString() }), getBranch: () => branch }, hasUI: false },
+);
+const restoredResult = await restored.handlers.get("context")(contextEvent, contextCtx);
+if (!restoredResult?.messages[1]?.content.includes("COMPACT_REFRESH_CURRENT_INSTRUCTIONS")) {
+  throw new Error("durable non-context refresh state was not restored after reload");
+}
+if (restored.sent.length !== 0) throw new Error("reload restoration persisted or triggered a model message");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi compact refresh behavior"
+  [ -z "$out" ] || fail "Pi compact refresh behavior printed output: $out"
+  pass "Pi compact refresh stays non-triggering, model-bounded, model-readable, and reload-restorable"
+}
+
 test_run_resume_delegates_to_the_nudge() {
   local root="$TMP_ROOT/run-resume" out status=0
   make_run_primary "$root"
@@ -1004,12 +1122,11 @@ test_run_gate_and_scope_are_silent() {
 }
 
 test_run_reports_a_failed_session_start_as_digest_text() {
-  local root="$TMP_ROOT/run-unwritable" out status=0
+  local root="$TMP_ROOT/run-invalid-lock" out status=0
   make_run_primary "$root"
-  chmod 0500 "$root/state"
+  ln -s /dev/null "$root/state/.lock"
   out=$(run_hook "$root" --source startup </dev/null) || status=$?
-  chmod 0700 "$root/state"
-  expect_code 0 "$status" "run wrapper with an unwritable state directory"
+  expect_code 0 "$status" "run wrapper with an invalid session lock"
   assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
@@ -1037,3 +1154,4 @@ test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
 test_pi_reload_releases_sessionstart_exit_listener
 test_pi_large_sessionstart_digest_is_delivered_loudly
+test_pi_compact_refresh_is_nontriggering_bounded_and_restorable

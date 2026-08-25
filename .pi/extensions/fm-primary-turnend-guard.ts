@@ -12,6 +12,29 @@ import {
 let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
+type CompactRefreshState = {
+  version: 1;
+  raw: string;
+  observedBytes: number;
+  hardTruncated: boolean;
+  reserveTokens: number;
+  keepRecentTokens: number;
+};
+type CompactRefreshBudget = {
+  contextWindow: number;
+  reserveTokens: number;
+  baseTokens: number;
+  safetyTokens: number;
+  availableTokens: number;
+  deliveredTokens: number;
+  omitted: boolean;
+};
+
+const compactRefreshStateType = "firstmate-post-compact-refresh";
+let compactSettings: { reserveTokens: number; keepRecentTokens: number } | undefined;
+let compactRefresh: CompactRefreshState | undefined;
+let previousCompactRefreshTokens = 0;
+let compactRefreshNotice = "";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -59,14 +82,16 @@ function markLoaded(): void {
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
-// separate session_compact event fires after a compaction. "new" is Pi's /new
+// separate session_compact event fires after a compaction. "new" is Pi's /clear
 // while reload, resume, and fork all keep prior context.
 const sessionstartDeliveryBytes = 512 * 1024;
+const compactRefreshSafetyTokens = 2048;
 
 type SessionStartContext = {
   sessionManager?: {
     getHeader?: () => { timestamp?: unknown } | null | undefined;
     getSessionId?: () => unknown;
+    getBranch?: () => unknown[];
   };
 };
 
@@ -109,7 +134,7 @@ const sessionstartRetireTimeoutMs = 1000;
 // lets only the matching session id claim one persistent provider prerequisite.
 type SessionstartSource = "startup" | "clear" | "resume" | "fork" | "compact";
 type SessionstartResult =
-  | { kind: "ready"; raw: string }
+  | { kind: "ready"; raw: string; observedBytes: number; hardTruncated: boolean }
   | { kind: "empty" | "failed" | "ineligible" | "cancelled" };
 type SessionstartMessage = {
   customType: "firstmate-sessionstart-nudge";
@@ -322,6 +347,8 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
       settle({
         kind: "ready",
         raw: truncated ? `${raw}${sessionstartTruncatedMarker}` : raw,
+        observedBytes,
+        hardTruncated: truncated,
       });
     };
     const completePending = (): void => {
@@ -424,10 +451,10 @@ function sessionstartMessage(
   }
 }
 
-async function claimSessionstartMessage(
+async function claimSessionstartResult(
   generation: SessionstartGeneration,
   ctx?: SessionStartContext,
-): Promise<SessionstartMessage | undefined> {
+): Promise<SessionstartResult | undefined> {
   const result = await generation.result;
   if (!sessionstartGenerationIsLive(generation) || generation.delivered) return undefined;
   const currentSessionId = ctx ? sessionIdFromContext(ctx) : "";
@@ -435,7 +462,227 @@ async function claimSessionstartMessage(
     return undefined;
   }
   generation.delivered = true;
+  return result;
+}
+
+async function claimSessionstartMessage(
+  generation: SessionstartGeneration,
+  ctx?: SessionStartContext,
+): Promise<SessionstartMessage | undefined> {
+  const result = await claimSessionstartResult(generation, ctx);
+  if (!result) return undefined;
   return sessionstartMessage(generation, result);
+}
+
+function contentChars(content: unknown): number {
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let chars = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const item = block as { type?: unknown; text?: unknown; source?: unknown };
+    if (item.type === "text" && typeof item.text === "string") chars += item.text.length;
+    if (item.type === "image") chars += 4800;
+  }
+  return chars;
+}
+
+function estimateMessageTokens(message: unknown): number {
+  if (!message || typeof message !== "object") return 0;
+  const item = message as {
+    role?: unknown;
+    content?: unknown;
+    command?: unknown;
+    output?: unknown;
+    summary?: unknown;
+  };
+  let chars = 0;
+  switch (item.role) {
+    case "user":
+    case "custom":
+    case "toolResult":
+      chars = contentChars(item.content);
+      break;
+    case "assistant":
+      if (Array.isArray(item.content)) {
+        for (const block of item.content) {
+          if (!block || typeof block !== "object") continue;
+          const part = block as {
+            type?: unknown;
+            text?: unknown;
+            thinking?: unknown;
+            name?: unknown;
+            arguments?: unknown;
+          };
+          if (part.type === "text" && typeof part.text === "string") chars += part.text.length;
+          if (part.type === "thinking" && typeof part.thinking === "string") chars += part.thinking.length;
+          if (part.type === "toolCall") {
+            if (typeof part.name === "string") chars += part.name.length;
+            try {
+              chars += JSON.stringify(part.arguments).length;
+            } catch {
+            }
+          }
+        }
+      }
+      break;
+    case "bashExecution":
+      chars = String(item.command ?? "").length + String(item.output ?? "").length;
+      break;
+    case "branchSummary":
+    case "compactionSummary":
+      chars = String(item.summary ?? "").length;
+      break;
+    default:
+      try {
+        chars = JSON.stringify(item).length;
+      } catch {
+        chars = 0;
+      }
+  }
+  return Math.ceil(chars / 4);
+}
+
+function activeToolTokens(pi: ExtensionAPI): number {
+  try {
+    const active = new Set(pi.getActiveTools());
+    const tools = pi.getAllTools()
+      .filter((tool) => active.has(tool.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        promptGuidelines: tool.promptGuidelines,
+      }));
+    return Math.ceil(JSON.stringify(tools).length / 4);
+  } catch {
+    return 0;
+  }
+}
+
+function restoreCompactRefresh(ctx: SessionStartContext): void {
+  compactRefresh = undefined;
+  previousCompactRefreshTokens = 0;
+  compactRefreshNotice = "";
+  const branch = ctx.sessionManager?.getBranch?.();
+  if (!Array.isArray(branch)) return;
+  let latestCompactionIndex = -1;
+  for (let i = branch.length - 1; i >= 0; i -= 1) {
+    const entry = branch[i] as { type?: unknown };
+    if (entry?.type === "compaction") {
+      latestCompactionIndex = i;
+      break;
+    }
+  }
+  if (latestCompactionIndex < 0) return;
+  for (let i = branch.length - 1; i > latestCompactionIndex; i -= 1) {
+    const entry = branch[i] as { type?: unknown; customType?: unknown; data?: unknown };
+    if (entry?.type !== "custom" || entry.customType !== compactRefreshStateType) continue;
+    const data = entry.data as Partial<CompactRefreshState> | undefined;
+    if (
+      data?.version === 1 && typeof data.raw === "string" &&
+      Number.isFinite(data.observedBytes) && typeof data.hardTruncated === "boolean" &&
+      Number.isFinite(data.reserveTokens) && Number.isFinite(data.keepRecentTokens)
+    ) {
+      compactRefresh = data as CompactRefreshState;
+    }
+    return;
+  }
+  compactRefresh = {
+    version: 1,
+    raw: "",
+    observedBytes: 0,
+    hardTruncated: false,
+    reserveTokens: 16384,
+    keepRecentTokens: 20000,
+  };
+}
+
+function trimTrailingHighSurrogate(value: string): string {
+  if (!value) return value;
+  const code = value.charCodeAt(value.length - 1);
+  return code >= 0xd800 && code <= 0xdbff ? value.slice(0, -1) : value;
+}
+
+function compactRefreshContent(
+  refresh: CompactRefreshState,
+  availableTokens: number,
+): { content: string; deliveredTokens: number; omitted: boolean } | undefined {
+  if (availableTokens <= 0) return undefined;
+  const sourceIndex =
+    `Read ${root}/AGENTS.md completely before acting on omitted instructions. ` +
+    `Inspect only the needed durable sources named in the retained index under ${fmHome}/data and ${fmHome}/state; do not infer omitted state.`;
+  const minimalBody = `POST-COMPACTION REFRESH OMITTED FOR CONTEXT SAFETY. ${sourceIndex}`;
+  let minimalContent: string;
+  try {
+    minimalContent = encodeFirstmateOperationalInput("session-start", minimalBody);
+  } catch {
+    return undefined;
+  }
+  const minimalTokens = Math.ceil(minimalContent.length / 4);
+  if (minimalTokens > availableTokens) return undefined;
+
+  let fullContent: string;
+  try {
+    fullContent = encodeFirstmateOperationalInput("session-start", refresh.raw || minimalBody);
+  } catch {
+    return undefined;
+  }
+  const fullTokens = Math.ceil(fullContent.length / 4);
+  if (!refresh.hardTruncated && refresh.raw && fullTokens <= availableTokens) {
+    return { content: fullContent, deliveredTokens: fullTokens, omitted: false };
+  }
+
+  const allowedChars = availableTokens * 4;
+  const prefixChars = encodeFirstmateOperationalInput("session-start", "x").length - 1;
+  const marker =
+    `\n\nPI POST-COMPACTION REFRESH TRUNCATED FOR CONTEXT SAFETY - the refresh contained ` +
+    `${refresh.raw.length} available characters from ${refresh.observedBytes} observed output bytes. ` +
+    `${sourceIndex}`;
+  let retained = trimTrailingHighSurrogate(
+    refresh.raw.slice(0, Math.max(0, allowedChars - prefixChars - marker.length)),
+  );
+  let content = encodeFirstmateOperationalInput("session-start", `${retained}${marker}`);
+  while (Math.ceil(content.length / 4) > availableTokens && retained.length > 0) {
+    retained = trimTrailingHighSurrogate(retained.slice(0, Math.max(0, retained.length - 16)));
+    content = encodeFirstmateOperationalInput("session-start", `${retained}${marker}`);
+  }
+  const deliveredTokens = Math.ceil(content.length / 4);
+  if (deliveredTokens > availableTokens) {
+    return { content: minimalContent, deliveredTokens: minimalTokens, omitted: true };
+  }
+  return { content, deliveredTokens, omitted: true };
+}
+
+function compactRefreshBudget(
+  pi: ExtensionAPI,
+  refresh: CompactRefreshState,
+  eventMessages: unknown[],
+  ctx: {
+    model?: { contextWindow?: number };
+    getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined;
+    getSystemPrompt?: () => string;
+  },
+): Omit<CompactRefreshBudget, "deliveredTokens" | "omitted"> | undefined {
+  const usage = ctx.getContextUsage?.();
+  const contextWindow = usage?.contextWindow || ctx.model?.contextWindow || 0;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+  const reserveTokens = Math.max(0, Math.min(contextWindow, refresh.reserveTokens));
+  const desiredSafetyTokens = Math.max(compactRefreshSafetyTokens, Math.ceil(contextWindow * 0.05));
+  let baseTokens: number;
+  if (usage?.tokens !== null && usage?.tokens !== undefined) {
+    baseTokens = Math.max(0, usage.tokens - previousCompactRefreshTokens);
+  } else {
+    const messageTokens = eventMessages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+    const systemTokens = Math.ceil(String(ctx.getSystemPrompt?.() ?? "").length / 4);
+    baseTokens = messageTokens + systemTokens + activeToolTokens(pi);
+  }
+  const headroomTokens = Math.max(0, Math.floor(contextWindow - reserveTokens - baseTokens));
+  // Preserve the normal safety margin without letting that margin itself crowd
+  // out the concise current-instruction pointer it exists to protect.
+  const safetyTokens = Math.min(desiredSafetyTokens, Math.max(0, headroomTokens - 256));
+  const availableTokens = Math.max(0, headroomTokens - safetyTokens);
+  return { contextWindow, reserveTokens, baseTokens, safetyTokens, availableTokens };
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -515,6 +762,7 @@ export default function (pi: ExtensionAPI) {
   registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
+    restoreCompactRefresh(ctx);
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
@@ -535,19 +783,51 @@ export default function (pi: ExtensionAPI) {
     return message ? { message } : undefined;
   });
 
-  // Pi's compaction equivalent. Manual compaction is idle and auto-compaction
-  // may retry without another before_agent_start, so the event keeps its
-  // existing delivery path while sharing generation ownership and cancellation.
+  pi.on?.("session_before_compact", (event) => {
+    compactSettings = {
+      reserveTokens: event.preparation.settings.reserveTokens,
+      keepRecentTokens: event.preparation.settings.keepRecentTokens,
+    };
+  });
+
+  // Pi's compaction equivalent shares startup's generation ownership and
+  // cancellation - a stale or superseded compaction cannot deliver - but never
+  // delivers through before_agent_start or an optionless sendMessage. A
+  // persistent full custom message would refill the context Pi just reduced
+  // and would itself enter a later summarization span, so the bounded result
+  // becomes durable extension state instead; the context hook below injects it
+  // ephemerally within the selected model's live budget on every later
+  // provider request.
   pi.on?.("session_compact", async (_event, ctx) => {
+    const reserveTokens = compactSettings?.reserveTokens ?? 16384;
+    const keepRecentTokens = compactSettings?.keepRecentTokens ?? 20000;
+    compactSettings = undefined;
     registerSessionstartExitListener();
     const generation = createSessionstartGeneration("compact", sessionIdFromContext(ctx));
     sessionstartGeneration = generation;
-    const message = await claimSessionstartMessage(generation, ctx);
-    if (!message || !sessionstartGenerationIsLive(generation)) return;
+    const result = await claimSessionstartResult(generation, ctx);
+    if (!result) return;
+    const raw = result.kind === "ready" ? result.raw : "";
+    compactRefresh = {
+      version: 1,
+      raw,
+      observedBytes: result.kind === "ready" ? result.observedBytes : 0,
+      hardTruncated: result.kind === "ready" ? result.hardTruncated : false,
+      reserveTokens,
+      keepRecentTokens,
+    };
+    previousCompactRefreshTokens = 0;
+    compactRefreshNotice = "";
     try {
-      pi.sendMessage(message);
+      pi.appendEntry(compactRefreshStateType, compactRefresh);
     } catch {
       generation.delivered = false;
+    }
+    if (!raw && ctx.hasUI) {
+      ctx.ui.notify(
+        `Firstmate could not rebuild its post-compaction digest; read ${root}/AGENTS.md before continuing.`,
+        "warning",
+      );
     }
   });
 
@@ -558,7 +838,60 @@ export default function (pi: ExtensionAPI) {
     } finally {
       if (sessionstartGeneration === generation) sessionstartGeneration = null;
       removeSessionstartExitListener();
+      compactSettings = undefined;
+      compactRefresh = undefined;
+      previousCompactRefreshTokens = 0;
+      compactRefreshNotice = "";
     }
+  });
+
+  pi.on("context", (event, ctx) => {
+    if (!compactRefresh) return;
+    const budget = compactRefreshBudget(pi, compactRefresh, event.messages, ctx);
+    if (!budget) return;
+    const bounded = compactRefreshContent(compactRefresh, budget.availableTokens);
+    if (!bounded) {
+      previousCompactRefreshTokens = 0;
+      const notice = "none";
+      if (ctx.hasUI && compactRefreshNotice !== notice) {
+        compactRefreshNotice = notice;
+        ctx.ui.notify(
+          `Firstmate omitted its post-compaction refresh because no safe model context remained; read ${root}/AGENTS.md before continuing.`,
+          "warning",
+        );
+      }
+      return;
+    }
+    previousCompactRefreshTokens = bounded.deliveredTokens;
+    if (bounded.omitted) {
+      const notice = "bounded";
+      if (ctx.hasUI && compactRefreshNotice !== notice) {
+        compactRefreshNotice = notice;
+        ctx.ui.notify(
+          `Firstmate bounded its post-compaction refresh to ${bounded.deliveredTokens} of ${budget.availableTokens} safe tokens; omitted sources remain readable on disk.`,
+          "warning",
+        );
+      }
+    }
+    const refreshMessage = {
+      role: "custom" as const,
+      customType: "firstmate-sessionstart-nudge",
+      content: bounded.content,
+      display: false,
+      details: {
+        kind: "session-start",
+        source: "compact",
+        ephemeral: true,
+        budget: { ...budget, deliveredTokens: bounded.deliveredTokens, omitted: bounded.omitted },
+      },
+      timestamp: Date.now(),
+    };
+    return { messages: [...event.messages, refreshMessage] };
+  });
+
+  pi.on("model_select", () => {
+    previousCompactRefreshTokens = 0;
+    compactRefreshNotice = "";
   });
 
   pi.on("tool_call", async (event) => {
