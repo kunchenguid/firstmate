@@ -80,6 +80,16 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "api graphql")
+    printf '%s\n' \
+      'state=MERGED' \
+      'merged=true' \
+      'queued=false' \
+      'base=main'
+    exit 0
+    ;;
+esac
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge a task's PR or MR after recording pr= and any available pr_head= through
+# Merge a task's PR or MR while recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh-axi by the derived owner and repository; a GitLab merge
@@ -8,6 +8,17 @@
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# After gh-axi returns success, GitHub's live state is read back and accepted
+# only when the pull request is merged or in the merge queue. gh-axi's view
+# surface does not expose isInMergeQueue, so this verification uses gh's
+# GraphQL API and requires gh on PATH. The gh-axi success output is withheld
+# until this read proves the real outcome. If the pull request remains open and
+# the base branch has an effective merge_queue rule, the refusal names the
+# queue's configured merge method and the exact -- --auto --<method> retry
+# flags. No method is selected for the caller. A gh-axi command failure keeps
+# the prior behavior of recording the PR for a later merge poll; a gh-axi
+# success records metadata only after outcome verification succeeds, so a
+# false-success response cannot make teardown treat unlanded work as landed.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -27,13 +38,6 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
-#
-# After the forge command, this script confirms the PR is actually merged before
-# reporting it; an auto-merge-queued or unconfirmed request leaves the poll armed
-# and records no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed
-# merge's destination, normal-case deduplication, and at-least-once recovery.
-# A landed merge whose outcome cannot be written is reported loudly rather than
-# misreported as a failed merge.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
@@ -44,8 +48,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-merge-outcome-lib.sh
-. "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
 # green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
 # without a branch actor).
@@ -138,6 +140,9 @@ if [ "$PROVIDER" = gitlab ]; then
     echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
     exit 1
   fi
+elif ! command -v gh >/dev/null 2>&1; then
+  echo "error: verifying a GitHub pull request merge requires gh on PATH" >&2
+  exit 1
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
@@ -146,12 +151,6 @@ RECORDED_HEAD=
 if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
-
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
-  exit 1
-}
 
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
@@ -254,54 +253,131 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
 }
 
-github_confirm_merged() {
-  local output state
-  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
-    printf 'actionable: GitHub accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
+# Read one live GitHub pull request view after gh-axi returns. The selected
+# fields distinguish a landed pull request from a merge-queue entry and retain
+# the concrete state needed for a refusal. Sets the four FM_PR_GITHUB_* values
+# only after all fields have been read exactly once.
+FM_PR_GITHUB_STATE=
+FM_PR_GITHUB_MERGED=
+FM_PR_GITHUB_QUEUED=
+FM_PR_GITHUB_BASE=
+github_read_outcome() {
+  local fields line
+  local total=0 named=0
+  local state='' merged='' queued='' base=''
+
+  # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
+  if ! fields=$(gh api graphql \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName}}}' \
+    -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
+    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
+    2>/dev/null) || [ -z "$fields" ]; then
+    echo "error: could not read the GitHub pull request outcome after the merge attempt" >&2
+    return 1
   fi
-  if ! state=$(printf '%s\n' "$output" | awk '
-    $1 == "state:" { count++; value=$2 }
-    END { if (count == 1 && value != "") print value; else exit 1 }
-  '); then
-    printf 'actionable: GitHub accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      queued=*) queued=${line#queued=} ;;
+      base=*) base=${line#base=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; } \
+    || { [ "$queued" != true ] && [ "$queued" != false ]; } \
+    || [ -z "$base" ]; then
+    echo "error: could not read the GitHub pull request outcome after the merge attempt" >&2
+    return 1
   fi
-  [ "$state" = merged ]
+
+  FM_PR_GITHUB_STATE=$state
+  FM_PR_GITHUB_MERGED=$merged
+  FM_PR_GITHUB_QUEUED=$queued
+  FM_PR_GITHUB_BASE=$base
 }
 
-gitlab_confirm_merged() {
-  local json state
-  if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
-    -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
-  fi
-  if ! state=$(printf '%s' "$json" | jq -r \
-    'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
+# Read the effective merge-queue method for the observed base branch. An
+# unreadable rules response does not hide the already-concrete outcome refusal;
+# it only means no queue-specific retry can be proven.
+FM_PR_GITHUB_QUEUE_METHOD=
+github_read_queue_method() {
+  local methods line method='' count=0
+  if ! methods=$(gh api \
+    "repos/$PR_OWNER/$PR_REPO/rules/branches/$FM_PR_GITHUB_BASE" \
+    --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
     2>/dev/null); then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
-    return 2
+    return 1
   fi
-  [ "$state" = merged ]
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      merge_method=*) method=${line#merge_method=} ;;
+      *) return 1 ;;
+    esac
+    count=$((count + 1))
+  done <<METHODS
+$methods
+METHODS
+  [ "$count" -eq 1 ] || return 1
+  case "$method" in
+    MERGE|SQUASH|REBASE) FM_PR_GITHUB_QUEUE_METHOD=$method ;;
+    *) return 1 ;;
+  esac
+}
+
+record_pr_metadata() {
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+  grep -qxF "pr=$URL" "$META" || {
+    echo "error: PR metadata recording failed" >&2
+    return 1
+  }
 }
 
 case "$PROVIDER" in
   github)
+    merge_output=
     merge_args=()
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
-    github_confirm_rc=0
-    github_confirm_merged || github_confirm_rc=$?
-    [ "$github_confirm_rc" -eq 0 ] || exit 0
+    if ! merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
+      record_pr_metadata || exit 1
+      [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+      exit 1
+    fi
+    github_read_outcome || exit 1
+    if [ "$FM_PR_GITHUB_MERGED" = true ]; then
+      record_pr_metadata || exit 1
+      printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
+        "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+    elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
+      record_pr_metadata || exit 1
+      printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
+        "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+    else
+      printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
+        "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
+      if github_read_queue_method; then
+        case "$FM_PR_GITHUB_QUEUE_METHOD" in
+          MERGE) queue_method=merge ;;
+          SQUASH) queue_method=squash ;;
+          REBASE) queue_method=rebase ;;
+        esac
+        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
+          "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
+      fi
+      exit 1
+    fi
     ;;
   gitlab)
+    record_pr_metadata || exit 1
     gitlab_verify_mergeable || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
@@ -309,28 +385,9 @@ case "$PROVIDER" in
     # the conditions above are what authorize the merge.
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
-    gitlab_confirm_rc=0
-    gitlab_confirm_merged || gitlab_confirm_rc=$?
-    [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   *)
     echo "error: invalid PR merge request" >&2
     exit 2
-    ;;
-esac
-
-# Reached only after the forge confirmed the merge landed: set -e exits on a
-# refused or failed merge above, and a queued forge merge exits without an
-# outcome while its existing poll remains armed.
-outcome_rc=0
-fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
-case "$outcome_rc" in
-  0) ;;
-  3)
-    printf 'actionable: merged %s but could not report it upward: this home has no readable secondmate identity or parent binding (.fm-secondmate-home, .fm-secondmate-parent)\n' \
-      "$URL" >&2
-    ;;
-  *)
-    printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
