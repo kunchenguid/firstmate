@@ -61,13 +61,36 @@ fm_nm_field() {  # <toon-output> <key>
 #   - equal commits (short or full SHA): match
 #   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
 #     the same history advanced the run tip past local HEAD)
-#   - run head is a strict ancestor of worktree HEAD, or diverged: no match
-#     (local work advanced outside the run, or the branch tip was rewritten)
+#   - run head is a strict ancestor of worktree HEAD, or diverged, or
+#     unresolvable: no match (local work advanced outside the run, or the
+#     branch tip was rewritten)
+#
+# Once the pipeline commits its own gate fixes, the run head exists ONLY in the
+# no-mistakes bare gate repo (wired as the worktree's `no-mistakes` remote) and
+# is not an object in the task worktree, so a worktree-only lookup rejected
+# every live run past its first gate fix and attribution fell through to a
+# stale prior run whose head still equalled the worktree HEAD - a LIVE run
+# read as failed (the 2026-07-25 incident). When the worktree cannot resolve
+# the head, resolve it in the gate repo and apply the same ancestry test
+# there: the run's base was pushed to the gate when the run started, so a
+# diverged or rewritten head still fails is-ancestor, and a worktree that
+# advanced past the run head carries local commits the gate repo has never
+# seen, which also fails. Both wrong-run rejections survive the widening.
+# That widening reaches only a gate remote naming a local directory: `no-mistakes
+# init` wires it as a bare path or as the same path in `file://` form, and both
+# resolve here, while any other remote form leaves the head unresolvable and the
+# run unattributed.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
-  local wt=$1 run_head=$2 local_full run_full
+  local wt=$1 run_head=$2 local_full run_full repo
   [ -n "$run_head" ] || return 1
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  repo=$wt
+  if ! run_full=$(git -C "$repo" rev-parse --verify "${run_head}^{commit}" 2>/dev/null); then
+    repo=$(git -C "$wt" remote get-url no-mistakes 2>/dev/null) || return 1
+    repo=${repo#file://}
+    [ -d "$repo" ] || return 1
+    run_full=$(git -C "$repo" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  fi
   [ "$run_full" = "$local_full" ] && return 0
-  git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+  git -C "$repo" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }

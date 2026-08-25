@@ -1389,6 +1389,183 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# --- gate-repo head resolution (2026-07-25 live-run-read-as-failed incident) --
+#
+# Once the pipeline commits its own gate fixes, the run head exists ONLY in the
+# no-mistakes bare gate repo (wired as the worktree's `no-mistakes` remote) and
+# is NOT an object in the task worktree. A worktree-only head lookup therefore
+# rejected every live run past its first gate fix, and attribution fell through
+# to a stale prior run whose head still equalled the worktree HEAD - a LIVE run
+# read as failed. These fixtures build the real topology: a throwaway worktree
+# plus a real bare gate repo seeded by a push, with the fix commit created in
+# the gate repo only.
+
+# A bare gate repo wired as <wt>'s `no-mistakes` remote and seeded with the
+# worktree's branch, the way `no-mistakes init` plus the run's initial push
+# leave it. Echoes the gate repo path.
+make_gate_repo() {  # <case-dir> <wt> <branch>
+  local d=$1 wt=$2 branch=$3 gate="$1/gate.git"
+  git init -q --bare "$gate"
+  git -C "$wt" remote add no-mistakes "$gate"
+  git -C "$wt" push -q no-mistakes "$branch"
+  printf '%s\n' "$gate"
+}
+
+# A commit that exists ONLY in the gate repo, on top of <parent> (the shape of
+# a pipeline gate-fix commit). Echoes the new sha.
+make_gate_only_commit() {  # <gate> <branch> <parent>
+  local gate=$1 branch=$2 parent=$3 tree sha
+  tree=$(git -C "$gate" rev-parse "${parent}^{tree}")
+  sha=$(git -C "$gate" commit-tree "$tree" -p "$parent" -m 'gate fix commit')
+  git -C "$gate" update-ref "refs/heads/$branch" "$sha"
+  printf '%s\n' "$sha"
+}
+
+# The exact incident: the live run's head is a gate-fix commit present only in
+# the gate repo, and an OLDER failed run on the same branch still reports the
+# worktree HEAD. The live run must bind (working), and must never fall through
+# to the stale failed run.
+test_gate_only_fix_head_binds_live_run() {
+  reset_fakes
+  local d gate base_head fix_head fix_short out
+  d=$(new_case gate-fix-head)
+  make_repo_on_branch "$d/wt" fm/feat-gatefix
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  gate=$(make_gate_repo "$d" "$d/wt" fm/feat-gatefix)
+  fix_head=$(make_gate_only_commit "$gate" fm/feat-gatefix "$base_head")
+  fix_short=$(git -C "$gate" rev-parse --short=7 "$fix_head")
+  # Fixture sanity: the gate-fix commit must NOT be an object in the worktree,
+  # or this test degenerates into the already-covered local-descendant case.
+  git -C "$d/wt" rev-parse --verify "${fix_head}^{commit}" >/dev/null 2>&1 \
+    && fail "fixture leak: gate fix commit resolvable in the worktree"
+  fm_write_meta "$d/state/gatefix.meta" "window=fm:fm-gatefix" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-gatefix)"
+  # A previous failed run on the same branch still sits at the worktree HEAD:
+  # the wrong-run trap the old worktree-only lookup fell into via the coarse
+  # fallback.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-gatefix ${fix_short}  2026-07-25 10:10
+  failed     fm/feat-gatefix $(git -C "$d/wt" rev-parse --short=7 HEAD)  2026-07-25 09:00
+EOF
+)"
+  out=$(run_crew_state "$d" gatefix)
+  assert_contains "$out" "state: working" "live run with gate-only fix head reads working"
+  assert_contains "$out" "source: run-step" "gate-only fix head binds the live run"
+  assert_not_contains "$out" "state: failed" "live run must not fall through to the stale failed run"
+  pass "gate-only fix head binds the live run, not the stale failed one"
+}
+
+# The coarse runs-list fallback applies the same gate-aware binding: when `axi
+# status` answers with another crew's branch, this branch's own row whose short
+# sha exists only in the gate repo must still be attributed.
+test_coarse_gate_only_fix_head_binds() {
+  reset_fakes
+  local d gate base_head fix_head fix_short out
+  d=$(new_case gate-fix-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-gatecoarse
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  gate=$(make_gate_repo "$d" "$d/wt" fm/feat-gatecoarse)
+  fix_head=$(make_gate_only_commit "$gate" fm/feat-gatecoarse "$base_head")
+  fix_short=$(git -C "$gate" rev-parse --short=7 "$fix_head")
+  fm_write_meta "$d/state/gatecoarse.meta" "window=fm:fm-gatecoarse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-25 10:10
+  running    fm/feat-gatecoarse ${fix_short}  2026-07-25 10:05
+EOF
+)"
+  out=$(run_crew_state "$d" gatecoarse)
+  assert_contains "$out" "state: working" "coarse row with gate-only fix head reads working"
+  assert_contains "$out" "source: run-step" "coarse gate-only fix head binds via the runs list"
+  pass "coarse fallback binds a gate-only fix head"
+}
+
+# `git remote get-url` answers with whatever form the remote was wired in, and a
+# local repo is just as legitimately addressed as a `file://` URL as by a bare
+# path. The URL form must resolve the same way, or the incident returns on any
+# home wired that way.
+test_gate_only_fix_head_binds_with_file_url_remote() {
+  reset_fakes
+  local d gate fix_head out
+  d=$(new_case gate-fix-file-url)
+  make_repo_on_branch "$d/wt" fm/feat-gateurl
+  make_fakebin "$d" >/dev/null
+  gate=$(make_gate_repo "$d" "$d/wt" fm/feat-gateurl)
+  git -C "$d/wt" remote set-url no-mistakes "file://$gate"
+  fix_head=$(make_gate_only_commit "$gate" fm/feat-gateurl "$(git -C "$d/wt" rev-parse HEAD)")
+  git -C "$d/wt" rev-parse --verify "${fix_head}^{commit}" >/dev/null 2>&1 \
+    && fail "fixture leak: gate fix commit resolvable in the worktree"
+  fm_write_meta "$d/state/gateurl.meta" "window=fm:fm-gateurl" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-gateurl)"
+  out=$(run_crew_state "$d" gateurl)
+  assert_contains "$out" "state: working" "file:// gate remote resolves the gate-only fix head"
+  assert_contains "$out" "source: run-step" "file:// gate remote binds the live run"
+  pass "a file:// gate remote resolves a gate-only fix head"
+}
+
+# A genuinely rewritten head that exists only in the gate repo, on DIVERGED
+# history, must still be rejected: gate-repo resolution must not weaken the
+# wrong-run protection.
+test_gate_only_diverged_head_not_attributed() {
+  reset_fakes
+  local d gate tree orphan out
+  d=$(new_case gate-diverged-head)
+  make_repo_on_branch "$d/wt" fm/feat-gatediv
+  make_fakebin "$d" >/dev/null
+  gate=$(make_gate_repo "$d" "$d/wt" fm/feat-gatediv)
+  # An orphan commit in the gate repo: same tree, unrelated history.
+  tree=$(git -C "$gate" rev-parse 'fm/feat-gatediv^{tree}')
+  orphan=$(git -C "$gate" commit-tree "$tree" -m 'rewritten tip')
+  git -C "$gate" update-ref refs/heads/rewritten "$orphan"
+  [ -n "$orphan" ] || fail "fixture: orphan gate commit was not created"
+  git -C "$d/wt" rev-parse --verify "${orphan}^{commit}" >/dev/null 2>&1 \
+    && fail "fixture leak: orphan gate commit resolvable in the worktree"
+  fm_write_meta "$d/state/gatediv.meta" "window=fm:fm-gatediv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 in progress\n' > "$d/state/gatediv.status"
+  FM_FAKE_RUN_HEAD="$orphan"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-gatediv)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" gatediv
+  out=$(run_crew_state "$d" gatediv)
+  assert_not_contains "$out" "source: run-step" "diverged gate-only head must not bind"
+  assert_contains "$out" "source: status-log" "diverged gate-only head falls back"
+  assert_contains "$out" "state: working" "status-log remains current after rejection"
+  pass "diverged gate-only head is still rejected"
+}
+
+# Local work that advanced past the run's base must still invalidate a
+# gate-only run head: the local tip is not in the gate repo, so ancestry cannot
+# hold and the historical run must not be attributed.
+test_gate_only_head_with_local_advance_not_attributed() {
+  reset_fakes
+  local d gate base_head fix_head out
+  d=$(new_case gate-local-advance)
+  make_repo_on_branch "$d/wt" fm/feat-gateadv
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  gate=$(make_gate_repo "$d" "$d/wt" fm/feat-gateadv)
+  fix_head=$(make_gate_only_commit "$gate" fm/feat-gateadv "$base_head")
+  # The crew moved on: new local work the gate repo has never seen.
+  git -C "$d/wt" commit -q --allow-empty -m 'local stage-2 work after prior run'
+  fm_write_meta "$d/state/gateadv.meta" "window=fm:fm-gateadv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/gateadv.status"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-gateadv)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" gateadv
+  out=$(run_crew_state "$d" gateadv)
+  assert_not_contains "$out" "source: run-step" "advanced local tip must not bind a gate-only run head"
+  assert_contains "$out" "source: status-log" "falls back after local work advanced past the run"
+  assert_contains "$out" "state: working" "status-log remains current after rejection"
+  pass "local advance past a gate-only run head invalidates attribution"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1460,6 +1637,11 @@ test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_gate_only_fix_head_binds_live_run
+test_coarse_gate_only_fix_head_binds
+test_gate_only_fix_head_binds_with_file_url_remote
+test_gate_only_diverged_head_not_attributed
+test_gate_only_head_with_local_advance_not_attributed
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

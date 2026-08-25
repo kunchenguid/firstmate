@@ -33,8 +33,11 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). Pipeline fix commits usually exist only in the
+#      no-mistakes bare gate repo (the worktree's `no-mistakes` remote), so head
+#      resolution consults it when the worktree lacks the object. Local work
+#      that advanced past the run head, or diverged from it, invalidates
+#      attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while

@@ -250,6 +250,47 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+# A stripped perl has no Time::HiRes, and a version-manager python3 shim can
+# resolve on PATH with no runtime behind it. Both must degrade to the next
+# clock source instead of aborting the whole runner under `set -e`.
+test_timing_survives_broken_interpreters() {
+  local tmp stub fixture
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-clock.XXXXXX")
+  stub="$tmp/bin"
+  fixture="$tmp/ok.test.sh"
+  mkdir -p "$stub"
+  cat >"$stub/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate Time/HiRes.pm in @INC" >&2
+exit 2
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+exit 0
+SH
+  chmod +x "$stub/perl" "$fixture"
+
+  if ! PATH="$stub:$PATH" "$RUNNER" "$fixture" >"$tmp/out.txt" 2>"$tmp/err.txt"; then
+    cat "$tmp/out.txt" "$tmp/err.txt"
+    rm -rf "$tmp"
+    fail "a perl without Time::HiRes must not abort the runner"
+  fi
+  grep -Eq '^FM_TEST_END .+ duration_ms=[0-9]+ ' "$tmp/out.txt" \
+    || { cat "$tmp/out.txt" "$tmp/err.txt"; rm -rf "$tmp"; fail "no duration after perl fell through"; }
+
+  cp "$stub/perl" "$stub/python3"
+  if ! PATH="$stub:$PATH" "$RUNNER" "$fixture" >"$tmp/out2.txt" 2>"$tmp/err2.txt"; then
+    cat "$tmp/out2.txt" "$tmp/err2.txt"
+    rm -rf "$tmp"
+    fail "a broken perl and python3 must not abort the runner"
+  fi
+  grep -Eq '^FM_TEST_END .+ duration_ms=[0-9]+ ' "$tmp/out2.txt" \
+    || { cat "$tmp/out2.txt" "$tmp/err2.txt"; rm -rf "$tmp"; fail "no duration from the date fallback"; }
+  rm -rf "$tmp"
+  pass "timing falls through interpreters that cannot print a timestamp"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -710,6 +751,7 @@ test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_timing_survives_broken_interpreters
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

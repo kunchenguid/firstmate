@@ -308,6 +308,19 @@ test_pi_compat_missing_adapter_exports() {
     return 0
   fi
 
+  # Unlike the pi-package-gated subtests, this one imports the .ts adapters
+  # directly, which needs node's native TypeScript type stripping (22.18+).
+  # Probe the capability itself so an older default node skips instead of
+  # failing with ERR_UNKNOWN_FILE_EXTENSION.
+  fixture="$TMP_ROOT/ts-import-probe"
+  mkdir -p "$fixture"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  printf 'export const ok: string = "ok";\n' >"$fixture/probe.ts"
+  if ! (cd "$fixture" && node --input-type=module -e 'await import("./probe.ts")' >/dev/null 2>&1); then
+    echo "skip: node cannot import TypeScript modules for Pi calm missing-adapter-export test"
+    return 0
+  fi
+
   fixture="$TMP_ROOT/missing-adapter-exports"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
