@@ -306,10 +306,29 @@ FIELDS
 # unreadable rules response does not hide the already-concrete outcome refusal;
 # it only means no queue-specific retry can be proven.
 FM_PR_GITHUB_QUEUE_METHOD=
+github_urlencode_path_segment() {
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
 github_read_queue_method() {
-  local methods line method='' count=0
+  local methods line method='' count=0 branch_path
+  branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
   if ! methods=$(gh api \
-    "repos/$PR_OWNER/$PR_REPO/rules/branches/$FM_PR_GITHUB_BASE" \
+    --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
     2>/dev/null); then
     return 1

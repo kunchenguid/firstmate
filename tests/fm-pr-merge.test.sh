@@ -29,13 +29,14 @@
 #   (t) a GitHub PR in the merge queue is reported as queued, not merged
 #   (u) a queue-required refusal names the exact compatible retry flags
 #   (v) a failed poll setup cannot be reported as a verified GitHub merge
+#   (w) a zero-exit queue-required refusal keeps merge semantics unchanged
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+PR_MERGE="${FM_PR_MERGE_OVERRIDE:-$ROOT/bin/fm-pr-merge.sh}"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 BASE_PATH=$PATH
 
@@ -102,7 +103,7 @@ case "\${1:-} \${2:-}" in
     cat "\$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
-  api\ repos/*)
+  api\ *)
     cat "\$FM_TEST_GH_RULES"
     exit 0
     ;;
@@ -132,7 +133,7 @@ case "${1:-} ${2:-}" in
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
-  api\ repos/*)
+  api\ *)
     cat "$FM_TEST_GH_RULES"
     exit 0
     ;;
@@ -403,6 +404,44 @@ test_github_open_unqueued_outcome_refuses() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "github-open-unqueued: failed verification armed the merged-PR poll"
   pass "fm-pr-merge refuses a GitHub merge call that leaves the PR open and unqueued"
+}
+
+test_github_zero_exit_queue_required_refuses_with_exact_retry() {
+  local case_dir rc
+  case_dir=$(make_case github-zero-exit-queue-required)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2121212121212121212121212121212121212121
+  write_github_outcome "$case_dir" OPEN false false 'release/2026'
+  printf 'merge_method=REBASE\n' > "$case_dir/github-rules"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/56 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-zero-exit-queue-required: an unproved merge must fail"
+  assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
+    "github-zero-exit-queue-required: refusal did not name the concrete observed state"
+  assert_grep 'base branch release/2026 requires the merge queue' "$case_dir/stderr" \
+    "github-zero-exit-queue-required: refusal did not name the queue requirement"
+  assert_grep '-- --auto --rebase' "$case_dir/stderr" \
+    "github-zero-exit-queue-required: refusal did not name the exact compatible flags"
+  assert_grep 'api --paginate repos/example/repo/rules/branches/release%2F2026' "$case_dir/gh.log" \
+    "github-zero-exit-queue-required: queue rules were not read with pagination and encoded branch path"
+  grep -qxF 'pr merge 56 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "github-zero-exit-queue-required: the attempted merge was changed unexpectedly"
+  [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+    || fail "github-zero-exit-queue-required: the wrapper attempted more than one merge"
+  assert_no_grep --auto "$case_dir/gh-axi.log" \
+    "github-zero-exit-queue-required: queue flags were auto-applied to the attempted merge"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" \
+    "github-zero-exit-queue-required: failed verification recorded the PR as landed work"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "github-zero-exit-queue-required: failed verification armed the merged-PR poll"
+  pass "fm-pr-merge reports exact queue retry flags after a zero-exit false success"
 }
 
 test_github_queued_outcome_is_verified() {
@@ -999,6 +1038,7 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
 
+test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_verified_merge_records_pr_and_head
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
