@@ -804,6 +804,18 @@ case "$FM_WEDGE_MAX_ESCALATIONS" in
   0)            triage_log "FM_WEDGE_MAX_ESCALATIONS=0 would cap on the first escalation, falling back to 10 (local patch 2026-08-19)"
               FM_WEDGE_MAX_ESCALATIONS=10 ;;
 esac
+# v9 (2026-08-25): cap horizon. The cap marker is honored for at most this many
+# seconds; after that, the cap is stale and a new wedge on the same (window, hash)
+# can re-fire. Bounds the silent-suppression window without depending on
+# pause_state_class=working (which can be a steady state during a wedge, not
+# a recovery signal). Default 24h: long enough that a stuck wedge does not
+# spam the LLM, short enough that a wedge that genuinely recovers in the
+# background can re-escalate within a day. Operator can also rm the marker
+# manually for immediate re-engagement.
+FM_CAP_HORIZON_SECS=${FM_CAP_HORIZON_SECS:-86400}
+case "$FM_CAP_HORIZON_SECS" in
+  ''|*[!0-9]*) FM_CAP_HORIZON_SECS=86400 ;;
+esac
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
@@ -818,11 +830,16 @@ esac
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker
-  # LOCAL PATCH (2026-08-19): if this hash was already capped as permanently
-  # wedged, stop firing wakes for it. Pane recovery (rm-on-reset sites below)
-  # clears the marker so a wedge that genuinely resolves can re-escalate if it
-  # wedges again. Marker is keyed on (window, hash) so a fresh stale hash in the
-  # same window can still escalate - only this exact stale hash is silenced.
+  # LOCAL PATCH (2026-08-19, v9 2026-08-25): if this hash was already capped,
+  # stop firing wakes for it UNTIL the cap horizon (FM_CAP_HORIZON_SECS, default
+  # 24h) passes. The marker is keyed on (window, hash) and stores its fire
+  # timestamp in the file content (date +%s); a cap older than the horizon is
+  # ignored, so a wedge that persists beyond the horizon can re-fire. A hash
+  # change also naturally invalidates the marker (different key). No auto-lift
+  # is performed on recovery - pause_state_class=working can be a steady state
+  # during a wedge, not a recovery signal, so the v6/v7 lift sites were
+  # over-eager. Operator can also `rm` the marker manually for immediate
+  # re-engagement.
   if [ -z "$hash" ]; then
     # Defensive fallback: without a hash, fall back to the v1 window-scoped
     # marker name so the cap still suppresses retries for this window even if
@@ -837,7 +854,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   else
     permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")-${hash:0:12}"
     if [ -e "$permanent_marker" ]; then
-      return 0
+      # v9 (2026-08-25): cap horizon check. The marker file's content is the
+      # cap-fire timestamp (date +%s). If the cap fired more than
+      # FM_CAP_HORIZON_SECS ago, the cap is stale and a new wedge on this
+      # (window, hash) can re-fire. This bounds the silent-suppression
+      # window without depending on pause_state_class (which can be a steady
+      # state during the wedge, not a recovery signal).
+      marker_ts=$(cat "$permanent_marker" 2>/dev/null || true)
+      case "$marker_ts" in
+        ''|*[!0-9]*) marker_ts=0 ;;
+      esac
+      if [ $(( $(date +%s) - marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
+        return 0
+      fi
+      # Cap horizon passed; fall through and let the wedge re-fire.
     fi
   fi
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -2084,21 +2114,18 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                # v6 (2026-08-25): capture the OLD hash before clear_pause_tracking
-                # wipes .stale-$key, then lift the cap marker for it. This is the
-                # unambiguous recovery signal - an active pipeline exists for this
-                # window, so any prior PERMANENTLY-WEDGED for the old hash is no
-                # longer authoritative. Without this lift, a later recurrence of
-                # the old hash (different wedge episode on the same content) would
-                # be silently suppressed by v5's permanent marker.
-                old_h=$(cat "$sf" 2>/dev/null || true)
+                # v9 (2026-08-25): the cap marker is keyed on (window, hash) and
+                # bounded by FM_CAP_HORIZON_SECS (the marker file's timestamp is
+                # checked at the top of wedge_timer_check). No auto-lift on
+                # recovery is needed - a genuine recovery is observable via
+                # hash change (different key), and a stale cap expires after
+                # the horizon. pause_state_class=working can be a steady state
+                # during a wedge (the worker is doing things but the pane is
+                # static), so it is NOT a recovery signal - the v6/v7 lift
+                # sites on this verdict over-corrected and let the cap cycle.
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
-                if [ -n "$old_h" ]; then
-                  rm -f "$STATE/.wedge-permanent-$key-${old_h:0:12}"
-                  triage_log "lifted cap marker for recovered hash: old=$old_h new=$h window=$w"
-                fi
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -2113,48 +2140,19 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                # v6 (2026-08-25): worker recovered on the SAME hash during a
-                # declared pause (an actively-running pipeline now exists).
-                # Lift the cap marker for this hash - the wedge that fired
-                # PERMANENTLY-WEDGED earlier is no longer authoritative.
+                # v9: same-hash + was-paused + working pipeline. Cap is horizon-
+                # bounded, no auto-lift here.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
-                         # v8 (2026-08-25): reset the escalation counter on cap lift.
-                         # Greptile R7: without the reset, the counter stays at
-                         # (or above) FM_WEDGE_MAX_ESCALATIONS and the next
-                         # wedge_timer_check call would re-fire the cap
-                         # immediately, turning a worker that cycles between
-                         # wedged and recovered into a continuous wake source
-                         # - exactly the drain the cap was supposed to bound.
-                         # The reset means each new wedge episode has to climb
-                         # FM_WEDGE_MAX_ESCALATIONS escalations again before
-                         # the cap fires, bounding the per-episode wake count.
-                         rm -f "$STATE/.wedge-permanent-$key-${h:0:12}" "$STATE/.wedge-escalations-$key"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h"
-                         triage_log "absorbed non-terminal stale (provably working, lifted cap and reset counter for hash $h): $w" ;;
+                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              # v7 (2026-08-25): same-hash recovery WITHOUT a declared pause.
-              # Greptile R6: a pane can genuinely recover without entering the
-              # declared-pause branch (e.g., the worker recovers via file
-              # activity or run-step without `paused:` ever being declared).
-              # In that case v5/v6's permanent marker silently suppresses every
-              # later wedge on the same captured content. Lift the marker when
-              # the worker is verifiably active again - pause_state_class is
-              # the same gate v6 site 1/site 2 already use, so a recovery here
-              # is just as unambiguous.
-              if [ -e "$STATE/.wedge-permanent-$key-${h:0:12}" ] \
-                && ! afk_present \
-                && [ "$(pause_state_class "$w" "$task")" = working ]; then
-                # v8 (2026-08-25): reset the escalation counter alongside the
-                # marker. Without this the counter stays at
-                # (or above) FM_WEDGE_MAX_ESCALATIONS and the next
-                # wedge_timer_check call re-fires the cap immediately,
-                # turning a wedge/recover cycle into a continuous wake drain.
-                rm -f "$STATE/.wedge-permanent-$key-${h:0:12}" "$STATE/.wedge-escalations-$key"
-                triage_log "lifted cap marker and reset counter (same-hash worker recovery): hash=$h window=$w"
-              fi
+              # v9: same-hash branch with no declared pause. Cap is horizon-
+              # bounded (FM_CAP_HORIZON_SECS), no explicit lift. The v6/v7
+              # attempts at "lift on pause_state_class=working" were over-
+              # eager (the verdict can be steady-state during the wedge).
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi
           fi
