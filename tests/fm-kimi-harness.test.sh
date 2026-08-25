@@ -175,8 +175,11 @@ run_spawn() {
   shift 6
   # Spawn launch assertions must not inherit the crewmate parent's Git config
   # overlay; the sanitizer composes from GIT_CONFIG_COUNT at launch time.
-  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
-  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  # NM_HOME is the same class of leak: a no-mistakes ship prefixes the resolved
+  # root onto the pane command, so a parent operator root would make the exact
+  # launch string environment-dependent.
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 NM_HOME
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" NM_HOME='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TREEHOUSE_PATH="$wt" \
@@ -216,8 +219,8 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  [ "$launch" = "GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not use the home-owned NM_HOME prefix, absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -644,7 +647,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' '$fallback' --auto" ] \
+  [ "$launch" = "GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable under the launch-scoped sanitizer: $launch"
   [ ! -s "$CASE_DIR/host-kimi.log" ] || fail "Kimi fallback executed the host shadow"
   pass "fm-spawn: Kimi fallback expands HOME without resolving or executing a host shadow under the launch-scoped sanitizer"

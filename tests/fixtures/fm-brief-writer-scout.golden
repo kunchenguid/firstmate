@@ -45,8 +45,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append `needs-decision: {summary of options}` and stop. Firstmate will reply with the decision.
    Use `needs-decision` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-   When firstmate replies or a blocker clears and you resume, append `resolved [key=<slug>]: {how it was decided or unblocked}` using the same key that was opened.
-   A keyed decision closes only with `resolved` naming that key; a bare `resolved` with only a correlation token does not close it.
+   A decision or blocker you opened stays open until a `resolved` line carrying its exact key lands; a later `done:` or `working:` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append `resolved: {how it cleared}` yourself (same `[key=<slug>]` if you opened it with one) as you resume.
    `done` records work completion and never closes a decision key.
 7. Never stop, restart, or update a `no-mistakes` daemon. The default instance is private to this
    Firstmate home, while an explicit operator `NM_HOME` remains authoritative; the legacy shared
@@ -61,7 +61,8 @@ The report must stand alone: what you did, what you found, the evidence (command
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from `{{FM_ROOT}}/.agents/skills/diagnostic-reasoning/SKILL.md`.
 Firstmate may verify that table with `bin/fm-diagnostic-report.sh evaluate <report>`.
 Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age.
-Before reporting done, read and follow `{{FM_ROOT}}/.agents/skills/decision-hold-lifecycle/SKILL.md` and pass its shared completion gate for the report and any visual review.
+If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
+Before reporting done, read and follow `{{FM_ROOT}}/.agents/skills/captain-hold-lifecycle/SKILL.md` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append `done: {one-line conclusion}` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 

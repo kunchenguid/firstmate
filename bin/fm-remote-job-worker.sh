@@ -14,7 +14,35 @@
 # record is marked done only after its bounded outputs and numeric exit status
 # have been committed. The library header owns the exact record fields and
 # lifecycle.
+#
+# The worker is abandoned when its configured FM_ROOT stops being a genuine
+# Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
+# pooled worktree, or a removed test fixture root leaves behind. It can never
+# validate or execute another job from a root that is gone, so both the serving
+# loop and the Linux restart supervisor stop instead of polling forever
+# reparented to init. FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS is how long the root
+# must stay missing before that counts, so an ordinary transient never stops a
+# healthy worker. The supervisor additionally bounds how many times it restarts
+# a failing child, whether or not the failures are immediate: it backs off
+# between immediate failures up to
+# FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS and gives up after
+# FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS failed children in total, since a
+# restart loop only burns CPU and grows its log without bound. A child that
+# stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# consecutive-failure backoff, but not that total restart guard, so a child
+# that dies just past the healthy threshold cannot restart without bound
+# either. fm-on's ensure path restarts a worker that gave up.
 set -u
+
+# A non-numeric override falls back to the default rather than crashing the
+# arithmetic that bounds these loops.
+worker_bounded_setting() { # <value> <default>
+  case "$1" in ''|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
+}
+FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS:-}" 5)
+FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS:-}" 20)
+FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
+FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
@@ -181,6 +209,21 @@ worker_cleanup() {
   WORKER_LOCK_HELD=0
 }
 
+# The configured code root is gone and stayed gone across the grace window, so
+# this worker has nothing left to serve. Confirming over the window keeps a
+# momentary read during an ordinary checkout operation from stopping a healthy
+# worker.
+worker_code_root_abandoned() {
+  local waited=0
+  fm_remote_job_root_is_live "$FM_ROOT" && return 1
+  while [ "$waited" -lt "$FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    fm_remote_job_root_is_live "$FM_ROOT" && return 1
+  done
+  return 0
+}
+
 worker_read_process_id() { # <file>
   local file=$1 pid
   fm_remote_job_regular_bounded "$file" 64 || return 1
@@ -251,8 +294,17 @@ worker_stop_active_execution() {
   WORKER_ACTIVE_JOB=
 }
 
+# Ignore, rather than restore the default disposition for, the signals this
+# handler answers. A replacement stops a Linux worker by signalling its whole
+# isolated group, and the supervisor in that group forwards a second stop signal
+# to this same serving child, so a repeat is the normal case and not an
+# exception. Restoring the default let that second signal kill the shutdown part
+# way through, which left the ownership lock behind holding a half-written temp
+# file that no later worker could clear, so every replacement then failed to
+# report ready. A shutdown that hangs is still stopped: the caller escalates to
+# KILL, which no disposition can block.
 worker_shutdown() {
-  trap - HUP INT TERM
+  trap '' HUP INT TERM
   worker_publish_quarantine || {
     worker_error "cannot guard worker ownership for shutdown"
     trap worker_shutdown HUP INT TERM
@@ -445,7 +497,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
   [ "$heartbeat_failed" -eq 0 ] || return 125
-  [ "$WORKER_PREEMPTED" -eq 0 ] || return 75
+  [ "$WORKER_PREEMPTED" -eq 0 ] || return "$FM_REMOTE_JOB_PREEMPTED_EXIT"
   return "$rc"
 }
 
@@ -648,6 +700,12 @@ main() {
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
   while :; do
     worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
+    # Checked right after a fresh heartbeat, so the grace window cannot make a
+    # still-healthy worker read as unready to a concurrent probe.
+    if worker_code_root_abandoned; then
+      worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker"
+      exit 0
+    fi
     worker_reap=0
     if [ "$worker_reap" -eq 0 ]; then
       fm_remote_job_reap_stale "$account_home" || true
@@ -688,13 +746,18 @@ worker_supervisor_shutdown() {
 }
 
 worker_supervise_linux() {
-  local account_home child_status
+  local account_home child_status started failures=0 restarts=0 backoff
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
   trap worker_supervisor_shutdown HUP INT TERM
   while :; do
+    if worker_code_root_abandoned; then
+      worker_error "configured FM_ROOT $FM_ROOT no longer exists; stopping the abandoned worker supervisor"
+      return 0
+    fi
+    started=$SECONDS
     "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
     WORKER_SUPERVISED_PID=$!
     wait "$WORKER_SUPERVISED_PID" 2>/dev/null
@@ -709,7 +772,21 @@ worker_supervise_linux() {
     fi
     worker_supervisor_cleanup_dead_child "$account_home" "$WORKER_SUPERVISED_PID" || true
     WORKER_SUPERVISED_PID=
-    sleep 0.1
+    restarts=$((restarts + 1))
+    if [ "$restarts" -ge "$FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS" ]; then
+      worker_error "remote job worker exited $restarts times; stopping the supervisor"
+      return 1
+    fi
+    if [ $((SECONDS - started)) -ge "$FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS" ]; then
+      failures=0
+      sleep 0.1
+      continue
+    fi
+    failures=$((failures + 1))
+    backoff=$failures
+    [ "$backoff" -le "$FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS" ] ||
+      backoff=$FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS
+    sleep "$backoff"
   done
 }
 

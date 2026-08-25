@@ -4,7 +4,7 @@
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
-#   fm-procevent-remote-reply.sh dispatch <source-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
@@ -17,6 +17,9 @@
 # terminal for that exact registration; `handle` validates and idempotently
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
+# `autohandle` is the runner's source-id entry into that same handler, so a
+# captured reply is applied and acknowledged without relying on a later manual
+# dispatch. A continuity escalation is considered fully handled here.
 #
 # Ingest handles each bounded line independently. Printable UTF-8 status lines
 # with an allowed lifecycle verb and strict corr=<16hex> are accepted, while an
@@ -561,13 +564,18 @@ cmd_handle() {
   )
 }
 
-cmd_dispatch() {
-  local sid=${1:-} seq=${2:-} result=${3:-} id
-  case "$sid" in remote-reply-*) id=${sid#remote-reply-} ;; *) die "source id is not a remote reply source: $sid" ;; esac
+cmd_autohandle() {
+  local sid=${1:-} seq=${2:-} result=${3:-} id rc=0
+  case "$sid" in
+    remote-reply-?*) id=${sid#remote-reply-} ;;
+    *) die "not a remote reply source: $sid" ;;
+  esac
   validate_id "$id"
-  [ "$(source_id "$id")" = "$sid" ] || die "source id is not canonical: $sid"
-  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
-  cmd_handle "$id" "$seq" "$result"
+  [ "$(source_id "$id")" = "$sid" ] \
+    || die "source id does not identify one secondmate: $sid"
+  cmd_handle "$id" "$seq" "$result" || rc=$?
+  [ "$rc" -eq 3 ] && rc=0
+  return "$rc"
 }
 
 retirement_capture_scan() {
@@ -697,7 +705,7 @@ case "${1:-}" in
   arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
-  dispatch) shift; [ "$#" -eq 3 ] || usage; cmd_dispatch "$@" ;;
+  autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   cursor-rebase|rebase) shift; [ "$#" -eq 3 ] || usage; cmd_cursor_rebase "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;

@@ -1,32 +1,57 @@
 #!/usr/bin/env bash
-# fm-lint.sh - the single owner of firstmate's shell-lint definition.
+# fm-lint.sh - the single owner of firstmate's lint definition.
 #
-# Runs every canonical shell root with ShellCheck's default severity, extended
-# analysis, ambient configuration disabled, and one exact ShellCheck version.
-# CI and no-mistakes share this script's file set, rule set, version, and
-# diagnostics ordering; callers may choose a different worker bound.
+# Runs its file set with ShellCheck's default severity, extended analysis,
+# ambient configuration disabled, and one exact ShellCheck version.
+# no-mistakes invokes the full default, while hosted CI uses --ci-fast to keep
+# the same ordinary checks with extended analysis disabled in one process.
+# The explicit --fast mode is local-only and disables ShellCheck's extended
+# dataflow analysis while preserving ordinary shell lint checks. The explicit
+# --ci-fast mode is the hosted low-memory contract and never runs workflow lint.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
+# The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
+# malformed GitHub workflow, including a self-broken ci.yml, fails locally
+# before merge instead of only failing to run as CI.
 #
-# Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays them in
-# deterministic order. FM_LINT_JOBS=1 runs both shards serially with identical
-# diagnostics; bin/fm-ci.sh's header owns Water 7's caller-specific override.
+# With no explicit paths, the file set depends on context:
+#   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
+#     merge-base against origin/main (or local main) can be found, it lints
+#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh. This is
+#     what CI always runs, so CI coverage never depends on a local diff.
+#   - Otherwise (an ordinary local branch with a real merge-base) it lints
+#     only the canonical-set files changed since that merge-base, including
+#     uncommitted local edits, via plain local `git diff` (no network, no
+#     `gh`). A branch with zero matching changed files skips ShellCheck and
+#     prints a "no changed lint targets" note, then still validates workflows.
+# Explicit paths always bypass this file-set selection and lint exactly the
+# given paths, matching the same config, without the workflow YAML check.
+#
+# Canonical lint defaults to two bounded workers over 32 stable logical shards.
+# Small shards cap each ShellCheck process's extended-analysis graph while the
+# jobs setting caps concurrency. The parent replays diagnostics in deterministic
+# shard and root order after every worker finishes. FM_LINT_JOBS=1 runs the same
+# shards serially with byte-identical diagnostics and exit selection.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
 # Usage:
-#   fm-lint.sh                         lint the canonical file set
+#   fm-lint.sh                         lint the context-selected file set (see above)
+#   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
+#   fm-lint.sh --ci-fast [path]...    one-process CI lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --shard <N>/32 [path]... lint one stable logical shard only
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
-#   fm-lint.sh --list-files            print the canonical file set
+#   fm-lint.sh --list-files            print the file set that would be linted
 #   fm-lint.sh --help                  print this usage
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+SHARD_COUNT=32
+ACTIVE_SHARD_COUNT=$SHARD_COUNT
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
@@ -43,7 +68,7 @@ fm_lint_worker_stop() {
 
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
   local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0
-  local -a roots
+  local -a roots shellcheck_args
   roots=()
   tab=$(printf '\t')
   while IFS="$tab" read -r index path || [ -n "${index:-}${path:-}" ]; do
@@ -55,7 +80,11 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
-    "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${roots[@]}" > "$output.out" 2>&1 &
+    shellcheck_args=(--norc --external-sources)
+    if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
+      shellcheck_args+=(--extended-analysis=false)
+    fi
+    "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" > "$output.out" 2>&1 &
     FM_LINT_WORKER_SHELLCHECK_PID=$!
     wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
     FM_LINT_WORKER_SHELLCHECK_PID=
@@ -84,12 +113,29 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,26{s/^# \{0,1\}//;p;}' "$SELF"
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$SELF"
+}
+
+# Default no-args lint also validates GitHub workflows. Explicit paths stay a
+# ShellCheck-only override so callers can target one shell root.
+fm_lint_run_workflows() {
+  [ "$CI_FAST" -eq 0 ] || return 0
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  [ -z "$SELECTED_SHARD" ] || return 0
+  "$SELF_DIR/fm-lint-workflows.sh"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+FAST=0
+CI_FAST=0
+ANALYSIS_MODE=full
 LIST_FILES=0
+SELECTED_SHARD=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs)
@@ -108,6 +154,26 @@ while [ "$#" -gt 0 ]; do
       ;;
     --telemetry=*)
       TELEMETRY=${1#*=}
+      shift
+      ;;
+    --shard)
+      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --shard requires N/%s.\n' "$SHARD_COUNT" >&2; exit 2; }
+      SELECTED_SHARD=$2
+      shift 2
+      ;;
+    --shard=*)
+      SELECTED_SHARD=${1#*=}
+      shift
+      ;;
+    --fast)
+      FAST=1
+      ANALYSIS_MODE=fast
+      shift
+      ;;
+    --ci-fast)
+      FAST=1
+      CI_FAST=1
+      ANALYSIS_MODE=fast
       shift
       ;;
     --list-files)
@@ -131,10 +197,105 @@ case "$JOBS" in
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
 
+case "$SELECTED_SHARD" in
+  '') ;;
+  */*)
+    shard_index=${SELECTED_SHARD%/*}
+    shard_total=${SELECTED_SHARD#*/}
+    case "$shard_index$shard_total" in
+      *[!0-9]*) printf 'fm-lint.sh: shard must be N/%s, got %s.\n' "$SHARD_COUNT" "$SELECTED_SHARD" >&2; exit 2 ;;
+    esac
+    [ "$shard_total" -eq "$SHARD_COUNT" ] && [ "$shard_index" -ge 1 ] && [ "$shard_index" -le "$SHARD_COUNT" ] || {
+      printf 'fm-lint.sh: shard must be N/%s with N from 1 through %s, got %s.\n' \
+        "$SHARD_COUNT" "$SHARD_COUNT" "$SELECTED_SHARD" >&2
+      exit 2
+    }
+    ;;
+  *)
+    printf 'fm-lint.sh: shard must be N/%s, got %s.\n' "$SHARD_COUNT" "$SELECTED_SHARD" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
+  if [ "$CI_FAST" -eq 0 ]; then
+    printf 'fm-lint.sh: --fast is local-only; CI uses the explicit --ci-fast contract.\n' >&2
+    exit 2
+  fi
+fi
+
+if [ "$CI_FAST" -eq 1 ]; then
+  [ -z "$SELECTED_SHARD" ] || {
+    printf 'fm-lint.sh: --ci-fast is one complete pass and cannot select a shard.\n' >&2
+    exit 2
+  }
+  JOBS=1
+  ACTIVE_SHARD_COUNT=1
+fi
+
+# fm_lint_changed_base_ref prints the ref to diff the working branch against:
+# the local origin/main tracking ref when present, else local main. Returns
+# nonzero when neither is resolvable, which the caller treats as "no
+# merge-base found" and falls back to a full lint.
+fm_lint_changed_base_ref() {
+  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    printf 'origin/main\n'
+    return 0
+  fi
+  if git rev-parse --verify -q main >/dev/null 2>&1; then
+    printf 'main\n'
+    return 0
+  fi
+  return 1
+}
+
+# fm_lint_is_canonical_root tests membership in the canonical set (a direct
+# *.sh child of bin/, bin/backends/, or tests/) without the shell case
+# statement's non-pathname wildcard matching a path separator by accident.
+fm_lint_is_canonical_root() {
+  local path=$1 dir base
+  case "$path" in
+    */*) dir=${path%/*}; base=${path##*/} ;;
+    *) dir=; base=$path ;;
+  esac
+  case "$base" in
+    *.sh) : ;;
+    *) return 1 ;;
+  esac
+  case "$dir" in
+    bin|bin/backends|tests) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+CHANGED_MODE=0
+EXPLICIT_PATHS=0
 if [ "$#" -gt 0 ]; then
+  EXPLICIT_PATHS=1
   ROOTS=("$@")
 else
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  full_lint=1
+  if [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
+    base_ref=$(fm_lint_changed_base_ref) || base_ref=
+    merge_base=
+    [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
+    [ -z "$merge_base" ] || full_lint=0
+  fi
+
+  if [ "$full_lint" -eq 1 ]; then
+    ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  else
+    CHANGED_MODE=1
+    ROOTS=()
+    while IFS= read -r -d '' changed_path; do
+      fm_lint_is_canonical_root "$changed_path" || continue
+      [ -f "$changed_path" ] || continue
+      ROOTS+=("$changed_path")
+    done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
+  fi
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
@@ -143,14 +304,14 @@ if [ "$LIST_FILES" -eq 1 ]; then
     printf 'fm-lint.sh: --list-files does not accept explicit paths.\n' >&2
     exit 2
   }
-  printf '%s\n' "${ROOTS[@]}"
+  [ "$ROOT_COUNT" -eq 0 ] || printf '%s\n' "${ROOTS[@]}"
   exit 0
 fi
 
 if ! command -v shellcheck >/dev/null 2>&1; then
-  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
+  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s with bin/fm-install-shellcheck.sh <destination-directory> and put that directory on PATH.\n' \
     "$REQUIRED_SHELLCHECK" >&2
-  exit 127
+  exit 1
 fi
 unset SHELLCHECK_OPTS
 SHELLCHECK_BIN=$(command -v shellcheck)
@@ -161,9 +322,23 @@ fi
 resolved=$("$SHELLCHECK_BIN" --version | awk '/^version:/ {print $2; exit}')
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
-  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
+  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s with bin/fm-install-shellcheck.sh <destination-directory>.\n' \
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
+fi
+if [ "$CI_FAST" -eq 1 ]; then
+  printf 'fm-lint.sh: hosted low-memory mode; ShellCheck extended analysis disabled\n' >&2
+elif [ "$FAST" -eq 1 ]; then
+  printf 'fm-lint.sh: fast local mode; ShellCheck extended analysis disabled\n' >&2
+else
+  printf 'fm-lint.sh: full ShellCheck extended analysis enabled\n' >&2
+fi
+
+if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
+  printf 'fm-lint.sh: no changed lint targets\n'
+  overall_rc=0
+  fm_lint_run_workflows || overall_rc=$?
+  exit "$overall_rc"
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -203,10 +378,11 @@ TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
-SHARD_COUNT=2
+WORKER_LOADS=()
 worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
   : > "$TMP_ROOT/manifest.$worker"
+  WORKER_LOADS[worker]=0
   worker=$((worker + 1))
 done
 
@@ -229,21 +405,24 @@ for path in "${ROOTS[@]}"; do
   index=$((index + 1))
 done
 
-# Largest-first deterministic greedy assignment keeps the two bounded workers
+# Largest-first deterministic greedy assignment keeps the stable logical shards
 # balanced without affecting replay order. Direct bytes are a stable portable
 # proxy after the expensive dynamic adapter source fan-out is cut.
-WORKER_LOADS=(0 0)
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
 while IFS="$TAB" read -r weight index path; do
   worker=0
-  if [ "${WORKER_LOADS[1]}" -lt "${WORKER_LOADS[0]}" ]; then
-    worker=1
-  fi
+  candidate=1
+  while [ "$candidate" -lt "$ACTIVE_SHARD_COUNT" ]; do
+    if [ "${WORKER_LOADS[candidate]}" -lt "${WORKER_LOADS[worker]}" ]; then
+      worker=$candidate
+    fi
+    candidate=$((candidate + 1))
+  done
   printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.$worker"
   WORKER_LOADS[worker]=$((WORKER_LOADS[worker] + weight))
 done < "$WEIGHTS.sorted"
 worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
   LC_ALL=C sort -t "$TAB" -k1,1n "$TMP_ROOT/manifest.$worker" > "$TMP_ROOT/manifest.$worker.sorted"
   mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
   worker=$((worker + 1))
@@ -290,18 +469,18 @@ fm_lint_run_worker() {  # <worker-index>
     if [ "$(uname)" = Darwin ]; then
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-      env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }
@@ -311,36 +490,36 @@ fm_lint_start_worker() {
   ACTIVE_PIDS+=("$!")
 }
 
-fm_lint_wait_workers() {
-  local pid
-  while [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; do
-    pid=${ACTIVE_PIDS[0]}
-    wait "$pid" 2>/dev/null || true
-    ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
-  done
+fm_lint_wait_one_worker() {
+  local pid=${ACTIVE_PIDS[0]}
+  wait "$pid" 2>/dev/null || true
+  ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
 }
 
-if [ "$JOBS" -eq 1 ]; then
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    fm_lint_wait_workers
-    worker=$((worker + 1))
-  done
-else
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    worker=$((worker + 1))
-  done
-  fm_lint_wait_workers
+first_worker=0
+worker_limit=$ACTIVE_SHARD_COUNT
+if [ -n "$SELECTED_SHARD" ]; then
+  first_worker=$((shard_index - 1))
+  worker_limit=$shard_index
 fi
 
-# Replay both stable shards in deterministic order and select the first nonzero
+worker=$first_worker
+while [ "$worker" -lt "$worker_limit" ]; do
+  fm_lint_start_worker "$worker"
+  if [ "${#ACTIVE_PIDS[@]}" -ge "$JOBS" ]; then
+    fm_lint_wait_one_worker
+  fi
+  worker=$((worker + 1))
+done
+while [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; do
+  fm_lint_wait_one_worker
+done
+
+# Replay all stable shards in deterministic order and select the first nonzero
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+worker=$first_worker
+while [ "$worker" -lt "$worker_limit" ]; do
   output="$OUTPUT_DIR/shard.$worker"
   [ ! -f "$output.out" ] || cat "$output.out"
   if [ -f "$output.rc" ]; then
@@ -432,6 +611,7 @@ EOF
     printf 'git_head\t%s\n' "$git_head"
     printf 'content_cksum\t%s\n' "$content_cksum"
     printf 'shellcheck_version\t%s\n' "$resolved"
+    printf 'analysis_mode\t%s\n' "$ANALYSIS_MODE"
     printf 'jobs\t%s\n' "$JOBS"
     printf 'root_count\t%s\n' "$ROOT_COUNT"
     printf 'direct_lines\t%s\n' "$direct_lines"
@@ -440,8 +620,11 @@ EOF
     printf 'source_boundary_directives\t%s\n' "$source_boundaries"
     printf 'source_followed_directives\t%s\n' "$source_followed"
     printf 'source_target_count\t%s\n' "$source_targets"
-    printf 'shard_1_weight_bytes\t%s\n' "${WORKER_LOADS[0]}"
-    printf 'shard_2_weight_bytes\t%s\n' "${WORKER_LOADS[1]:-0}"
+    worker=0
+    while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
+      printf 'shard_%s_weight_bytes\t%s\n' "$((worker + 1))" "${WORKER_LOADS[worker]}"
+      worker=$((worker + 1))
+    done
     printf 'wall_seconds\t%s\n' "$((TELEMETRY_END_EPOCH - TELEMETRY_START_EPOCH))"
     printf 'worker_wall_sum_seconds\t%s\n' "$timing_worker_wall"
     printf 'max_worker_wall_seconds\t%s\n' "$max_worker_wall"
@@ -461,6 +644,12 @@ EOF
     printf 'fm-lint.sh: could not write telemetry to %s.\n' "$TELEMETRY" >&2
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
+fi
+
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
 fi
 
 exit "$overall_rc"

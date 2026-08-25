@@ -128,6 +128,15 @@ latest_reread_instruction() {
   printf '%s\n' "$latest"
 }
 
+inbox_stream() {  # <parent-state-dir> <task-id>
+  local rec
+  for rec in "$1/$2.inbox"/*.msg; do
+    [ -e "$rec" ] || continue
+    bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+    printf '\n'
+  done
+}
+
 run_config_push() {
   local root=$1 home=$2 fakebin=$3 log=$4
   touch "$home/state/.last-watcher-beat"
@@ -136,7 +145,7 @@ run_config_push() {
 }
 
 catalog_converges_with_reread_before_intake() {
-  local rec root home sm fakebin log out instruction v1_count v2_count reread_line intake_line
+  local rec root home sm fakebin log out instruction inbox_message v1_count v2_count reread_line intake_line
   rec=$(new_propagation_world local-catalog)
   root=${rec%%|*}
   rec=${rec#*|}
@@ -156,8 +165,10 @@ catalog_converges_with_reread_before_intake() {
     "reread instruction must name the catalog path"
   assert_contains "$(cat "$instruction")" 'kimi-code/k3' \
     "reread instruction must carry converged catalog content"
-  assert_contains "$(cat "$log")" "CONFIG_REREAD: $instruction" \
-    "catalog propagation must notify before a later intake can rely on stale bytes"
+  inbox_message=$(find "$home/state/sm.inbox" -maxdepth 1 -type f -name '*.msg' -print | LC_ALL=C sort | tail -1)
+  [ -n "$inbox_message" ] || fail "catalog propagation did not enqueue its reread pointer"
+  assert_contains "$(cat "$inbox_message")" "CONFIG_REREAD: $instruction" \
+    "catalog propagation must enqueue the exact reread pointer"
 
   printf '%s' "$(valid_catalog_v2)" > "$home/config/model-catalog.json"
   out=$(run_config_push "$root" "$home" "$fakebin" "$log")
@@ -170,10 +181,10 @@ catalog_converges_with_reread_before_intake() {
   instruction=$(latest_reread_instruction "$sm") || fail "content-change push did not publish a reread instruction"
   assert_contains "$(cat "$instruction")" 'k3-256k' \
     "content-change reread must include the new model variant"
-  assert_contains "$(cat "$log")" "CONFIG_REREAD:" \
+  assert_contains "$(inbox_stream "$home/state" sm)" "CONFIG_REREAD: $instruction" \
     "content-change must notify after destination bytes settle"
   printf '%s\n' 'TASK_INTAKE: local-catalog' >> "$log"
-  reread_line=$(grep -nF "CONFIG_REREAD: $instruction" "$log" | tail -1 | cut -d: -f1)
+  reread_line=$(grep -nF 'Firstmate instruction waiting: list ' "$log" | tail -1 | cut -d: -f1)
   intake_line=$(grep -nF 'TASK_INTAKE: local-catalog' "$log" | tail -1 | cut -d: -f1)
   [ "$reread_line" -lt "$intake_line" ] \
     || fail "local catalog reread notification did not precede later task intake"
@@ -410,16 +421,16 @@ local_catalog_send_failure_retries_exact_generation() {
   retry_log="$TMP_ROOT/catalog-retry-success.tmux.log"
 
   printf '%s' "$(valid_catalog_v1)" > "$home/config/model-catalog.json"
-  FM_FAKE_TMUX_FAIL_LITERAL=1 \
-    run_config_push "$root" "$home" "$fail_fakebin" "$log" >/dev/null 2>&1 || true
+  : > "$home/state/sm.inbox"
+  run_config_push "$root" "$home" "$fail_fakebin" "$log" >/dev/null 2>&1 || true
   first_instr=$(latest_reread_instruction "$sm") || fail "send failure should still retain a generation"
   assert_present "$sm/state/${first_instr##*/}.pending" \
     "send failure must record a retry marker"
 
   printf '%s' "$(valid_catalog_v2)" > "$home/config/model-catalog.json"
-  FM_FAKE_TMUX_FAIL_LITERAL=0 \
-    run_config_push "$root" "$home" "$fakebin" "$retry_log" >/dev/null
-  retry_out=$(cat "$retry_log")
+  rm -f "$home/state/sm.inbox"
+  run_config_push "$root" "$home" "$fakebin" "$retry_log" >/dev/null
+  retry_out=$(inbox_stream "$home/state" sm)
   assert_contains "$retry_out" "CONFIG_REREAD: $first_instr" \
     "retry must deliver the earlier pending generation before later intake"
   [ "$(pool_model_count "$sm/config/model-catalog.json")" = 3 ] \

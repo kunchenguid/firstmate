@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Shared read-only validation and default-harness resolution for crew dispatch.
+# shellcheck disable=SC2034 # output globals are consumed by scripts sourcing this library
 
 FM_CREW_DISPATCH_ERROR=
 FM_CREW_DISPATCH_DEFAULT_STATUS=

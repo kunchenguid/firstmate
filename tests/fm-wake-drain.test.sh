@@ -11,19 +11,22 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain)
 
 test_drain_consumes_and_deduplicates_wakes() {
-  local dir state out count
+  local dir state out err count
   dir=$(make_case basic)
   state="$dir/state"
   out="$dir/drain.out"
+  err="$dir/drain.err"
   append_wake "$state" signal task.status "signal: first" || fail "first wake append failed"
   append_wake "$state" signal task.status "signal: second" || fail "second wake append failed"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "wake drain failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "wake drain failed"
   count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 1 ] || fail "duplicate wake was not collapsed: $(cat "$out")"
   grep -F "signal: second" "$out" >/dev/null || fail "latest duplicate payload was not retained"
-  [ ! -s "$state/.wake-queue" ] || fail "wake queue was not emptied after a successful drain"
-  pass "drain consumes queued wakes and keeps the latest duplicate payload"
+  [ -s "$state/.wake-queue" ] || fail "wake drain consumed rows before handling acknowledgement"
+  ack_drain_err "$state" "$err" >/dev/null || fail "wake acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "wake queue was not emptied after acknowledgement"
+  pass "drain presents the latest duplicate payload and consumes it after acknowledgement"
 }
 
 test_empty_drain_is_silent() {

@@ -32,6 +32,8 @@ test_buried_decision_still_surfaces() {
   grep -F 'OPEN DECISIONS' "$out" >/dev/null || fail "buried decision produced no OPEN DECISIONS section"
   grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
     || fail "buried needs-decision was not surfaced with its task, key, and note"
+  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
+    || fail "open section is missing the answerer-closes hint"
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
 }
 
@@ -50,6 +52,37 @@ test_explicit_resolution_closes_it() {
     fail "an explicitly resolved decision still printed as open: $(cat "$out")"
   fi
   pass "an explicit resolved [key=X] closes the keyed decision"
+}
+
+test_reserved_key_namespace_is_owned_by_its_library() {
+  local dir state out
+  dir=$(make_case reserved-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # `pending-reply-<id>` names a decision bin/fm-pending-reply-lib.sh raises and
+  # is the only writer that closes it. Every writer reaches this same stream - a
+  # local mate appends into it directly, and a remote mate's lines are mirrored
+  # into it verbatim - so another writer must not be able to take that key over
+  # or clear it just by naming it.
+  printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=ios pending-reply-id=abcdef0123456789 request=ship it\n' > "$state/task9.status"
+  printf 'blocked [key=pending-reply-abcdef0123456789]: shipping is blocked on infra\n' >> "$state/task9.status"
+  printf 'resolved [key=pending-reply-abcdef0123456789]: all good now\n' >> "$state/task9.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on reserved-key lines"
+
+  grep -F 'pending-reply-id=abcdef0123456789' "$out" >/dev/null \
+    || fail "a foreign resolution cleared a reserved decision it does not own: $(cat "$out")"
+  if grep -F 'shipping is blocked on infra' "$out" >/dev/null; then
+    fail "a foreign line took over a reserved decision key: $(cat "$out")"
+  fi
+
+  # The owner's own resolution, which speaks that namespace's vocabulary, closes it.
+  printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=ios pending-reply-id=abcdef0123456789 via=status\n' >> "$state/task9.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the owner closed its decision"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "the owner's own resolution did not close its reserved decision: $(cat "$out")"
+  fi
+  pass "a reserved decision key can only be opened or closed by its owning library"
 }
 
 test_later_unrelated_terminal_line_does_not_close_it() {
@@ -145,9 +178,48 @@ test_status_symlink_is_not_followed() {
   pass "the fleet-wide decision scan does not follow status symlinks"
 }
 
+# The per-item cut now comes from bin/fm-line-cap-lib.sh, shared with the
+# session-start digest's status tails so one truncation marker means the same
+# thing wherever an agent meets it. This pins the drain's own end of that
+# contract: the lede survives, the marker appears, and the item still fits the
+# section's per-item budget including the newline it is charged for.
+test_over_long_decision_note_is_capped_with_a_marker() {
+  local dir state out line longest
+  dir=$(make_case long-note)
+  state="$dir/state"
+  out="$dir/drain.out"
+  {
+    printf 'needs-decision [key=api-shape]: pick REST or RPC'
+    awk 'BEGIN { while (i++ < 200) printf " and-then-some" }'
+    printf '\n'
+  } > "$state/task-long.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
+
+  line=$(grep -F 'task-long' "$out")
+  case "$line" in
+    'task-long [key=api-shape] needs-decision: pick REST or RPC'*' [truncated]') : ;;
+    *) fail "an over-long decision note was not capped with its lede intact: $line" ;;
+  esac
+  longest=${#line}
+  [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
+
+  printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
+  grep -F 'task-short [key=short] needs-decision: brief enough to keep whole' "$out" >/dev/null \
+    || fail "a decision note already under the cap was altered"
+  if grep -F 'brief enough to keep whole [truncated]' "$out" >/dev/null; then
+    fail "a decision note already under the cap was marked truncated"
+  fi
+
+  pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
+}
+
 test_buried_decision_still_surfaces
+test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
+test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path

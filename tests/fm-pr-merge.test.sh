@@ -303,15 +303,15 @@ test_malformed_url_refuses_before_merge() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/1' \
+  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/-/merge_requests/1' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a malformed merge request URL"
   assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
     "malformed-url: refusal was not fixed and non-probing"
-  assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
+  assert_no_grep 'pr=https://gitlab.com/example/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "malformed-url: malformed PR URL armed a merge poll"

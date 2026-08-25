@@ -471,12 +471,25 @@ command_resolve() {
   fi
 }
 
+command_decline() {  # <origin-id> <decision-key> --decision-file <path>
+  local origin=${1:-} key=${2:-} id
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  id=$(hold_id "$origin" "$key")
+  exec "$SCRIPT_DIR/fm-captain-hold.sh" answer "$id" "$@"
+}
+
 case "${1:-}" in
   id) shift; command_id "$@" ;;
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  decline) shift; command_decline "$@" ;;
+  answers) shift; exec "$SCRIPT_DIR/fm-captain-hold.sh" answers "$@" ;;
+  bind) shift; exec "$SCRIPT_DIR/fm-captain-hold.sh" bind "$@" ;;
+  unbind) shift; exec "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$@" ;;
+  binding) shift; exec "$SCRIPT_DIR/fm-captain-hold.sh" binding "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

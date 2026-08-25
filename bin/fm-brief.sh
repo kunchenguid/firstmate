@@ -453,7 +453,7 @@ Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; 
 Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
-Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
+Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
 
 # Escalation to main firstmate
@@ -470,7 +470,8 @@ When a routed-work phase has a supervisor-actionable material change worth repor
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` using the same key that was opened.
+A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
 \`done\` records work completion and never closes a decision key.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
@@ -588,8 +589,8 @@ IFS= read -r -d '' SCOUT_RULES_3_TO_7 <<EOF || true
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` using the same key that was opened.
-   A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
+   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
    \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared
@@ -604,10 +605,12 @@ The report must stand alone: what you did, what you found, the evidence (command
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from \`$FM_ROOT/.agents/skills/diagnostic-reasoning/SKILL.md\`.
 Firstmate may verify that table with \`bin/fm-diagnostic-report.sh evaluate <report>\`.
 Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age.
-Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
+Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 EOF
 SCOUT_DOD_COMMON=${SCOUT_DOD_COMMON%$'\n'}
+SCOUT_READER_DOD=${SCOUT_DOD_COMMON/captain-hold-lifecycle/decision-hold-lifecycle}
 
 # PUBLISH_SECTION is the single emitted publication-language contract owner.
 IFS= read -r -d '' PUBLISH_SECTION <<'EOF' || true
@@ -696,7 +699,7 @@ $SCOUT_RULES_3_TO_7
 $HEAVY_SUITE_RULE
 
 # Definition of done
-$SCOUT_DOD_COMMON
+$SCOUT_READER_DOD
 If your findings reveal work that should ship (e.g. you identified the fix), say so in the report; firstmate will dispatch it as a separate implementation task with a full working copy.
 EOF
 if [ "$EVIDENCE_ARCHIVE" -eq 1 ]; then
@@ -815,7 +818,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active - the p
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
+  The repository owner applies \`ask-user-authority\` and obtains any required decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
@@ -941,8 +944,8 @@ $RULE1
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    Use \`needs-decision\` only for an actual question that requires a captain choice, not for a recorded refusal or a report.
-   When firstmate replies or a blocker clears and you resume, append \`resolved [key=<slug>]: {how it was decided or unblocked}\` using the same key that was opened.
-   A keyed decision closes only with \`resolved\` naming that key; a bare \`resolved\` with only a correlation token does not close it.
+   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
    \`done\` records work completion and never closes a decision key.
 7. Never stop, restart, or update a \`no-mistakes\` daemon. The default instance is private to this
    Firstmate home, while an explicit operator \`NM_HOME\` remains authoritative; the legacy shared

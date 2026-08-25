@@ -47,8 +47,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version) and deterministic diagnostics shared by CI and the no-mistakes pre-push gate.
-  Its header owns worker modes, while `bin/fm-ci.sh` owns CI's invocation policy.
+  `bin/fm-lint.sh` must pass: it is the single owner of the ShellCheck file set, config, and pinned version.
+  Hosted pull-request CI uses its one-process `--ci-fast` mode with extended analysis disabled, while the local no-mistakes gate keeps the full extended-analysis default.
+  Its header owns worker modes, while `.github/workflows/ci.yml` and `bin/fm-ci.sh` own the hosted-primary and fallback invocation policies.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
 - Harness-adapter ownership spans detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, semantic busy sources and trust gates in `bin/fm-busy-lib.sh`, delivery-only rendered guards in `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`; the `firstmate-coding-guidelines` skill owns the validation policy for checks that depend on those harnesses.
 - Changes to runtime session backends (`bin/fm-backend.sh`, `bin/backends/`, and the scripts that dispatch through them) keep current setup and limits in the relevant backend guide and active empirical evidence in [`docs/verification/runtime-backends.md`](docs/verification/runtime-backends.md).
@@ -68,14 +69,14 @@ When supervising live crewmates, keep firstmate's own long validation or build c
 Crewmate validation follows the installed no-mistakes version's SKILL.md and live `axi` help instead of duplicating gate mechanics in firstmate docs.
 Firstmate's wrapper still matters: crewmates route every `ask-user` finding to firstmate, which applies the authority contract in `AGENTS.md`, and crewmates avoid `--yes` because it would bypass that check and any required captain escalation.
 Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory and pins the gate's lint command to the same lint-definition owner as Linux CI.
-Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the complete behavior suite on the repository-scoped `water-7` runner.
+Local no-mistakes Test is intent-targeted and must not re-run every `tests/*.test.sh`; `.github/workflows/ci.yml` owns the complete behavior suite on GitHub-hosted shards.
 That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even when another no-mistakes-managed target project keeps committed PR evidence.
 
 Check and test the toolbelt before pushing:
 
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the canonical shell surface
-bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
+bin/fm-lint.sh   # full local lint for the toolbelt and behavior tests
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
@@ -97,17 +98,25 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns the complete behavior suite, real-Herdr setup, lint, invariants, and the coverage guard in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-For pull requests, that workflow reports a diff-scoped fast lane before the complete suite so iteration gets an early signal without changing the merge gate.
-The fast lane fails closed for an unmapped source path and conservatively selects mapped families, but maintainers must still use the complete suite for dynamic or indirect dependencies the path map cannot prove.
-The dedicated `water-7` runner executes one job at a time and refuses a suite verdict when the shared host's one-minute load is above 12.
-That conservative queue protects fleet workers at the cost of longer CI latency, and it replaces the former hosted macOS Bash 3.2 lane with the repository's Linux suite.
-Hosted macOS Bash 3.2 coverage was dropped to keep the complete behavior suite on the repository-owned `water-7` runner rather than paid hosted macOS capacity, leaving a recorded portability gap: no CI signal on stock macOS Bash 3.2.
+Pull-request CI owns one low-memory ShellCheck pass, focused teardown/spawn/delivery/wake safety tests, and three critical end-to-end smokes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+The complete behavior suite, real-Herdr setup, invariants, and coverage guard run on `main` pushes or pull requests carrying the `full-ci` label.
+All primary jobs use GitHub-hosted `ubuntu-latest` runners.
+If primary CI fails, [`.github/workflows/ci-water7-fallback.yml`](.github/workflows/ci-water7-fallback.yml) may run the complete `Suite` on the dedicated self-hosted `water-7` runner; maintainers may also dispatch that fallback manually.
+The fallback executes one job at a time and refuses a suite verdict when the shared host's one-minute load is above 12.
+Hosted macOS Bash 3.2 coverage remains intentionally absent, leaving a recorded portability gap: no CI signal on stock macOS Bash 3.2.
 Cover that gap locally with the existing `bin/fm-test-run.sh` suite on a stock-Bash macOS machine before landing a change to the canonical shell inventory or its portability-sensitive parsing.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
+
+## Upstream sync ritual
+
+Fetch `kunchenguid/firstmate` without changing the fork's `origin`, merge upstream `main` with a merge commit, and keep ordinary non-conflicting changes.
+Resolve semantic conflicts in favor of the fork's existing security and local-runtime owners, and describe any intentionally retained conflict in the sync pull request instead of guessing.
+Keep the fork's focused pull-request checks in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) instead of copying upstream's broad sharded suite onto every pull request, while [`.github/workflows/ci-water7-fallback.yml`](.github/workflows/ci-water7-fallback.yml) remains a failure/manual fallback.
+Run focused RED/GREEN coverage, `bin/fm-doc-audience-check.sh`, lint, and no-mistakes, with the hosted GitHub shard results as acceptance.
+Keep the upstream head in merge ancestry so the next sync starts from Git history rather than a prose ledger.
 
 ## Questions
 

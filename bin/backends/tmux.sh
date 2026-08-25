@@ -22,6 +22,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -162,10 +164,13 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
+    muse|muse-bin-*) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|cursor-agent|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
+        printf 'agent'
+      elif fm_cursor_process_matches "${path:-$argv0}" '' "$argv0"; then
         printf 'agent'
       else
         printf 'other'

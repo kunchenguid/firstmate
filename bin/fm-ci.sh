@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # fm-ci.sh - the single command policy for Firstmate's one-job Water 7 CI run.
 #
-# Lanes run one after another in that single job. The only concurrency is
-# bounded in-lane --jobs for a lane whose set is proven-isolated; see
+# Lanes run one after another in that single job. The upstream portable serial
+# partition is retained as its repository-owned shards, but those shards remain
+# sequential on the sole Water 7 runner. The only concurrency is bounded
+# in-lane --jobs for a lane whose set is proven-isolated; see
 # docs/fm-test-portable-shards.md and docs/verification/ci-portable-parallel-jobs.md.
-# Lint runs its two stable shards serially with FM_LINT_JOBS=1 to bound
+# Lint runs its 32 stable shards serially with FM_LINT_JOBS=1 to bound
 # concurrent ShellCheck memory on the shared host without changing diagnostics;
 # bin/fm-lint.sh keeps its two-worker default for other callers.
 #
@@ -31,6 +33,7 @@ FM_CI_HERDR_SESSION=fm-ci-water7
 FM_CI_SUMMARY_DIR=
 FM_CI_SUMMARY_ENABLED=0
 FM_CI_BOOTSTRAP_MS=0
+FM_CI_TIMING_INPUTS=()
 
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
@@ -161,11 +164,11 @@ ensure_tools() {
   [ "$(shellcheck --version 2>/dev/null | awk '/^version:/ { print $2; exit }')" = "$required" ] \
     || die "ShellCheck $required bootstrap failed"
 
-  if [ "$(herdr --version 2>/dev/null | awk '{ print $2; exit }')" != 0.7.4 ]; then
+  if [ "$(herdr --version 2>/dev/null | awk '{ print $2; exit }')" != 0.8.0 ]; then
     bin/fm-install-herdr.sh "$tool_dir"
   fi
-  [ "$(herdr --version 2>/dev/null | awk '{ print $2; exit }')" = 0.7.4 ] \
-    || die 'Herdr 0.7.4 bootstrap failed'
+  [ "$(herdr --version 2>/dev/null | awk '{ print $2; exit }')" = 0.8.0 ] \
+    || die 'Herdr 0.8.0 bootstrap failed'
 
   FM_CHROME_BIN=$(bin/fm-install-chrome.sh "$tool_dir")
   export FM_CHROME_BIN
@@ -176,8 +179,8 @@ ensure_tools() {
     || die "could not ready the dedicated Herdr controller $FM_CI_HERDR_SESSION"
   status=$(fm_backend_herdr_cli "$FM_CI_HERDR_SESSION" status --json 2>/dev/null || true)
   printf '%s' "$status" | jq -e \
-    '.client.version == "0.7.4" and (.client.protocol | tonumber) >= 16 and .server.running == true' \
-    >/dev/null || die "Herdr 0.7.4 protocol 16+ is not ready for $FM_CI_HERDR_SESSION"
+    '.client.version == "0.8.0" and (.client.protocol | tonumber) >= 19 and .server.running == true' \
+    >/dev/null || die "Herdr 0.8.0 protocol 19+ is not ready for $FM_CI_HERDR_SESSION"
   FM_HERDR_LAB_PROTECTED_SESSION=$FM_CI_HERDR_SESSION
   export FM_HERDR_LAB_PROTECTED_SESSION
 }
@@ -198,23 +201,35 @@ run_pr_fast_lane() {
 }
 
 run_lane() {
-  local name=$1
+  local name=$1 timing_path
   shift
   if [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ]; then
-    bin/fm-test-run.sh "$@" --json "$FM_CI_SUMMARY_DIR/$name.json"
+    timing_path="$FM_CI_SUMMARY_DIR/$name.json"
+    bin/fm-test-run.sh "$@" --json "$timing_path"
+    FM_CI_TIMING_INPUTS+=("$timing_path")
   else
     bin/fm-test-run.sh "$@"
   fi
+}
+
+run_portable_serial_shards() {
+  local lane found=0
+  while IFS= read -r lane; do
+    case "$lane" in
+      portable-serial-[0-9]*of[0-9]*)
+        found=1
+        run_lane "$lane" --lane "$lane"
+        ;;
+    esac
+  done < <(bin/fm-test-run.sh --list-lanes)
+  [ "$found" -eq 1 ] || die 'fm-test-run reported no portable serial shard lanes'
 }
 
 write_step_summary() {
   [ "$FM_CI_SUMMARY_ENABLED" -eq 1 ] || return 0
   local aggregate="$FM_CI_SUMMARY_DIR/aggregate.json"
   bin/fm-test-run.sh --aggregate-json "$aggregate" \
-    "$FM_CI_SUMMARY_DIR/portable-parallel-1.json" \
-    "$FM_CI_SUMMARY_DIR/portable-parallel-2.json" \
-    "$FM_CI_SUMMARY_DIR/portable-serial.json" \
-    "$FM_CI_SUMMARY_DIR/real-herdr-gated.json" >/dev/null || return 1
+    "${FM_CI_TIMING_INPUTS[@]}" >/dev/null || return 1
   python3 - "$GITHUB_STEP_SUMMARY" "$FM_CI_BOOTSTRAP_MS" "${GITHUB_RUN_ID:-unavailable}" "$aggregate" <<'PY'
 import json
 import sys
@@ -277,7 +292,7 @@ bin/fm-test-run.sh --check-coverage
 run_pr_fast_lane
 run_lane portable-parallel-1 --jobs 2 --lane portable-parallel-1
 run_lane portable-parallel-2 --lane portable-parallel-2
-run_lane portable-serial --lane portable-serial
+run_portable_serial_shards
 run_lane real-herdr-gated --family real-herdr-gated --fail-on-gate-skip 'herdr not found'
 if ! write_step_summary; then
   printf 'fm-ci: could not publish optional GitHub step summary\n' >&2

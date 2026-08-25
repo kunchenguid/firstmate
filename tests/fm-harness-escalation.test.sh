@@ -85,19 +85,19 @@ test_substantive_failure_climbs_rungs_then_stops_below_max() {
   out=$(esc "$home" "$id" substantive)
   assert_tuple "$out" pi default medium
   assert_not_contains "$out" "effort=max" "ladder selected max automatically"
-  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id=$id worktree=w project=p \
+  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id="$id" worktree=w project=p \
     harness=pi kind=ship model=default effort=medium routing_source=fallback
 
   out=$(esc "$home" "$id" substantive)
   assert_tuple "$out" pi default high
   assert_not_contains "$out" "effort=max" "ladder selected max automatically"
-  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id=$id worktree=w project=p \
+  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id="$id" worktree=w project=p \
     harness=pi kind=ship model=default effort=high routing_source=fallback
 
   out=$(esc "$home" "$id" substantive)
   assert_tuple "$out" pi default xhigh
   assert_not_contains "$out" "effort=max" "ladder selected max automatically"
-  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id=$id worktree=w project=p \
+  fm_write_meta "$home/state/$id.meta" window=w endpoint_task_id="$id" worktree=w project=p \
     harness=pi kind=ship model=default effort=xhigh routing_source=fallback
 
   out=$(esc "$home" "$id" substantive)

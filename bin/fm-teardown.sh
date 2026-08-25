@@ -232,10 +232,14 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -264,12 +268,67 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+# A live lease owned by the other supervision actor refuses before metadata or
+# any lifecycle mutation is inspected.
+if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
+  echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
+  exit "$FM_LEASE_REFUSE_EXIT"
+fi
+fm_lease_guard "$ID" "teardown (fm-teardown)"
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK_HELD=0
+META_LOCK=
+META_LOCK_HELD=0
+DESCENDANT_LOCK_PATHS=()
+DESCENDANT_TASK_STATES=()
+DESCENDANT_TASK_IDS=()
+DESCENDANT_TASK_KINDS=()
+DESCENDANT_TASK_HOMES=()
+teardown_release_route_locks() {
+  local status=$? i
+  for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
+  done
+  DESCENDANT_LOCK_PATHS=()
+  if [ -n "${HANDOFF_WAKE_RETIRE_LOCK:-}" ]; then
+    fm_lock_release "$HANDOFF_WAKE_RETIRE_LOCK" || true
+    HANDOFF_WAKE_RETIRE_LOCK=
+  fi
+  if [ -n "${LOCAL_HANDOFF_LOCK:-}" ]; then
+    fm_lock_release "$LOCAL_HANDOFF_LOCK" || true
+    LOCAL_HANDOFF_LOCK=
+  fi
+  if [ -n "${LOCAL_REGISTRY_LOCK:-}" ]; then
+    fm_lock_release "$LOCAL_REGISTRY_LOCK" || true
+    LOCAL_REGISTRY_LOCK=
+  fi
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
+  fi
+  fm_lease_guard_release || true
+  return "$status"
+}
+trap teardown_release_route_locks EXIT
+fm_lock_try_acquire "$CONTROL_LOCK" || {
+  echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
+  exit 1
+}
+CONTROL_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -280,6 +339,209 @@ REMOTE_PENDING_DIR_REAL=
 REMOTE_HANDOFF_LOCK=
 REMOTE_REGISTRY_LOCK=
 REMOTE_REPLY_LIFECYCLE_LOCK=
+LOCAL_HANDOFF_LOCK=
+LOCAL_REGISTRY_LOCK=
+HANDOFF_WAKE_RETIRE_MARKER=
+HANDOFF_WAKE_RETIRE_VALUE=
+HANDOFF_WAKE_RETIRE_CORR=
+HANDOFF_WAKE_RETIRE_LOCK=
+HANDOFF_WAKE_RETIRE_STAGE=
+
+handoff_wake_retire_validate() {
+  local marker="$STATE/.backlog-handoff-$ID.wake-pending" value corr rec confirmation
+  HANDOFF_WAKE_RETIRE_MARKER=
+  HANDOFF_WAKE_RETIRE_VALUE=
+  HANDOFF_WAKE_RETIRE_CORR=
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || {
+    echo "REFUSED: receiver wake state for secondmate $ID is unsafe" >&2
+    return 1
+  }
+  value=$(cat "$marker" 2>/dev/null || true)
+  case "$value" in
+    pending|confirmed) ;;
+    prepared:*)
+      corr=${value#prepared:}
+      corr=${corr%%:*}
+      printf '%s' "$value" | grep -Eq '^prepared:[a-f0-9]{16}:[a-f0-9]{16}$' || {
+        echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+        return 1
+      }
+      ;;
+    pending:*|confirmed:*)
+      corr=${value#*:}
+      printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || {
+        echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "REFUSED: receiver wake state for secondmate $ID is invalid" >&2
+      return 1
+      ;;
+  esac
+  if [ -n "$corr" ]; then
+    rec=$(fm_pending_reply_path "$STATE" "$corr")
+    if [ -e "$rec" ] || [ -L "$rec" ]; then
+      [ -f "$rec" ] && [ ! -L "$rec" ] \
+        && [ "$(fm_pending_reply_get "$rec" task_id)" = "$ID" ] || {
+        echo "REFUSED: receiver wake correlation for secondmate $ID is unsafe or belongs to another task" >&2
+        return 1
+      }
+    fi
+    confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+    if [ -e "$confirmation" ] || [ -L "$confirmation" ]; then
+      [ -f "$confirmation" ] && [ ! -L "$confirmation" ] || {
+        echo "REFUSED: receiver wake delivery state for secondmate $ID is unsafe" >&2
+        return 1
+      }
+    fi
+    HANDOFF_WAKE_RETIRE_CORR=$corr
+  fi
+  HANDOFF_WAKE_RETIRE_MARKER=$marker
+  HANDOFF_WAKE_RETIRE_VALUE=$value
+}
+
+handoff_wake_retire() {
+  local marker=$HANDOFF_WAKE_RETIRE_MARKER corr=$HANDOFF_WAKE_RETIRE_CORR lock rec confirmation rc=0
+  [ -n "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] \
+    && [ "$(cat "$marker" 2>/dev/null || true)" = "$HANDOFF_WAKE_RETIRE_VALUE" ] || return 1
+  if [ -n "$corr" ]; then
+    lock="$STATE/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait "$lock" || return 1
+    rec=$(fm_pending_reply_path "$STATE" "$corr")
+    confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+    if { [ ! -e "$rec" ] && [ ! -L "$rec" ]; } \
+      || { [ -f "$rec" ] && [ ! -L "$rec" ] \
+        && [ "$(fm_pending_reply_get "$rec" task_id)" = "$ID" ]; }; then
+      rm -f -- "$confirmation" "$rec" "$marker" || rc=$?
+    else
+      rc=1
+    fi
+    fm_lock_release "$lock"
+    return "$rc"
+  fi
+  rm -f -- "$marker"
+}
+
+handoff_wake_retire_stage_restore() {
+  local stage=$HANDOFF_WAKE_RETIRE_STAGE marker rec confirmation name destination
+  [ -n "$stage" ] || return 0
+  marker="$STATE/.backlog-handoff-$ID.wake-pending"
+  rec=
+  confirmation=
+  if [ -n "$HANDOFF_WAKE_RETIRE_CORR" ]; then
+    rec=$(fm_pending_reply_path "$STATE" "$HANDOFF_WAKE_RETIRE_CORR")
+    confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$HANDOFF_WAKE_RETIRE_CORR")
+  fi
+  for name in record confirmation marker; do
+    [ -e "$stage/$name" ] || continue
+    case "$name" in
+      record) destination=$rec ;;
+      confirmation) destination=$confirmation ;;
+      marker) destination=$marker ;;
+    esac
+    [ -n "$destination" ] && [ ! -e "$destination" ] && [ ! -L "$destination" ] \
+      && mv -- "$stage/$name" "$destination" || return 1
+  done
+  rm -f -- "$stage/corr" || return 1
+  rmdir -- "$stage" || return 1
+  if [ -n "$HANDOFF_WAKE_RETIRE_LOCK" ]; then
+    fm_lock_release "$HANDOFF_WAKE_RETIRE_LOCK" || return 1
+    HANDOFF_WAKE_RETIRE_LOCK=
+  fi
+  HANDOFF_WAKE_RETIRE_STAGE=
+}
+
+handoff_wake_retire_stage_commit() {
+  local stage=$HANDOFF_WAKE_RETIRE_STAGE retired
+  [ -n "$stage" ] || return 0
+  retired="$stage.retired.$$"
+  [ ! -e "$retired" ] && [ ! -L "$retired" ] || return 1
+  mv -- "$stage" "$retired" || return 1
+  HANDOFF_WAKE_RETIRE_STAGE=
+  if [ -n "$HANDOFF_WAKE_RETIRE_LOCK" ]; then
+    fm_lock_release "$HANDOFF_WAKE_RETIRE_LOCK" || return 1
+    HANDOFF_WAKE_RETIRE_LOCK=
+  fi
+  rm -rf -- "$retired" || echo "warning: retired receiver wake state remains at $retired" >&2
+}
+
+handoff_wake_retire_stage_recover() {
+  local home=$1 stage="$STATE/.backlog-handoff-$ID.wake-retiring" corr
+  [ -e "$stage" ] || [ -L "$stage" ] || return 0
+  [ -d "$stage" ] && [ ! -L "$stage" ] || {
+    echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+    return 1
+  }
+  if [ ! -e "$stage/corr" ] && [ ! -L "$stage/corr" ]; then
+    rmdir -- "$stage" 2>/dev/null && return 0
+    echo "REFUSED: receiver wake retirement state for secondmate $ID is incomplete" >&2
+    return 1
+  fi
+  [ -f "$stage/corr" ] && [ ! -L "$stage/corr" ] || {
+    echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+    return 1
+  }
+  corr=$(cat "$stage/corr" 2>/dev/null || true)
+  [ -z "$corr" ] || printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || {
+    echo "REFUSED: receiver wake retirement correlation for secondmate $ID is invalid" >&2
+    return 1
+  }
+  local staged
+  for staged in "$stage/marker" "$stage/record" "$stage/confirmation"; do
+    [ ! -e "$staged" ] && [ ! -L "$staged" ] && continue
+    [ -f "$staged" ] && [ ! -L "$staged" ] || {
+      echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
+      return 1
+    }
+  done
+  HANDOFF_WAKE_RETIRE_CORR=$corr
+  HANDOFF_WAKE_RETIRE_STAGE=$stage
+  if [ -n "$corr" ]; then
+    HANDOFF_WAKE_RETIRE_LOCK="$STATE/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait "$HANDOFF_WAKE_RETIRE_LOCK" || return 1
+  fi
+  if [ -e "$home" ] || [ -L "$home" ]; then
+    handoff_wake_retire_stage_restore
+  else
+    handoff_wake_retire_stage_commit
+  fi
+}
+
+handoff_wake_retire_stage() {
+  local stage="$STATE/.backlog-handoff-$ID.wake-retiring" marker=$HANDOFF_WAKE_RETIRE_MARKER
+  local corr=$HANDOFF_WAKE_RETIRE_CORR rec confirmation
+  [ -n "$marker" ] || return 0
+  [ ! -e "$stage" ] && [ ! -L "$stage" ] || return 1
+  (umask 077; mkdir -- "$stage") || return 1
+  HANDOFF_WAKE_RETIRE_STAGE=$stage
+  printf '%s\n' "$corr" > "$stage/corr" || { handoff_wake_retire_stage_restore || true; return 1; }
+  if [ -n "$corr" ]; then
+    HANDOFF_WAKE_RETIRE_LOCK="$STATE/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait "$HANDOFF_WAKE_RETIRE_LOCK" || {
+      HANDOFF_WAKE_RETIRE_LOCK=
+      handoff_wake_retire_stage_restore || true
+      return 1
+    }
+    rec=$(fm_pending_reply_path "$STATE" "$corr")
+    confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+    if [ -e "$rec" ] && ! mv -- "$rec" "$stage/record"; then
+      handoff_wake_retire_stage_restore || true
+      return 1
+    fi
+    if [ -e "$confirmation" ] && ! mv -- "$confirmation" "$stage/confirmation"; then
+      handoff_wake_retire_stage_restore || true
+      return 1
+    fi
+  fi
+  if ! mv -- "$marker" "$stage/marker"; then
+    handoff_wake_retire_stage_restore || true
+    return 1
+  fi
+}
+
 
 remote_teardown_locks_release() {
   if [ -n "$REMOTE_REPLY_LIFECYCLE_LOCK" ]; then
@@ -392,6 +654,7 @@ remote_secondmate_teardown() {
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
     || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
   [ -z "$FORCE" ] || [ "$FORCE" = --force ] || { echo "error: invalid teardown option: $FORCE" >&2; return 2; }
+  handoff_wake_retire_validate || return 1
   remote_recovery_paths_validate initial || return 1
   if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
     echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
@@ -441,6 +704,8 @@ remote_secondmate_teardown() {
   fi
   remote_pending_replies_cleanup \
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
+  handoff_wake_retire \
+    || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
@@ -1087,7 +1352,7 @@ teardown_occupancy_identity_matches() {
 
 teardown_treehouse_status_entry() {
   local abs=$1 json matches count
-  json=$(treehouse status --json 2>/dev/null) || return 2
+  json=$(CDPATH='' cd -- "$PROJ" && treehouse status --json 2>/dev/null) || return 2
   [ -n "$json" ] || json='[]'
   if ! printf '%s\n' "$json" | jq -e 'type=="array"' >/dev/null 2>&1; then
     return 2
@@ -2051,7 +2316,7 @@ telemetry_step_reruns_from_stats() {  # <worktree> <run-id>
 scout_delivery_is_accepted() {
   [ -s "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ] || return 1
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null 2>&1
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null 2>&1
 }
 
 # Digest of one caller-authored terminal payload, canonicalized first so a
@@ -2802,6 +3067,109 @@ preflight_firstmate_home_process_event_tree() {
   preflight_firstmate_home_process_events "$home" "$label"
 }
 
+collect_descendant_task_locks() {
+  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
+  local -a child_ids
+  sub_state="$home/state"
+  if [ -L "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if [ -e "$sub_state" ] && [ ! -d "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if ! mkdir -p -- "$sub_state"; then
+    echo "REFUSED: secondmate home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  if [ -L "$sub_state" ] || [ ! -d "$sub_state" ]; then
+    echo "REFUSED: secondmate home $home state path is not a safe directory at $sub_state; forced teardown changed nothing" >&2
+    return 1
+  fi
+  task_set_lock=$(fm_task_set_lock_path "$sub_state") || {
+    echo "REFUSED: secondmate home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$task_set_lock"; then
+    echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
+    return 1
+  fi
+  DESCENDANT_LOCK_PATHS+=("$task_set_lock")
+  child_ids=()
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_ids+=("$(basename "$child_meta" .meta)")
+  done
+  [ "${#child_ids[@]}" -gt 0 ] || return 0
+  while IFS= read -r child_id; do
+    child_meta="$sub_state/$child_id.meta"
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    child_home=
+    if [ "$child_kind" = secondmate ]; then
+      child_wt=$(meta_value "$child_meta" worktree)
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+    fi
+    DESCENDANT_TASK_STATES+=("$sub_state")
+    DESCENDANT_TASK_IDS+=("$child_id")
+    DESCENDANT_TASK_KINDS+=("$child_kind")
+    DESCENDANT_TASK_HOMES+=("$child_home")
+    [ "$child_kind" != secondmate ] \
+      || collect_descendant_task_locks "$child_home" \
+      || return 1
+  done < <(printf '%s\n' "${child_ids[@]}" | LC_ALL=C sort)
+}
+
+preflight_descendant_task_locks() {
+  local home=$1 i state task_id meta control_lock meta_lock kind child_wt child_home
+  DESCENDANT_TASK_STATES=()
+  DESCENDANT_TASK_IDS=()
+  DESCENDANT_TASK_KINDS=()
+  DESCENDANT_TASK_HOMES=()
+  collect_descendant_task_locks "$home" || return 1
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    control_lock="$state/.control-$task_id.lock"
+    meta_lock=$(fm_meta_lock_path "$meta") || {
+      echo "REFUSED: descendant task $task_id has an invalid metadata lock path; forced teardown changed nothing" >&2
+      return 1
+    }
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$control_lock")
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$meta_lock")
+    [ -f "$meta" ] || {
+      echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
+      return 1
+    }
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    [ "$kind" = "${DESCENDANT_TASK_KINDS[$i]}" ] || {
+      echo "REFUSED: descendant task $task_id changed kind while forced teardown acquired its locks; forced teardown changed nothing" >&2
+      return 1
+    }
+    if [ "$kind" = secondmate ]; then
+      child_wt=$(meta_value "$meta" worktree)
+      child_home=$(meta_value "$meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      [ "$child_home" = "${DESCENDANT_TASK_HOMES[$i]}" ] || {
+        echo "REFUSED: descendant task $task_id changed home while forced teardown acquired its locks; forced teardown changed nothing" >&2
+        return 1
+      }
+    fi
+  done
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
@@ -2938,7 +3306,7 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
+      trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
       return 0
     fi
     sleep 0.1
@@ -3058,28 +3426,40 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
+      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
   done
 }
 
 remove_secondmate_registry_entry() {
-  local id=$1 tmp lock rc=0
+  local id=$1 tmp lock rc=0 acquired=0
   [ -f "$SECONDMATE_REG" ] || return 0
   lock=$(secondmate_registry_lock_path "$STATE")
-  fm_lock_acquire_wait "$lock" || return 1
+  if [ "$LOCAL_REGISTRY_LOCK" != "$lock" ]; then
+    fm_lock_acquire_wait "$lock" || return 1
+    acquired=1
+  fi
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG" || rc=$?
-  fm_lock_release "$lock"
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
+  LOCAL_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$LOCAL_REGISTRY_LOCK" || exit 1
+  LOCAL_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  fm_lock_acquire_wait "$LOCAL_HANDOFF_LOCK" || exit 1
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
+  handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
@@ -3116,9 +3496,9 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     exit 1
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
-    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+    echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
 fi
@@ -3172,10 +3552,22 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
+    && [ -n "$PUBLIC_FOLLOWUP_STATE" ] \
+    && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
+    && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
+  echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
+fi
+
+X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+if [ -n "$X_REQUEST" ]; then
+  echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
+fi
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
   fm_lock_acquire_wait "$TEARDOWN_TREEHOUSE_LOCK" || exit 1
   TEARDOWN_TREEHOUSE_LOCK_HELD=1
-  trap teardown_release_herdr_locks EXIT
+  trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
 fi
 teardown_prove_worktree_occupancy || exit 1
 if [ "$TEARDOWN_WORKTREE_STALE" != 1 ]; then
@@ -3186,7 +3578,7 @@ fi
 teardown_refuse_open_pr_without_watch || exit 1
 if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$TEARDOWN_TREEHOUSE_LOCK_HELD" != 1 ]; then
   teardown_treehouse_lock_acquire || exit 1
-  trap teardown_release_herdr_locks EXIT
+  trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -3523,7 +3915,18 @@ if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
+  handoff_wake_retire_stage \
+    || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
+    :
+  else
+    rc=$?
+    handoff_wake_retire_stage_restore \
+      || echo "error: receiver wake restoration failed; recovery state remains at $HANDOFF_WAKE_RETIRE_STAGE" >&2
+    exit "$rc"
+  fi
+  handoff_wake_retire_stage_commit \
+    || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
@@ -3545,7 +3948,8 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/.$ID.open-decisions-cursor" \
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+  "$STATE/$ID.muse-session-current" "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.escalation"
 fm_lock_remove_path "$STATE/.$ID.escalation.lock" || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

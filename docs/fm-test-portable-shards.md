@@ -56,12 +56,13 @@ The estimates below therefore apply the current durations to that fixed partitio
 It keeps watcher, lock, AFK, real tmux, daemon, secondmate lifecycle, bootstrap, live-harness opt-in, GUI-backend, and other unproven work serial.
 Membership is derived rather than enumerated, so a newly added test lands here by default.
 
-## Water 7 CI execution
+## Hosted CI and Water 7 fallback
 
-`.github/workflows/ci.yml` runs `portable-parallel-1` with bounded in-lane `--jobs 2`, keeps `portable-parallel-2` serial after the acceptance oracle rejected `N=2` for that lane, then runs the complete portable serial remainder and the real-Herdr family through one repository-owned command policy in one job on the sole Water 7 runner.
+`.github/workflows/ci.yml` runs the two portable parallel lanes, four serial shards, and real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
+Shard membership and count remain owned by `bin/fm-test-run.sh`, and CI refuses a matrix count that disagrees with that owner.
 See [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md) for the measured oracle evidence.
-The workflow does not split the remainder across runner jobs because that would permit unsafe parallel use of the one host.
-The job admits and validates its verdict through the shared-host load guard.
+If primary CI fails, `.github/workflows/ci-water7-fallback.yml` runs `bin/fm-ci.sh` as one self-hosted Water 7 `Suite`; maintainers may also dispatch it manually.
+That fallback discovers and executes the serial shards sequentially, and admits and validates its verdict through the shared-host load guard.
 Static portability checks run on Linux, while [CONTRIBUTING.md](../CONTRIBUTING.md) records the required local stock-macOS Bash lane rather than adding a hosted macOS dependency.
 
 ## Coverage guard
@@ -73,7 +74,8 @@ It separately verifies that the portable serial CI shards are non-empty, disjoin
 ## Timing artifacts
 
 `bin/fm-test-run.sh --json <path>` writes one lane's runner-generated timing JSON, and `bin/fm-test-run.sh --aggregate-json out.json <lane>.json ...` merges lanes for critical-path review.
-Water 7 uses that same flag for job-summary observability rather than uploaded artifacts: when `GITHUB_STEP_SUMMARY` is set, `bin/fm-ci.sh` collects one timing JSON per lane in a temporary directory under `RUNNER_TEMP` and appends a compact lane report to the job summary.
+Primary CI uploads per-shard timing JSON and an aggregate artifact.
+The Water 7 fallback uses the same flag for job-summary observability: when `GITHUB_STEP_SUMMARY` is set, `bin/fm-ci.sh` collects one timing JSON per executed lane in a temporary directory under `RUNNER_TEMP` and appends a compact lane report to the job summary.
 `bin/fm-test-run.sh --aggregate-json` remains the single owner of cross-lane merging and slowest-test ranking, while `bin/fm-ci.sh` only renders those aggregate fields for the job summary.
 Both collection and publication are non-blocking: `bin/fm-test-run.sh` reports an unwritable timing artifact without changing the suite exit status it already decided, and `bin/fm-ci.sh` reports a publish failure without changing the policy verdict.
 Publication is success-only: a failing lane still fails the policy at that lane, so a job summary carries a timing report only when every lane passed.

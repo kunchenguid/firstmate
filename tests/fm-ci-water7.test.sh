@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Contract tests for the single-runner Water 7 workflow and command policy.
+# Contract tests for the hosted slim primary path and self-hosted fallback policy.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-test_workflows_are_static_and_water7_only() {
+test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback() {
   if ! python3 - "$ROOT" <<'PY'
 import pathlib
 import sys
@@ -19,67 +19,190 @@ except ModuleNotFoundError:
 root = pathlib.Path(sys.argv[1])
 labels = ["self-hosted", "Linux", "X64", "water-7"]
 ci_path = root / ".github/workflows/ci.yml"
+fallback_path = root / ".github/workflows/ci-water7-fallback.yml"
 required_path = root / ".github/workflows/no-mistakes-required.yml"
 ci = yaml.safe_load(ci_path.read_text())
+fallback = yaml.safe_load(fallback_path.read_text())
 required = yaml.safe_load(required_path.read_text())
 
 assert ci.get("permissions") == {"contents": "read"}
+assert fallback.get("permissions") == {"contents": "read"}
 assert required.get("permissions") == {"contents": "read", "pull-requests": "read"}
-assert list(ci["jobs"]) == ["suite"]
+expected_primary_jobs = [
+    "lint",
+    "critical-teardown",
+    "critical-spawn",
+    "critical-delivery",
+    "critical-smokes",
+    "test-coverage",
+    "tests-portable-parallel-1",
+    "tests-portable-parallel-2",
+    "tests-portable-serial",
+    "tests-herdr",
+    "tests-timing-aggregate",
+    "invariants",
+]
+assert list(ci["jobs"]) == expected_primary_jobs, list(ci["jobs"])
+assert list(fallback["jobs"]) == ["suite"]
 assert list(required["jobs"]) == ["check"]
 
-assert ci["concurrency"] == {
-    "group": "ci-water-7-${{ github.event.pull_request.number || github.ref }}",
+assert fallback["concurrency"] == {
+    "group": "ci-water-7-fallback-${{ github.event.workflow_run.id || github.run_id }}",
     "cancel-in-progress": True,
 }
-assert ci["env"] == {"FM_CI_MAX_LOAD": "12"}
 
-ci_job = ci["jobs"]["suite"]
+assert fallback["env"] == {"FM_CI_MAX_LOAD": "12"}
+
+fallback_job = fallback["jobs"]["suite"]
 required_job = required["jobs"]["check"]
-water7_labels = labels
 hosted_label = "ubuntu-slim"
 required_timeout = 15
 
-assert ci_job["runs-on"] == water7_labels
+primary_names = {
+    "lint": "Lint",
+    "critical-teardown": "Critical teardown safety",
+    "critical-spawn": "Critical spawn safety",
+    "critical-delivery": "Critical delivery and wake safety",
+    "critical-smokes": "Critical end-to-end smokes",
+    "test-coverage": "Test coverage guard",
+    "tests-portable-parallel-1": "Behavior portable parallel 1",
+    "tests-portable-parallel-2": "Behavior portable parallel 2",
+    "tests-portable-serial": "Behavior portable serial ${{ matrix.shard }}",
+    "tests-herdr": "Behavior tests (Herdr)",
+    "tests-timing-aggregate": "Behavior timing aggregate",
+    "invariants": "Repo invariants",
+}
+for job_id, job in ci["jobs"].items():
+    assert job["runs-on"] == "ubuntu-latest", (job_id, job["runs-on"])
+    assert job["name"] == primary_names[job_id], (job_id, job["name"])
+    assert "self-hosted" not in str(job["runs-on"])
+    assert "water-7" not in str(job["runs-on"])
+
+lint = ci["jobs"]["lint"]
+assert "strategy" not in lint
+assert "needs" not in lint
+assert "if" not in lint
+assert lint.get("env") == {"FM_LINT_JOBS": "1"}
+assert lint["steps"][-1]["run"] == "bin/fm-lint.sh --ci-fast"
+assert "actionlint" not in str(lint)
+
+critical_commands = {
+    "critical-teardown": [
+        "tests/fm-teardown.test.sh",
+        "tests/fm-teardown-endpoint-safety.test.sh",
+    ],
+    "critical-spawn": [
+        "tests/fm-spawn-dispatch-profile.test.sh",
+        "tests/fm-spawn-pool-base-freshen.test.sh",
+        "tests/fm-spawn-worktree-settle.test.sh",
+    ],
+    "critical-delivery": [
+        "tests/fm-pr-merge.test.sh",
+        "tests/fm-branch-supervision.test.sh",
+        "tests/fm-wake-queue.test.sh",
+        "tests/fm-wake-drain.test.sh",
+        "tests/fm-wake-drain-open-decisions.test.sh",
+        "tests/fm-wake-drain-open-decisions-cursor.test.sh",
+        "tests/fm-wake-drain-unread-status.test.sh",
+    ],
+    "critical-smokes": [
+        "tests/fm-backend-autodetect-smoke.test.sh",
+        "tests/fm-backend-tmux-smoke.test.sh",
+        "tests/fm-afk-inject-e2e.test.sh",
+    ],
+}
+for job_id, scripts in critical_commands.items():
+    job = ci["jobs"][job_id]
+    assert "if" not in job
+    assert "strategy" not in job
+    command = job["steps"][-1]["run"]
+    assert command.startswith("bin/fm-test-run.sh "), (job_id, command)
+    for script in scripts:
+        assert script in command, (job_id, script, command)
+
+full_ci_gate = "github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')"
+for job_id in (
+    "test-coverage",
+    "tests-portable-parallel-1",
+    "tests-portable-parallel-2",
+    "tests-portable-serial",
+    "tests-herdr",
+    "invariants",
+):
+    assert ci["jobs"][job_id]["if"] == full_ci_gate, job_id
+assert ci["jobs"]["tests-timing-aggregate"]["if"] == f"always() && ({full_ci_gate})"
+
+required_tool_step = {
+    "name": "Install required test tools",
+    "run": "sudo apt-get update\nsudo apt-get install -y ripgrep\n",
+}
+for job_id in (
+    "tests-portable-parallel-1",
+    "tests-portable-parallel-2",
+    "tests-portable-serial",
+    "tests-herdr",
+):
+    steps = ci["jobs"][job_id]["steps"]
+    assert required_tool_step in steps, (job_id, steps)
+
+serial = ci["jobs"]["tests-portable-serial"]
+assert serial["strategy"]["fail-fast"] is False
+assert serial["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
+assert ci["jobs"]["tests-timing-aggregate"]["needs"] == [
+    "tests-portable-parallel-1",
+    "tests-portable-parallel-2",
+    "tests-portable-serial",
+    "tests-herdr",
+]
+
+assert fallback_job["runs-on"] == labels
+assert fallback_job["name"] == "Suite"
+assert fallback_job["timeout-minutes"] == 120
 assert required_job["runs-on"] == hosted_label
 assert required_job["timeout-minutes"] == required_timeout
 for forbidden in ("self-hosted", "water-7"):
     assert forbidden not in str(required_job["runs-on"]), forbidden
 
-for job in (ci_job, required_job):
+for job in (fallback_job, required_job):
     assert "strategy" not in job
-    assert "needs" not in job
     assert job.get("continue-on-error") is None
 
 normalize = lambda value: " ".join(value.split())
-ci_admission = (
-    "(github.event_name == 'pull_request' && "
-    "github.event.pull_request.head.repo.full_name == github.repository) || "
-    "(github.event_name == 'push' && "
-    "github.event.repository.full_name == github.repository)"
+fallback_admission = (
+    "(github.event_name == 'workflow_run' && "
+    "github.event.workflow_run.conclusion == 'failure' && "
+    "github.event.workflow_run.head_repository.full_name == github.repository) || "
+    "github.event_name == 'workflow_dispatch'"
 )
 required_admission = (
     "github.event.pull_request.head.repo.full_name == github.repository && "
     "github.event.pull_request.user.login != 'github-actions[bot]' && "
     "github.event.pull_request.user.login != 'dependabot[bot]'"
 )
-assert normalize(ci_job["if"]) == ci_admission
+assert normalize(fallback_job["if"]) == fallback_admission
 assert normalize(required_job["if"]) == required_admission
 
-def admitted(event_name, repository, head_repository=None, event_repository=None):
-    return (
-        event_name == "pull_request" and head_repository == repository
-    ) or (
-        event_name == "push" and event_repository == repository
+fallback_on = fallback.get(True, fallback.get("on"))
+assert fallback_on["workflow_run"] == {
+    "workflows": ["CI"],
+    "types": ["completed"],
+}
+assert "workflow_dispatch" in fallback_on
+
+def fallback_admitted(event_name, repository, conclusion=None, head_repository=None):
+    return event_name == "workflow_dispatch" or (
+        event_name == "workflow_run"
+        and conclusion == "failure"
+        and head_repository == repository
     )
 
 repository = "pedromuller-del/firstmate"
-assert admitted("pull_request", repository, head_repository=repository)
-assert not admitted("pull_request", repository, head_repository="contributor/firstmate")
-assert admitted("push", repository, event_repository=repository)
-assert not admitted("push", repository, event_repository="elsewhere/firstmate")
+assert fallback_admitted("workflow_run", repository, "failure", repository)
+assert not fallback_admitted("workflow_run", repository, "success", repository)
+assert not fallback_admitted("workflow_run", repository, "failure", "contributor/firstmate")
+assert fallback_admitted("workflow_dispatch", repository)
 
-assert ci_job["env"] == {
+assert fallback_job["env"] == {
     "LC_ALL": "C",
     "LANG": "C",
     "GIT_AUTHOR_NAME": "Firstmate CI",
@@ -87,17 +210,15 @@ assert ci_job["env"] == {
     "GIT_COMMITTER_NAME": "Firstmate CI",
     "GIT_COMMITTER_EMAIL": "firstmate-ci@users.noreply.github.com",
 }
-assert ci_job["name"] == "Suite"
-assert len(ci_job["steps"]) == 4
-checkout, admission, command, verdict = ci_job["steps"]
+assert len(fallback_job["steps"]) == 4
+checkout, admission, command, verdict = fallback_job["steps"]
 assert checkout["uses"] == "actions/checkout@v6"
 assert checkout["with"]["fetch-depth"] == 0
 assert checkout["with"]["persist-credentials"] is False
+assert checkout["with"]["ref"] == "${{ github.event.workflow_run.head_sha || github.sha }}"
 assert admission["run"] == 'bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15'
 assert command["run"] == "bin/fm-ci.sh"
-assert command["env"] == {
-    "FM_CI_FAST_LANE_BASE": "${{ github.event.pull_request.base.sha }}",
-}
+assert "env" not in command
 assert verdict["if"] == "always()"
 assert verdict["run"] == 'bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_LOAD"'
 
@@ -106,19 +227,14 @@ assert len(required_runs) == 1
 assert "${{" not in required_runs[0]
 assert "Updates from [git push no-mistakes]" in required_runs[0]
 
-# The hosted body-compliance lane must stay checkout-free so it never queues
-# behind the Water 7 suite or needs repository checkout on a slim runner.
+# The hosted body-compliance lane stays checkout-free and independent.
 required_uses = [step.get("uses") for step in required_job["steps"] if "uses" in step]
 assert required_uses == [], required_uses
-ci_uses = [step.get("uses") for step in ci_job["steps"] if "uses" in step]
-assert ci_uses == ["actions/checkout@v6"], ci_uses
+fallback_uses = [step.get("uses") for step in fallback_job["steps"] if "uses" in step]
+assert fallback_uses == ["actions/checkout@v6"], fallback_uses
 
-# Every remaining routing and command-policy property is asserted against the
-# parsed jobs and steps, never against the file text: only the Water 7 suite may
-# run actions/checkout, no step may soften its own failure, and no delivered
-# command or step environment may reach the upstream repository or mutate the
-# runner's ambient PATH/env across steps.
-for step in ci_job["steps"]:
+# The fallback never weakens failures or reaches outside this repository.
+for step in fallback_job["steps"]:
     assert step.get("continue-on-error") is None
     if "uses" in step:
         assert step["uses"] == "actions/checkout@v6", step["uses"]
@@ -139,11 +255,64 @@ PY
   then
     fail "workflow routing or command policy contract failed"
   fi
-  pass "ci stays on Water 7 while body-compliance runs on a hosted ubuntu-slim label"
+  pass "hosted slim CI is primary and the self-hosted suite is a failure/manual fallback"
+}
+
+test_herdr_installer_matches_the_presentation_floor() {
+  local tmp fakebin destination out
+  tmp=$(fm_test_tmproot fm-herdr-installer-floor)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/destination"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Linux\n' ;;
+  -m) printf 'x86_64\n' ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+url=
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s\n' "$url" > "$FM_TEST_CURL_URL"
+cat > "$out" <<'HERDR'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  '--version ') printf 'herdr 0.8.0\n' ;;
+  'status --json') printf '{"client":{"version":"0.8.0","protocol":19}}\n' ;;
+  *) exit 2 ;;
+esac
+HERDR
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf 'b872ea7e40fa2cb17e857ac9b62b1bf26db7b403c622f5d2f3f5b35f6e9acd28  %s\n' "$1"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/curl" "$fakebin/sha256sum"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_CURL_URL="$tmp/url" \
+    "$ROOT/bin/fm-install-herdr.sh" "$destination" 2>&1) \
+    || fail "Herdr installer did not install the presentation-floor release"$'\n'"$out"
+  [ "$(cat "$tmp/url")" = \
+    "https://github.com/ogulcancelik/herdr/releases/download/v0.8.0/herdr-linux-x86_64" ] \
+    || fail "Herdr installer did not download the exact presentation-floor release"
+  assert_contains "$out" "installed herdr 0.8.0 (protocol 19)" \
+    "Herdr installer did not verify the presentation-floor version and protocol"
+  [ "$("$destination/herdr" --version)" = "herdr 0.8.0" ] \
+    || fail "installed Herdr binary did not preserve the exact version pin"
+  pass "Herdr installer pins the release that satisfies the presentation protocol floor"
 }
 
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies() {
-  local script out rc
+  local script out rc tmp fakebin
   if ! script=$(python3 - "$ROOT" <<'PY'
 import pathlib
 import sys
@@ -171,14 +340,24 @@ PY
 
   marker='## Pipeline
 
-Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)
+
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
 
   out=$(PR_BODY="$marker" PR_AUTHOR=test PR_NUMBER=42 bash -c "$script" 2>&1) || rc=$?
   rc=${rc:-0}
   [ "$rc" -eq 0 ] || fail "signed no-mistakes PR body was rejected: rc=$rc out=$out"
   assert_contains "$out" "Found no-mistakes signature in PR #42 body."
 
-  out=$(PR_BODY='manual PR without the signature' PR_AUTHOR=test PR_NUMBER=7 bash -c "$script" 2>&1) && rc=0 || rc=$?
+  tmp=$(fm_test_tmproot fm-ci-water7-unsigned)
+  fakebin="$tmp/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/gh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
+  chmod +x "$fakebin/gh" "$fakebin/sleep"
+  out=$(PATH="$fakebin:$PATH" GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    PR_BODY='manual PR without the signature' PR_AUTHOR=test PR_NUMBER=7 \
+    bash -c "$script" 2>&1) && rc=0 || rc=$?
   [ "$rc" -eq 1 ] || fail "unsigned PR body was accepted: rc=$rc out=$out"
   assert_contains "$out" "::error::This PR was not raised through no-mistakes."
 
@@ -217,12 +396,13 @@ PY
   fi
 
   marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  attestation='<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"abc123","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->'
   fakebin="$tmp/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/gh" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = api ] && [ "\$2" = repos/pedromuller-del/firstmate/pulls/88 ] && [ "\$3" = --jq ] && [ "\$4" = .body ]; then
-  printf '%s' 'live body with ${marker}'
+  printf '%s\n%s' 'live body with ${marker}' '${attestation}'
   exit 0
 fi
 echo "unexpected gh call: \$*" >&2
@@ -273,6 +453,18 @@ SH
   cat > "$repo/bin/fm-test-run.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'test-run %s\n' "$*" >> "$FM_CI_CALLS"
+if [ "${1:-}" = --list-lanes ]; then
+  printf '%s\n' \
+    portable-parallel-1 \
+    portable-parallel-2 \
+    portable-serial \
+    portable-serial-1of4 \
+    portable-serial-2of4 \
+    portable-serial-3of4 \
+    portable-serial-4of4 \
+    real-herdr-gated
+  exit 0
+fi
 printf 'SHELL=%s|HERDR_SESSION=%s|FM_HERDR_LAB_PROTECTED_SESSION=%s\n' \
   "${SHELL:-}" "${HERDR_SESSION:-}" "${FM_HERDR_LAB_PROTECTED_SESSION:-}" >> "$FM_CI_SUITE_ENV"
 printf 'FM_CHROME_BIN=%s\n' "${FM_CHROME_BIN:-}" >> "$FM_CI_SUITE_ENV"
@@ -330,8 +522,11 @@ fi
 case "$selection" in
   lane=portable-parallel-1) duration=101; start=1 ;;
   lane=portable-parallel-2) duration=202; start=4 ;;
-  lane=portable-serial) duration=303; start=7 ;;
-  'family=real-herdr-gated;fail-on-gate-skip=herdr not found') duration=404; start=10 ;;
+  lane=portable-serial-1of4) duration=301; start=7 ;;
+  lane=portable-serial-2of4) duration=302; start=10 ;;
+  lane=portable-serial-3of4) duration=303; start=13 ;;
+  lane=portable-serial-4of4) duration=304; start=16 ;;
+  'family=real-herdr-gated;fail-on-gate-skip=herdr not found') duration=404; start=19 ;;
   *) duration=0; start=1 ;;
 esac
 failed=0
@@ -377,11 +572,11 @@ SH
 #!/usr/bin/env bash
 printf 'herdr %s\n' "$*" >> "$FM_CI_HERDR_CALLS"
 case "$1 ${2:-}" in
-  '--version ') printf '%s\n' 'herdr 0.7.4' ;;
+  '--version ') printf '%s\n' 'herdr 0.8.0' ;;
   'status --json')
     running=${FM_TEST_HERDR_RUNNING:-true}
     [ ! -e "$FM_TEST_HERDR_STATE" ] || running=true
-    printf '{"client":{"version":"0.7.4","protocol":16},"server":{"running":%s}}\n' "$running"
+    printf '{"client":{"version":"0.8.0","protocol":19},"server":{"running":%s}}\n' "$running"
     ;;
   'server --session') : > "$FM_TEST_HERDR_STATE" ;;
   *) exit 2 ;;
@@ -479,7 +674,11 @@ lint
 test-run --check-coverage
 test-run --jobs 2 --lane portable-parallel-1
 test-run --lane portable-parallel-2
-test-run --lane portable-serial
+test-run --list-lanes
+test-run --lane portable-serial-1of4
+test-run --lane portable-serial-2of4
+test-run --lane portable-serial-3of4
+test-run --lane portable-serial-4of4
 test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
 EOF
 )
@@ -528,13 +727,19 @@ lane_rows = lanes[2:]
 assert [row.split("|")[1].strip() for row in lane_rows] == [
     "portable-parallel-1",
     "portable-parallel-2",
-    "portable-serial",
+    "portable-serial-1of4",
+    "portable-serial-2of4",
+    "portable-serial-3of4",
+    "portable-serial-4of4",
     "real-herdr-gated",
 ], lane_rows
 assert [row.split("|")[2].strip() for row in lane_rows] == [
     "101 ms",
     "202 ms",
+    "301 ms",
+    "302 ms",
     "303 ms",
+    "304 ms",
     "404 ms",
 ], lane_rows
 assert len(slowest[2:]) == 10, slowest
@@ -572,7 +777,10 @@ lanes, slowest = [block for block in blocks if block[0].startswith("|")]
 assert [row.split("|")[1].strip() for row in lanes[2:]] == [
     "portable-parallel-1",
     "portable-parallel-2",
-    "portable-serial",
+    "portable-serial-1of4",
+    "portable-serial-2of4",
+    "portable-serial-3of4",
+    "portable-serial-4of4",
     "real-herdr-gated",
 ], lanes
 assert len(slowest[2:]) == 10, slowest
@@ -618,7 +826,7 @@ test_policy_delivers_when_a_lane_timing_artifact_cannot_be_written() {
   make_policy_fixture "$repo" "$fakebin"
   rc=0
   out=$(FM_TEST_STEP_SUMMARY="$summary" FM_TEST_RUN_ID=9876 \
-    FM_TEST_LANE_ARTIFACT_FAIL=lane=portable-serial \
+    FM_TEST_LANE_ARTIFACT_FAIL=lane=portable-serial-2of4 \
     run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "an optional lane timing artifact failure wedged a green policy: $out"
   assert_contains "$out" 'could not write timing artifact' \
@@ -683,7 +891,11 @@ test-run --check-coverage
 test-run --changed --base base-sha --fail-on-gate-skip herdr not found
 test-run --jobs 2 --lane portable-parallel-1
 test-run --lane portable-parallel-2
-test-run --lane portable-serial
+test-run --list-lanes
+test-run --lane portable-serial-1of4
+test-run --lane portable-serial-2of4
+test-run --lane portable-serial-3of4
+test-run --lane portable-serial-4of4
 test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
 EOF
 )
@@ -789,7 +1001,7 @@ EOF
   make_policy_fixture "$repo" "$fakebin"
   sed 's/version: 0.11.0/version: 0.10.0/' "$fakebin/shellcheck" > "$fakebin/shellcheck.old"
   mv "$fakebin/shellcheck.old" "$fakebin/shellcheck"
-  sed 's/herdr 0.7.4/herdr 0.7.3/' "$fakebin/herdr" > "$fakebin/herdr.old"
+  sed 's/herdr 0.8.0/herdr 0.7.5/' "$fakebin/herdr" > "$fakebin/herdr.old"
   mv "$fakebin/herdr.old" "$fakebin/herdr"
   chmod +x "$fakebin/shellcheck" "$fakebin/herdr"
   run_policy_fixture "$repo" "$fakebin" "$calls" \
@@ -801,7 +1013,8 @@ chrome" ] || fail "bounded bootstrap did not use exactly the three tracked insta
   pass "the command owner only starts its explicit dedicated controller when down"
 }
 
-test_workflows_are_static_and_water7_only
+test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback
+test_herdr_installer_matches_the_presentation_floor
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
 test_policy_runs_every_family_serially

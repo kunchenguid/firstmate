@@ -953,6 +953,44 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
+test_herdr_ci_family_run_has_a_step_timeout() {
+  # The required Herdr lane's hang tripwire is the family-run *step* bound, not
+  # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
+  # artifact keys cannot masquerade as the step contract.
+  local json job_timeout step_timeout
+  json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import json
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as workflow:
+    job = yaml.safe_load(workflow)["jobs"]["tests-herdr"]
+step = next(
+    step
+    for step in job["steps"]
+    if step.get("name") == "Run real-Herdr family (serial, required)"
+)
+print(json.dumps({
+    "job_timeout": job["timeout-minutes"],
+    "step_timeout": step["timeout-minutes"],
+}))
+PY
+  ) \
+    || fail "could not parse tests-herdr timeouts from ci.yml"
+  job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
+    || fail "could not read job timeout from parsed workflow"
+  step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
+    || fail "could not read step timeout from parsed workflow"
+  [ "$job_timeout" = 75 ] \
+    || fail "tests-herdr job backstop must stay 75 minutes, got $job_timeout"
+  [ "$step_timeout" = 20 ] \
+    || fail "family-run step timeout must be 20 minutes, got $step_timeout"
+  [ "$step_timeout" -lt "$job_timeout" ] \
+    || fail "family-run step timeout must be below the job backstop"
+  pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -1027,4 +1065,5 @@ test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
+test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

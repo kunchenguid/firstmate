@@ -23,7 +23,7 @@ run_compatibility_check() {
 }
 
 test_exact_floor_is_compatible() {
-  write_quota_axi 'quota-axi 0.1.17'
+  write_quota_axi 'quota-axi 0.1.29'
   run_compatibility_check || fail "the pinned minimum quota-axi version was rejected"
   pass "exact quota-axi compatibility floor is accepted"
 }

@@ -1,8 +1,8 @@
-# Water 7 portable-parallel `--jobs 2` verification
+# Water 7 fallback portable-parallel `--jobs 2` verification
 
 Audience: maintainer verification.
 
-This record supports the bounded in-lane parallelism added to Water 7 CI for `portable-parallel-1` only.
+This record supports the bounded in-lane parallelism retained by the Water 7 fallback for `portable-parallel-1` only.
 `portable-parallel-2` remains serial because `N=2` failed the acceptance oracle on commit `f2fc52e` and again on follow-up reruns.
 Task chronology and delivery evidence beyond the measured runs stay in the PR.
 The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7.test.sh`.
@@ -11,9 +11,8 @@ The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7
 
 Verified 2026-08-20 on GNU bash 5.x under Linux.
 Every five-serial/five-parallel measurement in this record was taken at the single commit `f2fc52e`.
-No commit after `f2fc52e` changes executable behavior in `bin/fm-test-run.sh`: later commits touch only its comments, and both lane lists are byte-identical, so `--jobs 2 --lane portable-parallel-1` executes identically at every commit here.
-Every executable change after `f2fc52e` is in `bin/fm-ci.sh`: `4b0940e` rolled `portable-parallel-2` back to serial, and a later review commit raised the host `CPUQuotaPerSecUSec` floor to 2 so the admission guard covers the concurrency this policy now runs.
-Neither alters how the measured lane-1 command executes.
+On the evidence branch, later changes left both measured lane lists byte-identical: `4b0940e` rolled `portable-parallel-2` back to serial, and a later review commit raised the host `CPUQuotaPerSecUSec` floor to 2 so the admission guard covered the concurrency in this policy.
+The current fallback still runs the accepted lane-1 command and keeps lane 2 serial; the primary hosted shard topology is owned by `.github/workflows/ci.yml` and does not depend on this host-specific measurement.
 
 Oracle rules:
 
@@ -76,9 +75,9 @@ Wall-clock seconds from the initial oracle (`elapsed_s`):
 
 `N=2` is not wired into CI for this lane until a new proof shows identical `{script,exit,gate_skip}` sets under load.
 
-## Landed CI policy
+## Landed fallback policy
 
-`bin/fm-ci.sh` on the final branch:
+`bin/fm-ci.sh`, invoked by `.github/workflows/ci-water7-fallback.yml` after primary CI failure or by manual dispatch:
 
 ```sh
 bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
@@ -106,7 +105,7 @@ test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
 
 ## Reproduce
 
-From the repository root on the final branch:
+From the repository root:
 
 ```sh
 # Lane 1 oracle spot-check (one serial, one parallel)

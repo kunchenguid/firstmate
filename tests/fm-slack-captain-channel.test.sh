@@ -773,6 +773,18 @@ run_watch_cadence_cycle() {  # <slow-check-interval> <curl-log> <history-json>
   wait "$pid" 2>/dev/null || true
 }
 
+ack_watch_cadence_cycle() {
+  local err="$home/drain.err" sequence generation
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" \
+    > "$home/drain.out" 2> "$err" || fail "watch cadence drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "watch cadence acknowledgement was not emitted"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation" >/dev/null \
+    || fail "watch cadence acknowledgement failed"
+}
+
 history_calls() {  # <curl-log>
   awk '/^url=.*conversations\.history/ { n++ } END { print n + 0 }' "$1"
 }
@@ -787,6 +799,7 @@ run_watch_cadence_cycle 1000000 "$log" \
   || fail "watcher must run the Slack fast path while the slow check sweep is not due: $(cat "$log")"
 grep -Fq 'slack-captain-message 1786735230.222222' "$home/watch.out" \
   || fail "watcher must wake on the fast-path Slack message: $(cat "$home/watch.out")"
+ack_watch_cadence_cycle
 
 # Both due, and the fast path stays quiet. Ending on the heartbeat backstop is
 # the proof the cycle ran the sweep to completion: a sweep that had touched the

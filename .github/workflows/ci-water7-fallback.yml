@@ -1,0 +1,51 @@
+name: Water 7 fallback
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-water-7-fallback-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FM_CI_MAX_LOAD: "12"
+
+jobs:
+  suite:
+    name: Suite
+    runs-on: [self-hosted, Linux, X64, water-7]
+    if: >-
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_repository.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+    env:
+      LC_ALL: C
+      LANG: C
+      GIT_AUTHOR_NAME: Firstmate CI
+      GIT_AUTHOR_EMAIL: firstmate-ci@users.noreply.github.com
+      GIT_COMMITTER_NAME: Firstmate CI
+      GIT_COMMITTER_EMAIL: firstmate-ci@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Admit suite only below the shared-host load ceiling
+        run: bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15
+
+      - name: Run the repository-owned CI command policy
+        run: bin/fm-ci.sh
+
+      - name: Refuse an overloaded suite verdict
+        if: always()
+        run: bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_LOAD"

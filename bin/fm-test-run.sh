@@ -212,8 +212,8 @@ family_for_basename() {
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
-    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
-    fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-tangle-guard.test.sh|\
+    fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|fm-tangle-guard.test.sh|\
     fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
@@ -428,6 +428,7 @@ tests/fm-backend-zellij.test.sh 4225
 tests/fm-backend.test.sh 16370
 tests/fm-backlog-handoff.test.sh 2786
 tests/fm-bearings-snapshot.test.sh 60103
+tests/fm-bootstrap-network-parallel.test.sh 8000
 tests/fm-bootstrap.test.sh 21912
 tests/fm-busy-adapter-wiring.test.sh 13962
 tests/fm-busy-state.test.sh 607

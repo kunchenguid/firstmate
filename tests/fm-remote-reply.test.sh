@@ -120,6 +120,15 @@ SOURCE_AFTER="$TMP_ROOT/source-after"
 cp "$REMOTE/state/parent-replies.status" "$SOURCE_AFTER"
 pass "a blocking non-destructive remote delta reaches durable process-event capture"
 
+assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" \
+  "the captured reply was not applied to the parent status stream at capture"
+assert_present "$PARENT/state/procevent-inbox/$SID.1.handled" \
+  "the applied capture was left unacknowledged"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "applying the capture left the relay unarmed for the next delta"
+pass "a captured delta is applied, acknowledged, and re-armed without a handler"
+
+rm -f "$PARENT/state/procevent-inbox/$SID.1.handled"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
 set +e
@@ -128,7 +137,7 @@ handle_arm_rc=$?
 set -e
 [ "$handle_arm_rc" -ne 0 ] || fail "reply handling acknowledged a result whose re-arm failed"
 assert_grep 'done [corr=0123456789abcdef]' "$PARENT/state/ios.status" "failed re-arm lost the ingested reply"
-assert_grep 'ingested: ios appended=1' "$TMP_ROOT/handle-arm-fail.out" "failed re-arm did not commit the reply before retry"
+assert_grep 'ingested: ios appended=0' "$TMP_ROOT/handle-arm-fail.out" "failed re-arm did not replay the committed reply"
 rm -f "$PARENT/state/procevent"
 mkdir "$PARENT/state/procevent"
 reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
@@ -167,6 +176,7 @@ remote_env "$ADAPTER" arm ios >/dev/null \
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "second reply generation was not captured"
 RESULT_TWO="$PARENT/state/procevent-inbox/$SID.2.result"
+rm -f "$PARENT/state/procevent-inbox/$SID.2.handled"
 ln -s "$TMP_ROOT/missing-handled-marker" "$PARENT/state/procevent-inbox/$SID.2.handled"
 set +e
 remote_env "$ADAPTER" handle ios 2 "$RESULT_TWO" > "$TMP_ROOT/handle-two-unacked.out" 2>&1
@@ -217,8 +227,8 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$INTERLEAVE_SID" >/dev/null \
 INTERLEAVE_RESULT="$PARENT/state/procevent-inbox/$INTERLEAVE_SID.1.result"
 interleave_out=$(remote_env "$ADAPTER" handle interleave 1 "$INTERLEAVE_RESULT") \
   || fail "an uncorrelated line discarded the valid lines in the same delta"
-assert_contains "$interleave_out" 'ingested: interleave appended=2' \
-  "valid correlated lines were not ingested around the uncorrelated line"
+assert_contains "$interleave_out" 'ingested: interleave appended=0' \
+  "automatic interleaved ingest was not replay-idempotent"
 assert_grep 'first interleaved reply' "$PARENT/state/interleave.status" \
   "the first correlated line was discarded"
 assert_grep 'second interleaved reply' "$PARENT/state/interleave.status" \
@@ -267,8 +277,8 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$MIXED_SID" >/dev/null \
 MIXED_RESULT="$PARENT/state/procevent-inbox/$MIXED_SID.1.result"
 mixed_out=$(remote_env "$ADAPTER" handle mixed 1 "$MIXED_RESULT") \
   || fail "one bad mixed-delta line rejected later valid replies"
-assert_contains "$mixed_out" 'ingested: mixed appended=2 quarantined=5' \
-  "mixed ingest did not report two accepted and five quarantined lines"
+assert_contains "$mixed_out" 'ingested: mixed appended=0' \
+  "automatic mixed ingest was not replay-idempotent"
 assert_grep 'valid before mixed failures' "$PARENT/state/mixed.status" \
   "valid line before mixed failures was lost"
 assert_grep 'valid after mixed failures' "$PARENT/state/mixed.status" \
@@ -360,10 +370,10 @@ SEQ122_ADAPTER="$PARENT/state/procevent-inbox/$SEQ122_SID.122.adapter"
 cp -p "$SEQ122_RESULT_ONE" "$SEQ122_RESULT"
 cp -p "$SEQ122_ADAPTER_ONE" "$SEQ122_ADAPTER"
 SEQ122_CAPTURE_HASH=$(sha256_file "$SEQ122_RESULT")
-seq122_out=$(remote_env "$ROOT/bin/fm-procevent.sh" dispatch "$SEQ122_SID" 122) \
-  || fail "sequence 122 did not dispatch through the shared ingest owner"
-assert_contains "$seq122_out" 'ingested: seq122 appended=2 quarantined=1' \
-  "sequence 122 did not isolate its one malformed correlation"
+seq122_out=$(remote_env "$ADAPTER" autohandle "$SEQ122_SID" 122 "$SEQ122_RESULT") \
+  || fail "sequence 122 did not route through the automatic ingest owner"
+assert_contains "$seq122_out" 'ingested: seq122 appended=0' \
+  "sequence 122 automatic ingest was not replay-idempotent"
 assert_grep 'valid before sequence 122 defect' "$PARENT/state/seq122.status" \
   "valid line before the sequence 122 defect was lost"
 assert_grep 'valid after sequence 122 defect' "$PARENT/state/seq122.status" \
@@ -384,7 +394,7 @@ cmp -s "$SEQ122_SOURCE" "$REMOTE_SEQ122/state/parent-replies.status" \
   || fail "sequence 122 dispatch rewrote its append-only remote source"
 SEQ122_ARTIFACT_LIST="$TMP_ROOT/seq122-quarantine.before"
 find "$SEQ122_QUARANTINE" -type f -name '*.quarantine' -print | sort > "$SEQ122_ARTIFACT_LIST"
-seq122_replay=$(remote_env "$ROOT/bin/fm-procevent.sh" dispatch "$SEQ122_SID" 122) \
+seq122_replay=$(remote_env "$ADAPTER" autohandle "$SEQ122_SID" 122 "$SEQ122_RESULT") \
   || fail "sequence 122 replay was not idempotent"
 assert_contains "$seq122_replay" 'ingested: seq122 appended=0' \
   "sequence 122 replay repeated an accepted-line effect"
@@ -428,10 +438,12 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$REVIEWER_SID" >/dev/null \
 REVIEWER_RESULT="$PARENT/state/procevent-inbox/$REVIEWER_SID.1.result"
 assert_grep "done [corr=$REVIEWER_CORR]" "$REVIEWER_RESULT" \
   "captured reviewer generation lost its correlated answer"
-reviewer_dispatch=$(remote_env "$ROOT/bin/fm-procevent.sh" dispatch "$REVIEWER_SID" 1) \
-  || fail "captured reviewer answer did not dispatch through its recorded adapter"
-assert_contains "$reviewer_dispatch" 'ingested: reviewer appended=1 quarantined=0' \
-  "reviewer dispatch did not use the validated remote-reply ingest"
+assert_present "$PARENT/state/procevent-inbox/$REVIEWER_SID.1.handled" \
+  "captured reviewer answer was not applied automatically"
+reviewer_dispatch=$(remote_env "$ADAPTER" autohandle "$REVIEWER_SID" 1 "$REVIEWER_RESULT") \
+  || fail "captured reviewer answer did not replay through its recorded adapter"
+assert_contains "$reviewer_dispatch" 'ingested: reviewer appended=0' \
+  "reviewer automatic ingest was not replay-idempotent"
 assert_grep "done [corr=$REVIEWER_CORR]: reviewer answer data/remote-secondmates/reviewer/data/review/report.md" \
   "$PARENT/state/reviewer.status" \
   "reviewer answer did not reach its parent status channel"
@@ -456,7 +468,7 @@ assert_absent "$TMP_ROOT/reviewer-recovery.log" \
   "resolved reviewer answer triggered a false recovery"
 assert_no_grep 'pending-reply-missed' "$PARENT/state/reviewer.status" \
   "resolved reviewer answer false-escalated as a missed reply"
-reviewer_replay=$(remote_env "$ROOT/bin/fm-procevent.sh" dispatch "$REVIEWER_SID" 1) \
+reviewer_replay=$(remote_env "$ADAPTER" autohandle "$REVIEWER_SID" 1 "$REVIEWER_RESULT") \
   || fail "reviewer process-event replay was not idempotent"
 assert_contains "$reviewer_replay" 'ingested: reviewer appended=0' \
   "reviewer replay repeated its parent status effect"
@@ -475,8 +487,8 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
 UTF8_RESULT="$PARENT/state/procevent-inbox/$UTF8_SID.1.result"
 utf8_out=$(remote_env "$ADAPTER" handle utf8 1 "$UTF8_RESULT") \
   || fail "valid correlated UTF-8 status text was rejected"
-assert_contains "$utf8_out" 'ingested: utf8 appended=1' \
-  "utf8 correlated line was not ingested"
+assert_contains "$utf8_out" 'ingested: utf8 appended=0' \
+  "automatic utf8 ingest was not replay-idempotent"
 assert_grep 'reviewer' "$PARENT/state/utf8.status" \
   "utf8 status note did not reach the parent status channel"
 UTF8_OFFSET=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/utf8.cursor")
@@ -501,9 +513,11 @@ rebase_hash=$(sed -n 's/^to_prefix_sha256=//p' "$UTF8_RESULT_TWO")
   || fail "utf8 second capture did not record its committed cursor"
 printf 'done [corr=1010101010101010]: third utf8 reply\n' \
   >> "$REMOTE_UTF8/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" retire "$UTF8_SID" >/dev/null \
+  || fail "could not retire the utf8 source before cursor rebase"
 rebase_out=$(remote_env "$ADAPTER" cursor-rebase utf8 "$rebase_offset" "$rebase_hash") \
   || fail "cursor rebase could not select a captured complete-line boundary"
-assert_contains "$rebase_out" "from_offset=$UTF8_OFFSET" \
+assert_contains "$rebase_out" "from_offset=$rebase_offset" \
   "cursor rebase did not report its prior cursor"
 assert_contains "$rebase_out" "to_offset=$rebase_offset" \
   "cursor rebase did not report its target cursor"
@@ -511,8 +525,8 @@ assert_grep "offset=$rebase_offset" "$PARENT/state/remote-replies/utf8.cursor" \
   "cursor rebase did not commit the validated offset"
 utf8_handle_two=$(remote_env "$ADAPTER" handle utf8 2 "$UTF8_RESULT_TWO") \
   || fail "rebased mixed-validity generation could not be handled"
-assert_contains "$utf8_handle_two" 'ingested: utf8 appended=1 quarantined=3' \
-  "mixed UTF-8 generation did not isolate three invalid lines"
+assert_contains "$utf8_handle_two" 'ingested: utf8 appended=0' \
+  "automatic mixed UTF-8 ingest was not replay-idempotent"
 [ "$(grep -cF 'second utf8 reply' "$PARENT/state/utf8.status")" -eq 1 ] \
   || fail "mixed UTF-8 generation did not ingest its valid line exactly once"
 UTF8_QUARANTINE="$PARENT/state/remote-replies/quarantine/utf8"
@@ -531,6 +545,8 @@ if tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
 fi
 pass "invalid UTF-8 and control lines quarantine while cursor rebase remains inspectable"
 
+remote_env "$ROOT/bin/fm-procevent.sh" retire "$INTERLEAVE_SID" >/dev/null \
+  || fail "could not retire the interleaved source before cursor rebase"
 INTERLEAVE_HASH=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/interleave.cursor")
 EMPTY_PREFIX_HASH=$(sha256_file /dev/null)
 cp "$PARENT/state/remote-replies/interleave.cursor" "$TMP_ROOT/interleave-cursor.before"
@@ -601,7 +617,7 @@ set +e
 remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-four.out" 2>&1
 handle_rc=$?
 set -e
-[ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
+[ "$handle_rc" -eq 3 ] || fail "continuity replay returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
 remote_env "$ADAPTER" ingest ios "$RESULT_FOUR" >/dev/null 2>&1 || true
@@ -635,8 +651,8 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$KEYED_SID" >/dev/null \
 KEYED_RESULT="$PARENT/state/procevent-inbox/$KEYED_SID.1.result"
 keyed_out=$(remote_env "$ADAPTER" handle keyed 1 "$KEYED_RESULT") \
   || fail "a two-bracket keyed correlated resolved line was rejected"
-assert_contains "$keyed_out" 'ingested: keyed appended=1' \
-  "keyed correlated resolved line was not ingested"
+assert_contains "$keyed_out" 'ingested: keyed appended=0' \
+  "automatic keyed ingest was not replay-idempotent"
 assert_grep 'resolved [key=work-slug] [corr=cafebabef00d1234]: keyed correlated result' \
   "$PARENT/state/keyed.status" \
   "keyed correlated resolved line did not reach the parent status channel"
@@ -657,8 +673,8 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$KEYED_SID" >/dev/null \
 KEYED_RESULT_TWO="$PARENT/state/procevent-inbox/$KEYED_SID.2.result"
 keyed_bad_out=$(remote_env "$ADAPTER" handle keyed 2 "$KEYED_RESULT_TWO") \
   || fail "malformed keyed lines blocked completion of their captured delta"
-assert_contains "$keyed_bad_out" 'ingested: keyed appended=0 quarantined=3' \
-  "malformed keyed lines were not independently quarantined"
+assert_contains "$keyed_bad_out" 'ingested: keyed appended=0' \
+  "automatic malformed-key ingest was not replay-idempotent"
 assert_no_grep 'empty extra group' "$PARENT/state/keyed.status" \
   "empty extra bracket group was accepted"
 assert_no_grep 'missing closer' "$PARENT/state/keyed.status" \

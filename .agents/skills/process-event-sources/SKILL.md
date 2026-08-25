@@ -44,9 +44,8 @@ Two rules the commands cannot enforce for you:
 
 `procevent <adapter> <source-id> <sequence>`
 : The named durable result is waiting at `state/procevent-inbox/<source-id>.<sequence>.result`. Read that exact result; separate wakes identify later results independently.
-: For the `remote-reply` adapter, do not copy the line by hand or acknowledge it directly.
-: Run `bin/fm-procevent.sh dispatch <source-id> <sequence>` so the immutable captured adapter identity routes the exact result through `fm-procevent-remote-reply.sh`'s existing validated ingest, correlation resolution, cursor, re-arm, and acknowledgement owner.
-: This applies identically to every configured remote secondmate, including dedicated reviewer homes.
+: For the `remote-reply` adapter, do not copy the line by hand or acknowledge it directly. The runner normally applied it through the adapter during capture; confirm the exact generation's handled marker and read the resulting status channel.
+: If that capture remains unacknowledged, run `bin/fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>`, where `<secondmate-id>` is the source id without its `remote-reply-` prefix. That idempotent path owns validated ingest, correlation resolution, cursor advancement, re-arming, and acknowledgement for every configured remote home.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled any other adapter result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
@@ -63,7 +62,7 @@ Supported by tests:
 
 - output that reached the runner is stored atomically at mode `0600` **before** any event referencing it is published;
 - the remote-reply adapter reads its append-only source non-destructively from an offset plus prefix hash, so a pre-capture retry can derive the same bytes again, while source truncation or replacement is detected rather than silently rebased;
-- proactive delivery and adapter-owned terminal retirement follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
+- proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;

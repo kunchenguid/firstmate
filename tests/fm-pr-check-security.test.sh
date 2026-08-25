@@ -26,6 +26,22 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
+# deliberately restricted, so a case that needs jq exposes this one rather than
+# depending on the host keeping jq in one of those four directories.
+REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
+
+ack_watcher_cycle() {  # <state>
+  local state=$1 err sequence generation
+  err="$state/.test-wake-drain.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  rm -f "$err"
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation"
+}
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -135,6 +151,7 @@ fi
 exit 0
 EOF
   chmod 0700 "$dir/fakebin/treehouse"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
 }
 
 write_poll_meta() {
@@ -602,6 +619,7 @@ test_valid_recording_and_merge_derivation() {
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" "newline metadata key was injected"
 
   dir=$(make_case lifecycle-compatible-id)
+  fm_git_init_commit "$dir/project"
   write_task_meta "$dir" Task_A.1
   run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
@@ -619,12 +637,13 @@ SH
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     FM_TEST_GH_STATE=MERGED \
     "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "safe lifecycle-compatible task ID could not be torn down"
+    || fail "safe lifecycle-compatible task ID could not be torn down: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/Task_A.1.meta" ] \
     || fail "safe lifecycle-compatible task teardown retained metadata"
 
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
+    fm_git_init_commit "$dir/project"
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
@@ -1874,6 +1893,7 @@ test_obligation_namespace_compatibility() {
   printf 'legacy quarantined bytes\n' \
     > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
   chmod 0600 "$state/.pr-check-quarantine/"*
+  fm_git_init_commit "$dir/project"
   fm_write_meta "$state/_noncanonical.meta" \
     'window=firstmate:fm-_noncanonical' \
     'endpoint_task_id=_noncanonical' \
@@ -2431,6 +2451,7 @@ SH
     "watcher executed an unauthenticated check created after scan completion"
   assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
     "watcher did not continue the healthy authenticated poll"
+  ack_watcher_cycle "$state" || fail "healthy authenticated poll wake acknowledgement failed"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
   rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
@@ -2449,6 +2470,7 @@ SH
   [ "$rc" -eq 0 ] || fail "registered custom check did not run: $(cat "$dir/watch-custom.err")"
   assert_grep "check: $state/b-custom.check.sh: custom-ready" "$dir/watch-custom.out" \
     "registered custom check output did not wake the watcher"
+  ack_watcher_cycle "$state" || fail "registered custom check wake acknowledgement failed"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-replacement-ran" > "$state/b-custom.check.sh"
   chmod 0700 "$state/b-custom.check.sh"
   rm -f "$state/.last-check" "$x_poll_marker"
@@ -2643,6 +2665,7 @@ test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
+  fm_git_init_commit "$dir/project"
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
@@ -2668,7 +2691,7 @@ SH
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
+    || fail "teardown cleanup fixture failed: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
@@ -2678,6 +2701,7 @@ SH
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
+  fm_git_init_commit "$dir/project"
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
@@ -2710,6 +2734,7 @@ SH
 
   dir=$(make_case teardown-reserved-quarantine)
   fakebin="$dir/fakebin"
+  fm_git_init_commit "$dir/project"
   fm_write_meta "$dir/home/state/invalid.meta" \
     'window=firstmate:fm-invalid' \
     'endpoint_task_id=invalid' \
@@ -2742,6 +2767,7 @@ SH
   for artifact in check.sh pr-poll; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
+    fm_git_init_commit "$dir/project"
     fm_write_meta "$dir/home/state/task-a.meta" \
       'window=firstmate:fm-task-a' \
       'endpoint_task_id=task-a' \
@@ -2784,6 +2810,7 @@ SH
   for kind in regular dangling directory; do
     dir=$(make_case "teardown-quarantine-link-$kind")
     fakebin="$dir/fakebin"
+    fm_git_init_commit "$dir/project"
     fm_write_meta "$dir/home/state/task-a.meta" \
       'window=firstmate:fm-task-a' \
       'endpoint_task_id=task-a' \
@@ -2917,15 +2944,27 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path addresses the forge the URL names, and never the other one.
+  # This fixture's glab answers with the field output the poll reads, so the
+  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
+  # state it could not read.
   write_task_meta "$dir" task-c
+  : > "$dir/glab.log"
+  # The merge path needs jq before it reads anything, so this case supplies it
+  # and the refusal below is the unreadable state rather than a missing tool.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
+  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
+    || fail "merge wrapper refused for some reason other than the state it could not read"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
+  grep -qF "mr view 7 -R https://gitlab.example/group/subgroup/project" "$dir/glab.log" \
+    || fail "merge wrapper did not read the merge request through glab at its own instance"
+  ! grep -qF ' mr merge ' "$dir/glab.log" \
+    || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
@@ -2995,6 +3034,7 @@ test_merged_poll_retires_once() {
   [ "$rc" -eq 0 ] || fail "merged retirement watcher failed: $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
   case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
+  ack_watcher_cycle "$state" || fail "first merged notification handling acknowledgement failed"
   assert_poll_absent "$state" task-a
   [ "$(cat "$state/task-a.meta")" = "$meta_before" ] || fail "merged retirement changed canonical metadata"
 
@@ -3008,8 +3048,8 @@ test_merged_poll_retires_once() {
   case "$second" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
-  [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue" 2>/dev/null || true)" -eq 1 ] \
-    || fail "merged poll did not queue exactly one terminal notification"
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "handled merged notification remained queued after acknowledgement"
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
 
@@ -3061,6 +3101,11 @@ test_retirement_crash_recovery() {
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$state/task-a.check.sh" "check: $state/task-a.check.sh: merged" \
     || fail "could not seed post-queue crash"
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/recovery.out" 2> "$dir/recovery.err" \
+    || fail "post-queue crash recovery wake failed: $(cat "$dir/recovery.err")"
+  grep -F 'check: rearm-resurface' "$dir/recovery.out" >/dev/null \
+    || fail "post-queue crash did not surface its durable recovery first"
+  ack_watcher_cycle "$state" || fail "post-queue crash recovery acknowledgement failed"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
@@ -3068,7 +3113,7 @@ test_retirement_crash_recovery() {
   [ "$rc" -eq 0 ] || fail "post-queue retry watcher failed: $(cat "$dir/watch.err")"
   assert_poll_absent "$state" task-a
   raw_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue")
-  [ "$raw_count" -eq 2 ] || fail "post-queue retry did not preserve at-least-once rows"
+  [ "$raw_count" -eq 1 ] || fail "post-queue retry did not publish exactly one new terminal row"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null
   drain_count=$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$dir/drain.out")
   [ "$drain_count" -eq 1 ] || fail "same-key crash retry rows did not deduplicate at drain"
@@ -3153,6 +3198,11 @@ test_retirement_crash_recovery() {
   fm_pr_poll_retirement_publish "$state" task-a "$historical_poll" merged \
     || fail "could not publish pre-update retirement receipt"
   add_stop_custom_check "$dir"
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/template-recovery.out" 2> "$dir/template-recovery.err" \
+    || fail "template-update recovery wake failed: $(cat "$dir/template-recovery.err")"
+  grep -F 'check: rearm-resurface' "$dir/template-recovery.out" >/dev/null \
+    || fail "template-update recovery did not surface its durable wake first"
+  ack_watcher_cycle "$state" || fail "template-update recovery acknowledgement failed"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/restart.out" 2> "$dir/restart.err"
   rc=$?
@@ -3160,8 +3210,8 @@ test_retirement_crash_recovery() {
   [ "$rc" -eq 0 ] || fail "template-update recovery watcher failed: $(cat "$dir/restart.err")"
   case "$(cat "$dir/restart.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "template-update recovery did not reach the control check" ;; esac
   [ ! -s "$dir/gh.log" ] || fail "template-update migration rebuilt and queried the retired poll"
-  [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue")" -eq 1 ] \
-    || fail "template-update recovery duplicated the terminal wake"
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "template-update recovery left the handled terminal wake queued"
   assert_poll_absent "$state" task-a
   pass "queue, receipt, and every fixed-path removal crash point recover without loss or repeated execution"
 }
@@ -3197,6 +3247,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
     [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
     case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
+    ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
 
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
@@ -3310,13 +3361,18 @@ test_retirement_queue_failure_and_receipt_tampering() {
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/8
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/8
-  mkdir "$state/.wake-queue"
+  # Fail sequence publication without making the queue itself look non-empty:
+  # a directory at .wake-queue would now (correctly) trigger re-arm recovery
+  # before the poll runs, so it no longer exercises the terminal append path.
+  mkdir "$state/.wake-queue.seq"
   before=$(poll_artifact_snapshot "$state" task-a)
   set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "watcher retired despite queue publication failure"
+  [ -s "$dir/gh.log" ] || fail "queue failure fixture did not reach the authenticated poll"
   [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "queue failure changed poll artifacts"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "queue failure published a receipt"
 

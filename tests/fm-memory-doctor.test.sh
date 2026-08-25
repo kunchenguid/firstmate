@@ -873,6 +873,7 @@ SLACK_ACTIVE="$TMP_ROOT/slack-active"
 make_home "$SLACK_ACTIVE"
 printf 'FM_SLACK_BOT_TOKEN=fixture-token\n' > "$SLACK_ACTIVE/.env"
 printf 'C1234567890\n' > "$SLACK_ACTIVE/config/slack-captain-channel"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
 printf 'The configured Slack transport may use `state/slack-inbox/`, `state/slack-ack-pending/`, `state/slack-acked/`, `state/slack-offered/`, `state/slack-refused/`, `state/slack-decision-bindings/`, and `state/slack-poll.cursor`.\n' > "$SLACK_ACTIVE/data/captain.md"
 out=$(run_doctor "$SLACK_ACTIVE" --home-local 2>"$TMP_ROOT/err.slack-active") && rc=0 || rc=$?
 expect_code 0 "$rc" "an active Slack home without message history must remain fail-open"
@@ -884,6 +885,7 @@ make_home "$SLACK_DELETED"
 mkdir -m 700 "$SLACK_DELETED/state/slack-offered"
 printf '1786735224.690829\n' > "$SLACK_DELETED/state/slack-offered/1786735224.690829"
 chmod 600 "$SLACK_DELETED/state/slack-offered/1786735224.690829"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
 printf 'An offered Slack message requires `state/slack-inbox/`.\n' > "$SLACK_DELETED/data/captain.md"
 out=$(run_doctor "$SLACK_DELETED" --home-local 2>"$TMP_ROOT/err.slack-deleted") && rc=0 || rc=$?
 expect_code 1 "$rc" "deleting an inbox after durable Slack activity must be threatening"
@@ -893,6 +895,7 @@ assert_contains "$out" 'check pointers primary=GAP' \
 PENDING_ACTIVE="$TMP_ROOT/pending-active"
 make_home "$PENDING_ACTIVE"
 fm_write_meta "$PENDING_ACTIVE/state/secondmate.meta" "kind=secondmate" "window=firstmate:secondmate"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
 printf 'Secondmate requests may use `state/pending-replies/`.\n' > "$PENDING_ACTIVE/data/captain.md"
 out=$(run_doctor "$PENDING_ACTIVE" --home-local 2>"$TMP_ROOT/err.pending-active") && rc=0 || rc=$?
 expect_code 0 "$rc" "a secondmate home without persisted request evidence must remain fail-open"
@@ -903,6 +906,7 @@ PENDING_DELETED="$TMP_ROOT/pending-deleted"
 make_home "$PENDING_DELETED"
 printf 'pending-reply-missed: task=secondmate pending-reply-id=abcdef0123456789 request=review\n' \
   > "$PENDING_DELETED/state/secondmate.status"
+# shellcheck disable=SC2016 # Literal backticks are pointer fixtures and must remain unexpanded.
 printf 'A recorded missed report requires `state/pending-replies/`.\n' \
   > "$PENDING_DELETED/data/captain.md"
 out=$(run_doctor "$PENDING_DELETED" --home-local 2>"$TMP_ROOT/err.pending-deleted") && rc=0 || rc=$?

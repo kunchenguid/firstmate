@@ -110,6 +110,26 @@ daemon_lock_held_by_live_daemon() {
   daemon_pid_matches "$pid" "$owner"
 }
 
+fm_afk_flag_write() {  # <state-dir>
+  local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
+  mkdir -p "$state" || return 1
+  [ ! -d "$state/.afk" ] || return 1
+  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  while [ "$attempt" -lt 50 ]; do
+    attempt=$((attempt + 1))
+    if fm_lock_try_acquire "$lock"; then
+      mv "$pending" "$state/.afk" && status=0
+      fm_lock_release "$lock"
+      rm -f "$pending" 2>/dev/null || true
+      return "$status"
+    fi
+    [ "$attempt" -lt 50 ] && sleep 0.1
+  done
+  rm -f "$pending" 2>/dev/null || true
+  return 1
+}
+
 fm_afk_start_main() {
   case "${1:-}" in
     '' ) ;;
@@ -121,7 +141,7 @@ fm_afk_start_main() {
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
-    date '+%s' > "$FM_AFK_STATE/.afk"
+    fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 
   local pid

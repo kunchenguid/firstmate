@@ -19,6 +19,10 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 FM_WAKE_POST_OUTPUT_ACTION=
+# Set only after this watcher has printed a durable actionable reason. The
+# watcher's EXIT cleanup uses it to distinguish an ordinary delivered close from
+# an interruption that leaves a recovery gap before the next arm.
+FM_WATCH_DELIVERED_REASON=
 FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
@@ -92,6 +96,8 @@ wake() {
   if echo "$1"; then
     output_status=0
     watch_delivery_publish "$1" || true
+    # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
+    FM_WATCH_DELIVERED_REASON=$1
   else
     output_status=1
   fi
@@ -124,8 +130,12 @@ handle_push_transition() {  # <backend> <session> <record>
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
-  if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared pause, awaiting external): $window"
+  # A declared wait already names the human this transition would report: an
+  # external dependency, or the captain a verified hold transferred the work to.
+  # Either way the wait is durably recorded, so absorb the immediate escalation
+  # and leave the bounded re-surface to the watcher's own pause cadence.
+  if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    triage_log "absorbed push $to (declared wait, awaiting external or captain): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
   fi

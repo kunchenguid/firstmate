@@ -1,6 +1,6 @@
 ---
 name: ahoy
-description: Recap visible session events since the prior real captain message plus visibly unanswered captain decisions when the captain explicitly invokes /ahoy, with a Bearings fallback when /ahoy is the session's first real captain message.
+description: Recap visible session events and guide the captain through visibly unanswered decisions when the captain explicitly invokes /ahoy, with a Bearings fallback when /ahoy is the session's first real captain message.
 user-invocable: true
 metadata:
   internal: true
@@ -9,6 +9,11 @@ metadata:
 # ahoy
 
 Give the captain a concise session-only recap without gathering fresh state.
+
+0. Before anything else, check whether this session has already taken the helm: a `SESSION START` digest for this home must be visible in the session history.
+   If it is not, run `bin/fm-session-start.sh` once and read its digest before producing any recap.
+   Run-tier harness surfaces run it automatically at session open, so this step is normally already satisfied and costs one glance; it is the safety net for surfaces that cannot run it on a hook, and for any path where a skill would otherwise act first.
+   Taking the helm always precedes this skill's own logic, and the digest it produces is operational input, never a captain message or a recap event.
 
 1. Inspect only conversation or session history already visible to the current first mate.
 2. Find the most recent real captain-authored message before the current `/ahoy` invocation.
@@ -32,11 +37,17 @@ Give the captain a concise session-only recap without gathering fresh state.
    A later unrelated captain message establishes a recap boundary but does not close an earlier decision.
    Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.
    Include every visibly supported open decision once, and deduplicate by the decision's substance when the ordinary interval recap already represents it or its wording differs.
-6. The normal recap branch is session-history-only.
+6. The normal recap branch is session-history-only, apart from the step 0 helm check.
    Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.
    Create no report, persist nothing, and do not guess current live state beyond the last visible event.
 7. If no ordinary events occurred after the previous captain message but an older visibly open decision exists, report that decision instead of claiming nothing happened.
    If neither ordinary events nor visibly open decisions exist, say directly in one sentence that nothing happened after the previous captain message.
+
+8. After the normal recap, when the existing visibly open decision inventory contains decisions, begin a guided decision-clearing flow by presenting only the single open decision judged most impactful by the first mate.
+   Make clear that impact ordering is the first mate's judgment rather than a mechanical score.
+   Give enough escalation-quality context to decide easily: the decision, why it matters, the options, and a recommendation.
+9. When the captain answers the presented decision, present the next highest-impact decision from that existing inventory in the same form.
+   Continue one decision at a time until none remain, without starting this flow when the inventory is empty.
 
 The current `/ahoy` message is outside the recap interval.
 A previous `/ahoy` is a real captain message and may be the next interval boundary.

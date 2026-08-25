@@ -504,7 +504,8 @@ test_uncertain_checkpoint_delivery_recovers_without_abandoning_action() {
   out=$(FM_FAKE_PENDING_COMMIT_FAIL=1 run_production_drain "$home" "$seat" "$fakebin" "$snapshot" "$calls" "$root" 2>&1) \
     || fail "uncertain checkpoint cycle abandoned the action: $out"
   journal="$home/state/auto-quota-drain/action-primary-seat"
-  assert_grep 'phase=checkpoint_pending' "$journal" "uncertain checkpoint delivery was permanently refused"
+  grep -q 'phase=checkpoint_pending' "$journal" \
+    || fail "uncertain checkpoint delivery was permanently refused; output: $out; journal: $(cat "$journal" 2>/dev/null || true)"
   assert_no_grep 'phase=refused' "$journal" "uncertain checkpoint delivery abandoned its journal"
   corr=$(grep '^corr_id=' "$journal" | cut -d= -f2-)
   [ -f "$home/state/pending-replies/.delivery-confirmed-$corr" ] \
@@ -536,8 +537,12 @@ test_definitive_checkpoint_failure_refuses_without_later_mutation() {
   run_production_drain "$home" "$seat" "$fakebin" "$snapshot" "$calls" "$root" >/dev/null \
     || fail "failed checkpoint baseline failed"
   write_snapshot "$snapshot" 5 90
+  # Durable inbox creation is the delivery boundary. A plain file at the
+  # expected directory path makes the first enqueue definitively fail before
+  # any worker-visible record can land.
+  : > "$home/state/seat-a.inbox"
 
-  out=$(FM_FAKE_TMUX_SEND_FAIL=1 run_production_drain "$home" "$seat" "$fakebin" "$snapshot" "$calls" "$root" 2>&1) \
+  out=$(run_production_drain "$home" "$seat" "$fakebin" "$snapshot" "$calls" "$root" 2>&1) \
     || fail "definitive checkpoint refusal must remain nonblocking: $out"
   journal="$home/state/auto-quota-drain/action-primary-seat"
   assert_grep 'phase=refused' "$journal" "definitive checkpoint failure did not refuse the action"

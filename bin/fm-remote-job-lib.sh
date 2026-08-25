@@ -20,23 +20,38 @@
 # fm_remote_job_command_preemptible names the read-only long-poll class
 # (fm-remote-delta-read.sh, the reply-log delta read). The worker preempts a
 # running preemptible job as soon as a non-preemptible job is queued and
-# publishes exit 75 with emptied stdout and stderr, identical to the poll's own
-# elapsed-window-with-no-data result. The delta read is non-destructive and
-# cursor-anchored, so the caller's normal re-arm re-reads the same data and a
-# preempted poll loses nothing.
+# publishes exit 76 with emptied stdout and stderr, distinct from the poll's
+# exit 75 elapsed-window-with-no-data result. The delta read is non-destructive
+# and cursor-anchored, so the caller's normal re-arm re-reads the same data and
+# a preempted poll loses nothing.
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
-# system tail. No shell startup files are evaluated.
+# system tail. No shell startup files are evaluated. Each discovered set is
+# appended in the shell's own sorted pathname-expansion order, so which install
+# of a multi-version tool wins is fixed by this composition rather than by the
+# order the filesystem happens to return.
 #
 # On macOS the worker is Firstmate's Aqua LaunchAgent
 # dev.firstmate.remote-job at ~/Library/LaunchAgents/dev.firstmate.remote-job.plist
 # with logs under ~/Library/Logs. Linux starts the same worker process without
 # an Aqua requirement. The launch-agent renderer and repair helpers here are
 # shared by the entrypoint and remote doctor so their ownership cannot drift.
+#
+# The Linux start path puts the worker tree in its own process group, so
+# stopping a worker signals its restart supervisor, its serving child, and any
+# job descendant together instead of leaving a supervisor to restart what was
+# just killed. fm_remote_job_stop_worker_tree owns that stop and refuses to
+# signal a group whose leader is not itself a worker, so a worker inherited
+# from an older build or from launchd's own session is still stopped safely as
+# a single process. fm_remote_job_root_is_live is the shared predicate for
+# whether a worker's code root still exists; bin/fm-remote-job-worker.sh uses
+# it to stop itself once its root is pruned, and
+# bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
+# orphaned that way.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
@@ -45,6 +60,8 @@ FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
+# shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
+FM_REMOTE_JOB_PREEMPTED_EXIT=76
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -116,11 +133,18 @@ fm_remote_job_path_append_resolved_dir() { # <directory>
   fm_remote_job_path_append "$physical"
 }
 
-fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
-  local pattern=$1 directory
-  while IFS= read -r directory; do
+# Callers pass an already-expanded glob rather than the pattern, because only
+# the shell's own pathname expansion sorts its matches: bash sorts
+# glob_filename's result in pathexp.c, while `compgen -G` reaches the same
+# glob_filename through pcomplete.c, which does not sort. On bash 3.2 (macOS
+# /bin/bash) that handed back raw readdir order, so which install of a
+# multi-version tool a remote job resolved depended on the filesystem instead
+# of on this composition.
+fm_remote_job_append_dirs() { # <expanded glob matches>
+  local directory
+  for directory in "$@"; do
     fm_remote_job_path_append_if_dir "$directory"
-  done < <(compgen -G "$pattern" || true)
+  done
 }
 
 fm_remote_job_nvm_default_selector() { # <account-home>
@@ -203,11 +227,11 @@ fm_remote_job_compose_operator_path() { # <account-home>
   nvm_bin=$(fm_remote_job_nvm_selected_bin "$account_home" 2>/dev/null || true)
   [ -z "$nvm_bin" ] || fm_remote_job_path_append "$nvm_bin"
   fm_remote_job_path_append_if_dir "$account_home/.asdf/shims"
-  fm_remote_job_append_glob_dirs "$account_home/.asdf/installs/*/*/bin"
+  fm_remote_job_append_dirs "$account_home"/.asdf/installs/*/*/bin
   fm_remote_job_path_append_if_dir "$account_home/.local/share/mise/shims"
   fm_remote_job_path_append_if_dir "$account_home/.mise/shims"
-  fm_remote_job_append_glob_dirs "$account_home/.local/share/mise/installs/*/*/bin"
-  fm_remote_job_append_glob_dirs "$account_home/.mise/installs/*/*/bin"
+  fm_remote_job_append_dirs "$account_home"/.local/share/mise/installs/*/*/bin
+  fm_remote_job_append_dirs "$account_home"/.mise/installs/*/*/bin
   fm_remote_job_path_append_resolved_dir "$account_home/.nix-profile/bin"
   account_user=$(id -un 2>/dev/null || true)
   if [ -n "$account_user" ]; then
@@ -692,6 +716,76 @@ fm_remote_job_process_command() {
   printf '%s\n' "$value"
 }
 
+fm_remote_job_process_pgid() { # <pid>
+  local pid=$1 ps_bin value
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  value=$("$ps_bin" -p "$pid" -o pgid= 2>/dev/null) || return 1
+  value=$(printf '%s' "$value" | tr -d '[:space:]')
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+# The code root a worker serves is still a genuine Firstmate checkout. A worker
+# whose root fails this can never claim, validate, or execute another job, so
+# the same predicate decides both self-termination and orphan reaping.
+fm_remote_job_root_is_live() { # <remote-root>
+  local root=$1
+  [ -n "$root" ] || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  [ -f "$root/AGENTS.md" ] && [ ! -L "$root/AGENTS.md" ] || return 1
+  [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ]
+}
+
+# The isolated process group that owns <pid>'s whole worker tree, echoed only
+# when signalling it is provably safe: the group is not this shell's own, not a
+# reserved id, and its leader is itself a remote job worker. A worker started
+# without group isolation (an older build, or launchd's own session) therefore
+# never yields a group, and callers fall back to signalling the single process.
+fm_remote_job_worker_process_group() { # <pid>
+  local pid=$1 pgid own_pgid leader_command
+  pgid=$(fm_remote_job_process_pgid "$pid") || return 1
+  case "$pgid" in 0|1) return 1 ;; esac
+  own_pgid=$(fm_remote_job_process_pgid "$$") || return 1
+  [ "$pgid" != "$own_pgid" ] || return 1
+  leader_command=$(fm_remote_job_process_command "$pgid" 2>/dev/null || true)
+  case "$leader_command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
+  printf '%s\n' "$pgid"
+}
+
+# Stop a worker and every descendant it leaked, TERM first and KILL only for a
+# survivor. Signals the isolated worker group when one is provable and the lone
+# process otherwise. Returns non-zero when any verified worker-group member is
+# still alive afterwards.
+fm_remote_job_stop_worker_tree() { # <pid>
+  local pid=$1 pgid i=0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
+  if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  if [ -n "$pgid" ]; then
+    kill -0 -- "-$pgid" 2>/dev/null || return 0
+  else
+    kill -0 "$pid" 2>/dev/null || return 0
+  fi
+  if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
+  i=0
+  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
+    && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  if [ -n "$pgid" ]; then
+    ! kill -0 -- "-$pgid" 2>/dev/null
+  else
+    ! kill -0 "$pid" 2>/dev/null
+  fi
+}
+
 fm_remote_job_read_single_line() {
   local file=$1 max=$2 value extra
   fm_remote_job_regular_bounded "$file" "$max" || return 1
@@ -849,7 +943,7 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid i
+  local root=$1 account_home=$2 worker pid
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
@@ -858,23 +952,21 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   fm_remote_job_prepare_state "$account_home" || return 1
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
     if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
+    # The owner pid is the serving child; its restart supervisor sits above it
+    # and would immediately replace a lone process kill, so stop the whole
+    # worker tree through its isolated group.
     pid=$FM_REMOTE_JOB_OWNER_PID
-    kill -TERM "$pid" 2>/dev/null || {
-      FM_REMOTE_JOB_ERROR="could not stop the stale remote job worker"
+    fm_remote_job_stop_worker_tree "$pid" || {
+      FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
       return 1
     }
     wait "$pid" 2>/dev/null || true
-    i=0
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
-      i=$((i + 1))
-      sleep 0.1
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
-      return 1
-    fi
     FM_REMOTE_JOB_REPAIRED=1
   fi
+  # Job control puts the worker tree in its own process group, so a later stop
+  # can signal every descendant at once without ever reaching the caller's own
+  # group. Without this the group of a leaked worker is the launching command's.
+  set -m
   nohup env \
     HOME="$account_home" \
     FM_ROOT_OVERRIDE="$root" \
@@ -882,6 +974,7 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" \
     "$worker" >> "$FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log" 2>&1 < /dev/null &
   pid=$!
+  set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
   FM_REMOTE_JOB_REPAIRED=1
 }

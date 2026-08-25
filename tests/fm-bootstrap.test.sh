@@ -43,7 +43,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.45
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -105,7 +105,7 @@ add_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.17}"
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.29}"
   exit 0
 fi
 exit 0
@@ -405,8 +405,8 @@ test_lavish_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum lavish-axi version is accepted^0.1.45^empty
-newer lavish-axi patch is accepted^0.1.46^empty
+minimum lavish-axi version is accepted^0.1.46^empty
+newer lavish-axi patch is accepted^0.1.47^empty
 newer lavish-axi minor is accepted^0.2.0^empty
 newer lavish-axi major is accepted^1.0.0^empty
 the patch just below the floor reports an upgrade^0.1.44^missing
@@ -486,8 +486,8 @@ test_quota_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.17^empty
-newer quota-axi patch is accepted^0.1.18^empty
+minimum quota-axi version is accepted^0.1.29^empty
+newer quota-axi patch is accepted^0.1.30^empty
 newer quota-axi minor is accepted^0.2.0^empty
 newer quota-axi major is accepted^1.0.0^empty
 the patch just below the floor reports an upgrade^0.1.16^missing
@@ -853,7 +853,7 @@ make_firstmate_fork_fixture() {
 run_firstmate_fork_report() {
   local repo=$1 fakebin=$2 verbose=${3:-0}
   PATH="$fakebin:$BASE_PATH" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
-    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_VERBOSE_FACTS="$verbose" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh"
 }
@@ -881,7 +881,7 @@ SH
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
   (
-    GIT_SSH_COMMAND="$stall" FM_TEST_STALL_STARTED="$marker" \
+    GIT_SSH_COMMAND="$stall" FM_TEST_STALL_STARTED="$marker" FM_BOOTSTRAP_NETWORK=only \
       FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=3 run_firstmate_fork_report "$repo" "$fakebin"
   ) > "$output" 2>&1 &
   pid=$!

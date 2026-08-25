@@ -263,11 +263,9 @@ production_checkpoint() {
   . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
   message="Quota action checkpoint for pool $provider at $percent percent remaining. Run /stow completely through its completion receipt before any further routed work. If and only if the stow pass is sealed, append a parent status line containing 'done: auto quota drain checkpoint sealed' and the injected corr token. Report a blocked or failed line with the same corr token instead of exiting when the checkpoint cannot seal."
   corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$seat" "$message") || { echo "checkpoint expectation could not be recorded" >&2; return 1; }
-  if ! fm_pending_reply_prepare_delivery "$STATE" "$corr"; then
-    fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
-    echo "checkpoint delivery could not be prepared" >&2
-    return 1
-  fi
+  # fm-send owns the prepare/enqueue/confirm sequence. Preparing here would
+  # make the durable-inbox sender correctly treat this as an unresolved local
+  # resend and refuse it before the first enqueue.
   if ! FM_PENDING_REPLY_EXISTING_CORR="$corr" FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$seat" "$message" >/dev/null; then
     rec=$(fm_pending_reply_path "$STATE" "$corr")
     if checkpoint_expectation_recoverable "$seat" "$corr"; then
@@ -305,7 +303,7 @@ production_checkpoint_receipt() {
 }
 
 production_park() {
-  local seat=$1 home=$2 old_backend=$3 old_target=$4 old_harness=$5 meta command dirty
+  local seat=$1 home=$2 old_backend=$3 old_target=$4 old_harness=$5 meta command dirty send_out agent_state
   validate_local_seat "$seat" "$home" || return 1
   [ -n "$old_backend" ] && [ -n "$old_target" ] && [ -n "$old_harness" ] || { echo "journal-bound old endpoint identity is unavailable" >&2; return 1; }
   dirty=$(git -C "$home" status --porcelain --untracked-files=all 2>/dev/null) || { echo "REFUSED: secondmate home work status is unreadable" >&2; return 1; }
@@ -314,14 +312,31 @@ production_park() {
   . "$SCRIPT_DIR/fm-backend.sh"
   case "$old_harness" in
     cursor-agent)
-      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$old_target" --key C-d >/dev/null || { echo "graceful Cursor exit was not delivered" >&2; return 1; }
+      if ! send_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$old_target" --key C-d 2>&1); then
+        agent_state=$(fm_backend_agent_state "$old_backend" "$old_target" 2>/dev/null) || agent_state=unreadable
+        case "$agent_state" in
+          dead|missing) ;;
+          *) one_line "$send_out" >&2; echo "graceful Cursor exit was not delivered" >&2; return 1 ;;
+        esac
+      fi
       ;;
     claude|opencode|grok|kimi) command=/exit ;;
     codex|pi|pi-signed) command=/quit ;;
     *) echo "secondmate harness is not verified for graceful exit" >&2; return 1 ;;
   esac
   if [ "$old_harness" != cursor-agent ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$old_target" "$command" >/dev/null || { echo "graceful harness exit was not delivered" >&2; return 1; }
+    if ! send_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$old_target" "$command" 2>&1); then
+      # Parser-native exit commands can terminate the harness before fm-send's
+      # post-submit read-back completes. The journal-bound endpoint becoming
+      # dead or missing is positive continuity evidence that the requested
+      # graceful exit took effect; any still-live or unreadable endpoint keeps
+      # the refusal boundary and is never sent the command a second time.
+      agent_state=$(fm_backend_agent_state "$old_backend" "$old_target" 2>/dev/null) || agent_state=unreadable
+      case "$agent_state" in
+        dead|missing) ;;
+        *) one_line "$send_out" >&2; echo "graceful harness exit was not delivered" >&2; return 1 ;;
+      esac
+    fi
   fi
   printf 'pending\n'
 }

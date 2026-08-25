@@ -47,6 +47,18 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Pi supervision branch
+
+On a Pi primary, ordinary actionable fleet wakes that pass the unchanged watcher classifier, plus heartbeat scans that the cheap shell-level scan flags as possibly relevant, are handled by a persistent in-process supervision branch that keeps the main conversation clean; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns the architecture.
+Supervision is default-on once a Pi primary session owns this home's fleet lock; no local grant file is required.
+A wake is delegated only when every row observed by its unread-queue eligibility checks is either a resolvable task-local signal, a stale event, or a heartbeat; a no-op heartbeat is absorbed in shell and never reaches Pi, while an observed fleet-wide or unresolvable wake and every watcher-failure alarm stays on the main path.
+The branch repeats the eligibility check immediately before prompting the branch to drain, away mode declines every wake offer, and a broken branch falls back to the existing wake-to-main path.
+The branch cannot merge a pull request, land local work, or freshly spawn, and every existing user gate remains unchanged.
+Homes on any other primary harness never load this feature.
+Runtime state lives in `state/branch-outcomes.jsonl` with its `.branch-outcomes-cursor`, the persistent conversation under `state/branch-session/` with its `.branch-session` pointer and `.branch-mirror-cursor`, and per-task `state/.lease-<task>` files; `bin/fm-branch-outcome.sh` and `bin/fm-lease-lib.sh` own those formats.
+A user-facing branch outcome opens exactly one follow-up turn on the main conversation and Pi does not separately render its merge note.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently, while every other routine outcome appends a rendered note.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -549,14 +561,14 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+The locked session-start deferred network stage runs a best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns clone-refresh overlap, liveness-before-convergence, per-home concurrency, ordered diagnostic replay, and sequential fallback.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
 On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
 It never removes a live lock, leaves any other failure shape untouched, and prints every wait, retry, and removal to stderr plus a one-line `recovered:` summary to stdout on success so that this session-start relay still surfaces the recovery.
-The locked session-start bootstrap step also runs the guarded secondmate sync for recorded live homes, then propagates declared inherited local material into each validated live home.
+The same deferred network stage performs guarded tracked-file sync and propagates declared inherited local material into each validated live home under that sequencing contract.
 Local routes use direct guarded filesystem operations, while remote routes delegate sync and allowlisted transfer through their configured SSH host without probing any unconfigured fleet.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
@@ -718,8 +730,10 @@ Results are published as ordinary `check` wakes carrying the source id and commi
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a captured result reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
 Delivery is reported at most once per captured source and sequence while any records for that key remain queued.
 A durable handled acknowledgement stops future re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain consumes it.
-`bin/fm-procevent.sh dispatch <source-id> <sequence>` routes one exact capture through its immutable adapter identity without parsing its result, while that adapter remains the sole owner of validation, effects, acknowledgement, and replay behavior.
-Remote-secondmate reply wakes use that command so every remote home, including a dedicated reviewer home, reaches its ordinary parent status channel through the same reply ingest and correlation owner.
+Applying a captured result is adapter knowledge too, so the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` after durable capture and lets the adapter own validation, effects, acknowledgement, and replay behavior.
+Adapters without that command keep the result unacknowledged for the ordinary handler; an adapter error does the same.
+The remote-secondmate reply adapter implements automatic handling, so every remote home, including a dedicated reviewer home, reaches its ordinary parent status channel through the same reply ingest and correlation owner without depending on a later manual dispatch.
+It does not declare `self-announcing`, because a fully quarantined delta may add no parent status bytes, so its already-published `check` wake remains the durable announcement and a later adapter replay is idempotent.
 
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
@@ -730,6 +744,10 @@ After publishing a result the runner calls `bin/fm-procevent-<adapter>.sh termin
 A failed terminal removal stays durably terminal and is completed by ordinary reconciliation without restarting its poll, while a concurrently replaced registration survives and becomes independently runnable after the old claim releases.
 A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work, while explicit `retire` stays the supported and idempotent path afterwards.
 For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
+
+Automatic handling runs strictly after terminal retirement because a handling adapter may re-arm its next source, which retirement must not remove.
+For an adapter without its own downstream announcement, automatic handling runs only after this capture's wake was published; failure therefore leaves the durable capture unacknowledged and eligible for the documented handler retry.
+An adapter may instead declare `self-announcing`, in which case the runner applies first and publishes a `check` wake only when the result remains unhandled.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).

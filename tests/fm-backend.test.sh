@@ -143,7 +143,7 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-backend-hometag-lib.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-cursor-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-timeout-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-lease-lib.sh fm-decision-hold.sh fm-captain-hold.sh fm-backend.sh fm-backend-hometag-lib.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -690,56 +690,47 @@ strip_send_preflight() {  # <log>
   awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
-test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
-  old_bin=$(build_old_bin send-old)
+# The byte-identical old-vs-new tmux log comparison this test used to run
+# covered the P1 backend extraction, which promised an unchanged command
+# sequence. The composer consolidation deliberately changed that sequence, so
+# the current contract is asserted directly instead.
+test_send_tmux_contract() {
+  local fb log home rc
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
-  log_old="$TMP_ROOT/send-old.log"; log_new="$TMP_ROOT/send-new.log"
-  filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
+  log="$TMP_ROOT/send-new.log"
 
-  # Case 1: --key path.
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
-  rc_old=$?
-  run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
-  rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+  # Case 1: --key path - target verified, named key sent, no typing.
+  run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" --key Escape
+  rc=$?
+  expect_code 0 "$rc" "fm-send --key should succeed against a live fake pane"
+  assert_contains "$(cat "$log")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
-    || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
-  assert_contains "$(cat "$log_new")" $'\x1f''Escape' "fm-send --key did not send the named key"
+  assert_contains "$(cat "$log")" $'\x1f''Escape' "fm-send --key did not send the named key"
+  assert_not_contains "$(cat "$log")" $'\x1f''-l'$'\x1f' "fm-send --key must not type literal text"
 
-  # Case 2: plain text (0.3s settle, no popup).
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" hello captain
-  rc_old=$?
-  run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
-  rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
-    || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
-  assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
+  # Case 2: plain text - typed literally exactly once, submitted with Enter,
+  # confirmed against the bordered-empty fake composer.
+  run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" hello captain
+  rc=$?
+  expect_code 0 "$rc" "fm-send plain text should confirm against the empty fake composer"
+  assert_contains "$(cat "$log")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
-  assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send did not submit with Enter"
+  [ "$(grep -c $'\x1f''-l'$'\x1f' "$log")" -eq 1 ] \
+    || fail "fm-send must type the text exactly once (Enter-only retries, never a retype)"
+  assert_contains "$(cat "$log")" $'\x1f''Enter' "fm-send did not submit with Enter"
 
-  # Case 3: a slash command still opens the popup-settle path (verified
-  # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
-  # same tmux command shape: send-keys -l, then a retried Enter.
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" /some-skill
-  rc_old=$?
-  run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
-  rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
-    || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
+  # Case 3: a slash command still opens the popup-settle path and ends in the
+  # same command shape: one literal type, then Enter.
+  run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" /some-skill
+  rc=$?
+  expect_code 0 "$rc" "fm-send /skill should confirm against the empty fake composer"
+  assert_contains "$(cat "$log")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
+    "fm-send /skill did not type the literal slash command"
+  [ "$(grep -c $'\x1f''-l'$'\x1f' "$log")" -eq 1 ] \
+    || fail "fm-send /skill must type the text exactly once"
 
-  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
+  pass "fm-send.sh: explicit tmux targets are verified; text types once and submits with Enter"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------
@@ -1180,7 +1171,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
-test_send_conformance_old_vs_new
+test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
