@@ -110,6 +110,41 @@ test_test_selection_contract_in_ship_and_scout_briefs() {
   pass "fm-brief.sh: ship and scout scaffolds carry the standing test-selection contract"
 }
 
+# Ship and scout scaffolds carry a standing fast-abort contract; a secondmate
+# charter supervises its own crews and must not carry this worker contract.
+test_fast_abort_contract_in_ship_and_scout_briefs() {
+  local home id kind brief
+  home="$TMP_ROOT/fastabort-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-fastabort-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Fast-abort contract" "$brief" \
+      "$kind brief missing the fast-abort contract heading"
+    assert_grep "When a gate agent step fails twice on the same run - empty output, an unparseable response, or a provider/upstream error - do NOT keep retrying through the gate." "$brief" \
+      "$kind brief missing the two-failure gate-agent abort rule"
+    assert_grep "Append \`blocked: <evidence - which steps, how many failures, error text>\` and stop." "$brief" \
+      "$kind brief missing the blocked-evidence status line format"
+    assert_grep "if a command exceeds its own timeout or produces no output progress for 10 minutes, treat it as failed evidence rather than waiting longer" "$brief" \
+      "$kind brief missing the hung-local-command rule"
+    assert_grep "Firstmate decides between bypassing the failing step and a later retry; you never choose to bypass a gate alone." "$brief" \
+      "$kind brief missing the firstmate-owned bypass-authority rule"
+    assert_no_grep "EOF" "$brief" \
+      "$kind brief leaked a heredoc EOF marker (unterminated heredoc) in the fast-abort section"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" brief-fastabort-mate --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# Fast-abort contract" "$home/data/brief-fastabort-mate/brief.md" \
+    "secondmate charter must not carry the worker-level fast-abort contract"
+  pass "fm-brief.sh: ship and scout scaffolds carry the standing fast-abort contract"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -848,6 +883,7 @@ test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_codegraph_contract_in_ship_and_scout_briefs
 test_test_selection_contract_in_ship_and_scout_briefs
+test_fast_abort_contract_in_ship_and_scout_briefs
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
