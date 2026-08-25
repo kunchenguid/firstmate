@@ -2,6 +2,11 @@
 
 Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
+Visible Pi UI strings from Calm resolve through the same home-language lookup as other Firstmate product copy: `config/language`, optional tracked packs, and local overlays, defaulting to English when that file is absent, unreadable, or names no catalog.
+The built-in collision warning re-reads that lookup when it is shown.
+Pi registers the `/calm` command help once when Calm loads; it stays fixed for that Calm extension lifetime and updates only after a Pi reload rebuilds extension registrations, not on `/new`, resume, or fork alone.
+Background console diagnostics and internal logs remain English.
+[`configuration.md`](configuration.md#home-language-configlanguage) owns the language file, tracked packs, and local overlays.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
 The water fills the usable width in standard ANSI blue and the complete boat is standard ANSI yellow.

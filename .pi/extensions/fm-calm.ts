@@ -10,7 +10,7 @@
 // presentation adapters probe the exact API they patch and degrade independently with a
 // diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
 // still exposes no global renderer for arbitrary built-in or custom rows.
-// docs/configuration.md owns the home-local Calm preference contract.
+// docs/configuration.md owns the home-local Calm preference and language contracts.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
 // unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
@@ -54,6 +54,7 @@ import {
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
+import { formatHomeString } from "./lib/fm-language.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -158,6 +159,7 @@ export default function (pi: ExtensionAPI) {
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
+  const language = { codeRoot: root, configDirectory };
   const calmPreferencePath = resolve(configDirectory, "calm");
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
@@ -374,7 +376,11 @@ export default function (pi: ExtensionAPI) {
     const names = contested.map((tool) => `"${tool.name}"`).join(", ");
     const plural = contested.length > 1;
     ui.notify(
-      `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
+      formatHomeString(
+        language,
+        plural ? "calm.tool_collision.warning.other" : "calm.tool_collision.warning.one",
+        { names },
+      ),
       "warning",
     );
     for (const tool of contested) {
@@ -474,7 +480,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("calm", {
-    description: "Toggle Firstmate's supported conversation-only transcript presentation.",
+    description: formatHomeString(language, "calm.command.description"),
     handler: async (_args, ctx) => {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);

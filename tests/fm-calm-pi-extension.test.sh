@@ -11,6 +11,7 @@ ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
+LANGUAGE="$ROOT/.pi/extensions/lib/fm-language.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
@@ -95,6 +96,7 @@ test_home_resolution() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -217,6 +219,7 @@ test_pi_compat_degraded_adapter() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -316,6 +319,7 @@ test_pi_compat_missing_adapter_exports() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' \
@@ -376,6 +380,7 @@ test_builtin_gate_load_time() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -462,6 +467,7 @@ test_calm_activation_collision_and_regression_bound() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -676,6 +682,7 @@ test_rendering_and_session_lifecycle() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/lib/fm-language.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
@@ -1377,6 +1384,7 @@ test_calm_mid_turn_working_notes() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -1637,6 +1645,7 @@ test_operational_followup_turn_e2e() {
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
@@ -2000,6 +2009,7 @@ test_hidden_block_geometry_e2e() {
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$project/.pi/extensions/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
@@ -2232,6 +2242,7 @@ test_working_ship_geometry_and_lifecycle() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/lib/fm-language.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -3124,6 +3135,7 @@ test_interactive_terminal_e2e() {
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$project/.pi/extensions/lib/fm-language.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
@@ -3955,7 +3967,105 @@ JS
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
+test_home_language() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm home-language test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/home-language"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/languages" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home-default/config" \
+    "$fixture/home-unknown/config" \
+    "$fixture/home-pack/config" \
+    "$fixture/home-overlay/config/languages" \
+    "$fixture/home-region/config"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$LANGUAGE" "$fixture/project/.pi/extensions/lib/fm-language.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' 'not-a-language' >"$fixture/home-unknown/config/language"
+  printf '%s\n' es >"$fixture/home-pack/config/language"
+  printf '%s\n' es >"$fixture/home-overlay/config/language"
+  printf '%s\n' es-mx >"$fixture/home-region/config/language"
+  printf '%s\n' '{"calm.command.description":"Cambia la presentacion Calm de Firstmate."}' >"$fixture/project/languages/es.json"
+  printf '%s\n' '{"calm.command.description":"Cambia Calm desde un overlay local."}' >"$fixture/home-overlay/config/languages/es.json"
+
+  out=$(cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    HOME_DEFAULT="$fixture/home-default" \
+    HOME_UNKNOWN="$fixture/home-unknown" \
+    HOME_PACK="$fixture/home-pack" \
+    HOME_OVERLAY="$fixture/home-overlay" \
+    HOME_REGION="$fixture/home-region" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const loadDescription = async (home, stamp) => {
+  const previous = process.env.FM_HOME;
+  process.env.FM_HOME = home;
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?language=${stamp}`);
+  let description;
+  extension.default({
+    on() {},
+    registerCommand(_name, spec) {
+      description = spec.description;
+    },
+    registerEntryRenderer() {},
+    registerTool() {},
+  });
+  if (previous === undefined) delete process.env.FM_HOME;
+  else process.env.FM_HOME = previous;
+  return description;
+};
+
+const english = "Toggle Firstmate's supported conversation-only transcript presentation.";
+const fromDefault = await loadDescription(process.env.HOME_DEFAULT, "default");
+if (fromDefault !== english) {
+  throw new Error(`absent language file did not default to English: ${fromDefault}`);
+}
+const fromUnknown = await loadDescription(process.env.HOME_UNKNOWN, "unknown");
+if (fromUnknown !== english) {
+  throw new Error(`unrecognized language tag did not fall back to English: ${fromUnknown}`);
+}
+const fromPack = await loadDescription(process.env.HOME_PACK, "pack");
+if (fromPack !== "Cambia la presentacion Calm de Firstmate.") {
+  throw new Error(`tracked language pack was not used: ${fromPack}`);
+}
+const fromOverlay = await loadDescription(process.env.HOME_OVERLAY, "overlay");
+if (fromOverlay !== "Cambia Calm desde un overlay local.") {
+  throw new Error(`local language overlay did not win: ${fromOverlay}`);
+}
+const fromRegion = await loadDescription(process.env.HOME_REGION, "region");
+if (fromRegion !== "Cambia la presentacion Calm de Firstmate.") {
+  throw new Error(`regional tag did not fall back to its primary pack: ${fromRegion}`);
+}
+JS
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm home-language test failed: $out"
+  [ -z "$out" ] || fail "Pi calm home-language test printed output: $out"
+  pass "Pi calm visible strings follow config/language, default to English, use a tracked pack, prefer a local overlay, and fall back from a regional tag"
+}
+
 test_home_resolution
+test_home_language
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports

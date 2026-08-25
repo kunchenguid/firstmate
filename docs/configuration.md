@@ -25,6 +25,22 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Home language (config/language)
+
+The home language chooses visible Firstmate product strings such as Calm's built-in collision warning and `/calm` help text; the warning re-reads this lookup when shown, while the command help is resolved once when Calm registers with Pi and stays fixed until a Pi reload.
+Store the choice in gitignored `config/language` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The first non-empty, non-`#` line is a lowercase language tag such as `en`, `de`, `es`, or `fr-ca`.
+An absent, unreadable, or unrecognized value defaults to `en`.
+English is the source catalog and the fallback; no other language is preferred by the resolver.
+Additional languages are optional JSON catalogs, either a tracked pack at `languages/<tag>.json` in the code root or a home-local overlay at `config/languages/<tag>.json`.
+Each pack is a JSON object mapping catalog keys to translated strings; non-string values are ignored.
+Keys match the English source catalog in `.pi/extensions/lib/fm-language.ts`, and missing keys fall back to English.
+Values may include `{name}` placeholders that the formatter replaces at runtime.
+A local overlay wins over a tracked pack for the same tag, and a more specific tag (`es-mx`) falls back through its primary tag (`es`) to English.
+Background diagnostics and internal logs stay English.
+This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+`.pi/extensions/lib/fm-language.ts` owns lookup and formatting.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
@@ -398,10 +414,6 @@ A `command` entry gives the `PATH` comparison above, and adding `announce_patter
 A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
 `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
-A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
-An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
-Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
-See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 That writes `state/tool-updates.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
