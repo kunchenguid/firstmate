@@ -160,9 +160,9 @@
 #   not interrupt-free end to end, though: the zellij and cmux send_text_line
 #   adapters clear their own failed submit with C-c, and gating both first sends
 #   roughly doubles the number of send_text_line calls that can reach that
-#   pre-existing adapter path. Every gate refusal names the window to inspect,
-#   and the gate removes nothing itself, so on every flat layout that pane is
-#   still there afterwards.
+#   pre-existing adapter path. Every gate refusal names the window and says
+#   whether it survives, and the gate removes nothing itself, so on every flat
+#   layout that pane is still there afterwards.
 #   Known residuals on the herdr presentation-projection path: both gates run
 #   while this session's presentation-order lock is held, so an unresponsive pane
 #   can add up to two full poll budgets to that hold window; and the shared
@@ -2191,41 +2191,36 @@ spawn_send_key() {  # <target> <key>
 }
 
 # Shell-readiness gate for the FIRST text line sent into a pane.
+# This script's header owns the contract: which sends are gated, the knobs and
+# their defaults, the refusal rules, and the bypass. What follows is only the
+# rationale a maintainer changing this code needs and cannot read off the header.
 #
-# A freshly created pane's shell can still be sourcing its rc files when that
-# first send lands, and a slow init eats the leading byte(s). Seen live on herdr
-# under load (2026-08-17): the leading 't' of `treehouse get` was swallowed three
-# times running, the pane ran `reehouse get`, and the worktree was never entered -
-# silently, with nothing on firstmate's side to notice. A sacrificial leading
-# space is only a mitigation: it buys exactly as many bytes as spaces are sent.
+# Seen live on herdr under load (2026-08-17): the leading 't' of `treehouse get`
+# was swallowed three times running, the pane ran `reehouse get`, and the
+# worktree was never entered - silently, with nothing on firstmate's side to
+# notice. A sacrificial leading space was rejected as only a mitigation: it buys
+# exactly as many bytes as spaces are sent.
 #
-# So prove readiness instead. The probe sends `touch <marker>` and polls the
-# filesystem for <marker>. The command word cannot survive ANY head truncation -
-# every prefix loss turns `touch` into some other word, the shell reports
-# command-not-found, and the marker stays absent - so the marker exists only
-# after one byte-exact line was received AND executed at a live prompt. That is
-# the same condition which makes the NEXT send safe, which is what makes this a
-# fix rather than padding.
+# `touch` is load-bearing, not incidental. The command word cannot survive ANY
+# head truncation - every prefix loss turns it into some other word, the shell
+# reports command-not-found, and the marker stays absent - so the marker exists
+# only after one byte-exact line was received AND executed at a live prompt. That
+# is the same condition which makes the NEXT send safe, which is what makes this
+# a fix rather than padding.
 #
 # The verdict comes from the filesystem, never from rendered pane output, so it
 # holds identically on every send-capable backend and carries no per-harness
 # assumption at all: the gate runs strictly before the launch command, so no
-# harness has started yet.
+# harness has started yet. That is why no new per-harness evidence is owed here.
 #
-# Bounded and loud: on exhaustion the spawn refuses with the endpoint named,
-# rather than sending into a pane that never proved it can read a line.
-# FM_SPAWN_READY_POLLS, FM_SPAWN_READY_INTERVAL, and FM_SPAWN_READY_RESEND_EVERY
-# tune the budget; the defaults cost a healthy pane one poll interval.
-#
-# TEST-FIXTURE ESCAPE HATCH (FM_SPAWN_READY_BYPASS=1), the same shape and the
-# same reasoning as bin/fm-gate-refuse-lib.sh's: nearly every suite in this repo
-# drives the real fm-spawn.sh against a FAKE backend whose send channel has no
-# shell behind it at all, so no marker can ever appear there and the gate would
-# time out on fixtures that are not testing a shell. tests/lib.sh exports the
-# bypass for those, while the real-backend smoke suites - which do not source it -
-# exercise the gate for real, and tests/fm-spawn-first-send.test.sh strips it to
-# verify the gate itself. It must never be set in a live home: a pane whose shell
-# is unproven is exactly what this gate exists to catch.
+# FM_SPAWN_READY_BYPASS takes the same shape and the same reasoning as
+# bin/fm-gate-refuse-lib.sh's FM_GATE_REFUSE_BYPASS: nearly every suite in this
+# repo drives the real fm-spawn.sh against a FAKE backend whose send channel has
+# no shell behind it at all, so no marker can ever appear there and the gate
+# would time out on fixtures that are not testing a shell. tests/lib.sh exports
+# the bypass for those, while the real-backend smoke suites - which do not source
+# it - exercise the gate for real, and tests/fm-spawn-first-send.test.sh strips
+# it to verify the gate itself.
 spawn_ready_cleanup() {
   [ -n "$SPAWN_READY_DIR" ] || return 0
   rm -rf "$SPAWN_READY_DIR" 2>/dev/null || true
@@ -2252,8 +2247,18 @@ spawn_ready_probe_dir() {  # <root>
 
 spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
   local target=$1 about=$2 marker polls interval resend_every root i=0 sends=0
-  local probe_rc=0 send_status=0 send_failures=0
+  local probe_rc=0 send_status=0 send_failures=0 aftermath
   [ "${FM_SPAWN_READY_BYPASS:-}" != 1 ] || return 0
+  # Every refusal below ends with the same clause, built once here so the three
+  # cannot drift apart. The gate itself removes nothing, but a refusal is a
+  # nonzero exit, and on the herdr presentation-projection path the shared
+  # spawn-abort cleanup then closes the exact projected task pane - so promise
+  # the pane is there to inspect only where it actually still is.
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    aftermath="window $T is closed by this spawn's abort cleanup, so it is not left behind for you to inspect"
+  else
+    aftermath="inspect window $T, which survives this refusal and is left for you to clean up"
+  fi
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}
   resend_every=${FM_SPAWN_READY_RESEND_EVERY:-10}
@@ -2340,12 +2345,12 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
         send_failures=$((send_failures + 1))
         if [ "$send_status" -eq 2 ] && { [ "$BACKEND" = zellij ] || [ "$BACKEND" = cmux ]; }; then
           spawn_ready_cleanup
-          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about' - inspect window $T, which survives this refusal and is left for you to clean up" >&2
+          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about' - $aftermath" >&2
           return 1
         fi
         if [ "$send_failures" -ge 2 ]; then
           spawn_ready_cleanup
-          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell; inspect window $T, which survives this refusal and is left for you to clean up" >&2
+          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell; $aftermath" >&2
           return 1
         fi
       else
@@ -2360,7 +2365,7 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
     sleep "$interval"
   done
   spawn_ready_cleanup
-  echo "error: task $ID's pane shell never confirmed it can read a command line ($sends probes over $polls polls at ${interval}s on $target); refusing to send '$about' into a pane that may silently drop its leading bytes; inspect window $T, which survives this refusal and is left for you to clean up" >&2
+  echo "error: task $ID's pane shell never confirmed it can read a command line ($sends probes over $polls polls at ${interval}s on $target); refusing to send '$about' into a pane that may silently drop its leading bytes; $aftermath" >&2
   return 1
 }
 
