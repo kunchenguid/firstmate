@@ -2,7 +2,7 @@
 name: dependency-contracts
 description: >-
   Agent-only procedure for planning, recording, changing, clearing, and reconciling blocked-by edges.
-  Use before any dependency mutation, before briefing work that blocks another task, and when issue and backlog dependency records disagree.
+  Use before any dependency mutation, before briefing work that blocks another task, before dispatching dependency-bound work, and when the selected dependency owner and backlog disagree.
 user-invocable: false
 metadata:
   internal: true
