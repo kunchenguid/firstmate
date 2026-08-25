@@ -70,6 +70,46 @@ test_codegraph_contract_in_ship_and_scout_briefs() {
   pass "fm-brief.sh: ship and scout scaffolds carry the standing CodeGraph usage contract"
 }
 
+# Ship and scout scaffolds carry a standing test-selection contract; a
+# secondmate charter supervises its own crews and must not carry this worker
+# contract.
+test_test_selection_contract_in_ship_and_scout_briefs() {
+  local home id kind brief
+  home="$TMP_ROOT/testsel-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-testsel-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Test selection contract" "$brief" \
+      "$kind brief missing the test-selection contract heading"
+    assert_grep "never make a full local suite run your first verification step" "$brief" \
+      "$kind brief missing the no-full-suite-first rule"
+    assert_grep "select tests with \`bin/fm-test-run.sh --changed\` (add \`--base <ref>\` when your working base is not origin/main)" "$brief" \
+      "$kind brief missing changed-first selection for the firstmate repo"
+    assert_grep "on other projects use the runner's native changed/related feature" "$brief" \
+      "$kind brief missing the other-projects changed-selection rule"
+    assert_grep "re-run only the failed family or single script (\`bin/fm-test-run.sh --family <name>\` or that one script path), never the whole suite" "$brief" \
+      "$kind brief missing the failed-family-only rerun rule"
+    assert_grep "GitHub CI owns the final merge verdict; local runs are a fast pre-check, not the authority" "$brief" \
+      "$kind brief missing the CI-owns-the-verdict rule"
+    assert_grep "never pipe it through \`tail\` or any other filter that discards per-test result lines" "$brief" \
+      "$kind brief missing the keep-full-output rule"
+    assert_no_grep "EOF" "$brief" \
+      "$kind brief leaked a heredoc EOF marker (unterminated heredoc) in the test-selection section"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" brief-testsel-mate --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# Test selection contract" "$home/data/brief-testsel-mate/brief.md" \
+    "secondmate charter must not carry the worker-level test-selection contract"
+  pass "fm-brief.sh: ship and scout scaffolds carry the standing test-selection contract"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -771,6 +811,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_codegraph_contract_in_ship_and_scout_briefs
+test_test_selection_contract_in_ship_and_scout_briefs
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable

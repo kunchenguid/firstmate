@@ -45,6 +45,10 @@
 # affected-based test selection before done, a learning loop into the project's
 # docs/agents/codegraph/README.md with an AGENTS.md pointer, and a one-line note
 # to continue without codegraph when the binary is missing.
+# They also carry a standing test-selection contract: no full-suite first run,
+# changed-first selection (fm-test-run.sh --changed here, the project runner's
+# native equivalent elsewhere), failed-family-only reruns, GitHub CI as the PR
+# merge verdict, and full output kept in a file so failures need no rerun.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -317,6 +321,16 @@ CODEGRAPH_SECTION=$(printf '%s\n' \
 "   Keep an \`AGENTS.md\` pointer section to that file via '$FM_ROOT/bin/fm-ensure-agents-md.sh .'" \
 'If the `codegraph` binary is missing, append one status line noting it and continue with ordinary tools; nothing else changes.')
 
+# Standing test-selection contract shared by the ship and scout scaffolds.
+# shellcheck disable=SC2016  # single quotes are deliberate: backtick-wrapped command names must reach the reading agent verbatim, not expand at scaffold time.
+TEST_SELECTION_SECTION=$(printf '%s\n' \
+'# Test selection contract' \
+'Verify efficiently: never make a full local suite run your first verification step.' \
+"1. Changed-first selection: when the repo under test is the firstmate repo itself, select tests with \`bin/fm-test-run.sh --changed\` (add \`--base <ref>\` when your working base is not origin/main); on other projects use the runner's native changed/related feature, e.g. \`vitest --changed\`." \
+'2. On failure, re-run only the failed family or single script (`bin/fm-test-run.sh --family <name>` or that one script path), never the whole suite.' \
+'3. For PR-based deliveries, GitHub CI owns the final merge verdict; local runs are a fast pre-check, not the authority.' \
+'4. Keep full test output in a file: never pipe it through `tail` or any other filter that discards per-test result lines, so failures stay identifiable without rerunning.')
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -356,6 +370,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $CODEGRAPH_SECTION
+
+$TEST_SELECTION_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -475,6 +491,8 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $CODEGRAPH_SECTION
+
+$TEST_SELECTION_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
