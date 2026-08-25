@@ -196,15 +196,71 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
+# Raw no-mistakes query reuse lives only for this process tree. Each invocation
+# creates a fresh private directory outside the operational home, passes it only
+# to its task-local current-state readers, and removes it on every normal or
+# signalled exit. If private temporary storage is unavailable, reads retain the
+# prior uncached behavior and failure semantics.
+NM_SNAPSHOT_CACHE_DIR=
+NM_SNAPSHOT_CACHE_TOKEN=
+snapshot_nm_cache_cleanup() {
+  local owner=
+  [ -n "$NM_SNAPSHOT_CACHE_DIR" ] || return 0
+  [ -f "$NM_SNAPSHOT_CACHE_DIR/.owner" ] && [ ! -L "$NM_SNAPSHOT_CACHE_DIR/.owner" ] \
+    || return 0
+  IFS= read -r owner < "$NM_SNAPSHOT_CACHE_DIR/.owner" 2>/dev/null || return 0
+  [ "$owner" = "$NM_SNAPSHOT_CACHE_TOKEN" ] || return 0
+  rm -rf -- "$NM_SNAPSHOT_CACHE_DIR"
+  NM_SNAPSHOT_CACHE_DIR=
+}
+snapshot_nm_cache_init() {
+  local base=${TMPDIR:-/tmp} base_real home_real
+  base_real=$(cd "$base" 2>/dev/null && pwd -P) || base_real=
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
+  case "$base_real" in
+    "$home_real"|"$home_real"/*)
+      base=/tmp
+      base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 0
+      case "$base_real" in "$home_real"|"$home_real"/*) return 0 ;; esac
+      ;;
+  esac
+  NM_SNAPSHOT_CACHE_DIR=$(umask 077; mktemp -d "$base/fm-nm-snapshot.XXXXXX" 2>/dev/null) \
+    || NM_SNAPSHOT_CACHE_DIR=
+  [ -n "$NM_SNAPSHOT_CACHE_DIR" ] || return 0
+  NM_SNAPSHOT_CACHE_TOKEN="$$:$RANDOM"
+  if ! (umask 077; printf '%s\n' "$NM_SNAPSHOT_CACHE_TOKEN" > "$NM_SNAPSHOT_CACHE_DIR/.owner"); then
+    rm -rf -- "$NM_SNAPSHOT_CACHE_DIR"
+    NM_SNAPSHOT_CACHE_DIR=
+    NM_SNAPSHOT_CACHE_TOKEN=
+    return 0
+  fi
+  trap snapshot_nm_cache_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+snapshot_nm_cache_init
+
 bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
+# Stream JSON documents through stdin instead of expanding them into jq argv.
+# Shell function arguments do not cross exec(2), and printf is a bash builtin.
+json_documents() {
+  printf '%s\n' "$@"
+}
+
+path_presence_json() {  # <path> <present-json>
+  printf '%s\0' "$1" | jq -Rs --argjson present "$2" '
+    split("\u0000")[0] as $path
+    | {path:$path,present:$present}'
+}
+
 path_present_json() {  # <path>
-  local present=0
-  [ -e "$1" ] && present=1
-  jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present}'
+  local present=false
+  [ -e "$1" ] && present=true
+  path_presence_json "$1" "$present"
 }
 
 meta_value() {  # <meta-file> <key>
@@ -225,6 +281,8 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_NM_SNAPSHOT_CACHE_DIR="$NM_SNAPSHOT_CACHE_DIR" \
+      FM_NM_SNAPSHOT_CACHE_TOKEN="$NM_SNAPSHOT_CACHE_TOKEN" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
@@ -243,8 +301,9 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  printf '%s\0' "$state" "$source" "$detail" "$raw" | jq -Rs '
+    split("\u0000") as $fields
+    | {state:$fields[0],source:$fields[1],detail:$fields[2],raw:$fields[3]}'
 }
 
 status_event_json() {  # <status-log>
@@ -255,13 +314,11 @@ status_event_json() {  # <status-log>
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
   fi
-  jq -n \
-    --arg path "$log" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
-    --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+  printf '%s\0' "$log" "$raw" "$verb" "$note" | jq -Rs \
+    --argjson present "$(bool_json "$present")" '
+    split("\u0000") as $fields
+    | {path:$fields[0],present:$present,kind:"event_history",
+       last_event:{state:$fields[2],note:$fields[3],raw:$fields[1]}}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -427,8 +484,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json task_fields_json
+  local current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -469,7 +526,6 @@ task_json_lines() {
 
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
-    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
 
@@ -545,52 +601,54 @@ task_json_lines() {
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
-      home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
+      home_json=$(path_presence_json "$home" "$remote_home_present")
     elif [ -n "$home" ]; then
       home_json=$(path_present_json "$home")
     else
       home_json=$(jq -n '{path:null,present:false}')
     fi
+    task_fields_json=$(printf '%s\0' \
+      "$id" "$kind" "$harness" "$mode" "$yolo" "$project" "$projects" \
+      "$backend" "$target" "$remote_host" "$remote_root" "$pr" "$pr_source" \
+      "$agent_alive" "$SNAPSHOT_NOW" | jq -Rs '
+      split("\u0000") as $fields
+      | {id:$fields[0],kind:$fields[1],harness:$fields[2],mode:$fields[3],
+         yolo:$fields[4],project:$fields[5],projects:$fields[6],backend:$fields[7],
+         target:$fields[8],remote_host:$fields[9],remote_root:$fields[10],
+         pr:$fields[11],pr_source:$fields[12],agent_alive:$fields[13],
+         observed_at:$fields[14]}')
 
-    jq -n \
-      --arg id "$id" \
-      --arg kind "$kind" \
-      --arg harness "$harness" \
-      --arg mode "$mode" \
-      --arg yolo "$yolo" \
-      --arg project "$project" \
-      --arg worktree "$worktree" \
-      --arg home "$home" \
-      --arg projects "$projects" \
-      --arg backend "$backend" \
-      --arg target "$target" \
-      --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
-      --arg pr "$pr" \
-      --arg pr_source "$pr_source" \
-      --arg agent_alive "$agent_alive" \
-      --arg observed_at "$SNAPSHOT_NOW" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
-      --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
-      --argjson report "$report_json" \
-      --argjson worktree_path "$worktree_json" \
-      --argjson home_path "$home_json" \
+    json_documents \
+      "$task_fields_json" \
+      "$current_json" \
+      "$meta_json" \
+      "$status_json" \
+      "$report_json" \
+      "$worktree_json" \
+      "$home_json" \
+      "$open_decisions_json" \
+      | jq -s \
       --argjson endpoint_exists "$endpoint_exists" \
-      --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
-      '{
-        id:$id,
-        kind:$kind,
-        harness:($harness // ""),
-        mode:($mode // ""),
-        yolo:($yolo // ""),
-        project:($project // ""),
-        backend:$backend,
-        remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
+      '.[0] as $fields
+      | .[1] as $current_state
+      | .[2] as $meta_path
+      | .[3] as $status_log
+      | .[4] as $report
+      | .[5] as $worktree_path
+      | .[6] as $home_path
+      | .[7] as $open_decisions
+      | {
+        id:$fields.id,
+        kind:$fields.kind,
+        harness:($fields.harness // ""),
+        mode:($fields.mode // ""),
+        yolo:($fields.yolo // ""),
+        project:($fields.project // ""),
+        backend:$fields.backend,
+        remote:(if $fields.remote_host == "" then null else {host:$fields.remote_host,root:$fields.remote_root} end),
         paths:{
           meta:$meta_path,
           status_log:$status_log,
@@ -598,29 +656,29 @@ task_json_lines() {
           home:$home_path,
           report:$report
         },
-        secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
+        secondmate_projects:($fields.projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
+        current_state:($current_state + {observed_at:$fields.observed_at,freshness:"fresh"}),
+        endpoint:{target:($fields.target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$fields.agent_alive,
           status:(if $endpoint_exists == false then "absent"
-                  elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
+                  elif $fields.agent_alive == "alive" or $fields.agent_alive == "dead" then $fields.agent_alive
                   else "unknown" end),
-          observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+          observed_at:$fields.observed_at,freshness:"fresh"},
+        pr:{url:($fields.pr | if . == "" then null else . end),source:$fields.pr_source},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
           open_decisions:$open_decisions,
           scout_report_present:$report_present,
-          last_event_text:$last_event_raw
+          last_event_text:($status_log.last_event.raw // "")
         },
         actions:(
-          if $kind == "secondmate" then
-            {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
+          if $fields.kind == "secondmate" then
+            {send:"bin/fm-send.sh fm-\($fields.id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
              return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
           else
-            {watch:"bin/fm-peek.sh fm-\($id)",
-             steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
+            {watch:"bin/fm-peek.sh fm-\($fields.id)",
+             steer:"bin/fm-send.sh fm-\($fields.id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
       }'
@@ -632,9 +690,10 @@ task_json_lines() {
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
 main_inventory_json() {  # <backlog-json> <tasks-json>
-  jq -n \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
+  json_documents "$1" "$2" | jq -s '
+    .[0] as $backlog
+    | .[1] as $tasks
+    |
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]?
@@ -660,15 +719,16 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
-  jq -n \
+  json_documents "$1" "$2" | jq -s \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
-    --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
+    --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" '
+    .[0] as $backlog
+    | .[1] as $tasks
+    |
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
@@ -1079,7 +1139,11 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
 }
 
 parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <decisions-json>
-  jq -n --argjson summary "$1" --argjson activities "$2" --argjson decisions "$3" '
+  json_documents "$1" "$2" "$3" | jq -s '
+    .[0] as $summary
+    | .[1] as $activities
+    | .[2] as $decisions
+    |
     def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
       $e + {
@@ -1139,12 +1203,16 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 }
 
 secondmate_current_json() {  # <parent-tasks-json>
-  local tasks=$1 registry union rows total_registered total shown truncated
+  local tasks=$1 registry registry_json union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local validation_fields_json record_fields_json
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
-  union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
+  union=$(json_documents "$registry" "$tasks" | jq -s '
+    .[0] as $registry
+    | .[1] as $tasks
+    |
     ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
     | ([ $registered[] as $r
@@ -1242,24 +1310,31 @@ secondmate_current_json() {  # <parent-tasks-json>
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
           reason="structured home snapshot exceeded byte limit"
-        elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
-          .schema == "fm-secondmate-home-summary.v1" and .home == $home
-          and (($remote == true) or .generated == $generated)
-          and (.valid | type) == "boolean" and (.state | type) == "string"
-          and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
-          and (.active_children | type) == "array" and (.decisions_open | type) == "array"
-          and (.holds | type) == "array" and (.queued | type) == "array"
-          and (.landed | type) == "array" and (.endpoints | type) == "array"
-          and (.counts | type) == "object" and (.omitted | type) == "array"
-        ' >/dev/null 2>&1; then
-          reason="structured home snapshot was malformed or stale"
         else
-          summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
-          if [ "$summary_valid" != true ]; then
-            summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
-            summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
-            if [ "$summary_invalidity" != child_current_unavailable ]; then
-              reason="structured home state invalid: $summary_reason"
+          validation_fields_json=$(printf '%s\0' "$home" "$SNAPSHOT_NOW" | jq -Rs '
+            split("\u0000") as $fields
+            | {home:$fields[0],generated:$fields[1]}')
+          if ! json_documents "$summary" "$validation_fields_json" | jq -se --argjson remote "$remote" '
+            .[0] as $summary
+            | .[1] as $fields
+            | $summary.schema == "fm-secondmate-home-summary.v1" and $summary.home == $fields.home
+            and (($remote == true) or $summary.generated == $fields.generated)
+            and ($summary.valid | type) == "boolean" and ($summary.state | type) == "string"
+            and ($summary.invalidity | type) == "object" and ($summary.invalidity.ids | type) == "array"
+            and ($summary.active_children | type) == "array" and ($summary.decisions_open | type) == "array"
+            and ($summary.holds | type) == "array" and ($summary.queued | type) == "array"
+            and ($summary.landed | type) == "array" and ($summary.endpoints | type) == "array"
+            and ($summary.counts | type) == "object" and ($summary.omitted | type) == "array"
+          ' >/dev/null 2>&1; then
+            reason="structured home snapshot was malformed or stale"
+          else
+            summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
+            if [ "$summary_valid" != true ]; then
+              summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
+              summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
+              if [ "$summary_invalidity" != child_current_unavailable ]; then
+                reason="structured home state invalid: $summary_reason"
+              fi
             fi
           fi
         fi
@@ -1274,8 +1349,10 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
-      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
-        any(.activities[]; .verdict == "contradicts" and .summary == $note)')
+      terminal_contradiction=$(json_documents "$reconciliation" "$task" | jq -sr '
+        .[0] as $reconciliation
+        | (.[1].paths.status_log.last_event.note // "") as $note
+        | any($reconciliation.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else
@@ -1283,17 +1360,39 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
-      record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
-        --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
-        --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
-         current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
-         provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
+      record_fields_json=$(printf '%s\0' "$id" "$home" "$host" "$state" "$current_reason" "$SNAPSHOT_NOW" | jq -Rs '
+        split("\u0000") as $fields
+        | {id:$fields[0],home:$fields[1],host:$fields[2],state:$fields[3],
+           current_reason:$fields[4],observed_at:$fields[5]}')
+      record=$(json_documents \
+        "$record_fields_json" \
+        "$summary" \
+        "$decisions" \
+        "$activities" \
+        "$activity_scan" \
+        "$reconciliation" \
+        "$terminal" \
+        "$task" \
+        | jq -s \
+        --argjson remote "$remote" \
+        --argjson registered "$registered" --argjson summary_valid "$summary_valid" --argjson contradiction "$contradiction" \
+        --argjson event_age "$event_age" '
+        .[0] as $fields
+        | .[1] as $summary
+        | .[2] as $decisions
+        | .[3] as $activities
+        | .[4] as $activity_scan
+        | .[5] as $reconciliation
+        | .[6] as $terminal
+        | .[7] as $task
+        | ($task.paths.status_log.last_event.raw // "") as $event_raw
+        | ($task.paths.status_log.last_event.note // "") as $event_note
+        |
+        {id:$fields.id,home:$fields.home,host:($fields.host | if . == "" then null else . end),remote:$remote,registered:$registered,
+         current:{state:$fields.state,reason:($fields.current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
+         provenance:{selected:"structured-home",structured_home:$fields.home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
-         freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
+         freshness:{status:"fresh",observed_at:$fields.observed_at,age_seconds:0},
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
@@ -1313,35 +1412,56 @@ secondmate_current_json() {  # <parent-tasks-json>
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
-      record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
-        --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
-        --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" '
-        {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
-         current:{state:"unknown",reason:$reason},invalidity:null,
-         provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
-         freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
+      record_fields_json=$(printf '%s\0' "$id" "$home" "$host" "$reason" "$SNAPSHOT_NOW" "$provenance" "$freshness" | jq -Rs '
+        split("\u0000") as $fields
+        | {id:$fields[0],home:$fields[1],host:$fields[2],reason:$fields[3],
+           observed_at:$fields[4],provenance:$fields[5],freshness:$fields[6]}')
+      record=$(json_documents \
+        "$record_fields_json" \
+        "$activities" \
+        "$activity_scan" \
+        "$decisions" \
+        "$terminal" \
+        "$task" \
+        | jq -s \
+        --argjson remote "$remote" \
+        --argjson registered "$registered" --argjson event_age "$event_age" '
+        .[0] as $fields
+        | .[1] as $activities
+        | .[2] as $activity_scan
+        | .[3] as $decisions
+        | .[4] as $terminal
+        | .[5] as $task
+        | ($task.paths.status_log.last_event.raw // "") as $event_raw
+        | ($task.paths.status_log.last_event.note // "") as $event_note
+        |
+        {id:$fields.id,home:($fields.home | if . == "" then null else . end),host:($fields.host | if . == "" then null else . end),remote:$remote,registered:$registered,
+         current:{state:"unknown",reason:$fields.reason},invalidity:null,
+         provenance:{selected:$fields.provenance,structured_home:($fields.home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
+         freshness:{status:$fields.freshness,observed_at:$fields.observed_at,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
-    records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')
+    records=$(json_documents "$records" "$record" | jq -s '.[0] + [.[1]]')
   done <<EOF
 $rows
 EOF
-  jq -n \
-    --argjson registry "$(printf '%s' "$union" | jq '.registry')" \
-    --argjson records "$records" \
+  registry_json=$(printf '%s' "$union" | jq '.registry')
+  json_documents "$registry_json" "$records" | jq -s \
     --argjson total_registered "$total_registered" \
     --argjson total "$total" \
     --argjson shown "$shown" \
     --argjson truncated "$truncated" \
-    '{registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
+    '.[0] as $registry
+     | .[1] as $records
+     | {registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
 }
 
 secondmate_landed_from_current_json() {  # <secondmate-current-json>
-  jq -n --argjson current "$1" '
+  json_documents "$1" | jq -s '
+    .[0] as $current
+    |
     {records:[ $current.records[]
       | select(.provenance.selected == "structured-home") as $mate
       | $mate.landed[]
@@ -1390,7 +1510,14 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
-jq -n \
+json_documents \
+  "$BACKLOG_JSON" \
+  "$TASKS_JSON" \
+  "$MAIN_INVENTORY_JSON" \
+  "$SCOUT_REPORTS_JSON" \
+  "$SECONDMATE_CURRENT_JSON" \
+  "$SECONDMATE_LANDED_JSON" \
+  | jq -s \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
@@ -1398,13 +1525,13 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --argjson backlog "$BACKLOG_JSON" \
-  --argjson tasks "$TASKS_JSON" \
-  --argjson main_inventory "$MAIN_INVENTORY_JSON" \
-  --argjson scout_reports "$SCOUT_REPORTS_JSON" \
-  --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
-  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
-  'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+  '.[0] as $backlog
+   | .[1] as $tasks
+   | .[2] as $main_inventory
+   | .[3] as $scout_reports
+   | .[4] as $secondmate_current
+   | .[5] as $secondmate_landed
+   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
    {

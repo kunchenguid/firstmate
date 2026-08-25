@@ -990,9 +990,11 @@ families_for_changed_path() {
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
-      # pre-teardown run abort (pr-forge).
+      # pre-teardown run abort (pr-forge). Fleet snapshots also use its
+      # snapshot-local raw-query reuse path through fm-crew-state.sh.
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
+      printf '%s\n' snapshot-bearings
       ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it

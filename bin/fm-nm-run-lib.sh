@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared no-mistakes axi run attribution primitives.
+# Shared no-mistakes run attribution and snapshot-local query primitives.
 #
 # ONE owner for the branch+code-identity matching rule that decides whether a
 # no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
@@ -30,7 +30,77 @@ fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
   fm_nm_run_bounded "$@" 2>/dev/null
 }
 
+# Fleet snapshots give each fm-crew-state.sh child the same private temporary
+# directory and owner token. Only the two raw read-only queries used for run
+# attribution participate. The primary result is bound to the canonical
+# repository, branch, and current worktree HEAD; the coarse result is bound to
+# the canonical repository. Exact key bytes are compared before reuse, so file
+# names are never an identity proof.
+fm_nm_snapshot_query() {  # <dir> <timeout_secs> <args...>
+  local dir=$1 timeout_secs=$2 cache=${FM_NM_SNAPSHOT_CACHE_DIR:-}
+  local token=${FM_NM_SNAPSHOT_CACHE_TOKEN:-} owner query common branch='' head=''
+  local candidate entry=1 prefix output_tmp
+  shift 2
+  [ -n "$cache" ] && [ -n "$token" ] && [ -d "$cache" ] && [ ! -L "$cache" ] || return 1
+  [ -f "$cache/.owner" ] && [ ! -L "$cache/.owner" ] || return 1
+  IFS= read -r owner < "$cache/.owner" 2>/dev/null || return 1
+  [ "$owner" = "$token" ] || return 1
+
+  if [ "$#" -eq 2 ] && [ "$1" = axi ] && [ "$2" = status ]; then
+    query=primary
+    common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    common=$(cd "$common" 2>/dev/null && pwd -P) || return 1
+    branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+    head=$(git -C "$dir" rev-parse --verify HEAD 2>/dev/null) || return 1
+  elif [ "$#" -eq 3 ] && [ "$1" = runs ] && [ "$2" = --limit ] && [ "$3" = 200 ]; then
+    query=coarse
+    common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    common=$(cd "$common" 2>/dev/null && pwd -P) || return 1
+  else
+    return 1
+  fi
+
+  umask 077
+  candidate="$cache/.key.$$"
+  printf '%s\0%s\0%s\0%s\0' "$query" "$common" "$branch" "$head" > "$candidate" || return 1
+  while :; do
+    prefix="$cache/query-$entry"
+    if [ -f "$prefix.key" ]; then
+      if cmp -s "$candidate" "$prefix.key"; then
+        rm -f "$candidate"
+        if [ -f "$prefix.ready" ] && [ -f "$prefix.out" ]; then
+          cat "$prefix.out"
+          return 0
+        fi
+        break
+      fi
+    else
+      if mv "$candidate" "$prefix.key" 2>/dev/null; then
+        candidate=
+        break
+      fi
+    fi
+    entry=$((entry + 1))
+  done
+  [ -n "$candidate" ] && rm -f "$candidate"
+
+  output_tmp="$cache/.out.$$"
+  : > "$output_tmp" || return 1
+  fm_nm_run_checked "$dir" "$timeout_secs" "$@" > "$output_tmp" || true
+  if mv "$output_tmp" "$prefix.out" 2>/dev/null; then
+    : > "$prefix.ready" || true
+    cat "$prefix.out"
+  else
+    cat "$output_tmp"
+    rm -f "$output_tmp"
+  fi
+  return 0
+}
+
 fm_nm_run() {  # <dir> <timeout_secs> <args...>
+  if fm_nm_snapshot_query "$@"; then
+    return 0
+  fi
   fm_nm_run_checked "$@" || true
 }
 
