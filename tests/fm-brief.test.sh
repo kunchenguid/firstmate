@@ -520,6 +520,29 @@ test_secondmate_no_projects_charter() {
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
 }
 
+test_secondmate_code_review_trigger() {
+  local home brief
+  home="$TMP_ROOT/code-review-trigger-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Coordinate sample code changes.' \
+    "$ROOT/bin/fm-brief.sh" review-mate --secondmate sample >/dev/null 2>&1
+  brief="$home/data/review-mate/brief.md"
+  assert_grep "Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop." "$brief" \
+    "project-backed secondmate charter did not load the mandatory code-review owner"
+  assert_no_grep 'gh-axi pr diff --full' "$brief" \
+    "secondmate charter duplicated the detailed code-review procedure"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Coordinate Firstmate code changes.' \
+    "$ROOT/bin/fm-brief.sh" review-mate-no-projects --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/review-mate-no-projects/brief.md"
+  assert_grep "Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop." "$brief" \
+    "project-less secondmate charter did not load the mandatory code-review owner"
+  assert_no_grep 'no material findings' "$brief" \
+    "secondmate charter copied the review procedure instead of pointing to its owner"
+  pass "fm-brief.sh: every secondmate charter loads the tracked-code review-loop owner"
+}
+
 test_secondmate_marked_request_reporting_contract() {
   local home brief
   home="$TMP_ROOT/marked-request-reporting-home"
@@ -763,6 +786,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_secondmate_code_review_trigger
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
