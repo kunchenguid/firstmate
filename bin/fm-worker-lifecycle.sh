@@ -33,7 +33,7 @@
 #   fm-worker-lifecycle.sh capacity-reserve <exact specialized reservation flags>
 #   fm-worker-lifecycle.sh capacity-reserve-shape <exact complete-shape constituents>
 #   fm-worker-lifecycle.sh capacity-release <exact fence and cleanup receipt>
-#   fm-worker-lifecycle.sh execute <exact assignment flags> -- <argv...>
+#   fm-worker-lifecycle.sh execute <exact assignment flags> [--existing-task-disk --return-kind <ship|scout> --outcome-dir <dir>] -- <argv...>
 #   fm-worker-lifecycle.sh authority-receipt <exact assignment flags> --output <json>
 #   fm-worker-lifecycle.sh proof-template --task <id> --task-generation <id>
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>

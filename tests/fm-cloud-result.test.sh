@@ -7,7 +7,7 @@ set -u
 
 make_return_case() {  # <name> <id> <kind> <report yes|no> <scratch yes|no> <commit yes|no>
   local name=$1 id=$2 kind=$3 report=$4 scratch=$5 commit=$6
-  local root home repo worker state report_name
+  local root home repo worker state
   root=$(fm_test_tmproot "fm-cloud-result-$name")
   home="$root/home"
   repo="$root/repo"
@@ -18,8 +18,6 @@ make_return_case() {  # <name> <id> <kind> <report yes|no> <scratch yes|no> <com
   git clone --quiet "$repo" "$worker/task/repo"
   fm_git_identity "$worker/task/repo"
   git -C "$worker/task/repo" checkout --quiet --detach
-  report_name=completion.md
-  [ "$kind" = ship ] || report_name=report.md
   python3 - "$ROOT/bin/fm-worker-supervisor.py" "$root" "$id" "$kind" "$report" "$scratch" "$commit" <<'PY'
 import hashlib
 import importlib.util
@@ -63,7 +61,7 @@ request = {
     "schema": "fm.worker-execution/v1",
     "home_binding": "a" * 64,
     "task": task,
-    "task_generation": "gen-1",
+    "task_generation": "spawn:gen-1",
     "assignment_generation": "asg-00000001",
     "account_binding": "b" * 64,
     "worktree_binding": "c" * 64,
@@ -98,7 +96,7 @@ result = {
     "streams_persisted": True,
     "request_digest": request["request_digest"],
     "task": task,
-    "task_generation": "gen-1",
+    "task_generation": "spawn:gen-1",
     "assignment_generation": "asg-00000001",
     "cloud_instance_id": "vm-one",
     "repository_binding": "d" * 64,
@@ -123,7 +121,7 @@ window=fm-$id
 worktree=$repo
 kind=$kind
 placement=azure
-generation_id=gen-1
+generation_id=spawn:gen-1
 report_required=1
 EOF
   printf '%s|%s|%s\n' "$root" "$home" "$repo"
@@ -131,7 +129,7 @@ EOF
 
 run_collect() {  # <home> <id>
   python3 "$ROOT/bin/fm-cloud-result.py" collect --state "$1/state" --task "$2" \
-    --task-generation gen-1 --assignment-generation asg-00000001
+    --task-generation spawn:gen-1 --assignment-generation asg-00000001
 }
 
 test_ship_success_and_replay() {
@@ -149,13 +147,16 @@ EOF
   assert_grep '## Summary' "$home/data/$id/completion.md" "ship completion report was not transported"
   assert_grep 'working: remote task ran' "$home/state/$id.status" "remote status trail was not transported"
   assert_grep 'done: cloud outcome returned to local custody' "$home/state/$id.status" "local done status was not synthesized"
+  printf 'local continuation\n' > "$repo/local-continuation.txt"
+  git -C "$repo" add local-continuation.txt
+  git -C "$repo" commit --quiet -m "local continuation"
   first_head=$(git -C "$repo" rev-parse HEAD)
-  out=$(run_collect "$home" "$id" 2>&1) || fail "duplicate ship return should converge: $out"
+  out=$(run_collect "$home" "$id" 2>&1) || fail "duplicate ship return should preserve the continued branch: $out"
   second_head=$(git -C "$repo" rev-parse HEAD)
   test "$first_head" = "$second_head" || fail "duplicate replay moved the task branch"
   test "$(grep -c '^done: cloud outcome returned to local custody$' "$home/state/$id.status")" -eq 1 \
     || fail "duplicate replay appended a second terminal status"
-  pass "ship return reconstructs its branch, transports deliverables, synthesizes status, and replays idempotently"
+  pass "ship return reconstructs and preserves its continued branch, transports deliverables, synthesizes status, and replays idempotently"
 }
 
 test_scout_success_with_uncommitted_scratch() {
@@ -230,7 +231,10 @@ EOF
   if [ -f "$home/state/$id.status" ] && grep -E '^(done|failed):' "$home/state/$id.status" >/dev/null; then
     fail "divergence emitted a terminal status before branch custody"
   fi
-  git -C "$repo" show-ref --verify --quiet "refs/fm-cloud-return/$id/gen-1/outcome" \
+  local request_digest
+  request_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_digest"][:32])' \
+    "$home/state/$id.worker-result.json")
+  git -C "$repo" show-ref --verify --quiet "refs/fm-cloud-return/$id/$request_digest/outcome" \
     || fail "divergence did not retain the returned outcome in a custody ref"
   pass "local divergence is retained without overwrite or premature terminal state"
 }
@@ -274,12 +278,103 @@ spec.loader.exec_module(module)
 home = Path(home_text)
 result = json.loads((home / "state" / (task + ".worker-result.json")).read_text())
 evidence = module.cloud_return_evidence(
-    home, task, "gen-1", "asg-00000001", "ship", Path(repo_text),
+    home, task, "spawn:gen-1", "asg-00000001", "ship", Path(repo_text),
     result["repository_generation"],
 )
 assert evidence and b'"outcome_commits":1' in evidence, evidence
 PY
   pass "release authority proves exact local bundle, report, status, and task-branch custody"
+}
+
+test_lifecycle_accepts_only_exact_return_identity() {
+  local record root home repo id
+  id=cloud-return-lifecycle
+  record=$(make_return_case lifecycle "$id" ship yes no yes)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  python3 - "$ROOT/bin/fm-worker-lifecycle.py" "$home" "$id" <<'PY' \
+    || fail "lifecycle did not enforce the exact return identity"
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+module_path, home_text, task = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("worker_lifecycle", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+result = json.loads((Path(home_text) / "state" / (task + ".worker-result.json")).read_text())
+action = {
+    "type": "execute",
+    "slot": 1,
+    "request_digest": result["request_digest"],
+    "request": {"outcome_expected": True, "return_contract": {"schema": "fm.worker-return-contract/v1"}},
+}
+worker = {
+    "assignment_generation": result["assignment_generation"],
+    "cloud_instance_id": result["cloud_instance_id"],
+    "bindings": {
+        "task": result["task"],
+        "task_generation": result["task_generation"],
+        "repository_binding": result["repository_binding"],
+        "repository_generation": result["repository_generation"],
+    },
+}
+state = {"workers": {"1": copy.deepcopy(worker)}, "executions": {}}
+module.apply_action_result({}, state, action, {"execution": result})
+assert result["request_digest"] in state["executions"]
+changed = dict(result)
+changed["return_ref"] += ":refs/heads/injected"
+changed.pop("result_digest")
+changed["result_digest"] = module.digest_value(changed)
+try:
+    module.apply_action_result(
+        {}, {"workers": {"1": copy.deepcopy(worker)}, "executions": {}},
+        action, {"execution": changed},
+    )
+except module.LifecycleError as exc:
+    assert "return ref is not exact" in str(exc), exc
+else:
+    raise AssertionError("an inexact return ref was durably accepted")
+PY
+  pass "lifecycle records the exact return and refuses a guest-selected refspec"
+}
+
+test_release_authority_requires_retained_scout_scratch() {
+  local record root home repo id out
+  id=cloud-return-scratch-authority
+  record=$(make_return_case scratch-authority "$id" scout yes yes no)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  out=$(run_collect "$home" "$id" 2>&1) || fail "scratch authority fixture should localize: $out"
+  rm "$home/data/$id/cloud-scratch-untracked.tar"
+  python3 - "$ROOT/bin/fm-worker-authority.py" "$home" "$repo" "$id" <<'PY' \
+    || fail "release authority did not refuse missing scout scratch custody"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+module_path, home_text, repo_text, task = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("worker_authority", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+home = Path(home_text)
+result = json.loads((home / "state" / (task + ".worker-result.json")).read_text())
+try:
+    module.cloud_return_evidence(
+        home, task, "spawn:gen-1", "asg-00000001", "scout", Path(repo_text),
+        result["repository_generation"],
+    )
+except module.AuthorityError as exc:
+    assert "scratch custody is absent" in str(exc), exc
+else:
+    raise AssertionError("missing scout scratch custody was accepted")
+PY
+  pass "release authority retains the worker when localized scout scratch is missing"
 }
 
 test_monitor_retries_release_and_removes_credentials() {
@@ -291,7 +386,7 @@ $record
 EOF
   mkdir -p "$home/state/azure-workers" "$home/state/$id.cloud-account"
   printf '{"openai-codex":{"access":"secret"}}\n' > "$home/state/$id.cloud-account/auth.json"
-  printf '{"queue":{"%s@gen-1":{"status":"assigned","assignment_generation":"asg-00000001"}}}\n' "$id" \
+  printf '{"queue":{"%s@spawn:gen-1":{"status":"assigned","assignment_generation":"asg-00000001"}}}\n' "$id" \
     > "$home/state/azure-workers/controller.json"
   cat > "$root/fake-lifecycle" <<'SH'
 #!/usr/bin/env bash
@@ -326,7 +421,7 @@ SH
   chmod +x "$root/fake-lifecycle"
   out=$(FM_HOME="$home" FM_CLOUD_RETURN_LIFECYCLE_COMMAND="$root/fake-lifecycle" \
     FAKE_LIFECYCLE_LOG="$root/lifecycle.log" FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \
-    "$ROOT/bin/fm-spawn-cloud-monitor.sh" "$id" gen-1 2>&1) \
+    "$ROOT/bin/fm-spawn-cloud-monitor.sh" "$id" spawn:gen-1 2>&1) \
     || fail "monitor should retry release to completion: $out"
   test "$(grep -c '^release$' "$root/lifecycle.log")" -eq 2 \
     || fail "monitor did not retry the failed release exactly once"
@@ -343,6 +438,8 @@ test_absent_report_is_truthful_failure
 test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
 test_cloud_custody_authority_reads_localized_return
+test_lifecycle_accepts_only_exact_return_identity
+test_release_authority_requires_retained_scout_scratch
 test_monitor_retries_release_and_removes_credentials
 
 echo "# fm-cloud-result.test.sh: all assertions passed"

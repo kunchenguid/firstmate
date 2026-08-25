@@ -26,7 +26,8 @@ RESULT_SCHEMA = "fm.worker-execution-result/v1"
 RETURN_SCHEMA = "fm.worker-return/v1"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+SAFE_TASK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SAFE_GENERATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 REQUIRED_SECTIONS = (
     "Summary", "What changed", "Verification", "Visual evidence", "Artifacts", "Follow-ups",
 )
@@ -83,11 +84,29 @@ def read_result(path, task, generation, assignment):
             raise ReturnError("worker result {} binding differs".format(field))
     if result.get("return_present") is not True:
         raise ReturnError("worker result has no authorized return bundle")
-    for field in ("return_commit", "outcome_tip"):
+    for field in ("request_digest", "return_manifest_sha256", "outcome_sha256"):
+        if not HEX64.fullmatch(str(result.get(field))):
+            raise ReturnError("worker result {} is malformed".format(field))
+    for field in ("repository_generation", "return_commit", "outcome_tip"):
         if not HEX40.fullmatch(str(result.get(field))):
             raise ReturnError("worker result {} is malformed".format(field))
-    if not HEX64.fullmatch(str(result.get("return_manifest_sha256"))):
-        raise ReturnError("worker result return manifest digest is malformed")
+    commits = result.get("outcome_commits")
+    if not isinstance(commits, int) or isinstance(commits, bool) or commits < 0:
+        raise ReturnError("worker result outcome commit count is malformed")
+    outcome_bytes = result.get("outcome_bytes")
+    if not isinstance(outcome_bytes, int) or isinstance(outcome_bytes, bool) or outcome_bytes <= 0:
+        raise ReturnError("worker result outcome byte count is malformed")
+    if result.get("outcome_present") is not (commits > 0):
+        raise ReturnError("worker result outcome presence differs from its commit count")
+    if not isinstance(result.get("outcome_uncommitted_changes"), bool):
+        raise ReturnError("worker result working-tree disposition is malformed")
+    if not isinstance(result.get("exit_code"), int) or isinstance(result.get("exit_code"), bool):
+        raise ReturnError("worker result exit code is malformed")
+    if not isinstance(result.get("timed_out"), bool):
+        raise ReturnError("worker result timeout disposition is malformed")
+    expected_return_ref = "refs/fm-return/{}".format(result["request_digest"][:32])
+    if result.get("return_ref") != expected_return_ref:
+        raise ReturnError("worker result return ref is not exact")
     return result
 
 
@@ -141,7 +160,7 @@ def fetch_return_refs(worktree, bundle, result, task, generation):
     return_ref = result.get("return_ref")
     if heads.get(return_ref) != result["return_commit"]:
         raise ReturnError("worker return ref does not bind the declared artifact commit")
-    namespace = "refs/fm-cloud-return/{}/{}".format(task, generation)
+    namespace = "refs/fm-cloud-return/{}/{}".format(task, result["request_digest"][:32])
     artifact_ref = namespace + "/artifacts"
     git(worktree, "fetch", "--quiet", "--no-tags", str(bundle), "+{}:{}".format(return_ref, artifact_ref))
     outcome_ref = "refs/fm-outcome/{}".format(result["request_digest"][:32])
@@ -205,6 +224,7 @@ def substantive_report(body):
     except UnicodeDecodeError:
         return False, "report is not UTF-8"
     sections = {name: [] for name in REQUIRED_SECTIONS}
+    seen = []
     current = None
     fenced = False
     for raw in text.splitlines():
@@ -215,11 +235,19 @@ def substantive_report(body):
                 sections[current].append("")
             continue
         if not fenced and stripped.startswith("## ") and not stripped.startswith("### "):
-            current = stripped[3:] if stripped[3:] in sections else None
+            heading = stripped[3:]
+            if heading in sections:
+                expected_index = len(seen)
+                if expected_index >= len(REQUIRED_SECTIONS) or heading != REQUIRED_SECTIONS[expected_index]:
+                    return False, "required report sections are duplicated or out of order"
+                seen.append(heading)
+                current = heading
+            else:
+                current = None
             continue
         if current is not None:
             sections[current].append(raw)
-    missing = [name for name, lines in sections.items() if not lines]
+    missing = [name for name in REQUIRED_SECTIONS if name not in seen]
     empty = []
     for name, lines in sections.items():
         if lines and not any(
@@ -314,9 +342,12 @@ def fallback_report(kind, result, manifest, reason):
 def branch_custody(worktree, task, result, kind):
     base = result["repository_generation"]
     tip = result["outcome_tip"]
-    commits = int(result.get("outcome_commits", 0))
+    commits = result["outcome_commits"]
     if git(worktree, "merge-base", "--is-ancestor", base, tip, check=False).returncode != 0:
         raise ReturnError("returned outcome tip does not descend from the dispatched generation")
+    counted = git(worktree, "rev-list", "--count", "{}..{}".format(base, tip))
+    if int(counted.stdout.decode().strip()) != commits:
+        raise ReturnError("returned outcome commit count differs from its Git history")
     if kind == "scout":
         if commits:
             raise ReturnError("a scout returned project commits; they remain in the custody ref")
@@ -341,7 +372,7 @@ def branch_custody(worktree, task, result, kind):
     if not branch_head or branch_head == base:
         git(worktree, "update-ref", branch, tip, branch_head or "0" * 40)
         branch_head = tip
-    if branch_head == tip and head in (base, tip):
+    if head in (base, tip, branch_head):
         switched = git(worktree, "checkout", "--quiet", "fm/{}".format(task), check=False)
         if switched.returncode != 0:
             raise ReturnError("returned task branch exists but cannot be checked out in its worktree")
@@ -387,9 +418,11 @@ def merge_status(local_path, raw_status, terminal):
 
 
 def collect(args):
-    if not SAFE_ID.fullmatch(args.task) or not SAFE_ID.fullmatch(args.task_generation):
+    if not SAFE_TASK.fullmatch(args.task):
         raise ReturnError("task identity is malformed")
-    if not SAFE_ID.fullmatch(args.assignment_generation):
+    if not SAFE_GENERATION.fullmatch(args.task_generation):
+        raise ReturnError("task generation identity is malformed")
+    if not SAFE_GENERATION.fullmatch(args.assignment_generation):
         raise ReturnError("assignment identity is malformed")
     state = Path(args.state).resolve()
     if state.name != "state" or state.is_symlink() or not state.is_dir():

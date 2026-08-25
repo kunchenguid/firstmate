@@ -229,6 +229,10 @@ For ship work it creates or fast-forwards `fm/<task>` and checks that branch out
 For scout work it leaves the scratch worktree on its dispatched generation and stores any returned patch and untracked archive with the report.
 A missing authored report produces a substantive local failure report, never a false finding, and the local terminal status is synthesized only after the required report and branch or scratch custody exist.
 Replaying the same result converges on the same refs, files, branch, and one terminal status line.
+An assigned worker whose earlier supervisor could not return its task disk uses the explicit `execute --existing-task-disk` recovery lane.
+That request carries no payload or account archive, binds the exact landed recovery-supervisor digest, and runs one bounded continuation or no-op collection command against the retained repository instead of replacing it.
+The Azure adapter executes those bound supervisor bytes from a task-command-local recovery path without changing the originally bootstrapped supervisor, while every alternate provider must preserve the same request binding and retained-disk semantics.
+A missing repository, lost dispatched lineage, unreadable working tree, payload-restaging attempt, or recovery request without an authorized return refuses before the command runs, because continuing after any of them could delete or misattribute unlanded task-disk work.
 The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet.
 Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
 

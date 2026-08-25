@@ -17,6 +17,7 @@ the generation rides inside the envelope nonce and only the controller's
 exact-assignment gate enforces it today.
 """
 
+import base64
 import contextlib
 import datetime as dt
 import email.utils
@@ -2601,6 +2602,30 @@ def build_execute_script(action):
     request = action["request"]
     request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
     bindings = action["bindings"]
+    supervisor_prelude = ""
+    supervisor_command = "/usr/local/libexec/fm-worker-supervisor"
+    if request.get("existing_task_disk"):
+        try:
+            supervisor_body = (ROOT / "bin" / "fm-worker-supervisor.py").read_bytes()
+        except OSError as exc:
+            raise ProviderError(
+                "existing task-disk recovery supervisor is unreadable: {}".format(exc)
+            ) from None
+        supervisor_digest = hashlib.sha256(supervisor_body).hexdigest()
+        if request.get("supervisor_sha256") != supervisor_digest:
+            raise ProviderError("existing task-disk recovery supervisor binding differs")
+        supervisor_path = "/var/lib/firstmate-worker/recovery-supervisor-{}.py".format(
+            supervisor_digest
+        )
+        supervisor_prelude = """printf '%s' '{body}' | /usr/bin/base64 --decode > '{path}'
+[ "$(/usr/bin/sha256sum '{path}' | /usr/bin/awk '{{print $1}}')" = '{digest}' ]
+chmod 0700 '{path}'
+""".format(
+            body=base64.b64encode(supervisor_body).decode("ascii"),
+            path=supervisor_path,
+            digest=supervisor_digest,
+        )
+        supervisor_command = "/usr/bin/python3 '{}'".format(supervisor_path)
     return """set -eu
 umask 077
 install -d -m 0700 /var/lib/firstmate-worker
@@ -2612,14 +2637,15 @@ export FM_WORKER_HOME_BINDING='{home}' FM_WORKER_TASK='{task}' FM_WORKER_TASK_GE
 export FM_WORKER_WORKTREE_BINDING='{worktree}' FM_WORKER_REPOSITORY_BINDING='{repository}'
 export FM_WORKER_REPOSITORY_GENERATION='{repository_generation}' FM_WORKER_CLOUD_INSTANCE_ID='{cloud}'
 export FM_WORKER_WORKTREE=/mnt/task FM_WORKER_ACCOUNT_HOME=/mnt/account
-/usr/local/libexec/fm-worker-supervisor execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
+{supervisor_prelude}{supervisor_command} execute --request /var/lib/firstmate-worker/request.json --result /var/lib/firstmate-worker/result.json
 printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
 """.format(
         request=request_json, home=bindings["home_binding"], task=bindings["task"],
         task_generation=bindings["task_generation"], generation_line=execute_generation_line(action),
         worktree=bindings["worktree_binding"],
         repository=bindings["repository_binding"], repository_generation=bindings["repository_generation"],
-        cloud=action["cloud_instance_id"],
+        cloud=action["cloud_instance_id"], supervisor_prelude=supervisor_prelude,
+        supervisor_command=supervisor_command,
     )
 
 
