@@ -92,12 +92,15 @@ The supported AIME surface has no proven provider cancellation operation.
 
 ## iDA procedure
 
-iDA requires a valid enabled `config/ida-remote-agent`, `region=sg`, `identity=user`, and the exact configured `bytedcli` version.
-The adapter submits only through official `bytedcli --as user mcp --allow-domains ida --all-tools` and `ida_deep_research_create`; private tool arguments travel in a mode-`0600` stdin request, never argv.
-Provider reads and cancellation use the official SG `session list`, `session get`, and `chat completion close` surfaces.
+iDA requires a valid enabled `config/ida-remote-agent`, `region=sg`, `identity=user`, the installed `bytedcli` executable, a successful structured SG read, and the required Deep Research command capability.
+Do not pin or refresh a bytedcli version for iDA.
+A legacy `bytedcli_version` in config or durable iDA task state is readable informational metadata only; absence, staleness, and mismatch never block any lifecycle operation.
+The adapter submits only through official domain-restricted `bytedcli --as user mcp --allow-domains ida` and `run_command`, with `ida --region sg deep-research create` constructed inside a mode-`0600` stdin request so private arguments never enter argv.
+Provider reads and cancellation use the official SG `session raw list`, `session get`, and `chat completion close` surfaces.
+All iDA-owned bytedcli children discard conventional ambient proxy variables because they can misroute SG identity, without changing the operator's environment.
 
 Before submission, iDA derives and records one unique session marker from the task id and instruction digest.
-The adapter lists sessions and exact-matches that marker before the only allowed create and after every timeout or ambiguous submission.
+The adapter places it in the private first message, then uses raw session list plus bounded session get to exact-match either that marker or a legacy exact session name before the only allowed create and after every timeout or ambiguous submission.
 A unique match is adopted; multiple matches, a truncated list, or unresolved identity becomes `ambiguous`.
 No ambiguous or `submission-unknown` state authorizes another create.
 

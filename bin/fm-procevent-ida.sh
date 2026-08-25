@@ -10,11 +10,12 @@
 #   fm-procevent-ida.sh terminal <result-file>
 #   fm-procevent-ida.sh retire <task-id>
 #
-# `source` first reconciles the durable session marker through official iDA
-# session list/get reads. Only a unique zero-match, non-truncated result from the
-# initial submission-not-started phase can cross the durable request boundary
-# and call Deep Research. submission-unknown never retries: it keeps reconciling
-# the marker so a timeout cannot silently create a duplicate session.
+# `source` first reconciles the durable session marker through official iDA raw
+# session-list and session-get reads. Only a unique zero-match, non-truncated
+# result from the initial submission-not-started phase can cross the durable
+# request boundary and call Deep Research. submission-unknown never retries: it
+# keeps reconciling the exact legacy name or private first-message marker so a
+# timeout or SG's automatic session rename cannot silently create a duplicate.
 #
 # The Deep Research prompt is passed through fm-bytedcli-mcp-call.sh over stdin.
 # Provider responses are reduced to fm-ida-observation.v1 before stdout reaches
@@ -33,6 +34,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-procevent-lib.sh
+. "$SCRIPT_DIR/fm-procevent-lib.sh"
 # shellcheck source=bin/fm-remote-agent-lib.sh
 . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
 # shellcheck source=bin/fm-ida-remote-lib.sh
@@ -40,10 +43,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 IDA_PAGE_SIZE=${FM_IDA_SESSION_PAGE_SIZE:-100}
 IDA_WAIT_TIMEOUT_MS=${FM_IDA_DEEP_RESEARCH_TIMEOUT_MS:-900000}
+IDA_MARKER_SCAN_GRACE_SECONDS=300
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-case "$IDA_PAGE_SIZE:$IDA_WAIT_TIMEOUT_MS" in *[!0-9:]*|0:*|*:0|'':*) die "iDA bounds must be positive integers" ;; esac
+case "$IDA_PAGE_SIZE:$IDA_WAIT_TIMEOUT_MS:$IDA_MARKER_SCAN_GRACE_SECONDS" in *[!0-9:]*|0:*|*:0:*|*:0|*::*) die "iDA bounds must be positive integers" ;; esac
 
 temp_root() {
   local root
@@ -55,7 +59,7 @@ run_ida_json() { # <stdout> <stderr> <args...>
   local out=$1 err=$2
   shift 2
   : >"$out"; : >"$err"
-  if BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli --json --as user ida --region sg "$@" >"$out" 2>"$err"; then IDA_RC=0; else IDA_RC=$?; fi
+  if fm_ida_run_bytedcli --json --as user ida --region sg "$@" >"$out" 2>"$err"; then IDA_RC=0; else IDA_RC=$?; fi
 }
 
 error_observation() { # <id> <kind> <class>
@@ -76,13 +80,21 @@ ambiguous_observation() { # <id> <kind> <class> [count]
 }
 
 list_marker() { # <id> <root> ; sets LIST_* and leaves normalized list in root
-  local id=$1 root=$2 out err normalized
-  local args=(session list --page-size "$IDA_PAGE_SIZE")
-  out="$root/list.out"; err="$root/list.err"; normalized="$root/list.json"
-  [ -z "$IDA_STATE_AGENT_ID" ] || args+=(--agent-id "$IDA_STATE_AGENT_ID")
-  run_ida_json "$out" "$err" "${args[@]}"
+  local id=$1 root=$2 out err normalized raw_normalized candidates matches agent_id created_epoch session_id name get prefix
+  out="$root/list.out"; err="$root/list.err"; normalized="$root/list.json"; raw_normalized="$root/list-raw.json"
+  agent_id=$IDA_STATE_AGENT_ID
+  if [ -z "$agent_id" ]; then
+    run_ida_json "$out" "$err" agent get
+    agent_id=$(jq -r 'if .status=="success" and .error==null and .data.deep_research_enabled==true then .data.id // empty else empty end | tostring' "$out" 2>/dev/null)
+    if [ "$IDA_RC" -ne 0 ] || ! fm_ida_numeric_id "$agent_id"; then
+      fm_ida_normalize_error "$out" "$err" "$normalized"
+      LIST_OK=false; LIST_CLASS=$(fm_remote_error_classify "$normalized"); LIST_COUNT=0; LIST_TRUNCATED=true
+      return 1
+    fi
+  fi
+  run_ida_json "$out" "$err" session raw list --agent-id "$agent_id" --page-size "$IDA_PAGE_SIZE"
   if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$out" \
-      || ! jq -e '.data.sessions | type == "array"' "$out" >/dev/null 2>&1; then
+      || ! jq -e '.data.sessions.sessionList | type == "array"' "$out" >/dev/null 2>&1; then
     fm_ida_normalize_error "$out" "$err" "$normalized"
     LIST_OK=false
     LIST_CLASS=$(fm_remote_error_classify "$normalized")
@@ -90,15 +102,57 @@ list_marker() { # <id> <root> ; sets LIST_* and leaves normalized list in root
     LIST_TRUNCATED=true
     return 1
   fi
-  jq --arg marker "$IDA_STATE_MARKER" '
-    {sessions:[.data.sessions[] | select(.name == $marker)
-      | {id:(.id|tostring),name,agent_id:(.agent_id // null | if . == null then null else tostring end),
-         agent_name:(.agent_name // null),latest_task_status:(.latest_task_status // null)}],
-     truncated:(.data.truncated == true)}' "$out" >"$normalized" || return 1
+  jq --argjson requested "$IDA_PAGE_SIZE" '
+    {sessions:[.data.sessions.sessionList[]
+      | {id:(.id|tostring),name:(.name // ""),
+         agent_id:(.agentInfo.id // null | if . == null then null else tostring end),
+         agent_name:(.agentInfo.name // null),latest_task_status:(.latestTaskStatus // null),
+         create_time:(.createTime // null)}],
+     truncated:((.data.sessions.sessionList | length) >= $requested)}' "$out" >"$raw_normalized" || return 1
+  created_epoch=$(jq -r '.created_at | fromdateiso8601' "$REMOTE_STATE_FILE") || return 1
+  candidates="$root/list-candidates"; matches="$root/list-matches.ndjson"; : >"$matches"
+  jq -r --arg marker "$IDA_STATE_MARKER" --argjson created "$created_epoch" --argjson grace "$IDA_MARKER_SCAN_GRACE_SECONDS" '
+    [.sessions[] | select(
+      .name == $marker
+      or ((try (.create_time | gsub(" ";"T") + "Z" | fromdateiso8601) catch 0) >= ($created - $grace))
+    )] | unique_by(.id) | .[].id' "$raw_normalized" >"$candidates" || return 1
+  prefix="[Firstmate session marker: $IDA_STATE_MARKER]"
+  while IFS= read -r session_id; do
+    [ -n "$session_id" ] || continue
+    name=$(jq -r --arg sid "$session_id" '.sessions[] | select(.id==$sid) | .name' "$raw_normalized")
+    if [ "$name" != "$IDA_STATE_MARKER" ]; then
+      get="$root/get-$session_id.out"
+      run_ida_json "$get" "$err" session get --session-id "$session_id"
+      if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$get" \
+          || ! jq -e --arg sid "$session_id" --arg prefix "$prefix" '
+            (.data.session.id | tostring) == $sid
+            and ([.data.messages[]? | select(.type == 0 and (.text | type == "string")) | .text]
+              | any(. == $prefix or startswith($prefix + "\n")))
+          ' "$get" >/dev/null 2>&1; then
+        if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$get"; then
+          fm_ida_normalize_error "$get" "$err" "$normalized"
+          LIST_OK=false; LIST_CLASS=$(fm_remote_error_classify "$normalized"); LIST_COUNT=0; LIST_TRUNCATED=true
+          return 1
+        fi
+        continue
+      fi
+    fi
+    jq -c --arg sid "$session_id" '.sessions[] | select(.id==$sid)' "$raw_normalized" >>"$matches" || return 1
+  done <"$candidates"
+  jq -s --argjson truncated "$(jq '.truncated' "$raw_normalized")" '{sessions:.,truncated:$truncated}' "$matches" >"$normalized" || return 1
   LIST_OK=true
   LIST_CLASS=
   LIST_COUNT=$(jq '.sessions | length' "$normalized")
   LIST_TRUNCATED=$(jq -r '.truncated' "$normalized")
+}
+
+session_payload_has_marker() { # <structured session get>
+  local file=$1 prefix="[Firstmate session marker: $IDA_STATE_MARKER]"
+  jq -e --arg marker "$IDA_STATE_MARKER" --arg prefix "$prefix" '
+    .data.session.name == $marker
+    or ([.data.messages[]? | select(.type == 0 and (.text | type == "string")) | .text]
+      | any(. == $prefix or startswith($prefix + "\n")))
+  ' "$file" >/dev/null 2>&1
 }
 
 session_observation() { # <id> <session-id> <kind>
@@ -112,6 +166,11 @@ session_observation() { # <id> <session-id> <kind>
     class=$(fm_remote_error_classify "$normalized")
     rm -rf -- "$root"
     error_observation "$id" "$kind" "$class"
+    return 0
+  fi
+  if ! session_payload_has_marker "$out"; then
+    rm -rf -- "$root"
+    ambiguous_observation "$id" "$kind" session-marker-mismatch 1
     return 0
   fi
   status=$(jq -r '.data.session.latest_task_status // ""' "$out")
@@ -157,7 +216,7 @@ checkpoint_submission_boundary() {
 
 submit_observation() { # <id> <root>
   local id=$1 root=$2 arguments out err
-  local class session_id task_id answer availability agent_id_arg model_arg
+  local class session_id task_id agent_id_arg model_arg detail_session detail_task verified
   arguments="$root/arguments.json"; out="$root/submit.out"; err="$root/submit.err"
   fm_remote_instruction_validate "$id" "$REMOTE_STATE_INSTRUCTION_FILE" || return 1
   [ "$(fm_remote_sha256_file "$REMOTE_STATE_INSTRUCTION_FILE")" = "$REMOTE_STATE_INSTRUCTION_SHA256" ] || die "iDA instruction file changed before submission"
@@ -165,7 +224,7 @@ submit_observation() { # <id> <root>
   agent_id_arg=$IDA_STATE_AGENT_ID; model_arg=$IDA_STATE_MODEL
   jq -n --rawfile content "$REMOTE_STATE_INSTRUCTION_FILE" --arg name "$IDA_STATE_MARKER" \
     --arg timeout "$IDA_WAIT_TIMEOUT_MS" --arg agent_id "$agent_id_arg" --arg model "$model_arg" '
-      {content:$content,name:$name,timeoutMs:$timeout,args:["--region","sg"]}
+      {content:$content,name:$name,timeoutMs:$timeout}
       + (if $agent_id == "" then {} else {agentId:$agent_id} end)
       + (if $model == "" then {} else {model:$model} end)' >"$arguments" || die "cannot stage private iDA submission"
   chmod 0600 "$arguments"
@@ -176,17 +235,17 @@ submit_observation() { # <id> <root>
       && [ -n "$(jq -r '.data.task_id // "" | tostring' "$out")" ]; then
     session_id=$(jq -r '.data.session_id | tostring' "$out")
     task_id=$(jq -r '.data.task_id | tostring' "$out")
-    answer=$(jq -r '.data.answer // ""' "$out" | fm_remote_redact_result_text "$REMOTE_STATE_INSTRUCTION_FILE") \
-      || die "cannot normalize iDA final answer"
-    [ -n "$answer" ] && availability=available || availability=zero
-    jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$id" --arg marker "$IDA_STATE_MARKER" \
-      --arg session_id "$session_id" --arg task_id_remote "$task_id" --arg agent_id "$IDA_STATE_AGENT_ID" \
-      --arg model "$IDA_STATE_MODEL" --arg answer "$answer" --arg availability "$availability" '
-        {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:"submission",session_marker:$marker,
-         session_id:$session_id,task_id_remote:$task_id_remote,agent_id:(if $agent_id=="" then null else $agent_id end),
-         agent_name:null,model:(if $model=="" then null else $model end),provider_status:"completed",
-         terminal:true,ambiguous:false,result_availability:$availability,answer:(if $answer=="" then null else $answer end),
-         error_class:null,observed_at:(now|todateiso8601)}'
+    verified="$root/verified-submission.json"
+    session_observation "$id" "$session_id" submission >"$verified"
+    jq --arg task_id "$task_id" '.task_id_remote=$task_id' "$verified"
+    return 0
+  fi
+  detail_session=$(jq -r '.error.details.session_id // "" | tostring' "$out" 2>/dev/null)
+  detail_task=$(jq -r '.error.details.task_id // "" | tostring' "$out" 2>/dev/null)
+  if fm_ida_numeric_id "$detail_session" && [ -n "$detail_task" ]; then
+    verified="$root/verified-submission.json"
+    session_observation "$id" "$detail_session" submission >"$verified"
+    jq --arg task_id "$detail_task" '.task_id_remote=$task_id' "$verified"
     return 0
   fi
   fm_ida_normalize_error "$out" "$err" "$root/error.json"
@@ -194,7 +253,7 @@ submit_observation() { # <id> <root>
   # A timeout/error may follow remote acceptance. Reconcile the unique marker
   # before deciding; never issue a second Deep Research create from this phase.
   fm_ida_state_load "$id" || die "cannot reload iDA state after submission"
-  if list_marker "$id" "$root" && [ "$LIST_COUNT" -eq 1 ]; then
+  if list_marker "$id" "$root" && [ "$LIST_COUNT" -eq 1 ] && [ "$LIST_TRUNCATED" = false ]; then
     session_id=$(jq -r '.sessions[0].id' "$root/list.json")
     session_observation "$id" "$session_id" reconcile
   elif [ "$LIST_OK" = true ] && [ "$LIST_COUNT" -eq 0 ] && [ "$LIST_TRUNCATED" = false ] \
@@ -216,7 +275,7 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   trap 'rm -rf -- "$root"' EXIT
   if ! list_marker "$id" "$root"; then
     error_observation "$id" reconcile "$LIST_CLASS"
-  elif [ "$LIST_COUNT" -eq 1 ]; then
+  elif [ "$LIST_COUNT" -eq 1 ] && [ "$LIST_TRUNCATED" = false ]; then
     session_id=$(jq -r '.sessions[0].id' "$root/list.json")
     session_observation "$id" "$session_id" reconcile
   elif [ "$LIST_COUNT" -gt 1 ]; then
@@ -243,9 +302,10 @@ write_report() { # <id> <observation> <outcome>
     printf -- '- Task: `%s`\n- Executor: `remote-agent`\n- Provider: `ida`\n- Region: `sg`\n' "$id"
     printf -- '- Session marker: `%s`\n- Session: `%s`\n- Remote task: `%s`\n' "$IDA_STATE_MARKER" \
       "$(jq -r '.session_id // "unavailable"' "$observation")" "$(jq -r '.task_id_remote // "unavailable"' "$observation")"
-    printf -- '- Agent: `%s`\n- Model: `%s`\n- bytedcli: `%s`\n' \
+    printf -- '- Agent: `%s`\n- Model: `%s`\n' \
       "$(jq -r '.agent_name // .agent_id // "unavailable"' "$observation")" \
-      "$(jq -r '.model // "unavailable"' "$observation")" "$REMOTE_STATE_BYTEDCLI_VERSION"
+      "$(jq -r '.model // "unavailable"' "$observation")"
+    [ -z "$REMOTE_STATE_BYTEDCLI_VERSION" ] || printf -- '- Legacy bytedcli version: `%s` (informational)\n' "$REMOTE_STATE_BYTEDCLI_VERSION"
     printf -- '- Outcome: `%s`\n- Result availability: `%s`\n' "$outcome" "$availability"
     [ -z "$class" ] || printf -- '- Error class: `%s`\n' "$class"
     printf '\n## Provider Result\n\n'

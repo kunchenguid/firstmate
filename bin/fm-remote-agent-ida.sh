@@ -57,39 +57,47 @@ temp_root() {
   printf '%s\n' "$root"
 }
 
-bytedcli_version() {
-  local root out version
-  root=$(temp_root); out="$root/version.json"
-  BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli --json --version >"$out" 2>/dev/null || { rm -rf -- "$root"; return 1; }
-  version=$(jq -r 'if .status=="success" and .error==null then .data.version // empty else empty end' "$out")
-  rm -rf -- "$root"
-  [ -n "$version" ] || return 1
-  printf '%s\n' "$version"
-}
-
 cmd_probe() {
-  local version root out err rc=0 args=(session list --page-size 1)
+  local root out err capability rc=0 agent_id args=(agent get)
   [ "$#" -eq 0 ] || usage
   fm_ida_config_load || die "iDA remote-agent config is missing or invalid"
-  version=$(bytedcli_version) || die "bytedcli is unavailable"
-  [ "$version" = "$IDA_CONFIG_BYTEDCLI_VERSION" ] || die "bytedcli version differs from configured iDA version"
+  command -v bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
+  root=$(temp_root); out="$root/out"; err="$root/err"; capability="$root/capability.json"
   [ "$IDA_CONFIG_AGENT_ID" = default ] || args+=(--agent-id "$IDA_CONFIG_AGENT_ID")
-  root=$(temp_root); out="$root/out"; err="$root/err"
-  if BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli --json --as user ida --region sg "${args[@]}" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] || ! fm_ida_structured_success "$out"; then
+  if fm_ida_run_bytedcli --json --as user ida --region sg "${args[@]}" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
+  agent_id=$(jq -r 'if .status=="success" and .error==null and .data.deep_research_enabled==true then .data.id // empty else empty end | tostring' "$out" 2>/dev/null)
+  if [ "$rc" -ne 0 ] || ! fm_ida_numeric_id "$agent_id" \
+      || { [ "$IDA_CONFIG_AGENT_ID" != default ] && [ "$agent_id" != "$IDA_CONFIG_AGENT_ID" ]; }; then
     fm_ida_normalize_error "$out" "$err" "$root/error.json"
-    jq -n --arg class "$(fm_remote_error_classify "$root/error.json")" --arg version "$version" \
-      '{schema:"fm-ida-probe.v1",outcome:"unavailable",error_class:$class,provider:"ida",region:"sg",identity:"user",bytedcli_version:$version}'
+    jq -n --arg class "$(fm_remote_error_classify "$root/error.json")" \
+      '{schema:"fm-ida-probe.v1",outcome:"unavailable",error_class:$class,provider:"ida",region:"sg",identity:"user"}'
     rm -rf -- "$root"
     return 1
   fi
-  jq -n --arg version "$version" --arg agent "$IDA_CONFIG_AGENT_ID" --arg model "$IDA_CONFIG_MODEL" \
-    '{schema:"fm-ida-probe.v1",outcome:"ready",error_class:null,provider:"ida",region:"sg",identity:"user",agent_id:$agent,model:$model,capabilities:["deep-research.create","session.list","session.get","chat.completion.close"],bytedcli_version:$version}'
+  if fm_ida_run_bytedcli --json --as user ida --region sg session raw list --agent-id "$agent_id" --page-size 1 >"$out" 2>"$err"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ] || ! fm_ida_structured_success "$out" \
+      || ! jq -e '.data.sessions.sessionList | type == "array"' "$out" >/dev/null 2>&1; then
+    fm_ida_normalize_error "$out" "$err" "$root/error.json"
+    jq -n --arg class "$(fm_remote_error_classify "$root/error.json")" \
+      '{schema:"fm-ida-probe.v1",outcome:"unavailable",error_class:$class,provider:"ida",region:"sg",identity:"user"}'
+    rm -rf -- "$root"
+    return 1
+  fi
+  if ! "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities >"$capability" 2>"$err" \
+      || ! fm_ida_structured_success "$capability"; then
+    fm_ida_normalize_error "$capability" "$err" "$root/error.json"
+    jq -n --arg class "$(fm_remote_error_classify "$root/error.json")" \
+      '{schema:"fm-ida-probe.v1",outcome:"unavailable",error_class:$class,provider:"ida",region:"sg",identity:"user"}'
+    rm -rf -- "$root"
+    return 1
+  fi
+  jq -n --arg agent "$agent_id" --arg model "$IDA_CONFIG_MODEL" \
+    '{schema:"fm-ida-probe.v1",outcome:"ready",error_class:null,provider:"ida",region:"sg",identity:"user",agent_id:$agent,model:$model,capabilities:["deep-research.create","session.list","session.get","chat.completion.close"]}'
   rm -rf -- "$root"
 }
 
 cmd_dispatch() {
-  local id=${1-} instructions='' task_type=research version sha marker provider_state lock rc agent_id model
+  local id=${1-} instructions='' task_type=research sha marker provider_state lock rc agent_id model
   [ -n "$id" ] || usage; shift
   fm_remote_task_id_valid "$id" || die "invalid task id"
   while [ "$#" -gt 0 ]; do
@@ -104,8 +112,7 @@ cmd_dispatch() {
   fm_remote_instruction_validate "$id" "$instructions" || exit 1
   fm_ida_config_load || die "iDA remote agent is disabled: config is missing or invalid"
   [ "$IDA_CONFIG_ENABLED" = true ] || die "iDA remote agent is disabled in config"
-  version=$(bytedcli_version) || die "bytedcli is unavailable"
-  [ "$version" = "$IDA_CONFIG_BYTEDCLI_VERSION" ] || die "bytedcli version $version does not match configured version $IDA_CONFIG_BYTEDCLI_VERSION"
+  command -v bytedcli >/dev/null 2>&1 || die "bytedcli is unavailable"
   sha=$(fm_remote_sha256_file "$instructions") || die "cannot hash iDA instruction"
   marker=$(fm_ida_session_marker "$id" "$sha") || die "cannot derive iDA session marker"
   [ "$IDA_CONFIG_AGENT_ID" = default ] && agent_id= || agent_id=$IDA_CONFIG_AGENT_ID
@@ -118,7 +125,7 @@ cmd_dispatch() {
   fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
   trap 'fm_lock_release "$lock"' EXIT
   [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || die "task metadata already exists; dispatch refuses to replace another executor"
-  fm_remote_state_initialize "$id" ida "$task_type" "$instructions" "$sha" "$version" "$provider_state" || die "cannot initialize iDA task state"
+  fm_remote_state_initialize "$id" ida "$task_type" "$instructions" "$sha" "$provider_state" || die "cannot initialize iDA task state"
   if ! fm_remote_meta_write "$id" ida "$task_type"; then
     rc=$?; rm -rf -- "$(fm_remote_task_dir "$id")"
     [ "$rc" -eq 2 ] && die "task metadata appeared during iDA preparation"
@@ -204,7 +211,7 @@ cmd_cancel() (
   case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) die "iDA task is already terminal" ;; esac
   root=$(temp_root); out="$root/cancel.out"; err="$root/cancel.err"
   trap 'rm -rf -- "$root"' EXIT
-  if ! BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli --json --as user ida --region sg chat completion close --session-id "$IDA_STATE_SESSION_ID" >"$out" 2>"$err" \
+  if ! fm_ida_run_bytedcli --json --as user ida --region sg chat completion close --session-id "$IDA_STATE_SESSION_ID" >"$out" 2>"$err" \
       || ! fm_ida_structured_success "$out"; then
     fm_ida_normalize_error "$out" "$err" "$root/error.json"; class=$(fm_remote_error_classify "$root/error.json")
     rm -rf -- "$root"; die "iDA cancellation was not confirmed: $class"
@@ -237,9 +244,10 @@ write_abandon_report() { # <id>
     printf '# iDA remote-agent report\n\n'
     printf -- '- Task: `%s`\n- Executor: `remote-agent`\n- Provider: `ida`\n- Region: `sg`\n' "$id"
     printf -- '- Session marker: `%s`\n- Session: `unavailable`\n- Remote task: `unavailable`\n' "$IDA_STATE_MARKER"
-    printf -- '- Agent: `%s`\n- Model: `%s`\n- bytedcli: `%s`\n' \
+    printf -- '- Agent: `%s`\n- Model: `%s`\n' \
       "${IDA_STATE_AGENT_NAME:-${IDA_STATE_AGENT_ID:-unavailable}}" \
-      "${IDA_STATE_MODEL:-unavailable}" "$REMOTE_STATE_BYTEDCLI_VERSION"
+      "${IDA_STATE_MODEL:-unavailable}"
+    [ -z "$REMOTE_STATE_BYTEDCLI_VERSION" ] || printf -- '- Legacy bytedcli version: `%s` (informational)\n' "$REMOTE_STATE_BYTEDCLI_VERSION"
     printf -- '- Outcome: `failed`\n- Result availability: `unavailable`\n- Error class: `session-marker-not-found`\n'
     printf '\n## Provider Result\n\n'
     printf '%s\n' 'This task was abandoned after an authoritative complete non-truncated zero-match session list proved no provider session exists.'

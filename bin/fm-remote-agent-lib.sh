@@ -176,7 +176,8 @@ fm_remote_state_validate_file() {
     and (.revision | type == "number" and . >= 1 and floor == .)
     and (.instruction_file | type == "string" and length > 0)
     and (.instruction_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
-    and (.bytedcli_version | type == "string" and length > 0)
+    and ((has("bytedcli_version") | not)
+      or (.bytedcli_version | type == "string"))
     and (.outcome == null or (.outcome | type == "string" and length > 0))
     and (.error_class == null or (.error_class | type == "string" and length > 0))
     and (.waiter == "not-armed" or .waiter == "armed" or .waiter == "rearming" or .waiter == "interrupted" or .waiter == "terminal")
@@ -218,7 +219,7 @@ fm_remote_state_load() {
   # shellcheck disable=SC2034
   REMOTE_STATE_INSTRUCTION_SHA256=$(jq -r '.instruction_sha256' "$file")
   # shellcheck disable=SC2034
-  REMOTE_STATE_BYTEDCLI_VERSION=$(jq -r '.bytedcli_version' "$file")
+  REMOTE_STATE_BYTEDCLI_VERSION=$(jq -r '.bytedcli_version // ""' "$file")
 }
 
 fm_remote_state_publish() {
@@ -236,7 +237,7 @@ fm_remote_state_publish() {
 }
 
 fm_remote_state_initialize() {
-  local id=$1 provider=$2 task_type=$3 instruction_file=$4 instruction_sha=$5 version=$6 provider_state=$7
+  local id=$1 provider=$2 task_type=$3 instruction_file=$4 instruction_sha=$5 provider_state=$6
   local dir file staged now
   fm_remote_provider_valid "$provider" || return 1
   case "$task_type" in research|document) ;; *) return 1 ;; esac
@@ -250,10 +251,10 @@ fm_remote_state_initialize() {
   jq -n \
     --arg schema "$FM_REMOTE_STATE_SCHEMA" --arg task_id "$id" --arg provider "$provider" \
     --arg task_type "$task_type" --arg instruction_file "$instruction_file" \
-    --arg instruction_sha256 "$instruction_sha" --arg bytedcli_version "$version" \
+    --arg instruction_sha256 "$instruction_sha" \
     --argjson provider_state "$provider_state" --arg now "$now" '
       {schema:$schema,task_id:$task_id,executor:"remote-agent",provider:$provider,task_type:$task_type,
-       instruction_file:$instruction_file,instruction_sha256:$instruction_sha256,bytedcli_version:$bytedcli_version,
+       instruction_file:$instruction_file,instruction_sha256:$instruction_sha256,
        phase:"submission-not-started",outcome:null,error_class:null,provider_checkpoint:"dispatch-durable",
        waiter:"not-armed",result_availability:null,result_path:null,report_path:null,provider_state:$provider_state,
        revision:1,created_at:$now,updated_at:$now}' >"$staged" || { rm -f -- "$staged"; return 1; }

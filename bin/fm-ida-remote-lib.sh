@@ -9,15 +9,19 @@
 #   identity=user
 #   agent_id=default|<numeric iDA agent id>
 #   model=default|<iDA model name>
-#   bytedcli_version=<exact tested version>
+#   bytedcli_version=<legacy informational value; optional>
 #
-# Prompt submission uses `bytedcli mcp --allow-domains ida --all-tools` over
-# stdio JSON-RPC. The prompt exists only in a mode-0600 request file connected
-# to stdin; it is never placed in an operating-system argv, status event, log,
-# durable state, or provider artifact. CLI reads and cancellation use ordinary
-# official `bytedcli --json ida --region sg ...` commands because those carry no
-# private prompt payload. All durable artifacts are normalized here and never
-# preserve raw MCP responses or raw provider streams.
+# Prompt submission uses the domain-restricted bytedcli MCP `run_command` tool
+# over stdio JSON-RPC so the parent iDA command can carry `--region sg`. The
+# prompt exists only in a mode-0600 request file connected to stdin; it is never
+# placed in an operating-system argv, status event, log, durable state, or
+# provider artifact. CLI reads and cancellation use ordinary official
+# `bytedcli --json --as user ida --region sg ...` commands because those carry
+# no private prompt payload. All bytedcli children discard ambient proxy
+# variables, which otherwise divert the SG identity endpoint through an
+# incompatible proxy, while preserving the rest of the operator environment.
+# Durable artifacts are normalized here and never preserve raw MCP responses
+# or raw provider streams.
 set -u
 
 IDA_CONFIG_SCHEMA=fm-ida-remote-agent-config.v1
@@ -42,6 +46,18 @@ fm_ida_config_field() {
   sed -n "s/^$key=//p" "$file"
 }
 
+fm_ida_config_optional_field() {
+  local file=$1 key=$2 count
+  count=$(grep -c "^$key=" "$file" 2>/dev/null || true)
+  [ "$count" -le 1 ] || return 1
+  [ "$count" -eq 0 ] || sed -n "s/^$key=//p" "$file"
+}
+
+fm_ida_run_bytedcli() (
+  unset http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+  BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli "$@"
+)
+
 fm_ida_config_load() {
   local file
   file=$(fm_ida_config_path)
@@ -52,14 +68,15 @@ fm_ida_config_load() {
   IDA_CONFIG_IDENTITY=$(fm_ida_config_field "$file" identity) || return 1
   IDA_CONFIG_AGENT_ID=$(fm_ida_config_field "$file" agent_id) || return 1
   IDA_CONFIG_MODEL=$(fm_ida_config_field "$file" model) || return 1
-  IDA_CONFIG_BYTEDCLI_VERSION=$(fm_ida_config_field "$file" bytedcli_version) || return 1
+  # Read legacy configs without turning their recorded version into a gate.
+  # New configs omit this informational field.
+  fm_ida_config_optional_field "$file" bytedcli_version >/dev/null || return 1
   [ "$IDA_CONFIG_SCHEMA_VALUE" = "$IDA_CONFIG_SCHEMA" ] || return 1
   case "$IDA_CONFIG_ENABLED" in true|false) ;; *) return 1 ;; esac
   [ "$IDA_CONFIG_REGION" = sg ] || return 1
   [ "$IDA_CONFIG_IDENTITY" = user ] || return 1
   [ "$IDA_CONFIG_AGENT_ID" = default ] || fm_ida_numeric_id "$IDA_CONFIG_AGENT_ID" || return 1
   [ "$IDA_CONFIG_MODEL" = default ] || fm_ida_safe_token "$IDA_CONFIG_MODEL" || return 1
-  fm_ida_safe_token "$IDA_CONFIG_BYTEDCLI_VERSION" || return 1
 }
 
 fm_ida_session_marker() {
