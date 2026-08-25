@@ -187,12 +187,13 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
 }
 
 test_claude_launches_clear_inherited_child_session_marker() {
-  local rec crew_id secondmate_id codex_id sm out status launch
+  local rec crew_id scout_id secondmate_id codex_id sm out status launch
   crew_id=profile-claude-child-session-crew-z1c
-  secondmate_id=profile-claude-child-session-secondmate-z1d
-  codex_id=profile-claude-child-session-codex-z1e
+  scout_id=profile-claude-child-session-scout-z1d
+  secondmate_id=profile-claude-child-session-secondmate-z1e
+  codex_id=profile-claude-child-session-codex-z1f
   rec=$(make_spawn_case profile-claude-child-session claude \
-    "$crew_id" "$secondmate_id" "$codex_id")
+    "$crew_id" "$scout_id" "$secondmate_id" "$codex_id")
   read_case_record "$rec"
 
   out=$(CLAUDE_CODE_CHILD_SESSION=1 \
@@ -203,6 +204,15 @@ test_claude_launches_clear_inherited_child_session_marker() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "env -u CLAUDE_CODE_CHILD_SESSION" \
     "Claude crewmate launch must clear the inherited child-session marker"
+
+  out=$(CLAUDE_CODE_CHILD_SESSION=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$scout_id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "Claude scout spawn under a child-session marker should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CLAUDE_CODE_CHILD_SESSION" \
+    "Claude scout launch must clear the inherited child-session marker"
 
   printf '%s\n' claude > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
@@ -224,7 +234,7 @@ test_claude_launches_clear_inherited_child_session_marker() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CLAUDE_CODE_CHILD_SESSION" \
     "non-Claude launch must not receive the Claude-specific child-session scrub"
-  pass "Claude crewmate and secondmate launches clear the inherited child-session marker only for Claude"
+  pass "Claude crewmate, scout, and secondmate launches clear the inherited child-session marker only for Claude"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
