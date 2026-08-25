@@ -231,7 +231,7 @@ $PROJECT_CLONES_BODY
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
-Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop.
+Before coordinating any task that will change tracked code, load \`nathan-coding-loop\` and follow its mandatory developer-reviewer loop.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.

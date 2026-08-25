@@ -528,7 +528,7 @@ test_secondmate_code_review_trigger() {
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Coordinate sample code changes.' \
     "$ROOT/bin/fm-brief.sh" review-mate --secondmate sample >/dev/null 2>&1
   brief="$home/data/review-mate/brief.md"
-  assert_grep "Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop." "$brief" \
+  assert_grep "Before coordinating any task that will change tracked code, load \`nathan-coding-loop\` and follow its mandatory developer-reviewer loop." "$brief" \
     "project-backed secondmate charter did not load the mandatory code-review owner"
   assert_no_grep 'gh-axi pr diff --full' "$brief" \
     "secondmate charter duplicated the detailed code-review procedure"
@@ -536,7 +536,7 @@ test_secondmate_code_review_trigger() {
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Coordinate Firstmate code changes.' \
     "$ROOT/bin/fm-brief.sh" review-mate-no-projects --secondmate --no-projects >/dev/null 2>&1
   brief="$home/data/review-mate-no-projects/brief.md"
-  assert_grep "Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop." "$brief" \
+  assert_grep "Before coordinating any task that will change tracked code, load \`nathan-coding-loop\` and follow its mandatory developer-reviewer loop." "$brief" \
     "project-less secondmate charter did not load the mandatory code-review owner"
   assert_no_grep 'no material findings' "$brief" \
     "secondmate charter copied the review procedure instead of pointing to its owner"

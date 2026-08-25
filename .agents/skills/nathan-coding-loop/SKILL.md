@@ -1,5 +1,5 @@
 ---
-name: secondmate-code-review
+name: nathan-coding-loop
 description: >-
   Agent-only procedure for mandatory second-mate coordination of tracked code changes.
   Load before routing, starting, or coordinating work that will change tracked code, and keep it loaded through the independent review loop.
