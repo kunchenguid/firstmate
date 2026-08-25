@@ -1242,8 +1242,14 @@ test('PR #27 is dep-minor — max delta governs the group', () => {
   const result = classify(files(27), GENERATED);
   assert.equal(result.changeClass, 'dep-minor');
   assert.equal(result.maxDelta, 'minor');
-  assert.equal(result.bumps.length, 6);
+  // SEVEN, not the six dependabot's own summary table advertises: the table
+  // lists the production-dependencies group, but `@types/pg` ^8.20.4 -> ^8.23.1
+  // rode along in devDependencies. The file header (+7/-7) is the truth, and
+  // this is precisely why the classifier reads the manifest diff and not the
+  // bot's prose.
+  assert.equal(result.bumps.length, 7);
   assert.ok(result.bumps.some((b) => b.name === 'fastify' && b.level === 'minor'));
+  assert.ok(result.bumps.some((b) => b.name === '@types/pg'), 'the untabled bump is caught');
 });
 
 test('PR #32 is dep-major — one major among eleven governs', () => {
