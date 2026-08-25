@@ -13,6 +13,25 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+
+# The lock helpers below build every lock as a symlink (fm_lock_try_create uses
+# `ln -s`). On Windows/MSYS Git Bash's default `ln -s` silently COPIES the target
+# instead of creating a symlink, so fm_lock_try_create can never validate the link
+# it just made, fm_lock_try_acquire always fails, and fm_lock_acquire_wait spins
+# forever - every fleet lock deadlocks. Requesting winsymlinks:nativestrict makes
+# `ln -s` create a real NTFS symlink (needs Developer Mode or admin, i.e. the
+# SeCreateSymbolicLink privilege) and otherwise fail loudly rather than copy. This
+# is a no-op off Windows, where OSTYPE never matches, and it is only appended when
+# no winsymlinks policy is already set so an operator's explicit choice is kept.
+case "${OSTYPE:-}" in
+  msys*|mingw*|cygwin*)
+    case "${MSYS:-}" in
+      *winsymlinks*) : ;;
+      *) export MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ;;
+    esac
+    ;;
+esac
+
 mkdir -p "$STATE"
 
 fm_current_pid() {

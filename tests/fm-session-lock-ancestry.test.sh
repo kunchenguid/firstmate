@@ -35,10 +35,12 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
-# liveness questions are decided by the process table alone.
+# liveness questions are decided by the process table alone. FM_FORCE_WINDOWS=0
+# pins the POSIX path so these fake-ps cases are host-independent (on a Windows
+# host fm_is_windows would otherwise divert them to the native-table path).
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_FORCE_WINDOWS=0 PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -220,6 +222,110 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- windows layer: native ancestry over an injected process table ----------
+#
+# The Windows walk cannot use the fake ps above: it reads a native process table
+# and the shell's own Windows PID instead of `ps -o` fields. FM_WIN_PROCTABLE_CMD
+# and FM_WIN_SELF_WINPID inject both and FM_FORCE_WINDOWS forces the path, so the
+# logic is exercised on any host with no Windows and no real ps. CLAUDE_PID is
+# always passed explicitly ('' means unset) so the ambient value under which this
+# suite runs can never leak into a case.
+
+setup_windows_tables() {
+  WIN_TABLE="$TMP_ROOT/win-table.tsv"
+  WIN_TABLE_ORPHAN="$TMP_ROOT/win-table-orphan.tsv"
+  WIN_TABLE_NOHARNESS="$TMP_ROOT/win-table-noharness.tsv"
+  # bash -> bash -> claude.exe -> powershell.exe -> explorer.exe (a full chain).
+  printf '%s\t%s\t%s\t%s\n' \
+    5000 4000 bash.exe bash \
+    4000 3000 bash.exe bash \
+    3000 2000 claude.exe 'claude --resume' \
+    2000 1000 powershell.exe powershell \
+    1000 0 explorer.exe explorer > "$WIN_TABLE"
+  # Same tree with the self's parent (4000) missing: the MSYS orphaning case.
+  printf '%s\t%s\t%s\t%s\n' \
+    5000 4000 bash.exe bash \
+    3000 2000 claude.exe 'claude --resume' \
+    2000 1000 powershell.exe powershell > "$WIN_TABLE_ORPHAN"
+  # A tree whose self (8000) has no harness ancestor, though a claude exists
+  # elsewhere and is NOT reachable from 8000.
+  printf '%s\t%s\t%s\t%s\n' \
+    8000 7000 bash.exe bash \
+    7000 0 bash.exe bash \
+    3000 2000 claude.exe claude > "$WIN_TABLE_NOHARNESS"
+}
+
+# Run one library expression on the Windows path against table file $1, with this
+# shell's Windows PID forced to $2 and CLAUDE_PID set to $3 ('' = unset).
+win_eval() {  # <table-file> <self-winpid> <claude-pid> <expression>
+  CLAUDE_PID="$3" FM_FORCE_WINDOWS=1 FM_WIN_SELF_WINPID="$2" FM_WIN_PROCTABLE_CMD="cat '$1'" \
+    bash -c '. "$0"; '"$4" "$LIB"
+}
+
+test_win_anchor_resolves_and_owns() {
+  setup_windows_tables
+  local got state
+  got=$(win_eval "$WIN_TABLE" 5000 3000 'fm_harness_ancestry_pid') \
+    || fail "windows anchor: the harness was not resolved at all"
+  [ "$got" = 3000 ] || fail "windows anchor: resolved '$got', expected the harness pid 3000"
+  win_eval "$WIN_TABLE" 5000 3000 'fm_harness_pid_alive 3000' \
+    || fail "windows: a live harness pid was not recognized"
+  if win_eval "$WIN_TABLE" 5000 3000 'fm_harness_pid_alive 2000'; then
+    fail "windows: a non-harness pid passed the harness-liveness predicate"
+  fi
+  state="$TMP_ROOT/win-owns/state"
+  mkdir -p "$state"
+  printf '3000\n' > "$state/.lock"
+  win_eval "$WIN_TABLE" 5000 3000 "fm_session_lock_owned_by_self '$state'" \
+    || fail "windows: the session holding the lock did not recognize itself as owner"
+  pass "session-lock windows: the CLAUDE_PID anchor resolves the harness and owns its lock"
+}
+
+test_win_anchor_rescues_orphaned_self() {
+  setup_windows_tables
+  local got
+  if win_eval "$WIN_TABLE_ORPHAN" 5000 '' 'fm_harness_ancestry_pid' >/dev/null; then
+    fail "windows: an orphaned self resolved a harness with no anchor and a broken chain"
+  fi
+  got=$(win_eval "$WIN_TABLE_ORPHAN" 5000 3000 'fm_harness_ancestry_pid') \
+    || fail "windows anchor: an orphaned self was not rescued by CLAUDE_PID"
+  [ "$got" = 3000 ] || fail "windows anchor: rescued to '$got', expected 3000"
+  pass "session-lock windows: CLAUDE_PID rescues a session orphaned from its harness"
+}
+
+test_win_selfwalk_without_anchor() {
+  setup_windows_tables
+  local got
+  got=$(win_eval "$WIN_TABLE" 5000 '' 'fm_harness_ancestry_pid') \
+    || fail "windows self-walk: the harness was not resolved without an anchor"
+  [ "$got" = 3000 ] || fail "windows self-walk: resolved '$got', expected 3000"
+  pass "session-lock windows: the parent-chain walk resolves the harness when the chain is intact"
+}
+
+test_win_invalid_anchor_falls_back_to_walk() {
+  setup_windows_tables
+  local got
+  got=$(win_eval "$WIN_TABLE" 5000 2000 'fm_harness_ancestry_pid') \
+    || fail "windows: a non-harness anchor was not rejected in favor of the walk"
+  [ "$got" = 3000 ] || fail "windows non-harness anchor: resolved '$got', expected 3000"
+  got=$(win_eval "$WIN_TABLE" 5000 999999 'fm_harness_ancestry_pid') \
+    || fail "windows: a stale anchor was not rejected in favor of the walk"
+  [ "$got" = 3000 ] || fail "windows stale anchor: resolved '$got', expected 3000"
+  pass "session-lock windows: an invalid or stale CLAUDE_PID fails closed to the honest walk"
+}
+
+test_win_unrelated_harness_never_owns() {
+  setup_windows_tables
+  local state
+  state="$TMP_ROOT/win-unrelated/state"
+  mkdir -p "$state"
+  printf '3000\n' > "$state/.lock"
+  if win_eval "$WIN_TABLE_NOHARNESS" 8000 '' "fm_session_lock_owned_by_self '$state'"; then
+    fail "windows: a harness outside this ancestry was claimed as this session's lock owner"
+  fi
+  pass "session-lock windows: an unrelated harness is not mistaken for this session's lock owner"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +466,21 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_win_anchor_resolves_and_owns
+test_win_anchor_rescues_orphaned_self
+test_win_selfwalk_without_anchor
+test_win_invalid_anchor_falls_back_to_walk
+test_win_unrelated_harness_never_owns
+
+# The e2e fixtures build real POSIX process trees and read them with `ps -o`, so
+# they require a host whose ps supports it. Git Bash/MSYS ps does not (that is the
+# very gap the Windows path exists for), and there the real auto-arm would take
+# the native-table path and anchor on this suite's own harness, not the fixture.
+# Skip them there; CI runs on hosts with a POSIX ps and exercises them fully.
+if ps -o ppid= -p "$$" >/dev/null 2>&1; then
+  test_e2e_version_named_session_claims_the_home
+  test_e2e_daemon_parented_session_claims_the_home
+  test_e2e_daemon_parented_version_named_session_keeps_its_lock
+else
+  pass "session-lock e2e: skipped - host ps lacks POSIX -o support the fixtures require"
+fi

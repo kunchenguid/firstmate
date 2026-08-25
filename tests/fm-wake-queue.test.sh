@@ -994,7 +994,30 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_windows_source_requests_native_symlinks() {
+  local lib state got
+  lib="$ROOT/bin/fm-wake-lib.sh"
+  state="$TMP_ROOT/winsymlinks/state"
+  mkdir -p "$state"
+  # OSTYPE is assigned inside the child (bash resets it at startup, so an inherited
+  # value would be overwritten) before the library is sourced.
+  got=$(FM_STATE_OVERRIDE="$state" bash -c 'OSTYPE=msys; unset MSYS; . "$0"; printf "%s" "${MSYS-}"' "$lib") \
+    || fail "sourcing the wake library on a Windows OSTYPE failed"
+  case "$got" in
+    *winsymlinks:nativestrict*) ;;
+    *) fail "Windows source did not request native symlinks (the locks would deadlock); MSYS=[$got]" ;;
+  esac
+  got=$(FM_STATE_OVERRIDE="$state" bash -c 'OSTYPE=msys; MSYS=winsymlinks:native; . "$0"; printf "%s" "$MSYS"' "$lib") \
+    || fail "sourcing with an explicit MSYS policy failed"
+  [ "$got" = "winsymlinks:native" ] || fail "an operator's explicit winsymlinks policy was overridden; MSYS=[$got]"
+  got=$(FM_STATE_OVERRIDE="$state" bash -c 'OSTYPE=linux-gnu; unset MSYS; . "$0"; printf "%s" "${MSYS-UNSET}"' "$lib") \
+    || fail "sourcing the wake library off Windows failed"
+  [ "$got" = "UNSET" ] || fail "a non-Windows source touched MSYS; MSYS=[$got]"
+  pass "wake-lib: a Windows source requests native symlinks so symlink-based locks do not deadlock"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_windows_source_requests_native_symlinks
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
