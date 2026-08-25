@@ -49,6 +49,11 @@
 # changed-first selection (fm-test-run.sh --changed here, the project runner's
 # native equivalent elsewhere), failed-family-only reruns, GitHub CI as the PR
 # merge verdict, and full output kept in a file so failures need no rerun.
+# They also carry a standing fast-abort contract: a gate agent step that fails
+# twice on the same run (empty output, parse error, or provider/upstream error)
+# stops as blocked with evidence instead of retrying, a local validation command
+# past its own timeout or silent for 10 minutes counts as failed evidence, and
+# only firstmate decides between bypass and later retry.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -351,6 +356,19 @@ TEST_SELECTION_SECTION=$(printf '%s\n' \
 '3. For PR-based deliveries, GitHub CI owns the final merge verdict; local runs are a fast pre-check, not the authority.' \
 '4. Keep full test output in a file: never pipe it through `tail` or any other filter that discards per-test result lines, so failures stay identifiable without rerunning.')
 
+# Standing fast-abort contract shared by the ship and scout scaffolds: repeat
+# infrastructure failures become blocked evidence instead of retry loops, hung
+# local commands count as failed evidence, and bypass authority stays with
+# firstmate.
+# shellcheck disable=SC2016  # single quotes are deliberate: backtick-wrapped status verbs must reach the reading agent verbatim, not expand at scaffold time.
+FAST_ABORT_SECTION=$(printf '%s\n' \
+'# Fast-abort contract' \
+'Do not burn time retrying through broken steps; convert repeat failures into blocked evidence.' \
+'1. When a gate agent step fails twice on the same run - empty output, an unparseable response, or a provider/upstream error - do NOT keep retrying through the gate.' \
+'   Append `blocked: <evidence - which steps, how many failures, error text>` and stop.' \
+'2. The same rule covers local validation commands that hang: if a command exceeds its own timeout or produces no output progress for 10 minutes, treat it as failed evidence rather than waiting longer.' \
+'3. Firstmate decides between bypassing the failing step and a later retry; you never choose to bypass a gate alone.')
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -394,6 +412,8 @@ $INBOX_SECTION
 $CODEGRAPH_SECTION
 
 $TEST_SELECTION_SECTION
+
+$FAST_ABORT_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -517,6 +537,8 @@ $INBOX_SECTION
 $CODEGRAPH_SECTION
 
 $TEST_SELECTION_SECTION
+
+$FAST_ABORT_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
