@@ -31,7 +31,7 @@ Record one contract per blocker and dependent pair:
 - type: `hard`, `contract`, or `soft`
 - minimum capability dependent consumes
 - executable proof capability works
-- earliest safe base: merged slice or completed blocker
+- earliest safe spawn base: exact default-branch ref a fresh `fm-spawn.sh` will reset the dependent worktree to
 - blocker scope dependent does not require
 - unblocking task whose completion clears edge
 
@@ -39,10 +39,10 @@ Minimum capability belongs to edge, not blocker issue generally.
 One blocker may expose different slices to different dependents.
 If capability or proof cannot be stated, investigate before marking dependent ready.
 
-Classify edge:
+Classify edge by whether a production-safe minimum capability can land before full blocker:
 
-- `hard`: dependent cannot compile, run, migrate, or validate without landed capability
-- `contract`: dependent can proceed once stable API, event, payload, schema, or error behavior lands
+- `contract`: named independently shippable capability can unblock dependent before whole blocker completes
+- `hard`: no independently safe slice exists, so full blocker completion is required
 - `soft`: order reduces churn but independent progress remains safe
 
 Only hard and contract edges become `blocked-by` backlog edges.
@@ -50,16 +50,19 @@ Keep soft ordering in task note or priority rather than hiding ready work.
 
 ## Unblocking slices
 
-When minimum capability can ship independently, create dedicated ship task for it.
+For a `contract` edge, create a dedicated ship task for its minimum capability.
 Point dependent `blocked-by` edge at slice task, not whole issue task.
 Keep original issue open until every remaining acceptance criterion lands.
 Partial PR references issue without closing it.
 
-Unblocking slice must be production-safe, independently reviewable, and executable from merged default branch.
-Current Firstmate spawns fresh workers from remote default branch, so an unmerged branch does not clear edge.
-Do not invent stacked-branch machinery.
+Unblocking slice must be production-safe, independently reviewable, and executable with its proof from earliest safe spawn base.
+Resolve that base from current `fm-spawn.sh` contract instead of assuming delivery target and spawn base are same.
+For PR-backed modes, capability reaches spawn base only after landing on remote default branch.
+For `local-only`, confirm local landing is visible in exact spawn base.
+If it is not, keep edge blocked and escalate delivery-path mismatch rather than stacking branches or dispatching stale work.
+An unmerged branch never clears edge.
 
-If full blocker really is minimum safe capability, keep one task and state that evidence explicitly.
+For a `hard` edge, target full blocker task and state why no independently safe slice exists.
 Never weaken trust-boundary validation, data safety, security, accessibility, or accepted product behavior to manufacture smaller slice.
 
 ## Backlog mutation
@@ -68,13 +71,16 @@ Use current `tasks-axi` help for exact commands.
 Create blocker task before dependent task when recording edge.
 Preserve contract pointer in dependent task body and full structured dependency identifiers in backlog metadata.
 
-Clear edge only after:
+An edge becomes clear only through normal completion flow after:
 
-1. unblocking task landed through configured delivery path
-2. executable proof passes against landed head
-3. consumed contract matches dependent issue
+1. unblocking task landed through configured delivery path and capability is present in exact fresh dependent spawn base
+2. executable proof passes against that base
+3. consumed contract matches dependent contract's authoritative owner: project issue or spec when present, otherwise backlog task body
 
-Then mark slice task done, run `tasks-axi ready`, and dispatch every newly ready item whose other gates cleared.
+After all checks pass, run normal guarded `bin/fm-teardown.sh` for unblocking task.
+A teardown refusal leaves task and edge active.
+Only successful teardown's configured-backend reminder may record backlog completion and trigger readiness re-evaluation.
+Follow that reminder, then dispatch newly ready items whose other gates cleared.
 Do not use `tasks-axi unblock` to treat an unmerged commit, passing local branch, or partial validation as landed capability.
 
 ## Task brief handoff
