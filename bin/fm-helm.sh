@@ -61,8 +61,8 @@ trim() {
 validate_shape() {
   jq -e '
     type == "object"
-    and ((has("language") | not) or (.language | type) == "string")
-    and ((has("response_tone") | not) or (.response_tone | type) == "string")
+    and ((has("language") | not) or ((.language | type) == "string" and (.language | test("\\S"))))
+    and ((has("response_tone") | not) or ((.response_tone | type) == "string" and (.response_tone | test("\\S"))))
   ' "$1" >/dev/null 2>&1
 }
 
