@@ -75,8 +75,7 @@ export function calmBranchOutcomeAttention(
   if (!trimmedOutput || trimmedOutput === NO_OUTCOMES_TEXT) return [];
 
   const lines: CalmBranchOutcomeLine[] = [];
-  for (const rawLine of output.split("\n")) {
-    if (rawLine.trim() === "") continue;
+  for (const rawLine of trimmedOutput.split("\n")) {
     const record = parseOutcomeRecord(rawLine.trim());
     if (!record) {
       lines.push({ glyph: true, text: rawLine });

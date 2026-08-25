@@ -72,7 +72,7 @@ const check = (label, actual, expected) => {
 
 // A read the captain never has to act on collapses to nothing, exactly like
 // every other tool row Calm hides.
-check("routine-only store", calmBranchOutcomeAttention(routineOnly, false), []);
+check("routine-only store with trailing newline", calmBranchOutcomeAttention(routineOnly, false), []);
 check("empty output", calmBranchOutcomeAttention("", false), []);
 check("blank output", calmBranchOutcomeAttention("   \n\n", false), []);
 check(
@@ -102,25 +102,31 @@ check("failed read with no detail", calmBranchOutcomeAttention("", true), [
 // Output Calm does not recognize as the store's records is carried through
 // byte-for-byte rather than swallowed by a format it has not been taught.
 const unrecognized = [
-  "  not json at all",
   '{"seq":9}',
+  "  not json at all",
   '["task-1","captain","summary"]',
   '{"task":"task-7","verdict":"escalate","summary":"unknown verdict"}',
   '{"task":"task-8","verdict":"captain","summary":42}',
   '{"task":"task-9","verdict":"routine","summary":"ok"}',
-  "  ",
 ].join("\n");
 check(
   "unrecognized output",
   calmBranchOutcomeAttention(unrecognized, false),
   [
-    { glyph: true, text: "  not json at all" },
     { glyph: true, text: '{"seq":9}' },
+    { glyph: true, text: "  not json at all" },
     { glyph: true, text: '["task-1","captain","summary"]' },
     { glyph: true, text: '{"task":"task-7","verdict":"escalate","summary":"unknown verdict"}' },
     { glyph: true, text: '{"task":"task-8","verdict":"captain","summary":42}' },
     { glyph: true, text: '{"task":"task-9","verdict":"routine","summary":"ok"}' },
   ],
+);
+
+const routineRecords = routineOnly.trim().split("\n");
+check(
+  "interior whitespace-only output",
+  calmBranchOutcomeAttention(`${routineRecords[0]}\n  \n${routineRecords[1]}\n`, false),
+  [{ glyph: true, text: "  " }],
 );
 
 // A legacy record written before the store carried `silent` is still a valid
