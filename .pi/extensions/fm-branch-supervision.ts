@@ -364,8 +364,12 @@ export default function (pi: ExtensionAPI) {
     const pin = readModelPin();
     if (pin) return preparePinnedBranchModel(pin);
     if (!mainModel) return undefined;
-    const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
-    return resolved.ok ? resolved.selection : undefined;
+    try {
+      const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
+      return resolved.ok ? resolved.selection : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   function generationOwnsLock(expectedGeneration: number): boolean {
@@ -861,9 +865,16 @@ ${context.command}
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
   // the authoritative signal that "follow main" now means a different model.
+  // A model change often follows a quota failure, so an unpinned supervision
+  // branch follows live rather than retaining a model that may no longer work.
   pi.on?.("model_select", (event) => {
     const selected = (event as { model?: { provider: string; id: string } }).model;
-    if (selected) mainModel = { provider: selected.provider, id: selected.id };
+    if (!selected) return;
+    const changed = !mainModel || mainModel.provider !== selected.provider || mainModel.id !== selected.id;
+    mainModel = { provider: selected.provider, id: selected.id };
+    if (!changed || readModelPin()) return;
+    modelSelectionRevision += 1;
+    releaseBranchForModelChange();
   });
 
   pi.on?.("session_shutdown", () => {
@@ -935,16 +946,23 @@ ${context.command}
       // Clearing the pin only follows main if main's model can actually be
       // applied to the branch; say what will really happen rather than
       // reporting a state that did not take effect.
-      const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
-      if (following?.ok) {
-        ctx.ui.notify(`Supervision branch follows main's model (${modelLabel(following.selection.model)}).`, "info");
-        return;
+      try {
+        const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
+        if (following?.ok) {
+          ctx.ui.notify(`Supervision branch follows main's model (${modelLabel(following.selection.model)}).`, "info");
+          return;
+        }
+        const why = following ? following.reason : "main's model is not known yet";
+        ctx.ui.notify(
+          `Supervision branch pin cleared, but main's model could not be applied (${why}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+          "warning",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          `Supervision branch pin cleared, but main's model could not be applied (${error instanceof Error ? error.message : String(error)}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+          "warning",
+        );
       }
-      const why = following ? following.reason : "main's model is not known yet";
-      ctx.ui.notify(
-        `Supervision branch pin cleared, but main's model could not be applied (${why}); the branch keeps the model its own session recorded until that conversation is replaced.`,
-        "warning",
-      );
     },
   });
 

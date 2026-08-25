@@ -53,7 +53,8 @@ The Pi `/supervision-model` command opens Pi's own selector over the models that
 Firstmate keeps no model catalog of its own; the list is the intersection of what Pi reports when the picker opens and what a fresh isolated branch runtime can run.
 A provider that exists only because an extension registered it inside the captain's session is not offered, while stored OAuth and API-key credentials retain their native credential type because Firstmate never copies, converts, installs, or overwrites credentials for the branch runtime.
 The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
-An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly.
+An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly and live whenever main changes models mid-session.
+A valid pin wins over main and remains unaffected by main's model changes.
 Picking "Follow main" removes the file, and the command writes a pin at mode `0600` and replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
 The file's current state decides the branch model on every branch build - the first wake of a cold start and the reopen after `/new`, `/resume`, `/fork`, or reload - and it overrides Pi's restore of whatever model a reopened branch session recorded, so the choice survives all of them.
 That override is what keeps "Follow main" honest: a branch conversation that ran under an earlier pin still records that model, so clearing the file explicitly applies main's model rather than letting the reopened session restore the old one.

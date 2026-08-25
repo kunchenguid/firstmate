@@ -53,6 +53,8 @@ export class ModelRuntime {
     this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
   }
   static async create() {
+    const queuedError = globalThis.__fmModelRuntimeErrors?.shift();
+    if (queuedError) throw new Error(queuedError);
     if (globalThis.__fmModelRuntimeError) throw new Error(globalThis.__fmModelRuntimeError);
     const runtime = new ModelRuntime();
     (globalThis.__fmModelRuntimes ??= []).push(runtime);
@@ -1184,6 +1186,65 @@ EOF
   pass "the current pin state binds every branch create and reopen, and clearing it returns the branch to main's model"
 }
 
+test_unpinned_branch_follows_main_model_changes_live() {
+  local repo home out status
+  repo="$TMP_ROOT/model-live-root"
+  home="$TMP_ROOT/model-live-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  { provider: "anthropic", id: "replacement-model" },
+  { provider: "openai", id: "cheap-1" },
+);
+fire("session_start", {}, makeCtx());
+dispatch("signal: before main model change");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "initial unpinned branch build");
+const original = globalThis.__fmSessions[0];
+if (original.options.model?.id !== "main-model") throw new Error("the unpinned branch did not start on main's model");
+
+fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+await settle(() => original.disposed, "live unpinned branch release");
+dispatch("signal: after main model change");
+await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement unpinned branch build");
+const following = globalThis.__fmSessions[1];
+if (following.options.model?.id !== "replacement-model") {
+  throw new Error(`the unpinned branch did not follow main's model change: ${JSON.stringify(following.options.model)}`);
+}
+
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: establish pinned branch");
+await settle(() => (globalThis.__fmSessions ?? []).length === 3, "pinned branch build");
+const pinned = globalThis.__fmSessions[2];
+if (pinned.options.model?.id !== "cheap-1") throw new Error("the pinned branch did not use its pin");
+const promptsBefore = pinned.ops.filter((op) => op.kind === "prompt").length;
+
+fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+dispatch("signal: pinned after main model change");
+await settle(() => pinned.ops.filter((op) => op.kind === "prompt").length === promptsBefore + 1, "pinned branch wake");
+if (pinned.disposed || globalThis.__fmSessions.length !== 3) {
+  throw new Error("a main model change replaced the pinned branch");
+}
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "openai/cheap-1\n") {
+  throw new Error("a main model change disturbed the supervision pin");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "unpinned branches must follow main model changes while pins remain authoritative: $out"
+  pass "unpinned branches follow main model changes live while pinned branches stay fixed"
+}
+
 test_supervision_model_command_persists_and_rebinds_the_live_branch() {
   local repo home out status
   repo="$TMP_ROOT/modelcmd-root"
@@ -1308,6 +1369,23 @@ if (readFileSync(pinFile, "utf8") !== "openai-codex/cheap-oauth\n") throw new Er
 const newNotices = notices.slice(noticeCount);
 if (newNotices.length !== 1 || newNotices[0].type !== "error") {
   throw new Error(`an unapplied model emitted a success notification: ${JSON.stringify(newNotices)}`);
+}
+
+// If the picker loads but resolving main after Follow main fails, the pin is
+// cleared and the captain receives an honest warning rather than a rejection
+// or a false success notice.
+const clearFailureNoticeCount = notices.length;
+globalThis.__fmModelRuntimeErrors = [null, "synthetic post-clear runtime failure"];
+uiSelections.push("Follow main (anthropic/main-model)");
+await command.handler("", makeCtx());
+if (existsSync(pinFile)) throw new Error("following main did not clear the pin before its resolution warning");
+const clearFailureNotices = notices.slice(clearFailureNoticeCount);
+if (
+  clearFailureNotices.length !== 1 ||
+  clearFailureNotices[0].type !== "warning" ||
+  !clearFailureNotices[0].message.includes("synthetic post-clear runtime failure")
+) {
+  throw new Error(`post-clear resolution failure was not reported honestly: ${JSON.stringify(clearFailureNotices)}`);
 }
 process.exit(0);
 EOF
@@ -1901,6 +1979,7 @@ test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
+test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
