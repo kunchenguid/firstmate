@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
+#   printf '%s' '<reply>' | fm-procevent-lavish.sh arm-reply <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
@@ -10,6 +11,12 @@
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
+# arm-reply  Read one nonempty agent reply of at most 8192 bytes from stdin,
+#            replace this home's existing Lavish listener, and start its next
+#            blocking wait with that reply. The reply is staged at mode 0600,
+#            passed as one direct argv element, and consumed at most once. A
+#            live owner in another home, an in-flight reply, or uncertain source
+#            ownership is refused rather than displaced or overwritten.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # poll       The registered listener command `arm` publishes, not a command to
@@ -37,12 +44,24 @@
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
 #
-# It wraps ONLY the currently published interface, verified against 0.1.45:
+# It wraps ONLY the currently published interface, verified against 0.1.53:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
 # runs the plain blocking form with no timeout flag, so results arrive as real
 # server-side events. It adds no periodic discovery, no timer fallback, and no
 # dependency on any unreleased capability.
+#
+# ONE-SHOT REPLY, owned here and nowhere else. `arm-reply` interrupts only this
+# home's current listener generation through the generic runner's serialized
+# restart command. The next invocation claims the private reply before invoking
+# Lavish and passes the bytes only to that invocation; the unchanged registration
+# makes every later generation reply-free. Any retry after the exact transient
+# interruption below is reply-free. A crash after the claim but before or during
+# the Lavish call can lose the reply, because there is no upstream receipt proving
+# whether Lavish displayed it; recovery deliberately returns to plain polling
+# rather than risking a duplicate. A crash after private publication but before
+# restart can leave the reply pending for a later generation, so that caller
+# cannot claim immediate delivery.
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
@@ -72,6 +91,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -81,7 +101,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,87p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -98,6 +118,32 @@ cmd_source_id() {
   else
     printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
   fi
+}
+
+reply_lock() { printf '%s/.%s.reply-lock\n' "$(fm_procevent_registry_dir "$STATE")" "$1"; }
+reply_pending() { printf '%s/.%s.reply.pending\n' "$(fm_procevent_registry_dir "$STATE")" "$1"; }
+
+reply_state_present() {  # <source-id>
+  local id=$1 path
+  if [ -e "$(reply_pending "$id")" ] || [ -L "$(reply_pending "$id")" ]; then
+    return 0
+  fi
+  for path in "$(fm_procevent_registry_dir "$STATE")/.$id.reply."*.consumed; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+reply_state_remove() {  # <source-id>
+  local id=$1 path
+  rm -f -- "$(reply_pending "$id")"
+  for path in "$(fm_procevent_registry_dir "$STATE")/.$id.reply."*.consumed; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      rm -f -- "$path"
+    fi
+  done
 }
 
 cmd_arm() {
@@ -119,11 +165,93 @@ cmd_arm() {
   printf 'artifact: %s\n' "$real"
 }
 
+AGENT_REPLY_MAX_BYTES=8192
+
+# Read stdin without placing the reply in this adapter's argv. NUL cannot be
+# represented in the shell argv Lavish publishes, and oversized input is fully
+# rejected rather than truncated into a different message.
+stage_agent_reply() {  # <destination>
+  perl -e '
+    use strict;
+    use warnings;
+    my ($limit) = @ARGV;
+    binmode STDIN;
+    binmode STDOUT;
+    my $total = 0;
+    while (1) {
+      my $count = sysread STDIN, my $chunk, 65536;
+      exit 2 unless defined $count;
+      last if $count == 0;
+      exit 5 if index($chunk, "\0") >= 0;
+      $total += $count;
+      exit 3 if $total > $limit;
+      my $offset = 0;
+      while ($offset < $count) {
+        my $written = syswrite STDOUT, $chunk, $count - $offset, $offset;
+        exit 2 unless defined $written;
+        $offset += $written;
+      }
+    }
+    exit 4 if $total == 0;
+  ' "$AGENT_REPLY_MAX_BYTES" > "$1"
+}
+
+cmd_arm_reply() {
+  local artifact=${1-} id real reg pending tmp device rc=0
+  [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
+  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  poll_retry_delay >/dev/null
+  id=$(cmd_source_id "$artifact") || exit 1
+  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+    || die "cannot resolve the artifact path: $artifact"
+  reg=$(fm_procevent_registry_dir "$STATE")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || die "the Lavish source is not armed: $id"
+  device=$(fm_pr_file_device "$reg") || die "cannot inspect the process-event registry"
+  tmp=$(umask 077; mktemp "$reg/.reply.XXXXXX") || die "cannot stage the agent reply"
+  stage_agent_reply "$tmp" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) rm -f -- "$tmp"; die "agent reply exceeds $AGENT_REPLY_MAX_BYTES bytes" ;;
+    4) rm -f -- "$tmp"; die "agent reply cannot be empty" ;;
+    5) rm -f -- "$tmp"; die "agent reply cannot contain NUL bytes" ;;
+    *) rm -f -- "$tmp"; die "cannot read the agent reply" ;;
+  esac
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the agent reply"; }
+  fm_pr_private_file_valid "$tmp" 600 "$device" \
+    || { rm -f -- "$tmp"; die "staged agent reply failed validation"; }
+
+  fm_lock_acquire_wait "$(reply_lock "$id")" || { rm -f -- "$tmp"; die "cannot lock the agent reply"; }
+  if reply_state_present "$id"; then
+    fm_lock_release "$(reply_lock "$id")"
+    rm -f -- "$tmp"
+    die "an agent reply is already pending or in flight: $id"
+  fi
+  pending=$(reply_pending "$id")
+  if ! mv -f -- "$tmp" "$pending" \
+    || ! fm_pr_private_file_valid "$pending" 600 "$device"; then
+    rm -f -- "$tmp" "$pending"
+    fm_lock_release "$(reply_lock "$id")"
+    die "cannot publish the private agent reply"
+  fi
+  if ! "$SCRIPT_DIR/fm-procevent.sh" restart "$id"; then
+    rm -f -- "$pending"
+    fm_lock_release "$(reply_lock "$id")"
+    die "cannot arm the agent reply"
+  fi
+  fm_lock_release "$(reply_lock "$id")"
+  printf 'reply-armed: %s\n' "$id"
+  printf 'artifact: %s\n' "$real"
+}
+
 cmd_retire() {
   local artifact=${1-} id
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || exit 1
+  fm_lock_acquire_wait "$(reply_lock "$id")" || die "cannot lock the agent reply"
+  reply_state_remove "$id"
+  fm_lock_release "$(reply_lock "$id")"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -202,11 +330,10 @@ poll_retry_delay() {
   printf '%s\n' "$delay"
 }
 
-cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
+poll_loop() {  # <artifact> [one-shot-agent-reply]
+  local artifact=$1 reply=${2-} with_reply=0 delay attempt=0 response cleanup_command rc filter_rc
   local pipeline_status
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  [ "$#" -eq 2 ] && with_reply=1
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -223,7 +350,11 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    if [ "$with_reply" -eq 1 ] && [ "$attempt" -eq 0 ]; then
+      lavish-axi poll "$artifact" --agent-reply "$reply" | poll_response_filter "$response"
+    else
+      lavish-axi poll "$artifact" | poll_response_filter "$response"
+    fi
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
@@ -241,7 +372,63 @@ cmd_poll() {
       *) die "cannot classify the poll response" ;;
     esac
   done
+  rm -f -- "$response"
+  trap - EXIT INT TERM HUP
   return "$rc"
+}
+
+# A registered listener atomically claims one pending reply before invoking
+# Lavish. The generation token makes the consumed marker private to this run;
+# after a crash, the next generation removes it and polls without a reply.
+# A manually invoked poll has no runner-issued token and cannot touch reply state.
+cmd_poll() {
+  local artifact=${1-} id reg device pending consumed reply_with_sentinel reply rc
+  [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
+  if [ -z "${FM_PROCEVENT_ACTIVE_TOKEN:-}" ]; then
+    poll_loop "$artifact"
+    return $?
+  fi
+  id=$(cmd_source_id "$artifact") || exit 1
+  [ "${FM_PROCEVENT_ACTIVE_SOURCE:-}" = "$id" ] || die "poll has mismatched source ownership"
+  case "$FM_PROCEVENT_ACTIVE_TOKEN" in
+    *[!A-Za-z0-9._-]*) die "poll has no valid source generation" ;;
+  esac
+  reg=$(fm_procevent_registry_dir "$STATE")
+  device=$(fm_pr_file_device "$reg") || die "cannot inspect the process-event registry"
+  pending=$(reply_pending "$id")
+  fm_lock_acquire_wait "$(reply_lock "$id")" || die "cannot lock the agent reply"
+  if fm_pr_private_file_valid "$pending" 600 "$device"; then
+    # Recheck content at consumption time so local mutation cannot bypass the
+    # arm boundary's NUL and size limits.
+    rc=0
+    stage_agent_reply /dev/null < "$pending" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rm -f -- "$pending"
+      fm_lock_release "$(reply_lock "$id")"
+      die "the pending agent reply failed validation"
+    fi
+    reply_with_sentinel=$(cat -- "$pending"; printf '\034')
+    reply=${reply_with_sentinel%$'\034'}
+    consumed="$reg/.$id.reply.$FM_PROCEVENT_ACTIVE_TOKEN.consumed"
+    if ! mv -- "$pending" "$consumed"; then
+      fm_lock_release "$(reply_lock "$id")"
+      die "cannot claim the private agent reply"
+    fi
+    fm_lock_release "$(reply_lock "$id")"
+    poll_loop "$artifact" "$reply"
+    rc=$?
+    fm_lock_acquire_wait "$(reply_lock "$id")" || return "$rc"
+    rm -f -- "$consumed"
+    fm_lock_release "$(reply_lock "$id")"
+    return "$rc"
+  fi
+  # No valid pending reply belongs to this generation. Remove stale or tampered
+  # reply state from an earlier failed arm or consumed generation and continue
+  # with the ordinary reply-free wait.
+  reply_state_remove "$id"
+  fm_lock_release "$(reply_lock "$id")"
+  poll_loop "$artifact"
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
@@ -386,6 +573,7 @@ cmd_answers() {
 
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
+  arm-reply) shift; cmd_arm_reply "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;

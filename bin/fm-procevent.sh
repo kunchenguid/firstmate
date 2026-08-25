@@ -5,6 +5,7 @@
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
+#   fm-procevent.sh restart <source-id>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh handled <source-id> <sequence>
@@ -16,6 +17,12 @@
 #            to execute. argv is stored one argument per line and executed
 #            directly, so there is no shell surface and no argument splitting.
 #            Adapters register sources; nothing here parses user text.
+# restart    Stop this home's current blocking child while preserving its exact
+#            registration, then start the next generation. A live owner in
+#            another home or uncertain ownership is refused. The stop, claim
+#            release, and later start preserve the one-owner boundary, so
+#            adapters may use this to activate private one-shot input without
+#            ever running simultaneous pollers.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
@@ -120,7 +127,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,104p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -230,6 +237,64 @@ cmd_register() {
   fi
   fm_procevent_source_lock_release "$id"
   printf 'registered: %s (%s)\n' "$id" "$adapter"
+}
+
+# Restart one registered listener generation without changing its registration
+# or any binding around it. The old owned process group is stopped and its claim
+# released under the source boundary; only after that boundary is released may
+# a replacement runner start. A stale generation is left for ordinary
+# acquisition to reclaim. Foreign live or uncertain ownership is never
+# displaced.
+cmd_restart() {
+  local id=${1-} claim_state owner pid token identity stop_state
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+    fm_procevent_source_lock_release "$id"
+    die "source is not registered: $id"
+  fi
+  fm_procevent_claim_state_locked "$id"
+  claim_state=$?
+  case "$claim_state" in
+    0|3)
+      owner=$FM_PROCEVENT_CLAIM_HOME
+      pid=$FM_PROCEVENT_CLAIM_PID
+      token=$FM_PROCEVENT_CLAIM_TOKEN
+      identity=$FM_PROCEVENT_CLAIM_IDENTITY
+      if [ "$owner" != "$FM_HOME" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "source is owned by another home: $id"
+      fi
+      stop_runner_pid "$pid" "$identity"
+      stop_state=$?
+      if [ "$stop_state" -ne 0 ]; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot stop the current source generation: $id"
+      fi
+      if ! fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token"; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot release the current source generation: $id"
+      fi
+      rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
+      ;;
+    1) ;;
+    2)
+      fm_procevent_source_lock_release "$id"
+      die "cannot confirm source ownership; registration is unchanged: $id"
+      ;;
+    4)
+      fm_procevent_source_lock_release "$id"
+      die "source terminal retirement is still in progress: $id"
+      ;;
+    *)
+      fm_procevent_source_lock_release "$id"
+      die "cannot inspect source ownership: $id"
+      ;;
+  esac
+  fm_procevent_source_lock_release "$id"
+  detach_runner "$id"
+  printf 'restarted: %s\n' "$id"
 }
 
 # Publish every durably captured result with no handled acknowledgement yet.
@@ -364,7 +429,8 @@ cmd_start() {
   [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
   (umask 077; : > "$out") || die "cannot stage output"
   STAGED_OUTPUT=$out
-  "${ARGV[@]}" 2>/dev/null | perl -e '
+  FM_PROCEVENT_ACTIVE_SOURCE=$id FM_PROCEVENT_ACTIVE_TOKEN=$CLAIM_TOKEN \
+    "${ARGV[@]}" 2>/dev/null | perl -e '
     use strict;
     use warnings;
     my $limit = shift;
@@ -844,6 +910,7 @@ cmd_list() {
 
 case "${1-}" in
   register)  shift; cmd_register "$@" ;;
+  restart)   shift; cmd_restart "$@" ;;
   start)     shift; cmd_start_public "$@" ;;
   _start)    shift; cmd_start "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;

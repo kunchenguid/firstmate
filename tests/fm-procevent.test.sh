@@ -725,6 +725,246 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$NEAR_ART" >/dev/null
 pass "only the literal two-line interruption enters the quiet retry policy"
 
+# --- reply-capable Lavish listener generations -----------------------------
+# The adapter's public arm-reply command reads the reply from stdin, replaces a
+# live plain listener, and delegates every source transition to the real runner.
+# This fake records argv without evaluating it and detects overlapping polls.
+LAVISH_REPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-reply-stub")
+cat > "$LAVISH_REPLY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+active="$LAVISH_REPLY_LOG.active"
+if ! mkdir "$active" 2>/dev/null; then
+  : > "$LAVISH_REPLY_LOG.overlap"
+fi
+cleanup() { rmdir "$active" 2>/dev/null || true; }
+trap 'cleanup; exit 143' TERM INT HUP
+trap cleanup EXIT
+if [ "${3-}" = --agent-reply ]; then
+  printf 'reply:%s\n' "${4-}" >> "$LAVISH_REPLY_LOG"
+  case "$LAVISH_REPLY_MODE" in
+    interrupt)
+      printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'
+      exit 1
+      ;;
+    crash) exit 7 ;;
+    end)
+      printf 'session:\n  file: /reply.html\n  status: feedback\n  session_ended: true\nfeedback[1]{text}:\n  final reply accepted\n'
+      exit 0
+      ;;
+    hold)
+      printf 'ready\n' > "$LAVISH_REPLY_LOG.reply-ready"
+      while [ ! -e "$LAVISH_REPLY_LOG.reply-release" ]; do sleep 0.05; done
+      ;;
+  esac
+  printf 'session:\n  file: /reply.html\n  status: feedback\nfeedback[1]{text}:\n  reply accepted\n'
+  exit 0
+fi
+plain_count=$(cat "$LAVISH_REPLY_LOG.plain-count" 2>/dev/null || echo 0)
+plain_count=$((plain_count + 1))
+printf '%s\n' "$plain_count" > "$LAVISH_REPLY_LOG.plain-count"
+printf 'plain:%s\n' "$plain_count" >> "$LAVISH_REPLY_LOG"
+if [ "$plain_count" -eq 1 ]; then
+  printf 'ready\n' > "$LAVISH_REPLY_LOG.initial-ready"
+  while :; do sleep 0.05; done
+fi
+case "$LAVISH_REPLY_MODE" in
+  normal|hold)
+    printf 'ready\n' > "$LAVISH_REPLY_LOG.plain-$plain_count-ready"
+    while :; do sleep 0.05; done
+    ;;
+  *) printf 'session:\n  file: /reply.html\n  status: feedback\nfeedback[1]{text}:\n  plain response\n' ;;
+esac
+SH
+chmod +x "$LAVISH_REPLY_BIN/lavish-axi"
+
+# One shell-looking reply is passed literally once. After its response, the
+# next registered generation is ordinary reply-free polling, and replacement
+# never overlaps the listener it stopped.
+HREPLY="$TMP_ROOT/hreply"; new_home "$HREPLY"
+REPLY_ART="$TMP_ROOT/reply-board.html"
+printf '<h1>reply</h1>\n' > "$REPLY_ART"
+reply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
+PE_TRACKED+=("$HREPLY|$reply_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-log" LAVISH_REPLY_MODE=normal
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the initial reply test listener did not start"
+# shellcheck disable=SC2016 # Literal metacharacters are the unsafe-input fixture.
+unsafe_reply='literal $(touch should-not-exist); * [still data]'
+printf '%s' "$unsafe_reply" | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_ART" >/dev/null
+wait_for "$HREPLY/state/.wake-queue" || fail "the one-shot reply produced no captured result"
+assert_contains "$(cat "$LAVISH_REPLY_LOG")" "reply:$unsafe_reply" "the reply did not arrive as one literal argv element"
+assert_absent "$PWD/should-not-exist" "shell-looking reply input was executed"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "the one-shot reply was sent more than once"
+for _ in $(seq 1 50); do
+  PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY" reconcile >/dev/null
+  [ -e "$LAVISH_REPLY_LOG.plain-2-ready" ] && break
+  sleep 0.1
+done
+assert_present "$LAVISH_REPLY_LOG.plain-2-ready" "the reply generation did not return to ordinary polling"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "ordinary rearm resent the consumed reply"
+assert_absent "$LAVISH_REPLY_LOG.overlap" "listener replacement ran simultaneous pollers"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_ART" >/dev/null
+pass "one unsafe-looking reply is literal and one-shot, then polling returns to the plain form"
+
+# A transiently interrupted reply-carrying wait retries the blocking wait, but
+# the retry is deliberately plain because Lavish may already have displayed the
+# reply before returning the interruption.
+HREPLY_INT="$TMP_ROOT/hreply-int"; new_home "$HREPLY_INT"
+REPLY_INT_ART="$TMP_ROOT/reply-interrupt-board.html"
+printf '<h1>reply interruption</h1>\n' > "$REPLY_INT_ART"
+reply_int_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_INT_ART")
+PE_TRACKED+=("$HREPLY_INT|$reply_int_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-interrupt-log" LAVISH_REPLY_MODE=interrupt
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_INT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_INT_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_INT" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the interruption test listener did not start"
+printf '%s' 'reply before interruption' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_INT" \
+  FM_LAVISH_POLL_RETRY_DELAY=0 "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_INT_ART" >/dev/null
+wait_for "$HREPLY_INT/state/.wake-queue" || fail "the reply interruption retry produced no result"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "the interrupted wait resent its reply"
+[ "$(grep -c '^plain:' "$LAVISH_REPLY_LOG")" -eq 2 ] \
+  || fail "the interrupted wait did not retry once in plain form: $(cat "$LAVISH_REPLY_LOG")"
+assert_absent "$LAVISH_REPLY_LOG.overlap" "the interrupted replacement overlapped another poller"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_INT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_INT_ART" >/dev/null
+pass "a transient reply-wait interruption retries without resending the reply"
+
+# The unchanged registration generation also lets the runner retire a review
+# whose reply-bearing wait returns the final Send & End feedback.
+HREPLY_END="$TMP_ROOT/hreply-end"; new_home "$HREPLY_END"
+REPLY_END_ART="$TMP_ROOT/reply-end-board.html"
+printf '<h1>reply end</h1>\n' > "$REPLY_END_ART"
+reply_end_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_END_ART")
+PE_TRACKED+=("$HREPLY_END|$reply_end_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-end-log" LAVISH_REPLY_MODE=end
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_END" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_END_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_END" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the ending reply test listener did not start"
+printf '%s' 'final reply' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_END" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_END_ART" >/dev/null
+wait_for "$HREPLY_END/state/.wake-queue" || fail "the final reply produced no captured result"
+for _ in $(seq 1 30); do
+  [ ! -e "$HREPLY_END/state/procevent/$reply_end_id.source" ] && break
+  sleep 0.1
+done
+assert_absent "$HREPLY_END/state/procevent/$reply_end_id.source" \
+  "the final reply did not retire its unchanged source registration"
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_END" reconcile >/dev/null
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "the terminal reply was sent more than once"
+[ "$(grep -c '^plain:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "the ended reply source restarted plain polling"
+pass "a reply-bearing Send & End result retires without another poll"
+
+# Once a reply-bearing invocation begins, a result-less crash can no longer be
+# distinguished from successful display. Recovery therefore sacrifices that
+# reply and resumes plain polling rather than risking a duplicate.
+HREPLY_CRASH="$TMP_ROOT/hreply-crash"; new_home "$HREPLY_CRASH"
+REPLY_CRASH_ART="$TMP_ROOT/reply-crash-board.html"
+printf '<h1>reply crash</h1>\n' > "$REPLY_CRASH_ART"
+reply_crash_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_CRASH_ART")
+PE_TRACKED+=("$HREPLY_CRASH|$reply_crash_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-crash-log" LAVISH_REPLY_MODE=crash
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_CRASH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_CRASH_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_CRASH" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the crash test listener did not start"
+printf '%s' 'possibly displayed once' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_CRASH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_CRASH_ART" >/dev/null
+for _ in $(seq 1 50); do
+  PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_CRASH" reconcile >/dev/null
+  [ -e "$HREPLY_CRASH/state/.wake-queue" ] && break
+  sleep 0.1
+done
+wait_for "$HREPLY_CRASH/state/.wake-queue" || fail "plain polling did not recover after the reply crash"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "crash recovery resent an ambiguous reply"
+[ "$(grep -c '^plain:' "$LAVISH_REPLY_LOG")" -ge 2 ] || fail "crash recovery did not return to plain polling"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_CRASH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_CRASH_ART" >/dev/null
+pass "a crash after reply consumption loses rather than duplicates the reply and recovers plain polling"
+
+# An in-flight reply remains private and excludes a second one until its wait
+# ends. Inputs the shell cannot carry safely are rejected before replacement.
+HREPLY_HOLD="$TMP_ROOT/hreply-hold"; new_home "$HREPLY_HOLD"
+REPLY_HOLD_ART="$TMP_ROOT/reply-hold-board.html"
+printf '<h1>reply hold</h1>\n' > "$REPLY_HOLD_ART"
+reply_hold_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_HOLD_ART")
+PE_TRACKED+=("$HREPLY_HOLD|$reply_hold_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-hold-log" LAVISH_REPLY_MODE=hold
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_HOLD_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_HOLD" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the held reply test listener did not start"
+printf '%s' 'held reply' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_HOLD_ART" >/dev/null
+wait_for "$LAVISH_REPLY_LOG.reply-ready" || fail "the reply-bearing listener did not start"
+consumed_files=("$HREPLY_HOLD/state/procevent/.$reply_hold_id.reply."*.consumed)
+[ -f "${consumed_files[0]}" ] || fail "the in-flight reply has no private consumed record"
+consumed_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "${consumed_files[0]}")
+assert_contains "$consumed_mode" 600 "the in-flight reply record is not private"
+second_reply_status=0
+second_reply_out=$(printf '%s' 'must be refused' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_HOLD_ART" 2>&1) || second_reply_status=$?
+[ "$second_reply_status" -ne 0 ] || fail "a second reply was armed while one was in flight"
+assert_contains "$second_reply_out" "already pending or in flight" "the second reply refusal is explicit"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG")" -eq 1 ] || fail "the refused reply started another poll"
+: | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_HOLD_ART" >/dev/null 2>&1 \
+  && fail "an empty reply was accepted"
+printf '\0' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_HOLD_ART" >/dev/null 2>&1 \
+  && fail "a NUL reply was accepted"
+head -c 8193 /dev/zero | tr '\0' x | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_HOLD_ART" >/dev/null 2>&1 \
+  && fail "an oversized reply was accepted"
+: > "$LAVISH_REPLY_LOG.reply-release"
+wait_for "$HREPLY_HOLD/state/.wake-queue" || fail "the held reply did not complete"
+assert_absent "$LAVISH_REPLY_LOG.overlap" "the in-flight exclusion allowed simultaneous pollers"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_HOLD" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_HOLD_ART" >/dev/null
+pass "reply state is private, bounded, NUL-safe, and excludes concurrent replies"
+
+# A canonical source already owned by another home cannot be displaced to send
+# a reply, and the refused home starts no competing poll.
+HREPLY_OWNER_A="$TMP_ROOT/hreply-owner-a"; new_home "$HREPLY_OWNER_A"
+HREPLY_OWNER_B="$TMP_ROOT/hreply-owner-b"; new_home "$HREPLY_OWNER_B"
+REPLY_OWNER_ART="$TMP_ROOT/reply-owner-board.html"
+printf '<h1>reply owner</h1>\n' > "$REPLY_OWNER_ART"
+reply_owner_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_OWNER_ART")
+PE_TRACKED+=("$HREPLY_OWNER_A|$reply_owner_id" "$HREPLY_OWNER_B|$reply_owner_id")
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-owner-log" LAVISH_REPLY_MODE=normal
+export LAVISH_REPLY_LOG LAVISH_REPLY_MODE
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_OWNER_A" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_OWNER_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" pe "$HREPLY_OWNER_A" reconcile >/dev/null
+wait_for "$LAVISH_REPLY_LOG.initial-ready" || fail "the owning home's listener did not start"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_OWNER_B" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_OWNER_ART" >/dev/null
+owner_reply_status=0
+owner_reply_out=$(printf '%s' 'foreign reply' | PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_OWNER_B" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm-reply "$REPLY_OWNER_ART" 2>&1) || owner_reply_status=$?
+[ "$owner_reply_status" -ne 0 ] || fail "a foreign home displaced the source owner"
+assert_contains "$owner_reply_out" "owned by another home" "foreign ownership refusal is explicit"
+[ "$(grep -c '^reply:' "$LAVISH_REPLY_LOG" 2>/dev/null || true)" -eq 0 ] \
+  || fail "the foreign home sent a reply despite the ownership refusal"
+assert_absent "$LAVISH_REPLY_LOG.overlap" "foreign ownership produced simultaneous pollers"
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_OWNER_B" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_OWNER_ART" >/dev/null
+PATH="$LAVISH_REPLY_BIN:$PATH" FM_HOME="$HREPLY_OWNER_A" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$REPLY_OWNER_ART" >/dev/null
+pass "reply arming preserves one owner and refuses a competing home"
+
 # The public arm boundary refuses invalid retry intervals before it publishes a
 # source registration, rather than arming a listener that can only fail later.
 HINVALID="$TMP_ROOT/hinvalid"; new_home "$HINVALID"
@@ -1364,10 +1604,16 @@ assert_contains "$adapter_help" "destructively clears" \
   "the adapter's help states the destructive-source loss limitation"
 assert_contains "$adapter_help" "Never describe" \
   "the adapter's help forbids an at-least-once or lossless description"
+assert_contains "$adapter_help" "arm-reply" \
+  "the adapter's help publishes the one-shot reply interface"
+assert_contains "$adapter_help" "can lose the reply" \
+  "the adapter's help states the one-shot reply crash boundary"
 
 runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
 assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
+assert_contains "$runner_help" "restart" \
+  "the runner's help publishes the serialized restart boundary"
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"

@@ -31,6 +31,19 @@ For a Lavish review artifact firstmate owns (a live investigating scout should h
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
+After the source-owning worker or secondmate has applied feedback and updated the artifact, it can send exactly one reply on the next blocking wait without creating another poller:
+
+```sh
+printf '%s' "$reply" | bin/fm-procevent-lavish.sh arm-reply <artifact.html>
+```
+
+Run that command in the same `FM_HOME` that owns the armed source.
+The reply comes only from stdin, is bounded and staged privately, is passed as one literal argument rather than shell input, and is removed from every later ordinary poll.
+A second pending or in-flight reply and a live owner in another home are refused.
+The adapter header and `--help` own the exact bound and mechanics.
+A reply is consumed before the Lavish call because no upstream receipt can prove whether Lavish displayed it: after that point, a crash can lose it, and recovery deliberately resumes reply-free polling rather than risk a duplicate.
+The exact transient poll interruption is still retried, but every retry after the reply-bearing attempt is reply-free for the same reason.
+
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 
 ```sh
@@ -98,6 +111,7 @@ Supported by tests:
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
+- a serialized restart preserves the exact registration, stops and releases only this home's proven generation, refuses a foreign or uncertain owner, and starts no simultaneous replacement poller;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
 - ownership moves only once a whole generation is gone, so a crashed runner leader whose owned process group is still running never reads as stale: that surviving group is stopped before any replacement starts, and the claim is kept for retry when it cannot be;
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;

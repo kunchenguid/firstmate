@@ -8,6 +8,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
+One-shot Lavish agent replies verified on 2026-08-25 on Linux 6.6.87.2-microsoft-standard-WSL2 x86_64 with `lavish-axi` 0.1.53 installed.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -35,6 +36,14 @@ Exit 2 with `VALIDATION_ERROR` is positive proof the subcommand does not exist, 
 Note that `lavish-axi <anything> --help` exits 0 for any argument, including a nonsense subcommand, so a `--help` exit code can never be used as a capability probe.
 
 The adapter depends on none of this: it uses only the published poll shape above.
+The same 0.1.53 command help was rechecked on 2026-08-25 and still publishes `--agent-reply` on that blocking poll:
+
+```sh
+$ lavish-axi --version
+0.1.53
+$ lavish-axi poll --help | head -1
+Usage: lavish-axi poll <html-file> [--agent-reply "..."]
+```
 
 ## Why an ended Lavish review is terminal
 
@@ -87,6 +96,9 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
+| one-shot Lavish agent reply | the public `arm-reply` path stops the source-owning home's active plain listener, starts one reply-bearing wait with a private bounded stdin payload passed as one literal argv element, and then leaves the unchanged registration to start a plain wait; a reply-bearing `Send & End` still retires that registration without another poll; shell-looking text is not executed, and empty, NUL-containing, oversized, concurrent, and foreign-owner attempts are refused |
+| reply interruption and crash boundary | the exact transient interruption retries as a plain wait without resending the reply, while a result-less failure after the reply-bearing invocation resumes ordinary polling and never repeats the ambiguously consumed reply |
+| reply restart exclusion | fixture pollers take an external overlap marker around their whole lifetime, proving the old generation exits before the reply generation starts, a second reply cannot start while the first is in flight, and a second home's source cannot displace the live owner |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a presented-but-unacknowledged wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
