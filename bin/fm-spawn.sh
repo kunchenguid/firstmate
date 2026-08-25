@@ -813,7 +813,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4
-  local token_path token hook_root auth_path paths path
+  local token_path token hook_root hook_root_owner auth_path paths path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -825,11 +825,14 @@ clear_relaunch_harness_wiring() {
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   hook_root=
+  hook_root_owner=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-    # agy records the customization root it chose on the second line; every
-    # other adapter's token file has only the first, so this reads empty there.
+    # agy records the customization root it chose on the second line and root
+    # ownership (created|preexisting) on the third; every other adapter's
+    # token file has only the first, so these read empty there.
     hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
+    hook_root_owner=$(sed -n '3p' "$token_path" 2>/dev/null || true)
   fi
   auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token" "$state") || return 1
   if [ -n "$auth_path" ]; then
@@ -841,11 +844,24 @@ clear_relaunch_harness_wiring() {
   paths=$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$hook_root") || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    # agy's task-local hook sits inside a root the project may own and may
+    # have been replaced by a project-authored hooks.json while the task ran;
+    # only the firstmate-generated file (fm-control-lib.sh owns the test) is
+    # retired, anything else is project configuration and stays.
+    if [ "$harness" = agy ] && [ -n "$hook_root" ] \
+       && [ "$path" = "$wt/$hook_root/hooks.json" ] \
+       && ! fm_control_agy_task_hook_owned "$path" "$token"; then
+      continue
+    fi
     rm -f -- "$path" || return 1
   done <<EOF
 $paths
 EOF
-  if [ "$harness" = agy ] && [ -n "$hook_root" ]; then
+  # Only a root firstmate created may be removed once emptied; a pre-existing
+  # project directory (or a pre-owner-record token file, which reads as an
+  # empty owner) is left in place.
+  if [ "$harness" = agy ] && [ -n "$hook_root" ] \
+     && [ "$hook_root_owner" = created ]; then
     rmdir "$wt/$hook_root" 2>/dev/null || true
   fi
 }
@@ -2704,14 +2720,23 @@ EOF
       # Agy discovers task-local hooks from four supported customization roots.
       # Never merge with or overwrite a project's hooks.json.
       # Select the first unoccupied root and fail closed when every root is
-      # already owned by the project.
+      # already owned by the project. Whether the root existed before firstmate
+      # touched it is recorded alongside the token: a borrowed project
+      # directory must survive teardown and relaunch, only a firstmate-created
+      # one may be removed once emptied.
       AGY_HOOK_ROOT=
+      AGY_HOOK_ROOT_OWNER=
       for candidate in .agents .agent _agents _agent; do
-        if { [ ! -e "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ]; } \
-           || { [ -d "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ] \
-                && [ ! -e "$WT/$candidate/hooks.json" ] \
-                && [ ! -L "$WT/$candidate/hooks.json" ]; }; then
+        if [ ! -e "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ]; then
           AGY_HOOK_ROOT=$candidate
+          AGY_HOOK_ROOT_OWNER=created
+          break
+        fi
+        if [ -d "$WT/$candidate" ] && [ ! -L "$WT/$candidate" ] \
+           && [ ! -e "$WT/$candidate/hooks.json" ] \
+           && [ ! -L "$WT/$candidate/hooks.json" ]; then
+          AGY_HOOK_ROOT=$candidate
+          AGY_HOOK_ROOT_OWNER=preexisting
           break
         fi
       done
@@ -2728,7 +2753,8 @@ EOF
       umask "$old_umask"
       token=${auth_file##*/}
       printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n%s\n' "$token" "$AGY_HOOK_ROOT" > "$STATE/$ID.agy-turnend-token"
+      printf '%s\n%s\n%s\n' "$token" "$AGY_HOOK_ROOT" "$AGY_HOOK_ROOT_OWNER" \
+        > "$STATE/$ID.agy-turnend-token"
       printf 'token=%s\n' "$token" > "$WT/.fm-agy-turnend"
       agy_command=$(printf 'bash %s %s %s %s' \
         "$(shell_quote "$FM_ROOT/bin/fm-agy-turnend-hook.sh")" \

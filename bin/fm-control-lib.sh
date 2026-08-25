@@ -242,12 +242,28 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ag
   esac
 }
 
+# agy's task-local hooks.json lives inside a customization root the PROJECT
+# may own: spawn borrows a pre-existing hookless directory rather than always
+# creating one. The project may also have replaced the installed file while the
+# task ran, so retirement must only ever delete the firstmate-generated hook,
+# which is the one that names this task's turn-end token. Both teardown and the
+# control plane's relaunch decide through this single owner so neither ever
+# removes a project-authored hooks.json.
+fm_control_agy_task_hook_owned() {  # <hook-file> <token>
+  local hook=${1-} token=${2-}
+  [ -n "$hook" ] && [ -n "$token" ] || return 1
+  [ -f "$hook" ] && [ ! -L "$hook" ] || return 1
+  grep -Fq "firstmate-task-turn-end-$token" "$hook" 2>/dev/null
+}
+
 # The firstmate-owned global turn-end registry entry a harness mints per task.
 # grok, kimi, and agy are the adapters whose turn-end hook is gated by a
 # private token file; every other adapter's wiring is fully covered by
 # fm_control_harness_wiring_paths. agy's token file carries the chosen
-# customization root on its second line, which is why its first line is read
-# the same way and the root is handed back to fm_control_harness_wiring_paths.
+# customization root on its second line and, on its third, whether firstmate
+# created that root (created) or borrowed a pre-existing project directory
+# (preexisting); the root is handed back to fm_control_harness_wiring_paths
+# and the owner line decides whether retirement may remove the root itself.
 # Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}

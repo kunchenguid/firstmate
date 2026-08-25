@@ -332,6 +332,64 @@ test_agy_teardown_removes_task_hook_and_auth() {
   pass "Agy teardown removes the generated hook, pointer, and registry token"
 }
 
+test_agy_teardown_preserves_a_borrowed_project_root() {
+  # When every earlier candidate is unavailable only because the project owns
+  # it, spawn borrows the first hookless project directory instead of creating
+  # one. Teardown then removes only the installed hook and leaves the
+  # project's directory (and everything else in it) standing.
+  local id rec out rc
+  id="agy-keeproot-z8-$$"
+  rec=$(make_spawn_case keeproot "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$PROJ_DIR/.agents"
+  printf 'project content\n' > "$PROJ_DIR/.agents/keep.md"
+  git -C "$PROJ_DIR" add .agents
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'project-owned customization root'
+  git -C "$PROJ_DIR" push -q origin HEAD
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "Agy spawn should borrow the project-owned hookless root"$'\n'"$out"
+  [ "$(sed -n '2p' "$HOME_DIR/state/$id.agy-turnend-token")" = .agents ] \
+    || fail "spawn did not select the project-owned root"
+  [ "$(sed -n '3p' "$HOME_DIR/state/$id.agy-turnend-token")" = preexisting ] \
+    || fail "spawn did not record the borrowed root as preexisting"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Agy teardown failed"
+  assert_absent "$WT_DIR/.agents/hooks.json" "Agy hook survived teardown"
+  [ -d "$WT_DIR/.agents" ] \
+    || fail "teardown removed the project-owned customization root"
+  assert_present "$WT_DIR/.agents/keep.md" "teardown removed project content from its root"
+  pass "Agy teardown leaves a borrowed project customization root standing"
+}
+
+test_agy_teardown_preserves_a_project_authored_hook_file() {
+  # A hooks.json the project wrote over the installed one while the task ran
+  # carries no firstmate turn-end marker, so teardown must not delete it.
+  local id rec out rc hook_root
+  id="agy-keephook-z9-$$"
+  rec=$(make_spawn_case keephook "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "Agy spawn should succeed before teardown"
+  hook_root=$(sed -n '2p' "$HOME_DIR/state/$id.agy-turnend-token")
+  printf '{"project-owned":{}}\n' > "$WT_DIR/$hook_root/hooks.json"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Agy teardown failed"
+  [ "$(cat "$WT_DIR/$hook_root/hooks.json" 2>/dev/null)" = '{"project-owned":{}}' ] \
+    || fail "teardown deleted a project-authored hooks.json"
+  assert_absent "$WT_DIR/.fm-agy-turnend" "Agy pointer survived teardown"
+  assert_absent "$HOME_DIR/state/$id.agy-turnend-token" "Agy token state survived teardown"
+  pass "Agy teardown never deletes a project-authored hooks.json"
+}
+
 test_agy_primary_guard_bounds_continuation() {
   local dir out rc
   dir="$TMP_ROOT/primary-guard"
@@ -449,6 +507,8 @@ test_agy_spawn_refuses_when_all_hook_roots_are_owned
 test_agy_delivery_accepts_fast_completed_turn
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
+test_agy_teardown_preserves_a_borrowed_project_root
+test_agy_teardown_preserves_a_project_authored_hook_file
 test_agy_primary_guard_bounds_continuation
 test_agy_detection_uses_marker_and_ancestry
 test_agy_session_lock_identity
