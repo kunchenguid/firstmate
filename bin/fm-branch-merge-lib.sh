@@ -163,14 +163,23 @@ fm_branch_fetch_remote_tip() {
 # changes after inspection, and the worktree guard applies even though a remote
 # delete would otherwise allow deleting the branch under a live task.
 fm_branch_delete_remote_proven_tip() {
-  local repo=$1 remote=$2 branch=$3 expected_tip=$4 current
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4 current local_tip hold
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   current=$(fm_branch_remote_tip "$repo" "$remote" "$branch") || return 1
   [ "$current" = "$expected_tip" ] || return 1
+  local_tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" || true)
+  if [ "$local_tip" = "$expected_tip" ]; then
+    hold=$(mktemp -d /tmp/fm-branch-remote.XXXXXX) || return 1
+    rmdir "$hold" || return 1
+    git -C "$repo" worktree add -q "$hold" "$branch" || return 1
+  fi
   git -C "$repo" push --quiet \
     --force-with-lease="refs/heads/$branch:$expected_tip" \
     "$remote" ":refs/heads/$branch" >/dev/null 2>&1
+  current=$?
+  [ -z "${hold:-}" ] || git -C "$repo" worktree remove "$hold" >/dev/null 2>&1 || true
+  return "$current"
 }
 
 fm_branch_pr_number_from_branch() {

@@ -46,6 +46,11 @@ PROJ=$(resolve_project "$1")
 [ -d "$PROJ" ] || { echo "branch-cleanup: not a directory: $PROJ" >&2; exit 1; }
 git -C "$PROJ" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || { echo "branch-cleanup: not a git repo: $PROJ" >&2; exit 1; }
+TOPLEVEL=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) \
+  || { echo "branch-cleanup: not a git repo: $PROJ" >&2; exit 1; }
+PROJ=$(cd "$PROJ" && pwd -P)
+[ "$PROJ" = "$TOPLEVEL" ] \
+  || { echo "branch-cleanup: not a git repo root: $PROJ" >&2; exit 1; }
 
 label=$(basename "$PROJ")
 cleaned=0
