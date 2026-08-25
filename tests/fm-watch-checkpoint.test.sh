@@ -87,14 +87,15 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
-install_context_failure_checkpoint() { # <repo>
-  mkdir -p "$1/bin"
-  cp "$CHECKPOINT" "$1/bin/fm-watch-checkpoint.sh"
-  cat > "$1/bin/fm-watch.sh" <<'SH'
+write_context_failure_watcher() {
+  cat > "$1" <<'SH'
 #!/usr/bin/env bash
 printf 'signal: context fallback fixture\n'
 SH
-cat > "$1/bin/fm-wake-context.sh" <<'SH'
+}
+
+write_context_failure_presenter() {
+  cat > "$1" <<'SH'
 #!/usr/bin/env bash
 if [ ! -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wake-context-presentation" ]; then
   printf 'WAKE_CONTEXT_FALLBACK: automatic wake context is disabled; run bin/fm-wake-drain.sh once.\n'
@@ -109,6 +110,13 @@ fi
 printf 'codex context failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
 exit 1
 SH
+}
+
+install_context_failure_checkpoint() { # <repo>
+  mkdir -p "$1/bin"
+  cp "$CHECKPOINT" "$1/bin/fm-watch-checkpoint.sh"
+  write_context_failure_watcher "$1/bin/fm-watch.sh"
+  write_context_failure_presenter "$1/bin/fm-wake-context.sh"
   chmod +x "$1/bin"/*.sh
 }
 

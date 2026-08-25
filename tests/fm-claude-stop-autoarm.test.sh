@@ -22,9 +22,8 @@ ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
 
-install_autoarm_wake_context_fixture() {
-  local dir=$1
-  cat > "$dir/bin/fm-wake-context.sh" <<'SH'
+write_autoarm_wake_context_fixture() {
+  cat > "$1" <<'SH'
 #!/usr/bin/env bash
 if [ ! -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wake-context-presentation" ]; then
   printf 'WAKE_CONTEXT_FALLBACK: automatic wake context is disabled; run bin/fm-wake-drain.sh once.\n'
@@ -36,13 +35,16 @@ if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
 fi
 if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
   printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
-  printf 'durable Claude presentation\n'
-  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
+  printf 'durable Claude presentation\n'; printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-7\n' >&2
   exit 1
 fi
 printf 'CLAUDE_CONTEXT_PACKET\n'
 SH
-  chmod +x "$dir/bin/fm-wake-context.sh"
+}
+
+install_autoarm_wake_context_fixture() {
+  write_autoarm_wake_context_fixture "$1/bin/fm-wake-context.sh"
+  chmod +x "$1/bin/fm-wake-context.sh"
 }
 
 # Copy the hook and its sourced dependencies into a fixture checkout.
