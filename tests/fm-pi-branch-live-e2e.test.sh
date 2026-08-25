@@ -8,6 +8,19 @@
 # credentials and no models - the branch's first prompt must fail fast and
 # prove the never-lose-a-wake fallback to main against the real SDK.
 #
+# It also pins the vendor-side invariant the delivery-time freshness re-check
+# rides on. A note reported while the captain's turn is running is HELD until
+# Pi reports that turn finished, so the hazard is a turn that starts without
+# ever ending: that would strand the held note. This guard proves, against the
+# real SDK, that the real loader wires an extension's handlers and that a
+# prompt Pi refuses to run emits NEITHER a start NOR an end - the pair moves
+# together, so the hold is only ever entered when a release must follow.
+# LIMIT, stated rather than glossed: an isolated agent dir has no credentials
+# and no model, so no extension event is deliverable at all here and this guard
+# cannot exercise a real turn's own end emission. The event NAMES are pinned
+# separately by the strict typecheck against the installed package
+# (tests/fm-pi-primary-types.test.sh).
+#
 # No credentials are read and no provider call leaves the machine: the guard
 # points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
 # empty by construction. Run after every Pi upgrade and before trusting
@@ -48,6 +61,7 @@ ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 # Stock macOS Bash 3.2 cannot reliably parse JavaScript template literals in a
 # heredoc nested inside command substitution, so capture through a file.
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   PI_CODING_AGENT_DIR="$agentdir" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -136,6 +150,68 @@ if (!pointer.startsWith(`${home}/state/branch-session/`) || !pointer.endsWith(".
 if (!existsSync(`${home}/state/branch-session`)) {
   throw new Error("branch session store directory was not created");
 }
+
+// Held-note release: a note reported mid-turn waits for Pi to report the
+// captain's turn finished, so a turn that starts without ending would strand
+// it. Drive a prompt the real SDK refuses to run and assert the start and end
+// events move together - neither fires - through handlers the real loader
+// actually wired.
+const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+let factoryWired = 0;
+const seen = [];
+const probeLoader = new sdk.DefaultResourceLoader({
+  cwd: home,
+  agentDir: sdk.getAgentDir(),
+  noExtensions: true,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+  systemPrompt: "turn-end probe",
+  extensionFactories: [
+    {
+      name: "fm-turn-end-probe",
+      factory: (probePi) => {
+        factoryWired += 1;
+        for (const name of ["agent_start", "agent_end", "agent_settled"]) {
+          probePi.on(name, () => {
+            seen.push(name);
+          });
+        }
+      },
+    },
+  ],
+});
+await probeLoader.reload();
+mkdirSync(`${home}/state/probe-session`, { recursive: true });
+const probe = await sdk.createAgentSession({
+  cwd: home,
+  sessionManager: sdk.SessionManager.create(home, `${home}/state/probe-session`),
+  resourceLoader: probeLoader,
+  tools: [],
+  customTools: [],
+});
+let promptRefused = false;
+try {
+  await probe.session.prompt("probe turn");
+} catch {
+  // Expected: the isolated agent dir resolves no model and no credentials.
+  promptRefused = true;
+}
+try {
+  probe.session.dispose();
+} catch {
+  // Already gone.
+}
+if (factoryWired !== 1) {
+  throw new Error(`real resource loader did not wire the extension factory (ran ${factoryWired} times)`);
+}
+if (!promptRefused) {
+  throw new Error("credential-free probe prompt was accepted: this guard can no longer prove the refused-turn case");
+}
+if (seen.length !== 0) {
+  throw new Error(`a refused turn emitted ${JSON.stringify(seen)}: a start without an end would strand every held note`);
+}
 console.log("LIVE_OK");
 process.exit(0);
 EOF
@@ -144,4 +220,4 @@ out=$(cat "$TMP_ROOT/node-output")
 if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
+pass "real Pi SDK $PI_VERSION accepts the branch session construction, preserves an unpromptable wake, and never starts a turn it does not end"

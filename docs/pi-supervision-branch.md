@@ -24,7 +24,7 @@ This feature is Pi-only by construction and changes nothing anywhere else:
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect so replacement or lock loss cannot let an old continuation mutate the new session.
   Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
-- Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format and the read cursor.
+- Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format, the read cursor, and the claim anchor that keeps a delivered outcome honest (see "Freshness at delivery" below).
   Outcomes are written to the store before any note is handed to Pi, and rows that never reach that handoff replay once through the next locked session-start digest.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
@@ -44,6 +44,7 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
+A note is only ever handed to Pi while the captain's conversation is idle; one reported mid-turn is held by the extension and delivered at the end of that turn, so it never steers a running turn and its claim can still be re-checked first.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
@@ -58,6 +59,21 @@ A review that found literally nothing worth reporting uses verdict `routine`, `t
 Only a captain-worthy finding reports verdict `captain` and opens a main turn.
 Every other fleet-wide or unresolvable wake - including watcher-failure alarms, which are never offered to the branch - keeps today's wake-to-main path.
 
+## Freshness at delivery
+
+An outcome is recorded the moment the branch judges its claim true and delivered later, so the two are not the same instant.
+The fleet keeps moving inside the captain's running turn: the PR a note calls review-ready can merge, and the finished task can be torn down, before that turn ends.
+A note delivered afterwards would state a claim that has since become false.
+
+Every delivery therefore re-checks the claim instead of trusting the recorded text, against the task's **claim anchor**: the durable records that decide whether a task-local claim is still current, owned by `bin/fm-branch-outcome.sh`'s header.
+A merged PR and a torn-down task both move the anchor; ordinary progress on the task does not, so a routine note is not invalidated by mere activity.
+A fleet-wide outcome carries no task-local claim and is never treated as stale.
+
+Both delivery paths apply it.
+The extension re-checks a held note when the captain's turn ends: a stale `routine` note is dropped, because it is noise by definition and the durable row still holds it for `fm_branch_outcomes`, while a stale `captain` note still opens its one turn - suppressing it could bury a real terminal result - carrying an explicit supersession marker that sends main back to the task's current state instead of the recorded claim.
+The locked session-start replay applies the same check to rows that never reached a handoff at all, emitting a stale row with `"superseded":true` added rather than relaying it as current; the stored line is never rewritten.
+An anchor that cannot be computed is empty and never reads as stale, so an unverifiable claim is delivered unchanged rather than suppressed.
+
 ## Cost model and the byte-stable prefix
 
 The captain accepted the normal provider prompt-caching strategy: a byte-identical branch prefix generated once per firstmate version, the same tool set in the same order on every request, and one shared `prompt_cache_key` per home for all branch sessions (set in a `before_provider_request` hook, and only for providers whose requests already carry that field); main keeps its own per-session key.
@@ -71,6 +87,6 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 
 ## Verification
 
-Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, fallback, filter, mirror, cache key, persistence), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, leases, guards, non-branch-home invariance), the branch-offer and heartbeat-offer tests in `tests/fm-pi-watch-extension.test.sh`, and the recovery test in `tests/fm-session-start.test.sh`.
+Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, fallback, filter, delivery-time freshness, mirror, cache key, persistence), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, claim anchors and superseded replay, leases, guards, non-branch-home invariance), the branch-offer and heartbeat-offer tests in `tests/fm-pi-watch-extension.test.sh`, and the recovery test in `tests/fm-session-start.test.sh`.
 Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK with no credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.

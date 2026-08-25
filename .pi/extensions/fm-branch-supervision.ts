@@ -94,6 +94,17 @@ const MERGE_NOTE_BOAT = "⛵";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
+// A merge note main could not be given yet, held with the task's claim anchor
+// so the claim can be re-checked at the delivery boundary (see holdNote).
+type PendingNote = {
+  generation: number;
+  seq: string;
+  task: string;
+  verdict: Verdict;
+  summary: string;
+  silent: boolean;
+  anchor: string;
+};
 type LockOwnership = "owned" | "other" | "missing";
 
 const scriptEnv = {
@@ -251,6 +262,7 @@ export default function (pi: ExtensionAPI) {
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
   const pendingMirror: MirrorItem[] = [];
+  const pendingNotes: PendingNote[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
 
   function generationOwnsLock(expectedGeneration: number): boolean {
@@ -316,18 +328,119 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // The task's claim anchor right now (bin/fm-branch-outcome.sh owns what it
+  // contains). An empty result means the claim is unverifiable, which never
+  // reads as stale.
+  function claimAnchor(task: string): string {
+    const read = runOutcomeScript(["claim-anchor", "--task", task]);
+    return read.ok ? read.stdout : "";
+  }
+
+  function markRead(expectedGeneration: number, seq: string): boolean {
+    if (!/^[0-9]+$/.test(seq)) return true;
+    if (!actingAsOwner(expectedGeneration)) return false;
+    return runOutcomeScript(["mark-read", "--through", seq]).ok;
+  }
+
+  function noteContent(task: string, verdict: Verdict, summary: string): string {
+    return verdict === "captain" ? `${task}: ${summary}` : `${MERGE_NOTE_BOAT} ${task}: ${summary}`;
+  }
+
+  // Rendered unless it is a captain-facing note (its turn is the outcome) or an
+  // explicitly silent no-change fleet heartbeat.
+  function noteDisplay(task: string, verdict: Verdict, silent: boolean): boolean {
+    return verdict !== "captain" && !(task === "fleet" && silent);
+  }
+
+  // A captain-relevant outcome whose claim went stale still opens its turn -
+  // suppressing it could bury a real terminal result - but it is delivered as
+  // a superseded record with an explicit re-check instruction, so main reports
+  // the current truth rather than the recorded claim.
+  function supersededContent(task: string, summary: string): string {
+    return `${task}: SUPERSEDED - this outcome was recorded earlier and the task's durable record has changed since it was written, so treat its claim as out of date: "${summary}". Re-read the task's current state and report that to the captain instead of this recorded summary.`;
+  }
+
   // Append-only merge into main. The store row is already durable when this
-  // runs; the note is a cache of it at main's tail. Delivery modes per the
-  // design: routine+idle appends now with no turn, routine+busy appends after
-  // the captain's next prompt, captain-relevant triggers exactly one turn
-  // (queued as a follow-up while main is busy) - that follow-up turn is
-  // itself the captain-visible outcome, so the captain-facing note is
-  // delivered silently (display: false) rather than printed or rendered a
-  // second time; routine notes stay rendered except an explicitly silent
-  // no-change heartbeat. The read cursor advances once the note is handed to
-  // Pi; a crash inside Pi's
-  // own delivery window leaves the outcome durable in the store, where
-  // main's fm_branch_outcomes tool still reads it on demand.
+  // runs; the note is a cache of it at main's tail. Only ever called while
+  // main is idle, so an append can never steer the captain's running turn:
+  // routine appends with no turn, captain-relevant triggers exactly one turn -
+  // that turn is itself the captain-visible outcome, so the captain-facing
+  // note is delivered silently (display: false) rather than printed or
+  // rendered a second time; routine notes stay rendered except an explicitly
+  // silent no-change heartbeat. The read cursor advances once the note is
+  // handed to Pi; a crash inside Pi's own delivery window leaves the outcome
+  // durable in the store, where main's fm_branch_outcomes tool still reads it.
+  function sendNote(
+    expectedGeneration: number,
+    seq: string,
+    task: string,
+    verdict: Verdict,
+    content: string,
+    display: boolean,
+  ): boolean {
+    if (!actingAsOwner(expectedGeneration)) return false;
+    const message = { customType: "fm-branch-merge", content, display };
+    if (verdict === "captain") {
+      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+    } else {
+      pi.sendMessage(message, {});
+    }
+    return markRead(expectedGeneration, seq);
+  }
+
+  // Main is mid-turn, so the note cannot be delivered yet. Hold it HERE with
+  // the task's claim anchor rather than handing it to Pi's own queue: the
+  // fleet keeps moving inside that turn (the PR a note calls review-ready can
+  // merge before the turn ends), and a note Pi already owns can no longer be
+  // re-checked before it is rendered. The row stays unread until the note is
+  // actually delivered, so a session that ends first replays it at startup.
+  function holdNote(
+    expectedGeneration: number,
+    seq: string,
+    task: string,
+    verdict: Verdict,
+    summary: string,
+    silent: boolean,
+    anchor: string,
+  ): void {
+    pendingNotes.push({ generation: expectedGeneration, seq, task, verdict, summary, silent, anchor });
+  }
+
+  // Main's idle boundary: deliver every held note, re-checking each claim
+  // against the task's durable record first. A stale routine note is dropped
+  // (the durable row keeps it, and fm_branch_outcomes still reads it) and a
+  // stale captain-relevant one is refreshed, so a queued summary is never
+  // rendered as if its claim were still true.
+  function flushPendingNotes(): void {
+    while (pendingNotes.length > 0) {
+      if (mainStreaming) return;
+      const note = pendingNotes[0];
+      if (!actingAsOwner(note.generation)) {
+        // Ownership is gone; the rows are still unread and replay at session start.
+        pendingNotes.length = 0;
+        return;
+      }
+      pendingNotes.shift();
+      const current = note.anchor ? claimAnchor(note.task) : "";
+      const stale = note.anchor !== "" && current !== "" && current !== note.anchor;
+      if (stale && note.verdict === "routine") {
+        markRead(note.generation, note.seq);
+        continue;
+      }
+      const content = stale
+        ? supersededContent(note.task, note.summary)
+        : noteContent(note.task, note.verdict, note.summary);
+      const display = noteDisplay(note.task, note.verdict, note.silent);
+      if (!sendNote(note.generation, note.seq, note.task, note.verdict, content, display)) {
+        pendingNotes.length = 0;
+        return;
+      }
+      // A captain-relevant note just opened main's turn; the rest wait for the
+      // next idle boundary rather than steering that turn.
+      if (note.verdict === "captain") return;
+    }
+  }
+
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -335,24 +448,18 @@ export default function (pi: ExtensionAPI) {
     verdict: Verdict,
     summary: string,
     silent: boolean,
-  ): boolean {
-    if (!actingAsOwner(expectedGeneration)) return false;
-    if (verdict === "captain") {
-      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
-      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
-      if (mainStreaming) {
-        pi.sendMessage(message, { deliverAs: "nextTurn" });
-      } else {
-        pi.sendMessage(message, {});
-      }
+    anchor: string,
+  ): "delivered" | "held" | "refused" {
+    if (!actingAsOwner(expectedGeneration)) return "refused";
+    if (mainStreaming) {
+      holdNote(expectedGeneration, seq, task, verdict, summary, silent, anchor);
+      return "held";
     }
-    if (/^[0-9]+$/.test(seq)) {
-      if (!actingAsOwner(expectedGeneration)) return false;
-      return runOutcomeScript(["mark-read", "--through", seq]).ok;
+    const display = noteDisplay(task, verdict, silent);
+    if (!sendNote(expectedGeneration, seq, task, verdict, noteContent(task, verdict, summary), display)) {
+      return "refused";
     }
-    return true;
+    return "delivered";
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -389,7 +496,10 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const verdict = verdictRaw as Verdict;
-        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
+        // Captured BEFORE the row is written, so the anchor describes the task
+        // exactly as the branch just saw it when it judged the claim true.
+        const anchor = claimAnchor(task);
+        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent), "--anchor", anchor];
         if (wake) appendArgs.push("--wake", wake);
         if (!actingAsOwner(toolGeneration)) {
           return {
@@ -406,7 +516,8 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
+        const merged = mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent, anchor);
+        if (merged === "refused") {
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
             details: undefined,
@@ -414,7 +525,12 @@ export default function (pi: ExtensionAPI) {
           };
         }
         return {
-          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+          content: [{
+            type: "text",
+            text: merged === "held"
+              ? `recorded seq ${appended.stdout}; the [${verdict}] note waits for the captain's running turn to end and is re-checked against the task's record before it is merged`
+              : `recorded seq ${appended.stdout} and merged [${verdict}] into main`,
+          }],
           details: undefined,
         };
       },
@@ -645,9 +761,11 @@ ${context.command}
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
+    flushPendingNotes();
   });
   pi.on?.("agent_settled", () => {
     mainStreaming = false;
+    flushPendingNotes();
   });
 
   // Mirror at main's turn_end: collect the new captain/assistant dialog into
@@ -662,6 +780,9 @@ ${context.command}
       return;
     }
     enqueueMirrorFlush();
+    // Backstop for a turn that ends without agent_end/agent_settled: the flush
+    // is queue-driven and returns immediately while main is still streaming.
+    flushPendingNotes();
   });
 
   // Pi emits session_shutdown for ordinary same-process replacements (/new,
@@ -682,6 +803,9 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     pendingMirror.length = 0;
+    // Held notes were never delivered and their rows are still unread, so the
+    // replacement session replays them from the durable store instead.
+    pendingNotes.length = 0;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     if (branch) {

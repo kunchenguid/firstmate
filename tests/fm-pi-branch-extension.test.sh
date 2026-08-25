@@ -323,7 +323,8 @@ if (untouched !== undefined) throw new Error("cache-key hook rewrote a provider 
 console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 
 // 4. Two-stage filter, stage 2: routine while main is idle appends with no
-// turn; routine while main is busy defers to after the captain's next prompt;
+// turn; routine while main is busy is HELD by the extension until main goes
+// idle (so its claim can still be re-checked before delivery);
 // captain-relevant appends and triggers exactly one turn. Store rows are
 // written BEFORE the merge note and marked read after it.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
@@ -335,10 +336,14 @@ if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must 
 if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
 fire("agent_start", {});
 await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
-if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.triggerTurn) {
-  throw new Error(`routine busy merge must defer to nextTurn without a turn: ${JSON.stringify(sentToMain[1].options)}`);
+if (sentToMain.length !== 1) {
+  throw new Error(`a routine note must be held, not handed to Pi, while main streams: ${JSON.stringify(sentToMain.map((s) => s.options))}`);
 }
 fire("agent_end", {});
+if (sentToMain.length !== 2) throw new Error("a held routine note was not delivered when main went idle");
+if (sentToMain[1].options.deliverAs || sentToMain[1].options.triggerTurn) {
+  throw new Error(`a delivered routine note must append with no turn: ${JSON.stringify(sentToMain[1].options)}`);
+}
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
 if (sentToMain[2].options.triggerTurn !== true || sentToMain[2].options.deliverAs !== "followUp") {
   throw new Error(`captain merge must trigger exactly one follow-up turn: ${JSON.stringify(sentToMain[2].options)}`);
@@ -1123,7 +1128,127 @@ EOF
   pass "an extension rebind re-mirrors undelivered dialog instead of dropping it"
 }
 
+test_stale_task_claim_is_rechecked_before_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/freshness-root"
+  home="$TMP_ROOT/freshness-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainTools, home } = globalThis.__t;
+import { writeFileSync, rmSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+
+// Four live tasks, each with a PR whose merge poll fm-pr-check.sh has armed.
+const PR = {};
+for (const id of ["ledger-lab", "steady-lab", "chart-lab", "other-lab"]) {
+  PR[id] = `https://github.com/acme/${id}/pull/7`;
+  writeFileSync(`${home}/state/${id}.meta`, `project=${home}/projects/approved\nwindow=w\npr=${PR[id]}\n`);
+  writeFileSync(`${home}/state/${id}.pr-poll`, `github\n${PR[id]}\ngithub.com\nacme/${id}\n7\n`);
+}
+
+dispatch(`signal: ledger-lab done: PR ${PR["ledger-lab"]} checks green`);
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((t) => t.name === "fm_branch_report");
+const contents = () => sentToMain.map((s) => String(s.message.content));
+
+// The captain's turn is running - they told main to merge the very PR the
+// branch is about to call review-ready.
+fire("agent_start", {});
+
+const record = async (id, verdict, summary) => {
+  const res = await report.execute(`c-${id}`, { task: id, verdict, summary, wake: `signal: ${id}` }, undefined, undefined, {});
+  if (res.isError) throw new Error(`report failed for ${id}: ${JSON.stringify(res)}`);
+};
+
+await record("ledger-lab", "captain", `PR ${PR["ledger-lab"]} checks green and is ready for your review`);
+await record("steady-lab", "captain", `PR ${PR["steady-lab"]} checks green and is ready for your review`);
+await record("chart-lab", "routine", "worker healthy, no action needed");
+await record("fleet", "routine", "fleet review: rebased two branches");
+// Checked at the end, so the delivered-content assertions below report the
+// captain-visible symptom first rather than this structural cause.
+const reachedPiMidTurn = sentToMain.length;
+
+// Inside that same turn the fleet moves on: ledger-lab's PR merges (the
+// watcher retires its poll) and the finished task is torn down. chart-lab is
+// torn down too. steady-lab and the fleet-wide note are untouched.
+for (const id of ["ledger-lab", "chart-lab"]) {
+  rmSync(`${home}/state/${id}.pr-poll`);
+  rmSync(`${home}/state/${id}.meta`);
+}
+rmSync(`${home}/state/other-lab.meta`); // unrelated churn must not touch the fleet note
+
+// Main goes idle: every held note is delivered now, each re-checked first.
+fire("agent_end", {});
+
+// The stale review-ready claim is never delivered as if it were still true.
+const ledger = contents().filter((c) => c.includes("ledger-lab"));
+if (ledger.length !== 1) throw new Error(`expected one ledger-lab note, got ${JSON.stringify(ledger)}`);
+if (!/SUPERSEDED/.test(ledger[0])) {
+  throw new Error(`a merged PR's queued review-ready claim was delivered as current: ${ledger[0]}`);
+}
+if (!ledger[0].includes("Re-read the task's current state")) {
+  throw new Error(`superseded note must send main back to the record: ${ledger[0]}`);
+}
+// ...but a captain-relevant outcome still surfaces, still opening exactly one turn.
+const ledgerSent = sentToMain.find((s) => String(s.message.content).includes("ledger-lab"));
+if (ledgerSent.options.triggerTurn !== true) {
+  throw new Error("a superseded captain outcome must still open its turn, not be swallowed");
+}
+if (ledgerSent.message.display !== false) throw new Error("captain notes are never rendered");
+
+// One idle boundary delivers one captain-relevant note, because that note
+// opens main's turn and the rest must not steer it. Each fire() below is a
+// separate boundary draining the next held note; they are not redundant.
+fire("agent_end", {});
+const steady = contents().filter((c) => c.includes("steady-lab"));
+if (steady.length !== 1 || /SUPERSEDED/.test(steady[0])) {
+  throw new Error(`an unchanged claim must be delivered verbatim: ${JSON.stringify(steady)}`);
+}
+if (!steady[0].includes("ready for your review")) throw new Error(`current claim lost its outcome: ${steady[0]}`);
+
+// A stale ROUTINE note is dropped rather than rendered as current...
+fire("agent_end", {});
+fire("agent_end", {});
+
+if (contents().some((c) => c.includes("chart-lab"))) {
+  throw new Error(`a stale routine note was rendered: ${JSON.stringify(contents())}`);
+}
+// ...while the fleet-wide note, which carries no task-local claim, still lands.
+const fleet = contents().filter((c) => c.includes("fleet:"));
+if (fleet.length !== 1 || /SUPERSEDED/.test(fleet[0])) {
+  throw new Error(`a fleet-wide note must be unaffected by task churn: ${JSON.stringify(fleet)}`);
+}
+
+// Every held row was accounted for: nothing is left unread, and the dropped
+// routine outcome is still readable on demand from the durable store.
+if (outcomeScript(["unread"]) !== "") {
+  throw new Error(`delivered and dropped notes must all be marked read: ${outcomeScript(["unread"])}`);
+}
+// The structural cause of the symptom above: a note Pi already owns cannot be
+// re-checked, so nothing may be handed over while main is still streaming.
+if (reachedPiMidTurn !== 0) {
+  throw new Error(`${reachedPiMidTurn} note(s) reached Pi mid-turn, past any freshness re-check`);
+}
+const outcomesTool = mainTools.find((t) => t.name === "fm_branch_outcomes");
+const listed = (await outcomesTool.execute("c-list", { recent: 10 }, undefined, undefined, {})).content[0].text;
+if (!listed.includes("worker healthy, no action needed")) {
+  throw new Error(`a dropped routine outcome must survive in the store: ${listed}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a queued summary must be re-checked against the task record before delivery: $out"
+  pass "a queued summary whose task claim went stale is refreshed or dropped, never delivered as current"
+}
+
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_stale_task_claim_is_rechecked_before_delivery
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_defers_new_main_owned_row
