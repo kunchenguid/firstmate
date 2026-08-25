@@ -153,11 +153,10 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
               mcp_error=true
               ;;
             zero) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":""},"error":null}' "$session" "$remote_task") ;;
-            create-answer-only)
+            step-answer-only)
               printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"
-              result=$(jq -cn --argjson session "$session" --argjson task "$remote_task" \
-                --arg answer "${FM_IDA_FAKE_ANSWER:-Verified iDA answer.}" \
-                '{status:"success",data:{session_id:$session,task_id:$task,created_session:true,answer:$answer},error:null}')
+              result=$(printf '{"status":"error","data":null,"error":{"code":"IDA_EMPTY_RESULT","message":"completed without a compact answer","details":{"session_id":%s,"task_id":%s}}}' "$session" "$remote_task")
+              mcp_error=true
               ;;
             *) printf '%s\t%s\tcompleted\t%s\n' "$session" "$marker" "$marker" >"$sessions"; result=$(printf '{"status":"success","data":{"session_id":%s,"task_id":%s,"created_session":true,"answer":"%s"},"error":null}' "$session" "$remote_task" "${FM_IDA_FAKE_ANSWER:-Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com}") ;;
           esac
@@ -200,7 +199,7 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       failed) status=failed ;;
       cancelled) status=cancelled ;;
       ambiguous-status) status=mystery_state ;;
-      zero|structured-artifact|structured-text|structured-empty|structured-malformed|structured-unsupported) status=completed ;;
+      zero|structured-artifact|structured-text|structured-empty|structured-malformed|structured-unsupported|step-answer-only) status=completed ;;
       failed-answered) status=failed ;;
       cancelled-answered) status=cancelled ;;
       closed-answered) status=closed ;;
@@ -208,7 +207,7 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     esac
     user="[Firstmate session marker: $marker]"$'\n\n'"PRIVATE_PROMPT_alpha OECID_sensitive"
     if { [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] \
-        && [ "$mode" != create-answer-only ] && [ "${mode#structured-}" = "$mode" ]; } \
+        && [ "$mode" != step-answer-only ] && [ "${mode#structured-}" = "$mode" ]; } \
       || [ "$mode" = failed-answered ] || [ "$mode" = cancelled-answered ] || [ "$mode" = closed-answered ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
     structured_answer=${FM_IDA_FAKE_ANSWER:-'FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}'}
     jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" \
@@ -224,7 +223,15 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
        messages:([{id:90,type:0,status:0,visible:true,text:$user}]
          + (if $answer=="" then [] else [(recorded_task_message + {text:$answer})] end)
-         + (if $mode=="structured-artifact" then [{
+         + (if $mode=="step-answer-only" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{taskId:$task,terminalStatus:task_status,
+               steps:[
+                 {id:1,status:1,content:""},
+                 {id:2,status:1,content:($structured_answer + "\nAdditional provider text.")}
+               ]}
+           }]
+           elif $mode=="structured-artifact" then [{
              id:92,type:8,status:1,visible:true,
              deep_research_content:{taskId:$task,terminalStatus:task_status,finalAnswer:[{artifact:{
                artifactId:"PRIVATE_ARTIFACT_ID_92",name:"PRIVATE_ARTIFACT_NAME_92",
@@ -582,21 +589,21 @@ test_structured_final_answer_readback() {
   pass "completed structured final answers are privately recovered as artifacts without provider mutation or content leakage"
 }
 
-test_submission_stream_answer_fallback() {
-  local home fakebin id=ida-create-answer-only readiness prompt state report status_count creates
-  home=$(new_home create-answer-only); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+test_completed_step_answer_fallback() {
+  local home fakebin id=ida-step-answer-only readiness prompt state report status_count creates
+  home=$(new_home step-answer-only); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
   readiness='FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}'
   prompt=$(printf 'Return exactly this readiness record and nothing else:\n%s' "$readiness")
   new_task "$home" "$id" "$prompt"; : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
 
-  FM_IDA_FAKE_MODE=create-answer-only FM_IDA_FAKE_ANSWER="$readiness" \
+  FM_IDA_FAKE_MODE=step-answer-only FM_IDA_FAKE_ANSWER="$readiness" \
     FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
     FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
     PATH="$fakebin:$BASE_PATH" "$DISPATCH" remote-agent/ida "$id" \
       --instructions "$home/data/$id/instructions.txt" >/dev/null \
-    || fail "answer-only official create result did not dispatch"
-  wait_phase "$home" "$id" terminal-success || fail "answer-only official create result did not terminalize"
+    || fail "step-only official result did not dispatch"
+  wait_phase "$home" "$id" terminal-success || fail "step-only official result did not terminalize"
 
   state=$(state_file "$home" "$id"); report="$home/data/$id/report.md"
   jq -e --arg task "$REMOTE_TASK_ID" --arg readiness "$readiness" '
@@ -607,23 +614,24 @@ test_submission_stream_answer_fallback() {
   ' "$state" >/dev/null || {
     jq -c '{phase,outcome,result_availability,result_path,
       provider_status:.provider_state.provider_status,task_id:.provider_state.task_id}' "$state" >&2
-    fail "answer-only official create result lost its normalized terminal state"
+    fail "step-only official result lost its normalized terminal state"
   }
   jq -e --arg readiness "$readiness" '
     .terminal == true and .result_availability == "available" and .result_kind == "text"
-    and .answer == $readiness and .artifact_reference == null and .error_class == null
+    and (.answer | split("\n")[0]) == $readiness
+    and .artifact_reference == null and .error_class == null
   ' "$(jq -r '.result_path' "$state")" >/dev/null \
-    || fail "answer-only official create result did not preserve the exact final answer"
-  assert_grep "$readiness" "$report" "answer-only official create result was absent from the report"
-  assert_no_grep 'exact empty final answer' "$report" "answer-only official create result was reported as exact zero"
+    || fail "step-only official result did not preserve the exact readiness marker"
+  assert_grep "$readiness" "$report" "step-only official result was absent from the report"
+  assert_no_grep 'exact empty final answer' "$report" "step-only official result was reported as exact zero"
   if grep -R -F 'Return exactly this readiness record' "$home/state" "$report" "$home/bytedcli.log" >/dev/null; then
-    fail "private readiness instruction leaked through answer-only normalization"
+    fail "private readiness instruction leaked through step-only normalization"
   fi
   status_count=$(grep -F -c 'done: iDA remote research complete' "$home/state/$id.status" || true)
-  [ "$status_count" -eq 1 ] || fail "answer-only official create result emitted $status_count terminal notifications"
+  [ "$status_count" -eq 1 ] || fail "step-only official result emitted $status_count terminal notifications"
   creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
-  [ "$creates" -eq 1 ] || fail "answer-only official create result crossed $creates create boundaries"
-  pass "task-bound create-stream text fills exact-zero session readback without leakage or duplicate creation"
+  [ "$creates" -eq 1 ] || fail "step-only official result crossed $creates create boundaries"
+  pass "task-bound completed-step text fills exact-zero session readback without leakage or duplicate creation"
 }
 
 test_task_bound_terminal_and_monotonic_generations() {
@@ -1168,7 +1176,7 @@ test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result
 test_structured_final_answer_readback
-test_submission_stream_answer_fallback
+test_completed_step_answer_fallback
 test_task_bound_terminal_and_monotonic_generations
 test_terminal_outcomes_with_visible_answer
 test_provider_states_and_zero_result
