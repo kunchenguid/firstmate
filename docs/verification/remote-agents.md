@@ -83,7 +83,7 @@ It verifies:
 - child-local removal of all conventional proxy variables while preserving an unrelated environment sentinel across SG probe, reconciliation, and create;
 - required-command discovery through domain-restricted MCP plus the exact parent-position `ida --region sg deep-research create` command through `run_command`, with refusal evidence if that placement drifts;
 - raw-session reconciliation after provider-driven renaming, exact private first-message marker verification, and structured empty-result identity normalization;
-- recorded-task terminal authority amid conflicting session tasks and aggregate error, including same-task running then success without accepting an unrelated task answer;
+- recorded-task terminal authority amid conflicting session tasks and aggregate error, including same-task running then success with its text-bearing `finalAnswer` recovered as redacted task-bound text and no unrelated task answer accepted;
 - completed visible type-8 `deep_research_content.finalAnswer` readback with one file part and one inline-data part, normalized as an available artifact through the executable observe and process-event boundaries without creation, continuation, cancellation, or raw-content leakage;
 - completed task-bound step-only text readback when visible type-8 `.text` and `finalAnswer` are absent, preserving the exact readiness marker through public dispatch and report capture;
 - failed, cancelled, and closed sessions that still carry a visible type-8 text answer: the legacy redacted text payload stays a `text` result while availability remains `error` or `unavailable`, and readback reaches its terminal outcome without wedging;
