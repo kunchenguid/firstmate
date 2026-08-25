@@ -3165,20 +3165,24 @@ def run_is_compartment_lane(run: dict[str, Any]) -> bool:
 
 
 def stamp_durations(run: dict[str, Any], measured: dict[str, int]) -> None:
-    """Record this run's measurement, or drop it rather than brick the ledger.
+    """Record this run's compatible measurement, or drop an invalid one.
 
     Everything that later reads this ledger validates it, so an unvalidated
     write is a durable outage waiting to happen: one writer bug and `run`,
     `verify` and `timings` all refuse the task until a human edits the JSON by
-    hand. The measurement is the disposable half of that trade. A timing bug
-    should cost the operator a breakdown, never the durable findings, so a
-    measurement that fails its own contract is dropped loudly and the record
-    is written without it.
+    hand. A failed compartment attempt has no completed Azure identity to bind
+    its lane-only phases, so those incompatible fields are omitted while its
+    total and ordinary phases remain useful. Any other contract failure still
+    drops the measurement loudly and never affects the durable findings.
     """
 
+    candidate = dict(measured)
+    if not run_is_compartment_lane(run):
+        for phase in CROSSCHECK_COMPARTMENT_PHASES:
+            candidate.pop(phase, None)
     try:
         validate_durations(
-            measured,
+            candidate,
             "recorded durations_ms",
             compartment=run_is_compartment_lane(run),
         )
@@ -3191,7 +3195,7 @@ def stamp_durations(run: dict[str, Any], measured: dict[str, int]) -> None:
             file=sys.stderr,
         )
         return
-    run["durations_ms"] = measured
+    run["durations_ms"] = candidate
 
 
 def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:

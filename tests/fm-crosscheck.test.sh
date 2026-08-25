@@ -5632,12 +5632,18 @@ assert run["summary"] == "kept", run
 assert "dropping this run's phase measurement" in noise.getvalue(), noise.getvalue()
 assert "does not cover its named phases" in noise.getvalue(), noise.getvalue()
 
-# A stale measurement from an earlier persist in the same invocation is
-# removed too, rather than left behind as the record's answer.
+# A failed Azure attempt has no completed compartment identity to bind its
+# lane-only phases. Those incompatible fields are omitted, while the honest
+# total and ordinary phases remain available and the writer stays quiet.
 run["durations_ms"] = {"snapshot": 1, "total": 2}
-with contextlib.redirect_stderr(io.StringIO()):
-    module.stamp_durations(run, {"create": 1, "snapshot": 1, "total": 30})
-assert "durations_ms" not in run, run
+partial = io.StringIO()
+with contextlib.redirect_stderr(partial):
+    module.stamp_durations(
+        run,
+        {"create": 1, "stage": 2, "boot": 3, "snapshot": 4, "total": 30},
+    )
+assert run["durations_ms"] == {"snapshot": 4, "total": 30}, run
+assert partial.getvalue() == "", partial.getvalue()
 
 # An honest measurement is still written, and the drop path is not the norm.
 good = {"snapshot": 10, "reviewer": 20, "total": 40}
@@ -5670,7 +5676,7 @@ source = inspect.getsource(module.run_crosscheck)
 assert "stamp_durations(run, timer.durations_ms())" in source, source
 assert 'run["durations_ms"] =' not in source, source
 PY
-  pass "a measurement failing its own contract is dropped loudly, never written into the ledger"
+  pass "failed compartment timings omit incompatible phases and invalid measurements never land"
 }
 
 test_explicit_pi_tool_loads_with_discovery_disabled() {

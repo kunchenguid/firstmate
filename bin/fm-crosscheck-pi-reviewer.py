@@ -16,6 +16,14 @@ class ReviewError(RuntimeError):
     """A fail-closed Pi launch or verdict-protocol failure."""
 
 
+class VerdictProtocolError(ReviewError):
+    """A repairable final-verdict shape failure with its incurred telemetry."""
+
+    def __init__(self, message: str, telemetry: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.telemetry = telemetry
+
+
 def session_id(model: str, extension: Path) -> str:
     extension_digest = hashlib.sha256(extension.read_bytes()).hexdigest()
     seed = f"{model}\n{extension_digest}\n".encode()
@@ -54,6 +62,89 @@ def recover_single_object(value: str) -> dict[str, Any]:
     return recovered
 
 
+def usage_telemetry(
+    tokens: dict[str, int],
+    *,
+    tokens_complete: bool,
+    pi_cost: float,
+    cost_complete: bool,
+    turns: int,
+) -> dict[str, Any]:
+    rates = {"input": 1.40, "cache_read": 0.14, "cache_write": 1.40, "output": 4.40}
+    declared = (
+        sum(tokens[name] * rates[name] / 1_000_000 for name in rates)
+        if tokens_complete
+        else None
+    )
+    return {
+        "tokens": {
+            **(tokens if tokens_complete else dict.fromkeys(tokens)),
+            "source": "pi-turn-end-message-usage" if tokens_complete else "unavailable",
+        },
+        "costs_usd": {
+            "provider_reported": None,
+            "provider_reported_source": "unavailable-in-pi-events",
+            "pi_calculated": round(pi_cost, 12) if cost_complete else None,
+            "pi_calculated_source": (
+                "pi-turn-end-message-usage-cost-total" if cost_complete else "unavailable"
+            ),
+            "declared": round(declared, 12) if declared is not None else None,
+            "declared_source": (
+                "pinned-fireworks-regular-rates" if declared is not None else "unavailable"
+            ),
+        },
+        "turns": turns,
+    }
+
+
+def merge_telemetry(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Add the rejected initial attempt to the admitted repair attempt's spend."""
+
+    token_names = ("input", "output", "cache_read", "cache_write")
+    token_rows = [attempt["tokens"] for attempt in attempts]
+    tokens_complete = all(
+        row.get("source") == "pi-turn-end-message-usage"
+        and all(
+            isinstance(row.get(name), int)
+            and not isinstance(row.get(name), bool)
+            and row[name] >= 0
+            for name in token_names
+        )
+        for row in token_rows
+    )
+    tokens = {
+        name: sum(row[name] for row in token_rows) if tokens_complete else None
+        for name in token_names
+    }
+
+    costs: dict[str, Any] = {
+        "provider_reported": None,
+        "provider_reported_source": "unavailable-in-pi-events",
+    }
+    for name, source, source_name in (
+        ("pi_calculated", "pi-turn-end-message-usage-cost-total", "pi_calculated_source"),
+        ("declared", "pinned-fireworks-regular-rates", "declared_source"),
+    ):
+        values = [attempt["costs_usd"].get(name) for attempt in attempts]
+        complete = all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value >= 0
+            for value in values
+        )
+        costs[name] = round(sum(values), 12) if complete else None
+        costs[source_name] = source if complete else "unavailable"
+
+    return {
+        "tokens": {
+            **tokens,
+            "source": "pi-turn-end-message-usage" if tokens_complete else "unavailable",
+        },
+        "costs_usd": costs,
+        "turns": sum(attempt["turns"] for attempt in attempts),
+    }
+
+
 def parse_events(source: Path, expected_provider: str, expected_model: str) -> dict[str, Any]:
     calls: dict[str, Any] = {}
     turns = 0
@@ -66,6 +157,7 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
     pi_cost = 0.0
     tokens_complete = True
     cost_complete = True
+    verdict_protocol_error: str | None = None
 
     for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
@@ -123,7 +215,10 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
                         continue
                     call_id = part.get("id")
                     if not isinstance(call_id, str) or not call_id or call_id in calls:
-                        raise ReviewError("model guest: Pi verdict tool call id is invalid or duplicated")
+                        verdict_protocol_error = (
+                            "model guest: Pi verdict tool call id is invalid or duplicated"
+                        )
+                        continue
                     calls[call_id] = part.get("arguments")
         elif event.get("type") == "agent_end":
             if agent_ended:
@@ -140,47 +235,43 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
             final_provider = None
             final_model = None
             calls.clear()
+            verdict_protocol_error = None
 
     if not agent_ended or turns < 1 or attempt_turns < 1:
         raise ReviewError("model guest: Pi did not complete a reviewer turn")
-    if final_stop != "toolUse":
-        raise ReviewError(f"model guest: Pi final stopReason was {final_stop!r}, not 'toolUse'")
     if final_provider != expected_provider or final_model != expected_model:
         raise ReviewError("model guest: Pi final provider/model identity mismatch")
+    telemetry = usage_telemetry(
+        tokens,
+        tokens_complete=tokens_complete,
+        pi_cost=pi_cost,
+        cost_complete=cost_complete,
+        turns=turns,
+    )
+    if final_stop != "toolUse":
+        message = f"model guest: Pi final stopReason was {final_stop!r}, not 'toolUse'"
+        if not calls:
+            raise VerdictProtocolError(message, telemetry)
+        raise ReviewError(message)
+    if verdict_protocol_error is not None:
+        raise VerdictProtocolError(verdict_protocol_error, telemetry)
     if len(calls) != 1:
-        raise ReviewError("model guest: Pi must submit exactly one verdict tool call")
+        raise VerdictProtocolError(
+            "model guest: Pi must submit exactly one verdict tool call", telemetry
+        )
     value = next(iter(calls.values()))
     if isinstance(value, str):
-        value = recover_single_object(value)
+        try:
+            value = recover_single_object(value)
+        except ReviewError as exc:
+            raise VerdictProtocolError(str(exc), telemetry) from exc
     if not isinstance(value, dict) or not isinstance(value.get("verdict"), dict):
-        raise ReviewError("model guest: reviewer omitted its verdict")
+        raise VerdictProtocolError("model guest: reviewer omitted its verdict", telemetry)
     if not isinstance(value.get("evidence_files"), list):
-        raise ReviewError("model guest: reviewer omitted its evidence manifest")
-    rates = {"input": 1.40, "cache_read": 0.14, "cache_write": 1.40, "output": 4.40}
-    declared = (
-        sum(tokens[name] * rates[name] / 1_000_000 for name in rates)
-        if tokens_complete
-        else None
-    )
-    value["telemetry"] = {
-        "tokens": {
-            **(tokens if tokens_complete else dict.fromkeys(tokens)),
-            "source": "pi-turn-end-message-usage" if tokens_complete else "unavailable",
-        },
-        "costs_usd": {
-            "provider_reported": None,
-            "provider_reported_source": "unavailable-in-pi-events",
-            "pi_calculated": round(pi_cost, 12) if cost_complete else None,
-            "pi_calculated_source": (
-                "pi-turn-end-message-usage-cost-total" if cost_complete else "unavailable"
-            ),
-            "declared": round(declared, 12) if declared is not None else None,
-            "declared_source": (
-                "pinned-fireworks-regular-rates" if declared is not None else "unavailable"
-            ),
-        },
-        "turns": turns,
-    }
+        raise VerdictProtocolError(
+            "model guest: reviewer omitted its evidence manifest", telemetry
+        )
+    value["telemetry"] = telemetry
     return value
 
 
@@ -192,11 +283,7 @@ def run(argv: list[str]) -> int:
     prompt = Path(prompt_raw)
     schema = Path(schema_raw)
     result = Path(result_raw)
-    events = result.with_name("pi-events.jsonl")
-    stderr_path = result.with_name("pi.stderr")
     result.unlink(missing_ok=True)
-    events.unlink(missing_ok=True)
-    stderr_path.unlink(missing_ok=True)
     environment = dict(os.environ)
     environment["PI_CODING_AGENT_DIR"] = account
     environment["FM_CROSSCHECK_REVIEW_SCHEMA"] = str(schema)
@@ -206,53 +293,82 @@ def run(argv: list[str]) -> int:
         "the enabled tools and submit the complete final verdict exactly once "
         "with submit_crosscheck_verdict."
     )
-    command = [
-        "pi",
-        "--mode",
-        "json",
-        "--offline",
-        "--provider",
-        provider,
-        "--model",
-        model,
-        "--thinking",
-        effort,
-        "--tools",
-        "submit_crosscheck_verdict",
-        "--extension",
-        str(extension),
-        "--system-prompt",
-        system_prompt,
-        "--session-id",
-        session_id(model, extension),
-        "--no-session",
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--no-context-files",
-        "--no-approve",
-        f"@{prompt}",
-    ]
-    with events.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
-        completed = subprocess.run(
-            command,
-            check=False,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_file,
-            stderr=stderr_file,
+    repair_prompt = result.with_name("repair-prompt.txt")
+    attempt_telemetry: list[dict[str, Any]] = []
+    for attempt in range(2):
+        active_prompt = prompt if attempt == 0 else repair_prompt
+        events = result.with_name(f"pi-events-{attempt + 1}.jsonl")
+        stderr_path = result.with_name(f"pi-{attempt + 1}.stderr")
+        events.unlink(missing_ok=True)
+        stderr_path.unlink(missing_ok=True)
+        command = [
+            "pi",
+            "--mode",
+            "json",
+            "--offline",
+            "--provider",
+            provider,
+            "--model",
+            model,
+            "--thinking",
+            effort,
+            "--tools",
+            "submit_crosscheck_verdict",
+            "--extension",
+            str(extension),
+            "--system-prompt",
+            system_prompt,
+            "--session-id",
+            session_id(model, extension),
+            "--no-session",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-approve",
+            f"@{active_prompt}",
+        ]
+        with events.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            completed = subprocess.run(
+                command,
+                check=False,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+            )
+        if completed.returncode != 0:
+            sys.stderr.buffer.write(stderr_path.read_bytes()[:1024])
+            return 125
+        try:
+            value = parse_events(events, provider, model)
+        except VerdictProtocolError as exc:
+            attempt_telemetry.append(exc.telemetry)
+            if attempt == 1:
+                raise ReviewError(
+                    f"{exc}; one bounded verdict repair was exhausted"
+                ) from exc
+            repair_prompt.write_text(
+                prompt.read_text(encoding="utf-8")
+                + "\n\nVERDICT PROTOCOL REPAIR (trusted controller instruction):\n"
+                + "The preceding isolated attempt did not produce exactly one valid "
+                + "submit_crosscheck_verdict call. Re-evaluate this same exact-head "
+                + "packet. Do not end with prose and do not call the tool more than "
+                + "once. Submit the complete schema-valid verdict through "
+                + "submit_crosscheck_verdict exactly once.\n",
+                encoding="utf-8",
+            )
+            continue
+        attempt_telemetry.append(value["telemetry"])
+        value["telemetry"] = merge_telemetry(attempt_telemetry)
+        result.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
         )
-    if completed.returncode != 0:
-        sys.stderr.buffer.write(stderr_path.read_bytes()[:1024])
-        return 125
-    value = parse_events(events, provider, model)
-    result.write_text(
-        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-    stderr_path.unlink(missing_ok=True)
-    return 0
+        stderr_path.unlink(missing_ok=True)
+        return 0
+    raise ReviewError("model guest: Pi verdict repair loop ended without a result")
 
 
 def main() -> int:

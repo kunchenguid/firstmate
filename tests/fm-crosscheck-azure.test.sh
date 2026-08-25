@@ -2926,13 +2926,20 @@ import os
 from pathlib import Path
 import sys
 
-Path(os.environ["CAPTURE"]).write_text(json.dumps({
+capture_path = Path(os.environ["CAPTURE"])
+captures = json.loads(capture_path.read_text()) if capture_path.exists() else []
+captures.append({
     "argv": sys.argv[1:],
     "account": os.environ.get("PI_CODING_AGENT_DIR"),
     "schema": os.environ.get("FM_CROSSCHECK_REVIEW_SCHEMA"),
-}))
+    "prompt_text": Path(sys.argv[-1][1:]).read_text(),
+})
+capture_path.write_text(json.dumps(captures))
 scenario = os.environ["SCENARIO"]
-if scenario == "nonzero":
+effective = scenario
+if scenario.endswith("-then-valid"):
+    effective = scenario.removesuffix("-then-valid") if len(captures) == 1 else "valid"
+if effective == "nonzero":
     print("bounded fake provider failure", file=sys.stderr)
     raise SystemExit(17)
 outer = {
@@ -2942,22 +2949,22 @@ outer = {
     ],
 }
 arguments = outer
-if scenario == "string":
+if effective == "string":
     arguments = "Reviewed. " + json.dumps(outer) + " Done."
-elif scenario == "multiple-json":
+elif effective == "multiple-json":
     arguments = json.dumps(outer) + json.dumps({"second": True})
 call = {
     "type": "toolCall", "id": "verdict-1",
     "name": "submit_crosscheck_verdict", "arguments": arguments,
 }
 content = [call]
-if scenario == "missing":
+if effective == "missing":
     content = []
-elif scenario == "multiple":
+elif effective == "multiple":
     content = [call, {**call, "id": "verdict-2"}]
 reported_model = (
     "accounts/fireworks/routers/glm-5p2-fast"
-    if scenario == "wrong-model" else "accounts/fireworks/models/glm-5p2"
+    if effective == "wrong-model" else "accounts/fireworks/models/glm-5p2"
 )
 message = {
     "role": "assistant",
@@ -2974,8 +2981,17 @@ message = {
         },
     },
 }
+if effective == "internal-retry":
+    message["content"] = [{**call, "id": ""}]
+    message["stopReason"] = "error"
 print(json.dumps({"type": "turn_end", "message": message}))
 print(json.dumps({"type": "agent_end"}))
+if effective == "internal-retry":
+    print(json.dumps({"type": "auto_retry_start"}))
+    message["content"] = [call]
+    message["stopReason"] = "toolUse"
+    print(json.dumps({"type": "turn_end", "message": message}))
+    print(json.dumps({"type": "agent_end"}))
 '''
 
 
@@ -3016,7 +3032,7 @@ def run(scenario):
         return completed, captured, value, account, prompt, schema
 
 
-def assert_launch(captured, account, prompt, schema):
+def assert_launch(captured, account, prompt, schema, attempts=1):
     extension_digest = hashlib.sha256(extension.read_bytes()).hexdigest()
     seed = f"{model}\n{extension_digest}\n".encode()
     session = "fm-crosscheck-" + hashlib.sha256(seed).hexdigest()[:32]
@@ -3026,18 +3042,25 @@ def assert_launch(captured, account, prompt, schema):
         "the enabled tools and submit the complete final verdict exactly once "
         "with submit_crosscheck_verdict."
     )
-    assert captured["argv"] == [
-        "--mode", "json", "--offline", "--provider", provider,
-        "--model", model, "--thinking", "xhigh",
-        "--tools", "submit_crosscheck_verdict",
-        "--extension", str(extension),
-        "--system-prompt", system_prompt,
-        "--session-id", session, "--no-session", "--no-extensions",
-        "--no-skills", "--no-prompt-templates", "--no-themes",
-        "--no-context-files", "--no-approve", f"@{prompt}",
-    ], captured["argv"]
-    assert captured["account"] == str(account), captured
-    assert captured["schema"] == str(schema), captured
+    assert len(captured) == attempts, captured
+    for index, launch in enumerate(captured):
+        active_prompt = prompt if index == 0 else prompt.parent / "repair-prompt.txt"
+        assert launch["argv"] == [
+            "--mode", "json", "--offline", "--provider", provider,
+            "--model", model, "--thinking", "xhigh",
+            "--tools", "submit_crosscheck_verdict",
+            "--extension", str(extension),
+            "--system-prompt", system_prompt,
+            "--session-id", session, "--no-session", "--no-extensions",
+            "--no-skills", "--no-prompt-templates", "--no-themes",
+            "--no-context-files", "--no-approve", f"@{active_prompt}",
+        ], launch["argv"]
+        assert launch["account"] == str(account), launch
+        assert launch["schema"] == str(schema), launch
+    if attempts == 2:
+        repair = captured[1]["prompt_text"]
+        assert repair.startswith("PROMPT BY FILE\n\nVERDICT PROTOCOL REPAIR"), repair
+        assert "submit_crosscheck_verdict exactly once" in repair, repair
 
 
 completed, captured, value, account, prompt, schema = run("valid")
@@ -3056,15 +3079,42 @@ completed, captured, value, account, prompt, schema = run("string")
 assert completed.returncode == 0 and value["verdict"] == outer["verdict"]
 assert_launch(captured, account, prompt, schema)
 
-for scenario in ("missing", "multiple", "multiple-json", "wrong-model", "nonzero"):
+completed, captured, value, account, prompt, schema = run("internal-retry")
+assert completed.returncode == 0 and value["verdict"] == outer["verdict"], (
+    completed.returncode, completed.stderr, value,
+)
+assert_launch(captured, account, prompt, schema)
+
+for scenario in ("missing-then-valid", "multiple-then-valid", "multiple-json-then-valid"):
+    completed, captured, value, account, prompt, schema = run(scenario)
+    assert completed.returncode == 0 and value["verdict"] == outer["verdict"], (
+        scenario, completed.returncode, completed.stderr, value,
+    )
+    assert_launch(captured, account, prompt, schema, attempts=2)
+    assert value["telemetry"]["tokens"] == {
+        "input": 20, "output": 4, "cache_read": 8, "cache_write": 0,
+        "source": "pi-turn-end-message-usage",
+    }, value["telemetry"]
+    assert value["telemetry"]["costs_usd"]["declared"] == 0.00004672
+    assert value["telemetry"]["turns"] == 2
+
+for scenario in ("missing", "multiple", "multiple-json"):
+    completed, captured, value, account, prompt, schema = run(scenario)
+    assert completed.returncode == 125 and value is None, (
+        scenario, completed.returncode, completed.stderr, value,
+    )
+    assert "one bounded verdict repair was exhausted" in completed.stderr
+    assert_launch(captured, account, prompt, schema, attempts=2)
+
+for scenario in ("wrong-model", "nonzero"):
     completed, captured, value, account, prompt, schema = run(scenario)
     assert completed.returncode == 125 and value is None, (
         scenario, completed.returncode, completed.stderr, value,
     )
     assert_launch(captured, account, prompt, schema)
-print("PI RUNTIME executes the shipped strict-tool launch and fails closed")
+print("PI RUNTIME repairs one verdict-protocol miss, then fails closed")
 PY
-  pass "the digest-bound Pi runtime executes one isolated strict-tool review"
+  pass "the digest-bound Pi runtime bounds verdict repair and remains fail closed"
 }
 
 azure_pi_review_contract_unit() {

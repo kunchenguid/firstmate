@@ -1945,6 +1945,110 @@ PY
   pass "per-run routing selects a class from a file the run can carry, an absent file stays local and says so, and every present-but-broken file refuses by name and runs the command nowhere"
 }
 
+apt_lock_wait_contract() {
+  local tmp helpers lock ready release holder_pid release_pid out rc call_log attempts
+  tmp=$(mktemp -d)
+  helpers="$tmp/apt-lock-helpers.sh"
+  awk '
+    /BEGIN FM_AZURE_RUNNER_APT_LOCK_HELPERS/ {emit=1; next}
+    /END FM_AZURE_RUNNER_APT_LOCK_HELPERS/ {emit=0}
+    emit
+  ' "$GUEST" >"$helpers"
+  bash -n "$helpers" || fail "the extracted Azure runner apt-lock helpers are invalid"
+  # shellcheck source=/dev/null
+  . "$helpers"
+
+  lock="$tmp/lock-frontend"
+  ready="$tmp/ready"
+  release="$tmp/release"
+  python3 - "$lock" "$ready" "$release" <<'PY' &
+import fcntl
+import os
+from pathlib import Path
+import sys
+import time
+
+descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.lockf(descriptor, fcntl.LOCK_EX)
+Path(sys.argv[2]).touch()
+while not Path(sys.argv[3]).exists():
+    time.sleep(0.01)
+os.close(descriptor)
+PY
+  holder_pid=$!
+  fm_test_wait_for_file "$ready" "$holder_pid" 0.02 \
+    || fail "the apt-lock release regression did not acquire its fixture lock"
+  (sleep 0.15; touch "$release") &
+  release_pid=$!
+  wait_for_apt_locks 2 0.02 "$lock" \
+    || fail "the guest bootstrap did not continue after a normal apt lock released"
+  wait "$release_pid" || fail "the apt-lock release fixture failed"
+  wait "$holder_pid" || fail "the apt-lock holder failed"
+  call_log="$tmp/apt-call"
+  APT_LOCK_WAIT_SECONDS=1
+  APT_LOCK_PATHS=("$lock")
+  wait_for_apt_locks "$APT_LOCK_WAIT_SECONDS" 0.02 "${APT_LOCK_PATHS[@]}" \
+    || fail "the test apt lock set was not available for wrapper execution"
+  # shellcheck disable=SC2329 # Invoked indirectly by the extracted run_bootstrap_apt helper.
+  run_bootstrap_network() { printf '%s\n' "$*" >"$call_log"; }
+  run_bootstrap_apt install -y fixture-package \
+    || fail "the bounded apt wrapper did not reach apt-get after lock admission"
+  [ "$(<"$call_log")" = \
+    "apt-get -o DPkg::Lock::Timeout=1 install -y fixture-package" ] \
+    || fail "the executable apt wrapper lost its dpkg timeout or package arguments"
+
+  attempts="$tmp/apt-attempts"
+  printf '0\n' >"$attempts"
+  run_bootstrap_network() {
+    local count
+    count=$(<"$attempts")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$attempts"
+    if [ "$count" -eq 1 ]; then
+      echo "E: Could not get lock $lock. It is held by process 42" >&2
+      return 100
+    fi
+    return 0
+  }
+  APT_LOCK_WAIT_SECONDS=2
+  run_bootstrap_apt update -qq \
+    || fail "the apt wrapper did not retry an invocation-boundary lock race"
+  [ "$(<"$attempts")" -eq 2 ] \
+    || fail "the apt wrapper did not perform exactly one lock-race retry"
+
+  ready="$tmp/ready-timeout"
+  release="$tmp/release-timeout"
+  python3 - "$lock" "$ready" "$release" <<'PY' &
+import fcntl
+import os
+from pathlib import Path
+import sys
+import time
+
+descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.lockf(descriptor, fcntl.LOCK_EX)
+Path(sys.argv[2]).touch()
+while not Path(sys.argv[3]).exists():
+    time.sleep(0.01)
+os.close(descriptor)
+PY
+  holder_pid=$!
+  fm_test_wait_for_file "$ready" "$holder_pid" 0.02 \
+    || fail "the apt-lock timeout regression did not acquire its fixture lock"
+  set +e
+  out=$(wait_for_apt_locks 0.1 0.02 "$lock" 2>&1)
+  rc=$?
+  set -e
+  touch "$release"
+  wait "$holder_pid" || fail "the timed-out apt-lock holder failed"
+  [ "$rc" -ne 0 ] || fail "the guest bootstrap waited forever on an apt lock"
+  assert_contains "$out" "timed out waiting for apt/dpkg lock(s): $lock" \
+    "the bounded apt-lock refusal did not name the held lock"
+
+  pass "Azure runner bootstrap waits for apt/dpkg maintenance races and times out deterministically"
+}
+
+apt_lock_wait_contract
 dispatch_ambient_binding_contract
 no_mistakes_test_step_offload_contract
 routing_file_contract

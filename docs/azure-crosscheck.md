@@ -102,7 +102,7 @@ The final terminal event must report the exact `fireworks-glm` provider and `acc
 Reporting the historical Fast selector or another route fails before a verdict can publish.
 Pi's explicit `auto_retry_start` may open a continuation only after a completed attempt executed a turn and did not stop successfully.
 The continuation resets attempt-local terminal and verdict state, preserves aggregate usage for economics, and must execute its own turn before completing.
-Zero, multiple, malformed, or truncated verdict submissions fail closed without a second model invocation.
+The bounded verdict-repair contract owned by [`docs/crosscheck.md`](crosscheck.md) applies unchanged inside the isolated model compartment.
 The prompt is passed by `@file`, Pi starts with `--offline`, and a deterministic session identifier enables Fireworks session affinity without persisting a Pi conversation.
 The stable system prompt and byte-stable verdict tool schema precede all untrusted pull-request material.
 The guest returns input, output, cache-read, cache-write, turn, and Pi-calculated cost data from the complete event stream when available.

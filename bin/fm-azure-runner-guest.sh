@@ -56,13 +56,102 @@ run_bootstrap_network() {
   return "$status"
 }
 
+# BEGIN FM_AZURE_RUNNER_APT_LOCK_HELPERS
+wait_for_apt_locks() {
+  local timeout=$1 poll=$2
+  shift 2
+  python3 - "$timeout" "$poll" "$@" <<'PY'
+import errno
+import fcntl
+import os
+import pathlib
+import sys
+import time
+
+timeout = float(sys.argv[1])
+poll = float(sys.argv[2])
+paths = [pathlib.Path(value) for value in sys.argv[3:]]
+if not 0 <= timeout <= 600 or not 0.01 <= poll <= 5 or not paths:
+    raise SystemExit("guest bootstrap: unsafe apt/dpkg lock wait configuration")
+deadline = time.monotonic() + timeout
+while True:
+    descriptors = []
+    held = []
+    try:
+        for path in paths:
+            try:
+                descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            except FileNotFoundError:
+                continue
+            descriptors.append(descriptor)
+            try:
+                fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                held.append(str(path))
+        if not held:
+            raise SystemExit(0)
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        print(
+            "guest bootstrap: timed out waiting for apt/dpkg lock(s): "
+            + ", ".join(held),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    time.sleep(min(poll, remaining))
+PY
+}
+
+APT_LOCK_WAIT_SECONDS=180
+APT_LOCK_PATHS=(
+  /var/lib/dpkg/lock-frontend
+  /var/lib/dpkg/lock
+  /var/cache/apt/archives/lock
+  /var/lib/apt/lists/lock
+)
+run_bootstrap_apt() {
+  local deadline=$((SECONDS + APT_LOCK_WAIT_SECONDS)) remaining stderr_file status
+  stderr_file=$(mktemp)
+  while true; do
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then
+      echo "guest bootstrap: timed out retrying apt/dpkg lock contention" >&2
+      rm -f "$stderr_file"
+      return 1
+    fi
+    wait_for_apt_locks "$remaining" 0.2 "${APT_LOCK_PATHS[@]}" || {
+      rm -f "$stderr_file"
+      return 1
+    }
+    : >"$stderr_file"
+    if run_bootstrap_network apt-get -o "DPkg::Lock::Timeout=$remaining" "$@" 2>"$stderr_file"; then
+      cat "$stderr_file" >&2
+      rm -f "$stderr_file"
+      return 0
+    else
+      status=$?
+    fi
+    cat "$stderr_file" >&2
+    if ! grep -Eq 'Could not (get|open) lock |Unable to acquire (the )?(dpkg frontend|download directory|lists directory|archive) lock|is another process using it' "$stderr_file"; then
+      rm -f "$stderr_file"
+      return "$status"
+    fi
+  done
+}
+# END FM_AZURE_RUNNER_APT_LOCK_HELPERS
+
 missing=()
 for tool in mkfs.ext4 mount runuser groupadd useradd getent tmux node npm xz; do command -v "$tool" >/dev/null 2>&1 || missing+=("$tool"); done
 if [ "${#missing[@]}" -gt 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
   bootstrap_packages() {
-    run_bootstrap_network apt-get update -qq &&
-    run_bootstrap_network apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv e2fsprogs util-linux passwd systemd tmux jq nodejs npm xz-utils ripgrep
+    run_bootstrap_apt update -qq &&
+    run_bootstrap_apt install -y --no-install-recommends ca-certificates curl git python3 python3-venv e2fsprogs util-linux passwd systemd tmux jq nodejs npm xz-utils ripgrep
   }
   if ! bootstrap_packages; then
     # The regional azure.archive mirror rides plain port 80, whose egress can

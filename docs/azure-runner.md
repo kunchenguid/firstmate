@@ -69,6 +69,7 @@ Declared dependency paths are rehashed after the VM clones the bundle.
 Package installation performed by a repository command must remain rootless and derive from committed lockfiles or the selected reviewed image.
 Missing toolchain capability fails the command rather than triggering a local retry or privileged repository-controlled bootstrap.
 The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-tool package closure before repository code starts when the pinned Canonical image lacks it.
+Before each package operation it waits up to three minutes for the standard apt/dpkg locks, and apt carries the same bounded dpkg timeout, so normal image maintenance can finish without turning into a repository-command failure while a stuck lock still fails closed.
 Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
 The request records the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 releases plus, when the snapshot contains the Agent Fleet `uv.lock`, the complete Linux x86_64 pytest/ruff wheel closure selected from that lock.
 When that lock is present, trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.

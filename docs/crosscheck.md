@@ -79,8 +79,10 @@ Every reviewer disables reviewed-repository instruction discovery at launch: Cod
 Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, a deterministic session-affinity identifier, and only the read and Bash-capable review tools plus the explicit verdict tool.
 The prompt is passed by `@file` so repository and claim size cannot exceed the process argument limit.
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
-That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates the run without a second paid model turn.
-Crosscheck accepts exactly one verdict tool call from the successful final attempt, preserves usage across Pi auto-retries, and refuses zero or multiple calls.
+That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
+Crosscheck accepts exactly one verdict tool call from the successful final attempt and preserves usage across Pi auto-retries.
+If an otherwise completed attempt makes zero, multiple, or malformed verdict calls, the same isolated reviewer identity receives one fresh, fixed repair prompt containing the same exact-head packet.
+The repair is attempted once, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
@@ -93,7 +95,7 @@ On that lane it authenticates against the same upstream OpenAI accounts the Code
 What Pi adds is an independent client path and a reviewer that is separate from a Claude author by construction.
 A usage-limited reviewer account records a `tool-failure`, never a verdict about code, and Crosscheck then advances to the next independent entry rather than refusing the merge.
 Failover is limited to faults that prevented a verdict: a launch failure, an unusable credential, a provider that was never reached, or an exhausted account.
-A reviewer that reached the model and then declined clearance, returned no valid artifact, or returned a malformed one ends the run on the spot, because that is the reviewer's own conclusion and a second account must not be used to shop for a friendlier one.
+A reviewer that reached the model and then declined clearance, or still returned no valid artifact after the one bounded protocol repair, ends the run on the spot because a second account must not be used to shop for a friendlier conclusion.
 Each abandoned attempt is recorded as its own `tool-failure` run, so the ledger names every account that was tried and why it was left, and each attempt gets its own pristine exact-head checkout so no reviewer inherits an earlier reviewer's helpers or scratch state.
 Selection therefore makes the gate as available as the roster rather than as available as its first entry.
 Every candidate passed the configured reviewer-profile and model policy.
@@ -157,10 +159,12 @@ An empty `FM_STATE_OVERRIDE` falls back to the home state directory, so task met
 
 Every run record carries `durations_ms`, an integer millisecond breakdown of where that invocation's wall clock went (C1, `docs/azure-requirements.md`).
 The local lane records `snapshot` (task metadata, the GitHub head/claims lookup, reviewer selection, and the exact-head review checkout), `reviewer` (the bounded reviewer subprocess), `proofs` (the reproduction and mutation verification the gate re-executes for itself), `ledger` (reading and validating the durable ledger plus this invocation's earlier writes), and `total`.
-The Azure compartment lane additionally records `create`, `stage`, `boot`, and `collect`, which only that lane performs.
+The Azure compartment lane additionally records `create`, `stage`, `boot`, and `collect` after its completed Azure identity binds those phases to that lane.
 
-A phase appears only if the run actually entered it.
-An absent phase means the lane never did that work; it never means the work was free, so a run that failed before reviewer launch records no `reviewer` key rather than `reviewer: 0`.
+Every recorded phase represents work the run actually entered, but a failed compartment attempt may omit lane-only detail it cannot bind.
+An absent ordinary phase means the run never entered it, so a run that failed before reviewer launch records no `reviewer` key rather than `reviewer: 0`.
+A failed compartment attempt has no complete Azure identity to bind lane-only detail, so the writer omits `create`, `stage`, `boot`, and `collect` from that run while retaining `total` and compatible ordinary phases.
+The difference remains real unattributed time rather than a fabricated zero.
 Durations are measured on `time.monotonic()`, so a clock change cannot move them, while the record's `at` stamp remains the wall clock it has always been.
 Phases never nest and named phases round down while `total` rounds up, so `total >= sum(named phases)` holds exactly; the difference is real unattributed time between phases, not rounding.
 Two reviewer attempts inside one invocation accumulate into one `reviewer` phase, because the invocation really did spend both.
@@ -186,28 +190,12 @@ Summing the `total` column therefore double counts; read the last row of an invo
 `durations_ms` is additive.
 A run recorded before this field existed still validates and still renders, and shows `-` in every phase column rather than a fabricated zero.
 A record that does carry one is held to the full contract: integers only, never negative, only phase names the gate defines, a `snapshot` phase (every run that reaches a record has performed it), and a `total` that covers the phases it names.
-The compartment phases are lane-bound rather than writer-asserted: `create`, `stage`, `boot`, and `collect` are admitted only on a record whose own reviewer entry carries `execution_mode: azure-compartment-v1`, so "absent means this lane did not do it" is enforced by the gate and not merely by the writer's good behavior.
+The compartment phases are lane-bound rather than writer-asserted: `create`, `stage`, `boot`, and `collect` are admitted only on a record whose own reviewer entry carries `execution_mode: azure-compartment-v1`; a failed attempt without that completed identity retains its total but cannot claim the lane-only breakdown.
 A run's `at` stamp is pinned to `YYYY-MM-DDTHH:MM:SSZ` for the same reason: it is the one free-form string the table renders, and an embedded newline would let one record forge extra rows.
 
-The writer validates the measurement against that same contract before writing it, and drops it if it fails.
+The writer removes compartment-only phases from a run that lacks a completed compartment identity, then validates the compatible measurement against that same contract before writing it.
 Everything that later reads this ledger validates it, so an unvalidated write would be a durable outage: one writer bug and `run`, `verify` and `timings` all refuse the task until a human edits the JSON by hand.
-The measurement is the disposable half of that trade, so a timing bug loudly costs one run its breakdown and never the durable findings.
-#### Known gap, bound to the `fm-ccm` image rebake: stamp the compartment lane at its START
-
-The compartment lane's discriminator only exists on a run that COMPLETED that lane, so a compartment review which fails part-way loses its measurement entirely.
-`bin/fm-crosscheck-azure.py` `_run_azure_review_in_lane` stamps `execution_mode: azure-compartment-v1` onto the reviewer record only at the end, after a digest-bound result exists.
-A review that fails during `create`, `stage`, `boot`, or `collect` therefore reaches `append_failed_run` with those phases measured but no `execution_mode`, fails `validate_durations`' lane check, and has its whole `durations_ms` dropped by `stamp_durations` rather than written.
-That is precisely the run whose numbers would be most diagnostic: a compartment review that died in create or boot is the one an operator most needs a breakdown of.
-
-The obvious fix does not work as written, which is why this is recorded rather than done.
-Stamping `execution_mode` earlier makes `validate_ledger` route the record into `bin/fm-crosscheck-azure.py` `validate_azure_reviewer_record`, which demands a complete `azure_identity` (review generation, request and credential digests, model/tool/verifier identities).
-A failed part-way review has no such identity, so an early `execution_mode` would refuse the record outright: it trades a lost measurement for a bricked ledger, which is the worse end of the same trade.
-
-**Follow-up, due when the compartment lane becomes executable again:** before any compartment timing is relied on, stamp the lane at its start, either by making `validate_azure_reviewer_record` apply only to records that claim a completed compartment review, or by adding a separate early lane marker that `run_is_compartment_lane` also accepts.
-Do this at the rebake, not before: while the `fm-ccm` image carries no `pi` binary the compartment lane cannot run at all, so a failed compartment review is impossible and the lost-measurement cost is exactly zero.
-Adding schema surface for a lane that cannot execute would freeze a contract nothing has exercised.
-
-Until then the current behavior is deliberate and is preferred over both alternatives, which are bricking the ledger and letting any record claim compartment phases it never performed.
+Any other timing-contract bug still loudly costs one run its breakdown and never the durable findings.
 
 `bin/fm-pr-merge.sh` calls the verification form automatically after approval.
 Do not call the verification form as a substitute for running a reviewer.
