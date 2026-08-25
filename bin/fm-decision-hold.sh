@@ -31,7 +31,12 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
+
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 usage() {
   awk '
@@ -59,7 +64,7 @@ compose() {  # <origin> <key>
 }
 
 task_show() {
-  (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
+  fm_tasks_axi_show "$FM_HOME" "$DATA/done-archive.md" "$1"
 }
 
 show_field() {

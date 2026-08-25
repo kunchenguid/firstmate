@@ -225,7 +225,7 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
-  tasks_axi show "$1" --full 2>/dev/null
+  fm_tasks_axi_show "$FM_HOME" "$DATA/done-archive.md" "$1"
 }
 
 show_field() {  # <show-output> <field>

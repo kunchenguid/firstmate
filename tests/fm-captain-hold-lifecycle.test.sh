@@ -926,6 +926,72 @@ test_legacy_identities_keep_working() {
   pass "legacy identities, metadata, bindings, and the shim keep working"
 }
 
+# Reproduces a real loss with a synthetic name: a captain call is correctly
+# resolved, then ages past done_keep and tasks-axi prunes it out of the active
+# backlog into data/done-archive.md. Every id resolution built on task_show -
+# the completion gate's own verify, and the shim's idempotent resolve replay -
+# must still find it there instead of reporting it permanently absent.
+test_id_resolution_finds_an_archived_hold() {
+  local home id hold show out
+  home=$(make_home archived-hold)
+  id=sample-owner-model-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample ownership model" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample ownership model review\n\nThe captain must choose the owner model.\n' \
+    > "$home/data/$id/report.md"
+
+  # The modern path: a plain captain-held task, answered and closed.
+  run_captain "$home" hold sample-owner-model-call \
+    --title "Choose the sample owner model" --reason "captain owner-model choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain call"
+  printf 'Use the shared-owner model.\n' > "$home/owner-model.txt"
+  run_captain "$home" answer sample-owner-model-call --decision-file "$home/owner-model.txt" >/dev/null \
+    || fail "could not answer the captain call before archiving"
+
+  # Age it out of the active backlog exactly as tasks-axi's own done_keep does.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not force the resolved call into the archive"
+  if tasks_in "$home" show sample-owner-model-call --full >/dev/null 2>&1; then
+    fail "setup error: the resolved call did not actually leave the active backlog"
+  fi
+  assert_grep "sample-owner-model-call" "$home/data/done-archive.md" \
+    "setup error: the resolved call did not land in the archive"
+
+  # The completion gate: verify must still see the archived, already-answered
+  # call, not report it as absent.
+  printf 'decisions_reviewed=1\ndecision_keys=sample-owner-model-call\n' >> "$home/state/$id.meta"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate could not find the resolved-and-archived call"
+
+  # The shim's own lookup, exercised the way a pre-collapse origin would: hold,
+  # resolve with routed work, archive, then replay the same resolve call.
+  hold=$(run_shim "$home" hold "$id" owner-model \
+    --title "Choose the sample owner model (legacy)" \
+    --reason "captain owner-model choice pending" --repo sample) \
+    || fail "the shim hold path failed"
+  tasks_in "$home" add sample-owner-model-work "Apply the sample owner model" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null
+  run_shim "$home" resolve "$id" owner-model --decision-file "$home/owner-model.txt" \
+    --routed-to sample-owner-model-work >/dev/null \
+    || fail "the shim resolve path failed before archiving"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not force the shim-resolved hold into the archive"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "setup error: the shim-resolved hold did not actually leave the active backlog"
+  fi
+  out=$(run_shim "$home" resolve "$id" owner-model --decision-file "$home/owner-model.txt" \
+    --routed-to sample-owner-model-work 2>"$home/replay.err") \
+    || fail "the shim could not find the resolved-and-archived hold: $(cat "$home/replay.err")"
+  assert_contains "$out" "resolved: $hold" "the archived-hold shim replay did not report success"
+  show=$(tasks_in "$home" show sample-owner-model-work --full)
+  assert_contains "$show" "blocked: no" "the archived-hold replay did not release the routed work"
+  pass "the completion gate and the shim's resolve replay both find a hold after it archives"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -1181,6 +1247,7 @@ test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
+test_id_resolution_finds_an_archived_hold
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
