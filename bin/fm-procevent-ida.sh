@@ -64,7 +64,7 @@ IDA_TRANSIENT_BACKOFF_INITIAL_MS=${FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS:-5000}
 IDA_TRANSIENT_BACKOFF_MAX_MS=${FM_IDA_TRANSIENT_BACKOFF_MAX_MS:-60000}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 for ida_bound in "$IDA_PAGE_SIZE" "$IDA_WAIT_TIMEOUT_MS" "$IDA_MARKER_SCAN_GRACE_SECONDS" \
     "$IDA_TRANSIENT_BACKOFF_INITIAL_MS" "$IDA_TRANSIENT_BACKOFF_MAX_MS"; do
   case "$ida_bound" in ''|*[!0-9]*|0) die "iDA bounds must be positive integers" ;; esac
