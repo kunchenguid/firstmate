@@ -105,6 +105,14 @@ WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+case "$WATCHER_STALE_GRACE" in ''|*[!0-9]*) WATCHER_STALE_GRACE=300 ;; esac
+# How stale the liveness beacon may get INSIDE one cycle before the next
+# completed unit of work refreshes it (see watcher_beat_progress). Derived from
+# the staleness grace rather than set as a second independent constant, so
+# lowering the grace cannot leave a refresh interval behind that no longer fits
+# inside it. Floored at 1 because beacon mtimes have one-second resolution.
+WATCHER_BEAT_REFRESH=${FM_WATCHER_BEAT_REFRESH:-$((WATCHER_STALE_GRACE / 10))}
+case "$WATCHER_BEAT_REFRESH" in ''|*[!0-9]*|0) WATCHER_BEAT_REFRESH=1 ;; esac
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -622,6 +630,34 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( $(date +%s) - m ))
 }
 
+# Liveness beacon for fm-guard.sh and the arm layer: a fresh mtime here means a
+# watcher is alive AND making progress. It must stay a progress signal, not a
+# proof-of-existence - docs/watcher-continuity.md's invariant is that no helper
+# process can make a wedged watcher look healthy - so nothing but this process
+# writes it, and it is written only where a bounded unit of supervision work has
+# just COMPLETED.
+watcher_beat() {
+  touch "$STATE/.last-watcher-beat"
+}
+
+# One cycle is not one bounded unit. On a large fleet the per-window stale scan,
+# the per-check sweep, and the signal grace each carry a single cycle for
+# minutes: measured on a 37-task home, one cycle ran 4-7 minutes while the
+# beacon, written only at the top of the loop, aged past the 300s grace and
+# every reader (turn-end guard, pull warning, attached arm, and the watcher's
+# own live-holder check) declared a healthy watcher dead. Refresh the beacon
+# after each completed unit inside the cycle instead. A watcher wedged INSIDE
+# one unit still stops beating and still goes stale, which is the property the
+# guards depend on.
+#
+# Throttled to WATCHER_BEAT_REFRESH so a fleet whose whole cycle fits inside one
+# refresh interval keeps exactly one beat per cycle, at the top: the extra
+# touches appear only on a cycle that is genuinely running long.
+watcher_beat_progress() {
+  [ "$(age_of "$STATE/.last-watcher-beat")" -ge "$WATCHER_BEAT_REFRESH" ] || return 0
+  watcher_beat
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
 # compared against a persisted size:mtime signature (.seen-*) rather than
 # mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -1009,9 +1045,10 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Cycle boundary: the one unconditional beat, so a completed cycle always
+  # refreshes the beacon however short it was. Every other beat below is the
+  # throttled per-unit refresh that keeps a LONG cycle from aging out.
+  watcher_beat
 
   # Resource sampling + agent-death detection, on its own (slower) cadence.
   # Best-effort and non-fatal by construction: an evidence collector must never
@@ -1019,6 +1056,7 @@ while :; do
   if [ "$(age_of "$STATE/.last-resource-sample")" -ge "$RESOURCE_SAMPLE_INTERVAL" ]; then
     touch "$STATE/.last-resource-sample"
     "$SCRIPT_DIR/fm-resource-sample.sh" >/dev/null 2>&1 || true
+    watcher_beat_progress
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
@@ -1026,6 +1064,7 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+  watcher_beat_progress
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
@@ -1033,6 +1072,7 @@ while :; do
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    watcher_beat_progress
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
@@ -1054,6 +1094,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  watcher_beat_progress
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1116,6 +1157,9 @@ while :; do
         touch "$STATE/.last-check"
         wake "$reason"
       fi
+      # One check completed. Each may burn a full CHECK_TIMEOUT, so a sweep over
+      # a large fleet is itself longer than the staleness grace.
+      watcher_beat_progress
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
@@ -1134,6 +1178,7 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    watcher_beat_progress
     # Union the pre- and post-grace scans, then collapse to ONE record per signal
     # file (latest signature wins, first-seen order preserved). A file that still
     # differs from its seen-marker appears in BOTH scans - the marker is not
@@ -1203,6 +1248,12 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    # One window's classification is a bounded unit: a pane capture, at most one
+    # crew-state read, and its bookkeeping. Beat on ARRIVAL at each window so
+    # every exit from the body - including the secondmate and capture-failure
+    # `continue`s below - has recorded that the previous window completed. This
+    # scan is what pushes a large fleet's cycle past the grace.
+    watcher_beat_progress
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
@@ -1403,6 +1454,9 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  # The last window's own classification, which the arrival beat above cannot
+  # cover.
+  watcher_beat_progress
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
