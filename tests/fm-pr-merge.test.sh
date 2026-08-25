@@ -30,6 +30,8 @@
 #   (u) a queue-required refusal names the exact compatible retry flags
 #   (v) a failed poll setup cannot be reported as a verified GitHub merge
 #   (w) a zero-exit queue-required refusal keeps merge semantics unchanged
+#   (x) an unreadable outcome after a successful merge call keeps the PR
+#       recorded and the merge poll armed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,6 +143,30 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# gh mock that still answers fm-pr-check.sh's head lookup but cannot answer the
+# outcome read, so a merge call that returned success is followed by a live
+# state nothing can prove. Args: case_dir head_sha
+add_gh_mock_outcome_read_fails() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+  "api graphql")
+    echo 'error: could not reach the GitHub API' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 add_failing_poll_publish_mv() {
@@ -404,6 +430,36 @@ test_github_open_unqueued_outcome_refuses() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "github-open-unqueued: failed verification armed the merged-PR poll"
   pass "fm-pr-merge refuses a GitHub merge call that leaves the PR open and unqueued"
+}
+
+test_github_unreadable_outcome_keeps_pr_bookkeeping() {
+  local case_dir rc
+  case_dir=$(make_case github-outcome-read-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3131313131313131313131313131313131313131
+  add_gh_mock_outcome_read_fails "$case_dir" 3131313131313131313131313131313131313131
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/57 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-outcome-read-fails: an unreadable outcome must fail"
+  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
+    "$case_dir/stderr" "github-outcome-read-fails: the unreadable outcome was not reported"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-outcome-read-fails: an unproved merge was reported as verified"
+  # The merge call itself returned success, so the pull request may well have
+  # landed. Losing the reference here would leave teardown with nothing to
+  # verify against and no merge poll to catch up.
+  assert_grep 'pr=https://github.com/example/repo/pull/57' "$case_dir/state/task-x1.meta" \
+    "github-outcome-read-fails: a successful merge call lost its PR reference"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-outcome-read-fails: no merge poll was armed for a merge that may have landed"
+  pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
@@ -1073,6 +1129,7 @@ test_github_closed_unqueued_outcome_omits_retry_flags
 test_verified_merge_records_pr_and_head
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
+test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified

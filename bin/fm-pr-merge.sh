@@ -16,8 +16,10 @@
 # the base branch has an effective merge_queue rule, the refusal names the
 # queue's configured merge method and the exact -- --auto --<method> retry
 # flags. No method is selected for the caller. A gh-axi command failure keeps
-# the prior behavior of recording the PR for a later merge poll; a gh-axi
-# success records metadata only after outcome verification succeeds, so a
+# the prior behavior of recording the PR for a later merge poll, and an outcome
+# read that cannot complete records it too, because recording arms that poll
+# rather than claiming a merge. Metadata is withheld only when the read
+# succeeds and proves the pull request neither merged nor queued, so a
 # false-success response cannot make teardown treat unlanded work as landed.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
@@ -399,7 +401,14 @@ case "$PROVIDER" in
       fi
       exit "$merge_status"
     fi
-    github_read_outcome || exit 1
+    if ! github_read_outcome; then
+      # The merge call returned success, so the pull request may well have
+      # landed. Recording it arms the later merge poll and is not a success
+      # claim, so it must survive a read that proves nothing either way; the
+      # refusal itself is unchanged.
+      record_pr_metadata || :
+      exit 1
+    fi
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
       record_pr_metadata || exit 1
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
