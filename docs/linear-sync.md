@@ -121,7 +121,8 @@ A refusal is an unfinished handback that needs a decision, not a discarded one.
 - One credential per home. Cross-workspace issues need separate homes.
 - An issue with more comment pages than `FM_LINEAR_COMMENT_PAGE_MAX` holds rather than posting, because an unproven absence is treated as unknown. Raise the bound for a very long issue.
 - Only the comment body and the workflow state are synchronized. Assignees, labels, estimates, relations, and attachments are not.
-- `jq` is required. Without it, every command that builds or reads a typed record holds rather than proceeding.
+- `jq` is required by `queue` and by `deliver`; without it both hold rather than proceeding.
+  Reading is deliberately `jq`-free, so `bind`, `bindings`, `pending`, `show`, `hook`, `discard`, and the cleanup gate all keep working on a home that lacks it, and that home still refuses to complete a task that owes a handback.
 - The GraphQL documents are written against Linear's published API and are exercised end to end only against the hermetic fake. They have not been run against the live service from this repository. If Linear's schema differs, a delivery holds with the API's own message and no handback is lost; correcting the documents is a one-file change in `bin/fm-linear-sync.sh`.
 
 See [verification/linear-sync.md](verification/linear-sync.md) for the current maintainer evidence.

@@ -98,7 +98,7 @@ now_epoch() { date +%s; }
 
 require_jq() {
   command -v jq >/dev/null 2>&1 \
-    || hold_exit 'jq is required to build and read typed Linear records'
+    || hold_exit 'jq is required to queue and to deliver a typed Linear record'
 }
 
 # Every mutating verb runs in a genuine primary home. A crewmate/scout worktree
@@ -277,6 +277,17 @@ cmd_queue() {
     [ -f "$comment_file" ] || die "comment file not found: $comment_file"
     cat -- "$comment_file" > "$canonical"
   fi
+  # This check runs on the bytes as received, before the canonicalization below.
+  # That step reads the comment through a command substitution, which drops NUL
+  # bytes silently, so a NUL inspected afterwards would already be gone and the
+  # comment would reach Linear altered instead of refused.
+  # tr understands the octal escapes a portable grep does not, so the check is a
+  # byte comparison against the same text with control characters removed.
+  # Tab, newline, and carriage return are deliberately not in that set.
+  if ! LC_ALL=C cmp -s "$canonical" \
+      <(LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' < "$canonical"); then
+    die 'the comment contains control characters; refusing'
+  fi
   # Canonicalize the trailing newline only. Everything else reaches Linear
   # byte-exact, because the comment is the captain's text, not a summary.
   trimmed=$(new_tmp) || die 'cannot create a temporary file'
@@ -287,13 +298,6 @@ cmd_queue() {
   [ -s "$canonical" ] || die 'the comment is empty; refusing to post nothing'
   if grep -Fq -- "$FM_LINEAR_MARKER_PREFIX" "$canonical"; then
     die "the comment contains the reserved marker prefix '$FM_LINEAR_MARKER_PREFIX'; refusing"
-  fi
-  # tr understands the octal escapes a portable grep does not, so the check is a
-  # byte comparison against the same text with control characters removed.
-  # Tab, newline, and carriage return are deliberately not in that set.
-  if ! LC_ALL=C cmp -s "$canonical" \
-      <(LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' < "$canonical"); then
-    die 'the comment contains control characters; refusing'
   fi
   length=$(jq -Rs 'length' < "$canonical") || die 'cannot measure the comment'
   [ "$length" -le "$FM_LINEAR_COMMENT_MAX" ] \

@@ -201,6 +201,38 @@ run_sync() {  # <home> <args...>
     "$SYNC" "$@"
 }
 
+# A copy of $PATH with jq alone withheld. Any PATH directory that actually holds
+# a jq is mirrored without it rather than dropped, so the case proves a missing
+# jq and not a missing shell. Prints the new PATH.
+path_without_jq() {  # <shim-dir>
+  local shim=$1 dir entry name newpath=''
+  mkdir -p "$shim"
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    if [ -x "$dir/jq" ]; then
+      for entry in "$dir"/*; do
+        [ -e "$entry" ] || continue
+        name=${entry##*/}
+        [ "$name" = jq ] && continue
+        [ -e "$shim/$name" ] || ln -s "$entry" "$shim/$name" 2>/dev/null || true
+      done
+      newpath="${newpath:+$newpath:}$shim"
+    else
+      newpath="${newpath:+$newpath:}$dir"
+    fi
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+  printf '%s\n' "$newpath"
+}
+
+run_sync_nojq() {  # <home> <path> <args...>
+  local home=$1 path=$2
+  shift 2
+  PATH="$path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LINEAR_TRANSPORT="$home/fake-linear.sh" \
+    FAKE_LINEAR_DIR="$(fake_dir "$home")" \
+    "$SYNC" "$@"
+}
+
 # A credential file exactly as docs/linear-sync.md tells an operator to create it.
 write_credential() {  # <home> [key]
   local home=$1 key=${2:-lin_api_TESTKEYqqq0000}
@@ -294,7 +326,7 @@ test_missing_and_ambiguous_targets_refuse() {
 }
 
 test_comment_content_is_validated() {
-  local home rc big
+  local home rc big id
   home=$(make_home content)
   run_sync "$home" bind task-a ENG-1 >/dev/null || fail "bind failed"
 
@@ -319,8 +351,32 @@ test_comment_content_is_validated() {
   queue_comment "$home" task-a 'bad status' --status "$(printf 'Done\001')" >/dev/null 2> "$home/e4" || rc=$?
   [ "$rc" -eq 1 ] || fail "a control character in the status must refuse"
 
+  # A NUL cannot survive the command substitution that canonicalizes the
+  # trailing newline, so a NUL inspected after that step is already gone and the
+  # comment would post silently altered rather than refuse. This pins the
+  # refusal on the bytes as received.
+  rc=0
+  printf 'hello\000world\n' > "$home/nul.md"
+  run_sync "$home" queue task-a --comment-file "$home/nul.md" >/dev/null 2> "$home/e5" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a NUL byte must refuse, not be dropped into an altered comment"
+  assert_grep "control characters" "$home/e5" "the NUL refusal must name the cause"
+
   assert_absent "$home/state/linear/outbox" "no refused input may leave a delivery record"
-  pass "an empty comment, a forged marker, an oversized body, and a malformed status all refuse"
+
+  # The other half of that boundary: tab, newline, and carriage return are
+  # deliberately allowed, and the stored comment is the captain's bytes.
+  printf 'col1\tcol2\r\nline2\n' > "$home/tabs.md"
+  run_sync "$home" queue task-a --comment-file "$home/tabs.md" >/dev/null \
+    || fail "tab, CR, and newline must remain postable"
+  id=$(run_sync "$home" pending task-a | sed -n 's/.*delivery=\([0-9a-f][0-9a-f]*\).*/\1/p' | head -n1)
+  [ -n "$id" ] || fail "the queued handback must be listed"
+  # jq -r terminates its output with a newline; the record itself keeps none.
+  run_sync "$home" show "$id" | jq -r '.comment' > "$home/stored"
+  printf 'col1\tcol2\r\nline2\n' > "$home/expect"
+  cmp -s "$home/stored" "$home/expect" \
+    || fail "the stored comment must be the captain's bytes, trailing newline aside"
+
+  pass "an empty comment, a forged marker, an oversized body, a NUL byte, and a malformed status all refuse"
 }
 
 # --- 2. delivery, and its idempotence ---------------------------------------
@@ -910,6 +966,61 @@ test_comment_text_cannot_forge_record_fields() {
   pass "comment text cannot forge the record fields the jq-free cleanup gate reads"
 }
 
+# --- 6. reading without jq --------------------------------------------------
+
+# docs/linear-sync.md claims queue and deliver need jq and that everything else
+# reads the typed records without it. The point of keeping the reading path
+# jq-free is that a home missing jq still refuses to complete an owed task
+# rather than passing the gate by accident.
+test_a_home_without_jq_still_blocks_completion() {
+  local home shim nojq rc out id
+  home=$(make_home nojq)
+  shim="$home/nojq-bin"
+  nojq=$(path_without_jq "$shim")
+  ( PATH="$nojq"; command -v jq >/dev/null 2>&1 ) && fail "the jq-free PATH still resolves jq"
+  ( PATH="$nojq"; command -v grep >/dev/null 2>&1 ) || fail "the jq-free PATH lost grep"
+
+  run_sync "$home" bind task-a ENG-1 >/dev/null || fail "bind failed"
+  queue_comment "$home" task-a 'the handback' --status Done >/dev/null || fail "queue failed"
+
+  rc=0
+  run_sync_nojq "$home" "$nojq" guard-work task-a > "$home/gate.out" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "the completion gate must still block without jq (rc=$rc)"
+  assert_grep "ENG-1" "$home/gate.out" "the blocked gate must still name the issue without jq"
+
+  out=$(run_sync_nojq "$home" "$nojq" pending) || fail "pending must still read records without jq"
+  assert_contains "$out" "issue=ENG-1" "pending must still read the typed record without jq"
+  out=$(run_sync_nojq "$home" "$nojq" bindings) || fail "bindings must still read without jq"
+  assert_contains "$out" "ENG-1" "bindings must still read without jq"
+  out=$(run_sync_nojq "$home" "$nojq" hook 2>&1) || fail "the hook must stay usable without jq"
+  assert_contains "$out" "still owed" "the hook must still name the owed handback without jq"
+  id=$(one_id "$home/state/linear/outbox" .json) || fail "queue left no outbox record"
+  out=$(run_sync_nojq "$home" "$nojq" show "$id") || fail "show must still read a record without jq"
+  assert_contains "$out" "the handback" "show must still print the record without jq"
+
+  # The two that genuinely need jq must hold, not proceed and not claim success.
+  printf 'another handback\n' > "$home/c2.md"
+  rc=0
+  run_sync_nojq "$home" "$nojq" queue task-a --comment-file "$home/c2.md" \
+    >/dev/null 2> "$home/q.err" || rc=$?
+  [ "$rc" -eq 3 ] || fail "queue must hold without jq (rc=$rc)"
+  assert_grep "jq is required" "$home/q.err" "the queue hold must name jq"
+  rc=0
+  run_sync_nojq "$home" "$nojq" deliver --all >/dev/null 2> "$home/d.err" || rc=$?
+  [ "$rc" -eq 3 ] || fail "deliver must hold without jq (rc=$rc)"
+  assert_grep "jq is required" "$home/d.err" "the delivery hold must name jq"
+  [ "$(comment_count "$home" ENG-1)" -eq 0 ] || fail "a held delivery must post nothing"
+
+  # The explicit escape hatch is jq-free too, so a home missing jq is never
+  # stuck with a handback it cannot resolve one way or the other.
+  run_sync_nojq "$home" "$nojq" discard "$id" --reason 'no longer wanted' --yes >/dev/null \
+    || fail "discard must still work without jq"
+  run_sync_nojq "$home" "$nojq" guard-work task-a >/dev/null 2>&1 \
+    || fail "the gate must pass once the handback is explicitly discarded"
+
+  pass "a home without jq still reads its records and still refuses to complete an owed task"
+}
+
 test_missing_and_ambiguous_targets_refuse
 test_comment_content_is_validated
 test_delivery_posts_once_and_sets_status
@@ -932,3 +1043,4 @@ test_the_credential_never_leaves_its_file
 test_the_real_transport_keeps_the_credential_out_of_argv
 test_records_are_typed_and_bounded
 test_comment_text_cannot_forge_record_fields
+test_a_home_without_jq_still_blocks_completion

@@ -2,20 +2,22 @@
 
 Audience: maintainer verification.
 
-This record supports five active guarantees for firstmate's durable Linear synchronization:
+This record supports seven active guarantees for firstmate's durable Linear synchronization:
 
 1. A handback target is established, never inferred: a missing or ambiguous target refuses.
 2. A comment Linear committed but never acknowledged is recovered from Linear's own copy, so no retry, crash, or restart produces a duplicate comment or a second status change.
 3. Two concurrent deliveries cannot both post, and an abandoned lock never strands a handback.
 4. A disconnected, misconfigured, or unreachable Linear preserves the owed handback, surfaces one concise blocker, and never becomes a completion.
-5. A home that never bound a Linear issue pays nothing: no artifact, no output, no extra call.
+5. An owed handback is never dropped on the way to being set aside: when a permanent refusal cannot be written to quarantine, the delivery record survives and the task stays blocked.
+6. The comment reaches Linear as the captain's own bytes, so text that cannot survive that trip is refused rather than silently altered.
+7. A home that never bound a Linear issue pays nothing: no artifact, no output, no extra call.
 
 [`docs/linear-sync.md`](../linear-sync.md) owns the operator contract, [`docs/configuration.md`](../configuration.md#linear-synchronization-configlinearenv--statelinear) owns the two files an operator sets, and `bin/fm-linear-sync.sh --help` owns the commands and flags.
 Task chronology and delivery evidence stay outside this record.
 
 ## Environment
 
-Recorded 2026-08-20 on Darwin 25.5.0 (arm64, macOS 26.5.2) with GNU bash 3.2.57(1), jq 1.7.1-apple, git 2.50.1, curl 8.7.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
+Recorded 2026-08-25 on Darwin 25.5.0 (arm64, macOS 26.5.2) with GNU bash 3.2.57(1), jq 1.7.1-apple, git 2.50.1, curl 8.7.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
 
 Linear is a hermetic fake transport in every automated case, so no Linear mutation is ever made and no credential is ever needed.
 `FM_LINEAR_TRANSPORT` is the seam: `bin/fm-linear-sync.sh` reaches Linear only through the two-argument transport contract in `bin/fm-linear-transport.sh`, and the suite points that at a fake workspace held in a temp directory.
@@ -29,7 +31,7 @@ bash tests/fm-linear-sync.test.sh
 
 ```
 ok - an unbound task, an ambiguous binding, and a prose target all refuse instead of guessing
-ok - an empty comment, a forged marker, an oversized body, and a malformed status all refuse
+ok - an empty comment, a forged marker, an oversized body, a NUL byte, and a malformed status all refuse
 ok - a delivery posts one comment, applies the status once, and repeats as a no-op
 ok - re-queueing an identical handback resolves to one delivery, and a changed one is distinct
 ok - a delivery already under way holds, and an abandoned lock is taken over rather than stranding it
@@ -40,6 +42,7 @@ ok - a disconnected or misconfigured Linear preserves the handback and never cla
 ok - an unreachable Linear holds the handback and the later retry posts exactly once
 ok - a comment that landed without its status is completed on retry with no second comment
 ok - an issue Linear does not have is quarantined, keeps blocking, and clears only on an explicit discard
+ok - a refusal that cannot be quarantined preserves the outbox record and holds instead of discarding it
 ok - cleanup refuses while a Linear handback is owed and proceeds once the issue is current
 ok - the completion gate blocks only the task that owes the handback
 ok - session start surfaces an owed Linear handback from disk, and stays silent otherwise
@@ -49,6 +52,7 @@ ok - the credential never reaches a request body, a durable record, or any outpu
 ok - the real transport passes its credential by private file, never in argv or the environment
 ok - delivery records are typed, private, and refused when they no longer match their identity
 ok - comment text cannot forge the record fields the jq-free cleanup gate reads
+ok - a home without jq still reads its records and still refuses to complete an owed task
 ```
 
 The sixth case is the end-to-end proof for guarantee 2.
@@ -64,8 +68,21 @@ An absence that could not be proven is treated as unknown, never as new.
 The read-back cannot prevent one duplicate on its own: two concurrent deliveries would both prove absence before either posted.
 `a delivery already under way holds, and an abandoned lock is taken over rather than stranding it` covers both halves of the per-delivery lock that closes it, including the takeover that keeps a crashed delivery retryable rather than stranded.
 
+`a refusal that cannot be quarantined preserves the outbox record and holds instead of discarding it` covers guarantee 5, which is the one way the quarantine path could otherwise turn an owed handback into a silent discard.
+The case makes the refused directory unwritable, so a permanent refusal has nowhere to go.
+The delivery must then hold rather than proceed: it exits 3 saying the handback is preserved and still owed, the outbox record survives, no partial quarantine record is left behind, `pending` still lists the handback as queued rather than refused, and the completion gate still refuses the task.
+
+`an empty comment, a forged marker, an oversized body, a NUL byte, and a malformed status all refuse` covers guarantee 6.
+The comment is canonicalized in its trailing newline only and otherwise reaches Linear byte for byte, and that canonicalization reads the text through a command substitution, which drops NUL bytes silently.
+The control-character check therefore runs on the bytes as received rather than after canonicalization: a comment carrying a NUL refuses instead of posting an altered comment.
+The same case pins the other side of that boundary, since tab, carriage return, and newline are deliberately postable: a comment containing all three queues, and the stored record is asserted byte for byte against the captain's own text.
+
 `comment text cannot forge the record fields the jq-free cleanup gate reads` covers the one place a delivery record is parsed without `jq`, so that the cleanup gate keeps working on a home with no `jq`.
 A comment whose own text contains `"status":`, `"issue":`, and `"task_id":` lines must not change what that gate sees, in either direction: the gate must still block the task that owes the handback and must still pass the task named only inside the comment.
+
+`a home without jq still reads its records and still refuses to complete an owed task` proves that same boundary from the operator's side, on a PATH rebuilt from the real one with `jq` alone withheld.
+`bind`, `bindings`, `pending`, `show`, `hook`, and `discard` keep working on the typed records, and the completion gate still refuses the task that owes the handback and then passes once that handback is explicitly discarded; `queue` and `deliver` are the only two commands that hold, and both name `jq` and post nothing.
+Those two holds are also what keep the case from passing vacuously: a PATH that still resolved a `jq` would let them succeed instead of hold.
 
 ## Secret handling
 
@@ -98,7 +115,8 @@ fm-linear-sync: .../.treehouse/firstmate-7bab20/1/firstmate is not a firstmate p
 exit=1
 ```
 
-No `state/` directory came into existence in that worktree as a result.
+No `state/linear` came into existence in that worktree as a result, so nothing about a binding, an outbox, or a receipt was written outside the primary home.
+Re-observed on 2026-08-25 in the same worktree, with the same three verdicts.
 
 ## Harness surfaces inspected
 
