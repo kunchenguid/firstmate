@@ -826,8 +826,10 @@ SH
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_GITLAB_HOSTS=gitlab.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "MISSING: glab (install: brew install glab  # or the platform's package manager)" ] \
-    || fail "GitLab remote with userinfo and port must require installable glab, got: $out"
+  assert_contains "$out" "MISSING: glab (install: brew install glab  # or the platform's package manager)" \
+    "GitLab remote with userinfo and port must require installable glab"
+  assert_contains "$out" "NEEDS_GLAB_AUTH: gitlab.example" \
+    "GitLab remote without glab must still surface the deferred auth diagnostic"
 
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
@@ -838,6 +840,29 @@ SH
     FM_GITLAB_HOSTS=gitlab.example FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "NEEDS_GLAB_AUTH: gitlab.example" ] \
     || fail "GitLab auth diagnostic must retain the normalized host, got: $out"
+
+  case_dir="$TMP_ROOT/forge-network-only-mixed"
+  project="$case_dir/home/projects/unknown"
+  github_project="$case_dir/home/projects/github"
+  mkdir -p "$project" "$github_project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://code.example/team/project.git
+  git -C "$github_project" init -q
+  git -C "$github_project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "FORGE_UNSUPPORTED: unknown (host: code.example)" \
+    "network-only bootstrap must fail closed for unknown origins"
+  assert_contains "$out" "NEEDS_GH_AUTH: github.com" \
+    "an unknown origin must not suppress GitHub auth remediation in a mixed home"
 
   pass "bootstrap keeps origin-only local semantics and owns forge remediation"
 }
