@@ -39,9 +39,9 @@
 // pin a cheaper model for the branch alone with /supervision-model, which
 // picks from Pi's own catalog and persists one line under this home's
 // config/. docs/configuration.md owns that file's operator-facing schema. No
-// pin means the branch follows main's own model, applied explicitly on every
-// build so a reopened branch cannot restore a model an earlier pin left in
-// its session.
+// pin makes the branch follow main's own model when the isolated runtime can
+// resolve it, applied explicitly on every build so a reopened branch cannot
+// restore a model an earlier pin left in its session.
 //
 // Threat model (captain-decided): the branch's actor identity is
 // CONFUSED-AGENT-GRADE - deterministic spawnHook env injection plus a
@@ -359,7 +359,7 @@ export default function (pi: ExtensionAPI) {
   // restored the model an earlier pin left behind. Only when main's model is
   // genuinely unknown, or the isolated runtime cannot run it, does the build
   // fall back to passing no override at all, which is the pre-feature
-  // behavior; the branch is never refused over model choice alone.
+  // behavior; an unpinned branch is never refused over model choice alone.
   async function branchModelSelection(): Promise<PinnedBranchModel | undefined> {
     const pin = readModelPin();
     if (pin) return preparePinnedBranchModel(pin);

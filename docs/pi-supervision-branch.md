@@ -26,7 +26,7 @@ This feature is Pi-only by construction and changes nothing anywhere else:
 - The branch itself: `.pi/extensions/fm-branch-supervision.ts` creates and reopens the persistent branch session, serializes wakes, mirrors dialog, and merges outcomes.
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect so replacement or lock loss cannot let an old continuation mutate the new session.
   Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
-- Branch model selection: the same extension registers `/supervision-model`, applies the pin file's current state on every branch build so it overrides a reopened session's recorded model, follows main's own model when there is no pin, and refuses a pin the isolated branch runtime cannot honor rather than silently falling back to main's model.
+- Branch model selection: the same extension registers `/supervision-model` and applies model selection at the branch-session creation boundary; [configuration.md](configuration.md#pi-supervision-branch-model-configsupervision-branch-model) owns the operator-facing schema and behavior.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
 - Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format and the read cursor.
   Outcomes are written to the store before any note is handed to Pi, and rows that never reach that handoff replay once through the next locked session-start digest.
