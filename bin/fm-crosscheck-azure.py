@@ -52,6 +52,14 @@ MAX_REVIEW_SECONDS = 7200
 MODEL_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_ACTIVE_REVIEWS = 4
 MAX_REVIEW_PACKET_BYTES = 1500 * 1024
+CAPACITY_RETRY_SECONDS = 5
+TRANSIENT_CAPACITY_REFUSALS = frozenset(
+    {
+        "exact selected-family observed-plus-reserved capacity is exhausted",
+        "specialized observed-plus-reserved demand exceeds its shared 40-vCPU shape",
+        "combined observed-plus-reserved demand would consume the shared East US ceiling",
+    }
+)
 STAGING_CONTAINER = "validation-shards"
 AZURE_EVIDENCE_PATH_PATTERN = (
     r"^\.crosscheck/(reproductions|mutations)/"
@@ -214,8 +222,9 @@ def preflight_reviewer_credential(core: Any, config: dict[str, str]) -> dict[str
     same treatment any other environment fault gets.
 
     The margin covers the review, not the wait in front of it, so this is
-    called twice: once to fail fast, and once after the lane is held, which
-    is the call that actually stands between a dead token and a paid VM.
+    called three times: once to fail fast, once after the lane is held, and
+    once after shared capacity is admitted. The final call stands between a
+    token that expired in either queue and Azure-staged data or a paid VM.
 
     It also covers the gap between the check and the reviewer's first token:
     scope verification, VM create, boot, and bundle upload all happen after
@@ -418,13 +427,6 @@ def verify_scope_and_foundation(config: dict[str, Any]) -> Any:
         runner_env = runner.environment()
         runner.scope_gate(runner_env)
         runner.foundation_gate(runner_env)
-        runner.sku_quota_gate(
-            runner_env,
-            {
-                "sku": config["reviewer_sku"],
-                "sku_family": runner.SKU_FAMILY[config["reviewer_sku"]],
-            },
-        )
         runner.budget_gate(
             runner_env, {"sku": config["reviewer_sku"], "network_bytes": 0}
         )
@@ -1213,13 +1215,33 @@ def reserve_model_capacity(config: dict[str, Any], identity: dict[str, Any], run
     compartment holds one exact reservation with a cushioned worst-case amount
     until its compute absence is proved.
     """
-    fence = hashlib.sha256(os.urandom(32)).hexdigest()
     reservation_id = "ccm-" + identity["review_generation"][:12]
     sku = config["reviewer_sku"]
     family = runner.SKU_FAMILY[sku]
     rate = runner.retail_rate(runner.environment(), sku)
     amount = round(float(rate) * 24.0 * 1.5 + 5.0, 6)
-    result = shared_capacity_command([
+    # The allocator persists a queued row before returning its refusal. Bind
+    # the fence to the complete stable review identity so a command restarted
+    # after an ambiguous transport interruption reattaches to that exact row
+    # instead of stranding it behind a newly random fence.
+    fence = hashlib.sha256(canonical_bytes({
+        "schema": "fm.azure-crosscheck-capacity-fence/v1",
+        "reservation_id": reservation_id,
+        "review_generation": identity["review_generation"],
+        "subscription_binding": hashlib.sha256(
+            config["subscription"].encode("utf-8")
+        ).hexdigest(),
+        "sku": sku,
+        "sku_family": family,
+    })).hexdigest()
+    capacity = {
+        "reservation_id": reservation_id,
+        "fence": fence,
+        "sku": sku,
+        "sku_family": family,
+        "amount_usd": amount,
+    }
+    arguments = [
         "capacity-reserve",
         "--reservation-id", reservation_id,
         "--fence-binding", fence,
@@ -1229,30 +1251,37 @@ def reserve_model_capacity(config: dict[str, Any], identity: dict[str, Any], run
         "--vcpus", str(runner.SKU_VCPUS[sku]),
         "--amount-usd", str(amount),
         "--confirm-subscription", config["subscription"],
-    ])
-    if result.returncode != 0:
-        raise AzureCrosscheckError(
-            "shared allocator refused the model reservation: "
-            + (result.stderr or result.stdout or "").strip()[-400:]
-        )
-    try:
-        reservation = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise AzureCrosscheckError("shared allocator returned a malformed model reservation") from exc
-    if (
-        reservation.get("reservation_id") != reservation_id
-        or reservation.get("status") not in ("reserved", "queued")
-    ):
-        raise AzureCrosscheckError("shared allocator returned a model reservation with the wrong identity")
-    capacity = {
-        "reservation_id": reservation_id,
-        "fence": fence,
-        "sku": sku,
-        "sku_family": family,
-        "amount_usd": amount,
-    }
-    if reservation["status"] != "reserved":
+    ]
+    wait_seconds = config["queue_wait_seconds"]
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        result = shared_capacity_command(arguments)
+        if result.returncode != 0:
+            raise AzureCrosscheckError(
+                "shared allocator refused the model reservation: "
+                + (result.stderr or result.stdout or "").strip()[-400:]
+            )
+        try:
+            reservation = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise AzureCrosscheckError(
+                "shared allocator returned a malformed model reservation"
+            ) from exc
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("reservation_id") != reservation_id
+            or reservation.get("status") not in ("reserved", "queued")
+        ):
+            raise AzureCrosscheckError(
+                "shared allocator returned a model reservation with the wrong identity"
+            )
+        if reservation["status"] == "reserved":
+            return capacity
         reason = str(reservation.get("reason") or "capacity unavailable")[:300]
+        timed_out = time.monotonic() >= deadline
+        if reason in TRANSIENT_CAPACITY_REFUSALS and not timed_out:
+            time.sleep(min(CAPACITY_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+            continue
         try:
             # capacity-reserve persists even refused candidates as queued. No
             # model compute can exist yet, but capacity-release still asks the
@@ -1264,10 +1293,15 @@ def reserve_model_capacity(config: dict[str, Any], identity: dict[str, Any], run
                 "shared allocator queued the model compartment and its exact "
                 "zero-compute release failed: " + reason + "; " + str(exc)
             ) from exc
+        if timed_out and reason in TRANSIENT_CAPACITY_REFUSALS:
+            raise AzureCrosscheckError(
+                "shared allocator capacity queue wait exceeded {} seconds: {}".format(
+                    wait_seconds, reason
+                )
+            )
         raise AzureCrosscheckError(
             "shared allocator queued the model compartment: " + reason
         )
-    return capacity
 
 
 def release_model_capacity(config: dict[str, Any], reservation: dict[str, Any]) -> None:
@@ -2071,10 +2105,8 @@ def run_azure_review(
         # blocks in FIFO order for up to queue_wait_seconds - 7200 by default and
         # 86400 at the maximum - which is far longer than the review margin, so a
         # credential admitted as usable can be long dead by the time a lane frees.
-        # Under load, which is exactly when spend is highest, the first check is
-        # the one that proves nothing. This second check is the one that gates
-        # spend: every billable action happens after it, and it costs one local
-        # file read.
+        # This second check refuses that drift before foundation inspection. A
+        # third check after shared-capacity admission gates staging and compute.
         preflight_reviewer_credential(core, config)
         return _run_azure_review_in_lane(
             core=core, root=root, home=home, task_id=task_id, pr_url=pr_url,
@@ -2236,20 +2268,26 @@ def _run_azure_review_in_lane(
         }
         uploaded: set[str] = set()
         resources: dict[str, Any] | None = None
+        model_capacity: dict[str, Any] | None = None
         cleanup_error: Exception | None = None
         ledger_identity: dict[str, Any] | None = None
         try:
-            with measured_phase(phase_timer, "create"):
-                model_capacity = reserve_model_capacity(azure, identity, runner)
-        except core.CrosscheckToolError:
-            raise
-        except Exception as exc:
-            # Reservation refusal happens before the model-resource cleanup
-            # window below exists. Normalize both allocator refusals and local
-            # subprocess failures here so the core records this exact reviewer
-            # as a tool failure and can advance to the next screened account.
-            raise core.CrosscheckToolError(str(exc)) from exc
-        try:
+            try:
+                with measured_phase(phase_timer, "create"):
+                    model_capacity = reserve_model_capacity(azure, identity, runner)
+            except core.CrosscheckToolError:
+                raise
+            except Exception as exc:
+                # Normalize allocator refusals and local subprocess failures so
+                # the core records this exact reviewer as a tool failure. The
+                # outer cleanup window releases any admitted reservation.
+                raise core.CrosscheckToolError(str(exc)) from exc
+            preflight_reviewer_credential(core, config)
+            require_stable_reviewer_credential(
+                core,
+                config,
+                (credential, source, identifier, reviewer_account_identity),
+            )
             with measured_phase(phase_timer, "stage"):
                 upload_blob(azure, input_path, staged["input_blob"])
                 uploaded.add(staged["input_blob"])
@@ -2401,13 +2439,18 @@ def _run_azure_review_in_lane(
                     cleanup_model_vm(azure, resources, identity)
                 except Exception as exc:
                     cleanup_error = exc
-            if cleanup_error is None:
+            if cleanup_error is None and model_capacity is not None:
                 try:
                     release_model_capacity(azure, model_capacity)
                 except Exception as exc:
                     cleanup_error = exc
             blob_cleanup_errors: list[str] = []
-            for blob in sorted(uploaded | {staged["output_blob"]}):
+            expected_blobs = (
+                uploaded | {staged["output_blob"]}
+                if model_capacity is not None
+                else uploaded
+            )
+            for blob in sorted(expected_blobs):
                 try:
                     delete_exact_blob(azure, blob)
                 except Exception as exc:

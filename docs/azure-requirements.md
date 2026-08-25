@@ -1128,6 +1128,9 @@ commits only on success, and is refused if its effects reach outside the one com
 owns.
 The later per-slot pending map and lock-discipline changes completed that work.
 
+Crosscheck model admission now retains the shipped four-lane FIFO model while transient exact-family or shared-capacity pressure polls one durable allocator reservation identity within the configured queue wait.
+Timeout releases that exact queued identity, non-capacity refusals remain immediate, and reviewer credentials are rechecked after admission before staging or billable compute.
+
 One thing not to do, found while designing this: the three capacity commands stay fully locked.
 `merged_specialized_reservations` ignores local reservations whose status is not `reserved`, so a
 candidate parked by one concurrent reserve is invisible to another's admission arithmetic and two

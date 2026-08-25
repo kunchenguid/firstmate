@@ -62,8 +62,8 @@ A wrong account, model, generation, VM, boot, request, transport, or cleanup ide
 The model compartment's egress allowlist is Azure-provided DNS plus the exact provider API endpoint, and a provider auth host is not on it.
 A reviewer CLI inside the compartment therefore cannot refresh an expired session, so a dead credential buys a real VM and returns a tool failure instead of a verdict.
 
-Every review runs `bin/fm-credential-expiry.py` against the selected reviewer's account home twice: once before the FIFO lane wait, before any Azure call and before any staged object, and again once the lane is held.
-The second check is the one that gates spend. The margin covers the review, not the queue in front of it, and `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS` bounds that queue at 7200 seconds by default and 86400 at its maximum, so a credential admitted before the wait can be long dead by the time a lane frees - under load, which is when spend is highest.
+Every review runs `bin/fm-credential-expiry.py` against the selected reviewer's account home three times: before the FIFO lane wait, once the lane is held, and after shared capacity is admitted.
+The third check gates Azure staging and compute because `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS` bounds both lane and shared-capacity waiting at 7200 seconds by default and 86400 at its maximum.
 The credential must be `usable` and must still be usable after the review deadline (`FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS`); `refreshable` is refused because it is not recoverable inside the compartment.
 A refusal is an ordinary tool failure, so the roster records the account and rotates to the next policy-screened reviewer rather than ending the review.
 The preflight reads expiry instants and account paths only, and never emits token material.
@@ -172,7 +172,8 @@ It creates no role assignment, provider registration, public path, support ticke
 There is no warm review compute and no review queue daemon.
 Zero waiting reviews means zero model, tool, or verifier VMs.
 Review capacity is owned by the released whole-fleet allocator in [Elastic task workers](azure-workers.md): every model compartment reserves one exact SKU/family/cost constituent through `capacity-reserve` before compute and releases it only after proven compute absence, tool and verifier invocations reserve through the released runner's own shared-allocator bridge, and review demand shares the 40-vCPU specialized envelope with no-mistakes validation under the single 128-vCPU East US ceiling.
-A queued shared reservation refuses the review rather than creating capacity, and the local software cap (default four active model compartments, configurable one through eight) remains only a concurrency safety bound, never a capacity authority.
+A queued shared reservation caused by exact-family or shared-capacity pressure is retried with the same durable reservation identity until `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS` expires, while budget, daily-bound, credential, identity, and other allocator failures remain immediate.
+Timeout releases the exact queued reservation before failing, and the local software cap (default four active model compartments, configurable one through eight) remains only a concurrency safety bound, never a capacity authority.
 Regional and exact-family quota can impose a lower effective ceiling.
 
 Two admitted reviews have distinct review generations, staged object prefixes, model VMs, tool invocations, verifier invocations, process trees, scratch, credentials, and cleanup authorization.
@@ -277,10 +278,12 @@ The home-local configuration is optional and gitignored:
   "enabled": true,
   "provider_host": "exact-provider-host.example",
   "provider_port": 443,
-  "reviewer_sku": "Standard_D4as_v6",
   "model_image_id": "/subscriptions/.../resourceGroups/.../providers/Microsoft.Compute/galleries/.../images/.../versions/1.0.0"
 }
 ```
+
+Omitting `reviewer_sku` spreads the default four lanes across the reviewed SKU families.
+An explicit `reviewer_sku` remains an opt-in diagnostic override that pins every lane.
 
 The required environment is the accepted foundation's existing `FM_HOME`, `FM_AZURE_TENANT_ID`, `FM_AZURE_SUBSCRIPTION_ID`, `FM_AZURE_NAMING_PREFIX`, `FM_AZURE_STORAGE_NAME`, `FM_AZURE_OWNER_TAG`, `FM_AZURE_DEPLOYMENT_GENERATION`, and independently accepted `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID`, plus the exact image through the config or `FM_CROSSCHECK_AZURE_MODEL_IMAGE_ID`.
 The standard Crosscheck reviewer roster remains `config/crosscheck-reviewer.json` and keeps its existing account/model policy.
