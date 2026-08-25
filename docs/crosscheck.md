@@ -87,7 +87,7 @@ The regular-lane reviewer record binds `review_depth_passes: "2"`, `review_depth
 Successful current-contract `clear` and `blocking` records, including reusable records, fail validation when any of those fields is missing or contradictory.
 Failed `tool-failure`, `unreviewed`, and `cannot-certify` attempts may omit terminal and depth evidence they never earned, so their ledgers remain reloadable for a later retry; they are never reusable.
 Crosscheck accepts exactly one verdict tool call from each successful pass and preserves usage across Pi auto-retries.
-If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral minimal-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
+If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral low-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
 The repair is attempted once per pass, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
 Provider terminal-error diagnostics have credential-shaped values redacted, are whitespace-normalized and stripped of non-printable characters, and are limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.

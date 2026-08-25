@@ -2939,6 +2939,12 @@ scenario = os.environ["SCENARIO"]
 effective = scenario
 if scenario.endswith("-then-valid"):
     effective = scenario.removesuffix("-then-valid") if len(captures) == 1 else "valid"
+reasoning_effort = sys.argv[sys.argv.index("--thinking") + 1]
+provider_reasoning_efforts = {
+    "low", "medium", "high", "xhigh", "max", "none", "adaptive",
+}
+if reasoning_effort not in provider_reasoning_efforts:
+    effective = "invalid-reasoning-effort"
 if effective == "nonzero":
     print("bounded fake provider failure", file=sys.stderr)
     raise SystemExit(17)
@@ -3006,6 +3012,13 @@ elif effective == "terminal-error-secrets":
         "secret='secret-visible'; access_token=access-visible; opaque="
         + "Z" * 48
     )
+elif effective == "invalid-reasoning-effort":
+    message["content"] = []
+    message["stopReason"] = "error"
+    message["errorMessage"] = (
+        "reasoning_effort must be low, medium, high, xhigh, max, none, or adaptive; "
+        f"received {reasoning_effort!r}"
+    )
 print(json.dumps({"type": "turn_end", "message": message}))
 print(json.dumps({"type": "agent_end"}))
 if effective == "internal-retry":
@@ -3066,7 +3079,7 @@ def assert_launch(captured, account, prompt, schema, attempts=1):
         active_prompt = prompt if index == 0 else prompt.parent / "repair-prompt.txt"
         assert launch["argv"] == [
             "--mode", "json", "--offline", "--provider", provider,
-            "--model", model, "--thinking", "xhigh" if index == 0 else "minimal",
+            "--model", model, "--thinking", "xhigh" if index == 0 else "low",
             "--tools", "submit_crosscheck_verdict",
             "--extension", str(extension),
             "--system-prompt", system_prompt,
@@ -3074,13 +3087,14 @@ def assert_launch(captured, account, prompt, schema, attempts=1):
             "--no-skills", "--no-prompt-templates", "--no-themes",
             "--no-context-files", "--no-approve", f"@{active_prompt}",
         ], launch["argv"]
+        assert "minimal" not in launch["argv"], launch["argv"]
         assert launch["account"] == str(account), launch
         assert launch["schema"] == str(schema), launch
     if attempts == 2:
         repair = captured[1]["prompt_text"]
         assert repair.startswith("VERDICT PROTOCOL REPAIR"), repair
         assert repair.endswith("PROMPT BY FILE"), repair
-        assert "fresh minimal-reasoning attempt" in repair, repair
+        assert "fresh low-reasoning attempt" in repair, repair
         assert "submit_crosscheck_verdict exactly once" in repair, repair
 
 

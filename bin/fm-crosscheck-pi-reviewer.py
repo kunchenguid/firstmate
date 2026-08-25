@@ -12,6 +12,9 @@ import sys
 from typing import Any
 
 
+VERDICT_REPAIR_EFFORT = "low"
+
+
 class ReviewError(RuntimeError):
     """A fail-closed Pi launch or verdict-protocol failure."""
 
@@ -331,7 +334,7 @@ def run(argv: list[str]) -> int:
             "--model",
             model,
             "--thinking",
-            effort if attempt == 0 else "minimal",
+            effort if attempt == 0 else VERDICT_REPAIR_EFFORT,
             "--tools",
             "submit_crosscheck_verdict",
             "--extension",
@@ -370,7 +373,7 @@ def run(argv: list[str]) -> int:
             repair_prompt.write_text(
                 "VERDICT PROTOCOL REPAIR (trusted controller instruction):\n"
                 "Perform the exact independent review packet below in this fresh "
-                "minimal-reasoning attempt. Do not end with prose and do not call "
+                f"{VERDICT_REPAIR_EFFORT}-reasoning attempt. Do not end with prose and do not call "
                 "the tool more than once. Submit the complete schema-valid verdict "
                 "through submit_crosscheck_verdict exactly once.\n\n"
                 + prompt.read_text(encoding="utf-8"),
