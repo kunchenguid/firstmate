@@ -6,6 +6,8 @@
 // downloads, and the SDK's message APIs for durable outbound delivery.
 // It never starts Pi, imports an Agent SDK, writes a Pi session, evaluates
 // message text, opens a webhook, or invokes an operator command.
+// `recover` accepts one exact credential-free binding/session/config fence on
+// stdin and exits 75 only for classified retryable process-level failures.
 // FM_FEISHU_RECOVERY_TIMEOUT_MS sets the one-episode reconnect deadline in
 // positive integer milliseconds; the default is 300000.
 import { spawn, spawnSync } from "node:child_process";
@@ -23,11 +25,13 @@ import {
   disablePairing,
   failFeishuMediaDownload,
   failOutboundAttempt,
+  liveSessionOwnsBinding,
   publicStatusSummary,
   pendingFeishuMedia,
   publishFeishuInbound,
   readActiveBinding,
   readPairing,
+  readTransportHealth,
   readTransportOwner,
   receiptOutbound,
   recordTransportDiagnostic,
@@ -317,6 +321,26 @@ function sdkConnectionFailureIsTerminal(error) {
   return sdkFailureIsAuthentication(error);
 }
 
+function processRecoveryClass(errorType) {
+  if (new Set([
+    "sdk-connection-closed",
+    "sdk-connection-lost",
+    "sdk-connection-refused",
+    "sdk-connection-reset",
+    "sdk-connection-timeout",
+    "sdk-dns-unavailable",
+    "sdk-long-connection-error",
+    "sdk-long-connection-failed",
+    "sdk-network-error",
+    "sdk-network-no-response",
+    "sdk-ready-timeout",
+    "sdk-recovery-timeout",
+    "transport-start-failed",
+  ]).has(errorType)) return "retryable";
+  if (/^sdk-http-(408|409|425|429|5[0-9]{2})$/.test(errorType)) return "retryable";
+  return "terminal";
+}
+
 function headerValue(headers, name) {
   if (!headers || typeof headers !== "object") return "";
   const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
@@ -532,7 +556,16 @@ async function runTransport({ once = false, daemon = false } = {}) {
     if (fatalSettled) return;
     fatalSettled = true;
     terminalError = sdkErrorType(error, fallback);
-    try { writeTransportHealth(HOME, { ...healthFence, phase: "degraded", healthy: false, reconnects, lastErrorType: terminalError }); } catch {}
+    try {
+      writeTransportHealth(HOME, {
+        ...healthFence,
+        phase: "degraded",
+        healthy: false,
+        reconnects,
+        lastErrorType: terminalError,
+        recoveryClass: processRecoveryClass(terminalError),
+      });
+    } catch {}
     fatal.resolve(new Error(terminalError));
     stop();
   };
@@ -709,6 +742,7 @@ async function runTransport({ once = false, daemon = false } = {}) {
         healthy: false,
         reconnects,
         lastErrorType: terminalError,
+        recoveryClass: terminalError ? processRecoveryClass(terminalError) : null,
       });
     } finally {
       releaseTransportOwner(HOME, nonce);
@@ -764,6 +798,18 @@ function currentOwnerMatchesConfiguration(owner) {
   return !identity || owner?.config_file_identity === identity;
 }
 
+function sameTransportOwner(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.pid === right.pid &&
+    left.nonce === right.nonce &&
+    left.process_start_token === right.process_start_token &&
+    left.module_file === right.module_file &&
+    left.home_realpath === right.home_realpath,
+  );
+}
+
 async function probeConfiguration() {
   const credentials = environmentAppCredentials();
   const chatId = String(process.env.FM_FEISHU_P2P_CHAT_ID || "");
@@ -800,6 +846,25 @@ function configuredSessionFromStdin() {
   return value;
 }
 
+function configuredRecoveryFromStdin() {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(0, "utf8"));
+  } catch {
+    throw transportError("process-recovery-request-malformed");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || !value.session || typeof value.session !== "object" || Array.isArray(value.session)) {
+    throw transportError("process-recovery-request-malformed");
+  }
+  if (!/^bind_[a-f0-9]{24}$/.test(value.bindingId) || !Number.isSafeInteger(value.bindingGeneration) || value.bindingGeneration <= 0) {
+    throw transportError("process-recovery-binding-malformed");
+  }
+  if (!/^[0-9]+:[0-9]+:[0-9.]+:[0-9]+$/.test(value.configFileIdentity) || !/^pi_[0-9]+_[a-f0-9]{24}$/.test(value.liveOwnerToken)) {
+    throw transportError("process-recovery-owner-malformed");
+  }
+  return value;
+}
+
 function configuredIdentity(config) {
   return {
     appIdFingerprint: appFingerprint(config.appId),
@@ -822,6 +887,62 @@ function currentTransportMatches(config, binding) {
     owner.config_file_identity === config.fileIdentity &&
     transportHealthAllowsDispatch(HOME, binding),
   );
+}
+
+function assertRecoveryFence(request) {
+  if (!lockIsOwned()) throw transportError("session-lock-ownership-lost");
+  const config = readFeishuConfig(HOME);
+  if (config.status === "absent") throw transportError("configuration-absent");
+  if (config.status === "disabled") throw transportError("configuration-disabled");
+  if (config.fileIdentity !== request.configFileIdentity) throw transportError("configuration-changed");
+  const desired = configuredIdentity(config);
+  if (!configuredSessionMatches(HOME, desired, request.session)) throw transportError("binding-session-mismatch");
+  const binding = readActiveBinding(HOME);
+  if (!binding || binding.binding_id !== request.bindingId || binding.generation !== request.bindingGeneration) {
+    throw transportError("binding-generation-changed");
+  }
+  if (!liveSessionOwnsBinding(HOME, binding, request.session, request.liveOwnerToken)) {
+    throw transportError("live-session-ownership-lost");
+  }
+  return { config, binding };
+}
+
+async function recoverConfiguredTransport() {
+  const request = configuredRecoveryFromStdin();
+  let { config, binding } = assertRecoveryFence(request);
+  loadConfiguredCredentials(config);
+  const existing = readTransportOwner(HOME);
+  if (existing && ownerLooksLive(existing)) {
+    if (!currentOwnerMatchesConfiguration(existing)) throw transportError("conflicting-live-transport-owner");
+    return { status: "owner-active", owner: existing };
+  }
+  if (existing && ownerPidIsAlive(existing)) throw transportError("ambiguous-live-transport-owner");
+  const health = readTransportHealth(HOME);
+  if (health?.binding_id === binding.binding_id && health?.binding_generation === binding.generation && health?.recovery_class === "terminal") {
+    throw transportError(typeof health.last_error_type === "string" ? health.last_error_type : "terminal-transport-failure");
+  }
+  if (existing && !retireStaleTransportOwner(HOME, existing)) throw transportError("stale-transport-owner-changed");
+  try {
+    await probeConfiguration();
+    assertConfigUnchanged(config);
+  } catch (error) {
+    throw transportError(sdkErrorType(error, "configuration-probe-failed"));
+  }
+  ({ config, binding } = assertRecoveryFence(request));
+  loadConfiguredCredentials(config);
+  const result = await startDetached();
+  try {
+    assertRecoveryFence(request);
+    const owner = readTransportOwner(HOME);
+    if (!sameTransportOwner(owner, result.owner)) throw transportError("replacement-transport-owner-changed");
+  } catch (error) {
+    if (result.status === "started") {
+      try { await stopOwned({ replacement: true, expected: result.owner }); }
+      catch { throw transportError("replacement-transport-cancel-failed"); }
+    }
+    throw error;
+  }
+  return result;
 }
 
 async function reconcileConfiguredLifecycle({ hardBind = false } = {}) {
@@ -880,7 +1001,7 @@ async function startDetached() {
   const existing = readTransportOwner(HOME);
   if (existing && ownerLooksLive(existing) && currentOwnerMatchesConfiguration(existing)) {
     if (!SILENT) process.stdout.write("feishu transport already running\n");
-    return;
+    return { status: "owner-active", owner: existing };
   }
   if (existing && ownerLooksLive(existing)) throw new Error("a verified Feishu transport for another configuration is still running");
   if (existing && !retireStaleTransportOwner(HOME, existing)) throw new Error("stale Feishu transport ownership changed during retirement");
@@ -896,21 +1017,23 @@ async function startDetached() {
     const owner = readTransportOwner(HOME);
     if (owner && owner.pid === child.pid && ownerLooksLive(owner)) {
       if (!SILENT) process.stdout.write("feishu transport started\n");
-      return;
+      return { status: "started", owner };
     }
     if (child.exitCode !== null) break;
   }
-  throw new Error("Feishu transport did not publish a live owner record");
+  throw transportError("transport-start-failed");
 }
 
-async function stopOwned({ replacement = false } = {}) {
+async function stopOwned({ replacement = false, expected } = {}) {
   const owner = readTransportOwner(HOME);
   if (!owner) {
+    if (expected) return;
     if (replacement) return;
     writeTransportHealth(HOME, { phase: "stopped", healthy: false, lastErrorType: null });
     if (!SILENT) process.stdout.write("feishu transport already stopped\n");
     return;
   }
+  if (expected && !sameTransportOwner(owner, expected)) throw transportError("replacement-transport-owner-changed");
   if (!ownerLooksLive(owner)) {
     if (replacement && ownerPidIsAlive(owner)) throw new Error("the prior Feishu transport owner is live but cannot be verified for safe replacement");
     if (!retireStaleTransportOwner(HOME, owner)) throw new Error("stale Feishu transport ownership changed during retirement");
@@ -931,11 +1054,14 @@ async function stopOwned({ replacement = false } = {}) {
 }
 
 function usage() {
-  return "usage: fm-feishu-transport.sh reconcile|hard-bind|disable-config|config-check|probe|start|stop|restart|status|run [--once]";
+  return "usage: fm-feishu-transport.sh reconcile|hard-bind|recover|disable-config|config-check|probe|start|stop|restart|status|run [--once]";
 }
+
+let activeCommand = "";
 
 async function main(argv) {
   const command = argv.shift();
+  activeCommand = command || "";
   if (command === "config-check") {
     const config = readFeishuConfig(HOME);
     process.stdout.write(`${JSON.stringify({ status: config.status })}\n`);
@@ -948,6 +1074,17 @@ async function main(argv) {
   }
   if (command === "reconcile") return reconcileConfiguredLifecycle();
   if (command === "hard-bind") return reconcileConfiguredLifecycle({ hardBind: true });
+  if (command === "recover") {
+    const result = await recoverConfiguredTransport();
+    process.stdout.write(`${JSON.stringify({
+      status: result.status,
+      ownerPid: result.owner.pid,
+      ownerNonce: result.owner.nonce,
+      ownerProcessStartToken: result.owner.process_start_token,
+      configFileIdentity: result.owner.config_file_identity,
+    })}\n`);
+    return;
+  }
   if (command === "disable-config") return disableConfiguredLifecycle();
   if (command === "start") {
     const config = loadConfiguredCredentialsIfNeeded();
@@ -979,5 +1116,5 @@ main(process.argv.slice(2)).catch((error) => {
     ? error.message
     : sdkErrorType(error, "operation-failed");
   process.stderr.write(`fm-feishu-transport: ${kind}\n`);
-  process.exitCode = 2;
+  process.exitCode = activeCommand === "recover" && processRecoveryClass(kind) === "retryable" ? 75 : 2;
 });

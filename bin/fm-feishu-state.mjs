@@ -825,6 +825,8 @@ function validateRecordAtPath(path, record) {
     requireSafeInteger(record.reconnects, "transport reconnect count");
     for (const [key, label] of [["last_connected_at", "connection"], ["last_identity_verified_at", "identity verification"]]) if (record[key] !== null) requireIso(record[key], `transport ${label} time`);
     if (record.last_error_type !== null && typeof record.last_error_type !== "string") throw new Error("invalid Feishu transport health error");
+    if (record.recovery_class !== undefined && record.recovery_class !== null && !new Set(["retryable", "terminal"]).has(record.recovery_class)) throw new Error("invalid Feishu transport process recovery class");
+    if (record.recovery_class && !new Set(["degraded", "stopped"]).has(record.phase)) throw new Error("active Feishu transport health has a process recovery class");
     requireIso(record.updated_at, "transport update time");
   }
   return record;
@@ -3249,6 +3251,7 @@ export function writeTransportHealth(home, patch) {
     last_connected_at: patch.lastConnectedAt ?? prior?.last_connected_at ?? null,
     last_identity_verified_at: patch.lastIdentityVerifiedAt ?? prior?.last_identity_verified_at ?? null,
     last_error_type: patch.lastErrorType ?? null,
+    recovery_class: patch.recoveryClass ?? null,
     updated_at: nowIso(),
   };
   validateRecordAtPath(paths.health, health);
@@ -3264,14 +3267,13 @@ export function readTransportHealth(home) {
   return health;
 }
 
-function readProcessStartToken(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-    return /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
-  } catch {
-    return "";
-  }
+export function transportOwnerIncarnationIsLive(owner) {
+  if (!owner || !pidAlive(owner.pid)) return false;
+  let stat;
+  try { stat = readFileSync(`/proc/${owner.pid}/stat`, "utf8"); }
+  catch { return false; }
+  const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+  return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") && suffix[19] === owner.process_start_token;
 }
 
 export function transportHealthAllowsDispatch(home, binding) {
@@ -3281,7 +3283,7 @@ export function transportHealthAllowsDispatch(home, binding) {
   if (!health || !owner || health.phase !== "healthy" || health.healthy !== true) return false;
   if (health.binding_id !== binding.binding_id || health.binding_generation !== binding.generation) return false;
   if (owner.home_realpath !== paths.home || owner.pid !== health.owner_pid || owner.nonce !== health.owner_nonce || owner.process_start_token !== health.owner_process_start_token) return false;
-  return pidAlive(owner.pid) && readProcessStartToken(owner.pid) === owner.process_start_token;
+  return transportOwnerIncarnationIsLive(owner);
 }
 
 export function statusSummary(home) {

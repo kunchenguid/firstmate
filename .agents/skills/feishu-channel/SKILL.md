@@ -39,7 +39,7 @@ Thinking, partial streams, tool calls and results, user/system/custom messages, 
 
 ## Local control and health
 
-Normal pairing, direct hard binding, replacement, missing live-session ownership recovery, and transport recovery come from local `config/feishu.env` during trusted persisted Pi session startup and owned turn boundaries.
+Normal pairing, direct hard binding, replacement, and missing live-session ownership recovery come from local `config/feishu.env` during trusted persisted Pi session startup and owned turn boundaries, and automatic transport process recovery continues on its own while the exact current session remains active.
 They require no slash command, credential export, or manual transport start.
 Use `/fm-feishu-disable` for a durable local disable and `/fm-feishu-status` for detailed local status.
 Use `/fm-feishu-rebind` only as the compatibility-named local recovery control that hard-binds the configured channel to the exact current trusted persisted Pi session and fences every prior session in the same takeover.

@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The configuration-driven lifecycle, bounded SDK reconnect path, native inbound image path, and outbound post Markdown path were verified on 2026-08-24 against Pi `0.84.3` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle, bounded SDK reconnect and process-replacement paths, native inbound image path, and outbound post Markdown path were verified on 2026-08-25 against Pi `0.84.3` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
@@ -43,7 +43,7 @@ A post-PR real-image check remains an explicit captain action using the already 
 ```console
 $ bash tests/fm-feishu-channel.test.sh
 ok - native Pi steering, lock-contention recovery, state safety, and all-origin Assistant mirroring
-ok - local Pi bridge distinguishes transport health and directly hard-binds exact persisted-session recovery
+ok - local Pi bridge hard-binds session ownership and recovers terminal transport processes safely
 ok - secure config parsing and automatic Feishu lifecycle converge silently and fail closed
 ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized post Markdown outbound
 ```
@@ -68,11 +68,19 @@ It exercises session replacement through the registered Pi lifecycle and proves 
 The public lifecycle and shared state-owner checks prove stable inbound delivery references, stable outbound event and chunk UUID identities, pending registration-intent transfer, receipt-first uncertainty reconciliation, immediate prior-session inbound and mirroring fences, and already-current idempotence.
 The compatibility `/fm-feishu-rebind` command checks prove wrong-owner and invalid-configuration refusal, Feishu-origin refusal, concise body-free output, no credential or private-identifier leakage, and that slash-like Feishu message text remains ordinary native-queue content rather than command execution.
 
-The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-check`, `bin/fm-feishu-lifecycle.mjs reconcile`, the real pairing and binding state owner, verified process-owner stop, and the mocked official SDK boundary.
+The process-recovery fixture starts from the production failure shape: the initiating trigger is a terminal long-connection process outcome, valid configuration and a successful P2P probe are the masking conditions that exclude setup failure, and the visible symptom is degraded transport with one durable outbound response still pending.
+It first proves that transient SDK reconnect keeps the original owner incarnation and starts no replacement.
+It then removes only the terminated owner while preserving the exact binding, live Pi owner, and pending outbound identity, injects three retryable lifecycle failures, and proves four serialized attempts with exponential delay capped at the configured test ceiling despite pump ticks running faster than each attempt.
+The successful replacement preserves the binding generation and configuration identity, publishes a different owner incarnation, becomes dispatchable only after identity-verified health, and delivers the pending chunk exactly once with its original UUID.
+A further case terminates the replacement itself before first healthy state and leaves its exact owner record behind, proving the lingering stale incarnation is deferred as retryable, retired by the next strict recovery, and replaced exactly once without duplicate transports.
+Separate cases prove session-lock loss cancels the retry loop, a terminal authentication health class starts no recovery, and the local diagnostic contains no private identity or credential.
+
+The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-check`, `bin/fm-feishu-lifecycle.mjs reconcile|recover`, the real pairing and binding state owner, verified process-owner stop, and the mocked official SDK boundary.
 It proves absent-config inertness without private state creation, strict key parsing, missing-field refusal, duplicate and unsupported-field refusal, exact `0600` enforcement, symlink and wrong-owner refusal, credential and P2P probing before binding mutation, silent first activation, unchanged-session idempotence, exact-session replacement with generation increment, prior-owner shutdown, stopped-transport recovery without generation churn, config-persisted disable, process-argument redaction, state-record redaction, and credential-rejection failure before binding state exists.
+The strict recovery action additionally proves unchanged configuration-file identity and live Pi ownership, exact same-generation restart, new owner fencing, changed-configuration refusal, terminal HTTP authentication refusal, lock-loss refusal, credential redaction, and zero transport start after any terminal refusal.
 
 The SDK section uses a local module implementing the documented `Client`, `WSClient`, `EventDispatcher`, and `messageResource.get` calls.
-It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, authorized image download only after admission, no download for an unauthorized image event, bounded stream consumption and actual-image verification, healthy and pre-ready transient recovery under one unchanged owner, counted reconnect callbacks, bounded stalled recovery, terminal HTTP authentication and ownership-generation failures, terminal reconnect identity refusal, sanitized connection diagnostics, no client close or outbound attempt while reconnecting, one exact pending send after verified recovery, duplicate-timer cleanup, clean deliberate stop, replay deduplication, canonical bound-chat SDK `message.create`, the exact post locale/content matrix, supported and literal-preserved Markdown in the `md` element, routine-response zero-send with ordinary sibling delivery, stable UUID retry, unsupported-response refusal without card or plain-text fallback, Retry-After preservation, structured multi-chunk delivery, outbound single-flight serialization, body-free health, and owner-verified graceful stop.
+It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, authorized image download only after admission, no download for an unauthorized image event, bounded stream consumption and actual-image verification, healthy and pre-ready transient recovery under one unchanged owner, counted reconnect callbacks, bounded stalled recovery classified for outer retry, terminal HTTP authentication and ownership-generation failures classified to stop, terminal reconnect identity refusal, sanitized connection diagnostics, no client close or outbound attempt while reconnecting, one exact pending send after verified recovery, duplicate-timer cleanup, clean deliberate stop, replay deduplication, canonical bound-chat SDK `message.create`, the exact post locale/content matrix, supported and literal-preserved Markdown in the `md` element, routine-response zero-send with ordinary sibling delivery, stable UUID retry, unsupported-response refusal without card or plain-text fallback, Retry-After preservation, structured multi-chunk delivery, outbound single-flight serialization, body-free health, and owner-verified graceful stop.
 A sentinel executable on `PATH` proves the transport does not invoke the former command transport.
 
 ## Pi compatibility results

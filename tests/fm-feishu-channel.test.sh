@@ -134,7 +134,7 @@ const binding = bindSession(home, {
 const procStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
 const processStartToken = procStat.slice(procStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
 const transportNonce = "a".repeat(48);
-assert.equal(claimTransportOwner(home, { nonce: transportNonce, moduleFile: join(process.cwd(), "bin/fm-feishu-transport.mjs"), processStartToken }).ok, true);
+assert.equal(claimTransportOwner(home, { nonce: transportNonce, moduleFile: join(process.cwd(), "bin/fm-feishu-transport.mjs"), processStartToken, configFileIdentity: "1:2:3:4" }).ok, true);
 function markHealthy(activeBinding) {
   writeTransportHealth(home, {
     phase: "healthy",
@@ -1103,26 +1103,75 @@ BRIDGE_SESSION="$BRIDGE_FIXTURE/session"
 BRIDGE_SESSION_FILE="$BRIDGE_SESSION/current.jsonl"
 BRIDGE_TRANSPORT_LOG="$BRIDGE_FIXTURE/transport.log"
 BRIDGE_LIFECYCLE_LOG="$BRIDGE_FIXTURE/lifecycle.log"
+BRIDGE_RECOVERY_ATTEMPTS="$BRIDGE_FIXTURE/recovery-attempts.log"
+BRIDGE_RECOVERY_FAILURES="$BRIDGE_FIXTURE/recovery-failures"
+BRIDGE_RECOVERY_HOLD_MS="$BRIDGE_FIXTURE/recovery-hold-ms"
+BRIDGE_RECOVERY_UNCLEAN_DEATHS="$BRIDGE_FIXTURE/recovery-unclean-deaths"
+BRIDGE_RECOVERY_SENDS="$BRIDGE_FIXTURE/recovery-sends.log"
+: > "$BRIDGE_RECOVERY_ATTEMPTS"
+: > "$BRIDGE_RECOVERY_SENDS"
+printf '0\n' > "$BRIDGE_RECOVERY_FAILURES"
+printf '0\n' > "$BRIDGE_RECOVERY_HOLD_MS"
+printf '0\n' > "$BRIDGE_RECOVERY_UNCLEAN_DEATHS"
 mkdir -p "$BRIDGE_SESSION"
 printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$BRIDGE_SESSION" > "$BRIDGE_SESSION_FILE"
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" <<'JS'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { convergeConfiguredSession } from "./fm-feishu-state.mjs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { claimNextOutbound, convergeConfiguredSession, readActiveBinding, receiptOutbound } from "./fm-feishu-state.mjs";
+const readStartToken = (pid) => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
+  } catch { return ""; }
+};
 const action = process.argv[2];
 let body = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { body += chunk; });
-process.stdin.on("end", () => {
+process.stdin.on("end", async () => {
   const config = readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8");
   if (config.includes("FM_FEISHU_ENABLED=false")) return;
   if (!config.includes("FM_FEISHU_ENABLED=true")) throw new Error("fixture configuration refused");
-  const identity = JSON.parse(body);
-  const { binding } = convergeConfiguredSession(process.env.FM_HOME, {
-    appIdFingerprint: process.env.APP_FINGERPRINT,
-    allowedUser: "ou_captain1234",
-    allowedChat: "oc_chat1234",
-  }, identity, action === "hard-bind" ? { hardTakeover: true } : undefined);
-  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${action === "hard-bind" ? "hard-bind:" : ""}${identity.sessionId}\n`);
+  const request = JSON.parse(body);
+  const identity = action === "recover" ? request.session : request;
+  const binding = action === "recover"
+    ? readActiveBinding(process.env.FM_HOME)
+    : convergeConfiguredSession(process.env.FM_HOME, {
+      appIdFingerprint: process.env.APP_FINGERPRINT,
+      allowedUser: "ou_captain1234",
+      allowedChat: "oc_chat1234",
+    }, identity, action === "hard-bind" ? { hardTakeover: true } : undefined).binding;
+  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${action === "hard-bind" ? "hard-bind:" : action === "recover" ? "recover:" : ""}${identity.sessionId}\n`);
+  if (action === "recover") {
+    appendFileSync(process.env.BRIDGE_RECOVERY_ATTEMPTS, `${Date.now()}\n`);
+    const holdMs = Number(readFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "utf8"));
+    if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
+    const failures = Number(readFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "utf8"));
+    if (failures > 0) {
+      writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, `${failures - 1}\n`);
+      process.exitCode = 75;
+      return;
+    }
+    const currentOwnerPath = `${process.env.FM_HOME}/state/feishu/transport/owner.json`;
+    if (existsSync(currentOwnerPath)) {
+      const currentOwner = JSON.parse(readFileSync(currentOwnerPath, "utf8"));
+      const incumbentToken = readStartToken(currentOwner.pid);
+      if (/^[0-9]+$/.test(incumbentToken) && incumbentToken === currentOwner.process_start_token) {
+        process.stdout.write(`${JSON.stringify({
+          status: "owner-active",
+          ownerPid: currentOwner.pid,
+          ownerNonce: currentOwner.nonce,
+          ownerProcessStartToken: currentOwner.process_start_token,
+          configFileIdentity: currentOwner.config_file_identity,
+        })}\n`);
+        return;
+      }
+      rmSync(currentOwnerPath);
+    }
+  }
   const transportDir = `${process.env.FM_HOME}/state/feishu/transport`;
   const owner = `${transportDir}/fixture-owner`;
   if (!existsSync(owner)) {
@@ -1133,9 +1182,54 @@ process.stdin.on("end", () => {
     writeFileSync(owner, `${binding.binding_id}\n`);
     appendFileSync(process.env.BRIDGE_TRANSPORT_LOG, `start generation=${binding.generation}\n`);
   }
-  const parentStat = readFileSync(`/proc/${process.ppid}/stat`, "utf8");
-  const processStartToken = parentStat.slice(parentStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
-  const nonce = "b".repeat(48);
+  const parentStartToken = readStartToken(process.ppid);
+  const uncleanDeaths = action === "recover" ? Number(readFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, "utf8")) : 0;
+  if (uncleanDeaths > 0) {
+    writeFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, `${uncleanDeaths - 1}\n`);
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 500)"], { stdio: "ignore" });
+    let childStartToken = "";
+    for (let poll = 0; poll < 100 && !childStartToken; poll += 1) {
+      childStartToken = readStartToken(child.pid);
+      if (!childStartToken) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const uncleanNonce = createHash("sha256").update(`${action}:${Date.now()}:${process.pid}:unclean`).digest("hex").slice(0, 48);
+    writeFileSync(`${transportDir}/owner.json`, `${JSON.stringify({
+      schema: "fm-feishu-transport-owner.v1",
+      pid: child.pid,
+      nonce: uncleanNonce,
+      module_file: `${process.env.FM_ROOT_OVERRIDE}/bin/fm-feishu-transport.mjs`,
+      home_realpath: process.env.FM_HOME,
+      process_start_token: childStartToken,
+      config_file_identity: "1:2:3:4",
+      started_at: new Date().toISOString(),
+    })}\n`);
+    writeFileSync(`${transportDir}/health.json`, `${JSON.stringify({
+      schema: "fm-feishu-transport-health.v2",
+      phase: "starting",
+      healthy: false,
+      owner_pid: child.pid,
+      owner_nonce: uncleanNonce,
+      owner_process_start_token: childStartToken,
+      binding_id: binding.binding_id,
+      binding_generation: binding.generation,
+      reconnects: 0,
+      last_connected_at: null,
+      last_identity_verified_at: null,
+      last_error_type: null,
+      recovery_class: null,
+      updated_at: new Date().toISOString(),
+    })}\n`);
+    process.stdout.write(`${JSON.stringify({
+      status: "started",
+      ownerPid: child.pid,
+      ownerNonce: uncleanNonce,
+      ownerProcessStartToken: childStartToken,
+      configFileIdentity: "1:2:3:4",
+    })}\n`);
+    return;
+  }
+  const processStartToken = parentStartToken;
+  const nonce = createHash("sha256").update(`${action}:${Date.now()}:${process.pid}`).digest("hex").slice(0, 48);
   writeFileSync(`${transportDir}/owner.json`, `${JSON.stringify({
     schema: "fm-feishu-transport-owner.v1",
     pid: process.ppid,
@@ -1143,7 +1237,7 @@ process.stdin.on("end", () => {
     module_file: `${process.env.FM_ROOT_OVERRIDE}/bin/fm-feishu-transport.mjs`,
     home_realpath: process.env.FM_HOME,
     process_start_token: processStartToken,
-    config_file_identity: null,
+    config_file_identity: "1:2:3:4",
     started_at: new Date().toISOString(),
   })}\n`);
   writeFileSync(`${transportDir}/health.json`, `${JSON.stringify({
@@ -1159,8 +1253,23 @@ process.stdin.on("end", () => {
     last_connected_at: new Date().toISOString(),
     last_identity_verified_at: new Date().toISOString(),
     last_error_type: null,
+    recovery_class: null,
     updated_at: new Date().toISOString(),
   })}\n`);
+  if (action === "recover") {
+    const claim = claimNextOutbound(process.env.FM_HOME);
+    if (claim) {
+      appendFileSync(process.env.BRIDGE_RECOVERY_SENDS, `${claim.chunk.idempotency_key}\n`);
+      receiptOutbound(process.env.FM_HOME, claim, { messageId: "om_recovered1234", chatId: "oc_chat1234" });
+    }
+    process.stdout.write(`${JSON.stringify({
+      status: "started",
+      ownerPid: process.ppid,
+      ownerNonce: nonce,
+      ownerProcessStartToken: processStartToken,
+      configFileIdentity: "1:2:3:4",
+    })}\n`);
+  }
 });
 JS
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-transport.sh" <<'SH'
@@ -1178,12 +1287,21 @@ FM_HOME="$BRIDGE_FIXTURE/home" \
 FM_ROOT_OVERRIDE="$BRIDGE_FIXTURE" \
 FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
 FM_FEISHU_LIFECYCLE_SCRIPT="$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" \
+FM_FEISHU_PROCESS_RECOVERY_TEST_MODE=1 \
+FM_FEISHU_PUMP_MS=10 \
+FM_FEISHU_PROCESS_RECOVERY_BASE_MS=20 \
+FM_FEISHU_PROCESS_RECOVERY_MAX_MS=80 \
 FM_FEISHU_DISABLE_AUTOSTART=1 \
 BRIDGE="$BRIDGE_FIXTURE/.pi/extensions/fm-primary-feishu-bridge.ts" \
 TURNEND="$BRIDGE_FIXTURE/.pi/extensions/fm-primary-turnend-guard.ts" \
 BRIDGE_SESSION="$BRIDGE_SESSION" \
 BRIDGE_SESSION_FILE="$BRIDGE_SESSION_FILE" \
 BRIDGE_LIFECYCLE_LOG="$BRIDGE_LIFECYCLE_LOG" \
+BRIDGE_RECOVERY_ATTEMPTS="$BRIDGE_RECOVERY_ATTEMPTS" \
+BRIDGE_RECOVERY_FAILURES="$BRIDGE_RECOVERY_FAILURES" \
+BRIDGE_RECOVERY_HOLD_MS="$BRIDGE_RECOVERY_HOLD_MS" \
+BRIDGE_RECOVERY_UNCLEAN_DEATHS="$BRIDGE_RECOVERY_UNCLEAN_DEATHS" \
+BRIDGE_RECOVERY_SENDS="$BRIDGE_RECOVERY_SENDS" \
 BRIDGE_TRANSPORT_LOG="$BRIDGE_TRANSPORT_LOG" \
 BRIDGE_STATE="$BRIDGE_FIXTURE/bin/fm-feishu-state.mjs" \
 SID="$SID" \
@@ -1274,8 +1392,11 @@ assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().s
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "repeated settled or agent_start boundary duplicated transport startup");
 
 const initialPaths = feishuState.pathsForHome(process.env.FM_HOME);
+for (let attempt = 0; attempt < 100 && readdirSync(initialPaths.liveSession).length === 0; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 const initialLiveOwners = readdirSync(initialPaths.liveSession);
-assert.equal(initialLiveOwners.length, 1, "initial bind did not publish sole live Pi ownership");
+assert.equal(initialLiveOwners.length, 1, `initial bind did not publish sole live Pi ownership: ${JSON.stringify(notices)}`);
 rmSync(`${initialPaths.liveSession}/${initialLiveOwners[0]}`);
 const ownershipGap = feishuState.publicStatusSummary(process.env.FM_HOME);
 assert.equal(ownershipGap.transport_healthy, true, "ownership-gap fixture did not preserve healthy transport");
@@ -1289,6 +1410,163 @@ assert.equal(ownershipRecovered.transport_healthy, true, "direct ownership recov
 assert.equal(ownershipRecovered.live_session_owned, true, "direct hard bind did not restore exact current Pi live ownership");
 assert.equal(ownershipRecovered.binding_generation, generationBeforeOwnershipRecovery, "exact-current ownership recovery churned the binding generation");
 assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportBeforeOwnershipRecovery, "exact-current ownership recovery relied on a transport restart");
+
+const recoveryAttemptTimes = () => readFileSync(process.env.BRIDGE_RECOVERY_ATTEMPTS, "utf8").trim().split("\n").filter(Boolean).map(Number);
+const terminateFixtureTransport = (errorType, recoveryClass) => {
+  const activeBinding = feishuState.readActiveBinding(process.env.FM_HOME);
+  const ownerPath = `${initialPaths.transport}/owner.json`;
+  const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
+  rmSync(ownerPath);
+  rmSync(`${initialPaths.transport}/fixture-owner`, { force: true });
+  writeFileSync(`${initialPaths.transport}/health.json`, `${JSON.stringify({
+    schema: "fm-feishu-transport-health.v2",
+    phase: "degraded",
+    healthy: false,
+    owner_pid: owner.pid,
+    owner_nonce: owner.nonce,
+    owner_process_start_token: owner.process_start_token,
+    binding_id: activeBinding.binding_id,
+    binding_generation: activeBinding.generation,
+    reconnects: 0,
+    last_connected_at: new Date().toISOString(),
+    last_identity_verified_at: new Date().toISOString(),
+    last_error_type: errorType,
+    recovery_class: recoveryClass,
+    updated_at: new Date().toISOString(),
+  })}\n`);
+  return owner;
+};
+const waitFor = async (predicate, message) => {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(message);
+};
+
+const reconnectOwner = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+const transportBeforeTransientReconnect = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8");
+const transientAttemptsBefore = recoveryAttemptTimes().length;
+writeFileSync(`${initialPaths.transport}/health.json`, `${JSON.stringify({
+  schema: "fm-feishu-transport-health.v2",
+  phase: "reconnecting",
+  healthy: false,
+  owner_pid: reconnectOwner.pid,
+  owner_nonce: reconnectOwner.nonce,
+  owner_process_start_token: reconnectOwner.process_start_token,
+  binding_id: binding.binding_id,
+  binding_generation: binding.generation,
+  reconnects: 1,
+  last_connected_at: new Date().toISOString(),
+  last_identity_verified_at: new Date().toISOString(),
+  last_error_type: "sdk-connection-reset",
+  recovery_class: null,
+  updated_at: new Date().toISOString(),
+})}\n`);
+await waitFor(() => recoveryAttemptTimes().length === transientAttemptsBefore + 1, "outer recovery did not observe the live reconnecting owner");
+assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportBeforeTransientReconnect, "transient SDK reconnect replaced the live transport process");
+writeFileSync(`${initialPaths.transport}/health.json`, `${JSON.stringify({
+  schema: "fm-feishu-transport-health.v2",
+  phase: "healthy",
+  healthy: true,
+  owner_pid: reconnectOwner.pid,
+  owner_nonce: reconnectOwner.nonce,
+  owner_process_start_token: reconnectOwner.process_start_token,
+  binding_id: binding.binding_id,
+  binding_generation: binding.generation,
+  reconnects: 1,
+  last_connected_at: new Date().toISOString(),
+  last_identity_verified_at: new Date().toISOString(),
+  last_error_type: null,
+  recovery_class: null,
+  updated_at: new Date().toISOString(),
+})}\n`);
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert.equal(JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8")).nonce, reconnectOwner.nonce, "verified SDK reconnect changed the owner incarnation");
+
+const pendingRecovery = feishuState.registerAssistantOutbound(process.env.FM_HOME, {
+  text: "pending once across process recovery",
+  assistantEntryId: "face2001",
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-12T00:01:00.000Z",
+  sessionId: process.env.SID,
+  bindingGeneration: binding.generation,
+});
+const pendingRecoveryOutbox = readdirSync(initialPaths.outbox)
+  .map((name) => JSON.parse(readFileSync(`${initialPaths.outbox}/${name}`, "utf8")))
+  .find((record) => record.event_id === pendingRecovery.eventId);
+writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "3\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "50\n");
+const processAttemptsBefore = recoveryAttemptTimes().length;
+const terminalOwner = terminateFixtureTransport("sdk-long-connection-failed", "retryable");
+await waitFor(
+  () => feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy && recoveryAttemptTimes().length === processAttemptsBefore + 4,
+  "terminal transport exit was not autonomously reconciled after repeated retryable failures",
+);
+await new Promise((resolve) => setTimeout(resolve, 120));
+const processAttempts = recoveryAttemptTimes().slice(processAttemptsBefore);
+assert.equal(processAttempts.length, 4, "concurrent recovery ticks spawned duplicate transports");
+const recoveryIntervals = processAttempts.slice(1).map((time, index) => time - processAttempts[index]);
+assert(recoveryIntervals[0] >= 70 && recoveryIntervals[1] >= 110 && recoveryIntervals[2] >= 110, `process recovery did not apply bounded exponential delays: ${recoveryIntervals}`);
+assert(Math.abs(recoveryIntervals[2] - recoveryIntervals[1]) < 80, `process recovery interval did not remain capped: ${recoveryIntervals}`);
+const recoveredOwner = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+assert.notEqual(recoveredOwner.nonce, terminalOwner.nonce, "automatic process recovery did not publish a new owner incarnation");
+assert.equal(recoveredOwner.config_file_identity, terminalOwner.config_file_identity, "automatic process recovery changed configured identity");
+assert.equal(feishuState.readActiveBinding(process.env.FM_HOME).generation, generationBeforeOwnershipRecovery, "automatic process recovery changed the binding generation");
+const recoverySends = readFileSync(process.env.BRIDGE_RECOVERY_SENDS, "utf8").trim().split("\n").filter(Boolean);
+assert.deepEqual(recoverySends, [pendingRecoveryOutbox.chunks[0].idempotency_key], "pending outbound was not delivered exactly once with its stable UUID after health recovery");
+assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).outbound_pending, 0, "recovered pending outbound did not publish its receipt");
+
+const ownerIncarnationAlive = (owner) => {
+  try {
+    const stat = readFileSync(`/proc/${owner.pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") && suffix[19] === owner.process_start_token;
+  } catch { return false; }
+};
+writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "0\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "0\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, "1\n");
+const uncleanAttemptsBefore = recoveryAttemptTimes().length;
+const uncleanPriorOwner = terminateFixtureTransport("sdk-long-connection-failed", "retryable");
+await waitFor(() => recoveryAttemptTimes().length === uncleanAttemptsBefore + 1, "unclean replacement death scenario did not start its first replacement");
+await waitFor(() => existsSync(`${initialPaths.transport}/owner.json`), "unclean replacement did not publish its exact owner record before first healthy state");
+const doomedReplacement = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+assert.notEqual(doomedReplacement.nonce, uncleanPriorOwner.nonce, "unclean replacement reused the exited owner incarnation");
+assert.notEqual(doomedReplacement.pid, process.pid, "unclean replacement owner was not a dedicated transport process");
+await waitFor(() => !ownerIncarnationAlive(doomedReplacement), "unclean replacement transport never terminated before first healthy state");
+assert(existsSync(`${initialPaths.transport}/owner.json`), "unclean replacement death did not leave its exact stale owner record behind");
+assert.equal(JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8")).nonce, doomedReplacement.nonce, "unclean replacement death changed the stale owner record identity");
+assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy, false, "unclean replacement death still advertised dispatchable transport");
+await waitFor(
+  () => feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy && recoveryAttemptTimes().length === uncleanAttemptsBefore + 2,
+  "lingering exact owner record from an unclean replacement death wedged automatic recovery",
+);
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert.equal(recoveryAttemptTimes().length, uncleanAttemptsBefore + 2, "recovery after an unclean replacement death spawned duplicate transports");
+const uncleanRecoveredOwner = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+assert.notEqual(uncleanRecoveredOwner.nonce, doomedReplacement.nonce, "recovery after an unclean replacement death kept the stale owner incarnation");
+assert.equal(uncleanRecoveredOwner.config_file_identity, uncleanPriorOwner.config_file_identity, "recovery after an unclean replacement death changed configured identity");
+assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).outbound_pending, 0, "recovery after an unclean replacement death changed durable pending outbound");
+
+writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "99\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "0\n");
+const cancellationAttemptsBefore = recoveryAttemptTimes().length;
+terminateFixtureTransport("sdk-long-connection-failed", "retryable");
+await waitFor(() => recoveryAttemptTimes().length === cancellationAttemptsBefore + 1, "lock-loss fixture did not begin one retryable process recovery");
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
+await new Promise((resolve) => setTimeout(resolve, 220));
+assert.equal(recoveryAttemptTimes().length, cancellationAttemptsBefore + 1, "lost session-lock ownership did not cancel process recovery");
+writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "0\n");
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
+await emit(pi, "agent_start", {}, ctx);
+await waitFor(() => feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy, "owned lifecycle boundary did not restore transport after cancelled recovery");
+
+const terminalAttemptsBefore = recoveryAttemptTimes().length;
+terminateFixtureTransport("sdk-http-401", "terminal");
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert.equal(recoveryAttemptTimes().length, terminalAttemptsBefore, "terminal authentication refusal entered process recovery");
+assert(notices.some((message) => message.includes("process recovery stopped safely")), "terminal process refusal omitted its concrete local diagnostic");
 
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
 const deniedBefore = notices.length;
@@ -1417,6 +1695,7 @@ assert(existsSync(process.env.BRIDGE_TRANSPORT_LOG), notices.join("\n"));
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"]);
 assert(notices.filter((message) => message.includes("refused")).every((message) => message.startsWith("Feishu hard bind refused.")), notices.join("\n"));
 
+await emit(pi, "session_shutdown", { reason: "disable-fixture-reset" }, ctx);
 rmSync(`${process.env.FM_HOME}/data/feishu`, { recursive: true });
 rmSync(`${process.env.FM_HOME}/state/feishu`, { recursive: true });
 rmSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`);
@@ -1429,7 +1708,7 @@ await emit(pi, "agent_start", {}, ctx);
 assert(!existsSync(`${process.env.FM_HOME}/data/feishu`) && !existsSync(`${process.env.FM_HOME}/state/feishu`), "disabled public lifecycle created Feishu state");
 assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterHardBind, `hard-bind:${process.env.SID}`], "disabled public lifecycle reconciled a pairing");
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"], "disabled public lifecycle started a transport");
-console.log("ok - local Pi bridge distinguishes transport health and directly hard-binds exact persisted-session recovery");
+console.log("ok - local Pi bridge hard-binds session ownership and recovers terminal transport processes safely");
 JS
 
 # The transport test replaces the official SDK boundary with one local module.
@@ -1532,6 +1811,12 @@ export class Client {
     this.im = { v1: {
       chat: { get: async ({ path }) => {
         log({ type: "chat-get", chatId: path.chat_id });
+        if (process.env.FM_FAKE_SDK_CHAT_DELAY_MS) await sleep(Number(process.env.FM_FAKE_SDK_CHAT_DELAY_MS));
+        if (process.env.FM_FAKE_SDK_CHAT_STATUS) {
+          const error = new Error("private configured chat refusal");
+          error.response = { status: Number(process.env.FM_FAKE_SDK_CHAT_STATUS), data: { code: 99991663 } };
+          throw error;
+        }
         const reconnectMark = process.env.FM_FAKE_SDK_RECONNECT_MARK;
         const chatMode = reconnectMark && existsSync(reconnectMark)
           ? process.env.FM_FAKE_SDK_RECONNECT_CHAT_MODE || "p2p"
@@ -1662,6 +1947,23 @@ run_configured_lifecycle() {
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
       FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
       "$@" node bin/fm-feishu-lifecycle.mjs reconcile
+}
+
+run_configured_recovery() {
+  home=$1
+  session_id=$2
+  session_file=$3
+  session_dir=$4
+  binding_id=$5
+  binding_generation=$6
+  config_identity=$7
+  live_owner_token=$8
+  shift 8
+  printf '{"session":{"sessionId":"%s","sessionFile":"%s","sessionCwd":"%s","headerId":"%s","headerCwd":"%s","outboundAfterEntryId":null},"bindingId":"%s","bindingGeneration":%s,"configFileIdentity":"%s","liveOwnerToken":"%s"}\n' \
+    "$session_id" "$session_file" "$session_dir" "$session_id" "$session_dir" "$binding_id" "$binding_generation" "$config_identity" "$live_owner_token" |
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+      FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+      "$@" node bin/fm-feishu-lifecycle.mjs recover
 }
 
 owner_pid() {
@@ -1872,6 +2174,111 @@ grep -Fq "$APP_SECRET" "$TMP_ROOT/reject.out" "$TMP_ROOT/reject.err" \
 [ ! -e "$REJECT_HOME/data/feishu" ] && [ ! -e "$REJECT_HOME/state/feishu" ] \
   || fail "credential rejection changed Feishu binding state before validation"
 
+STRICT_HOME="$TMP_ROOT/strict-recovery-home"
+STRICT_TOKEN_FILE="$TMP_ROOT/strict-recovery-live-token"
+STRICT_SDK_LOG="$TMP_ROOT/strict-recovery-sdk.log"
+prepare_bound_transport_home "$STRICT_HOME"
+printf 'owned\n' > "$STRICT_HOME/lock-mode"
+: > "$STRICT_SDK_LOG"
+run_configured_lifecycle "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" null \
+  FM_FAKE_SDK_LOG="$STRICT_SDK_LOG" >"$TMP_ROOT/strict-start.out" 2>"$TMP_ROOT/strict-start.err"
+wait_for_transport_phase "$STRICT_HOME" healthy || fail "strict recovery fixture did not first become healthy"
+STRICT_FIRST_OWNER=$(owner_pid "$STRICT_HOME")
+STRICT_BINDING_ID=$(FM_HOME="$STRICT_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(m.readActiveBinding(process.env.FM_HOME).binding_id))')
+STRICT_BINDING_GENERATION=$(FM_HOME="$STRICT_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(String(m.readActiveBinding(process.env.FM_HOME).generation)))')
+STRICT_CONFIG_IDENTITY=$(node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1]));process.stdout.write(v.config_file_identity)' "$STRICT_HOME/state/feishu/transport/owner.json")
+FM_HOME="$STRICT_HOME" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" TOKEN_FILE="$STRICT_TOKEN_FILE" node --input-type=module <<'JS' &
+import { writeFileSync } from "node:fs";
+import { claimLiveSession, readActiveBinding, releaseLiveSession } from "./bin/fm-feishu-state.mjs";
+const binding = readActiveBinding(process.env.FM_HOME);
+const token = `pi_${process.pid}_${"d".repeat(24)}`;
+const session = { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR };
+if (!claimLiveSession(process.env.FM_HOME, binding, session, token).ok) process.exit(2);
+writeFileSync(process.env.TOKEN_FILE, `${token}\n`, { mode: 0o600 });
+const stop = () => {
+  releaseLiveSession(process.env.FM_HOME, binding.binding_id, token);
+  process.exit(0);
+};
+process.once("SIGTERM", stop);
+process.once("SIGINT", stop);
+setInterval(() => {}, 60000);
+JS
+STRICT_LIVE_PID=$!
+TEST_DAEMON_PIDS+=("$STRICT_LIVE_PID")
+for _ in $(seq 1 100); do
+  [ -s "$STRICT_TOKEN_FILE" ] && break
+  sleep 0.02
+done
+[ -s "$STRICT_TOKEN_FILE" ] || fail "strict recovery fixture did not claim live Pi ownership"
+STRICT_LIVE_TOKEN=$(cat "$STRICT_TOKEN_FILE")
+FM_HOME="$STRICT_HOME" FM_FEISHU_SILENT=1 bash bin/fm-feishu-transport.sh stop
+STRICT_RECOVERY_OUT=$(run_configured_recovery "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" \
+  "$STRICT_BINDING_ID" "$STRICT_BINDING_GENERATION" "$STRICT_CONFIG_IDENTITY" "$STRICT_LIVE_TOKEN" \
+  FM_FAKE_SDK_LOG="$STRICT_SDK_LOG")
+printf '%s\n' "$STRICT_RECOVERY_OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=JSON.parse(s);if(v.status!=="started"||!v.ownerNonce||v.configFileIdentity!==process.argv[1])process.exit(1)})' "$STRICT_CONFIG_IDENTITY" \
+  || fail "strict same-binding recovery did not return its new verified owner fence"
+wait_for_transport_phase "$STRICT_HOME" healthy || fail "strict same-binding recovery did not become healthy"
+STRICT_RECOVERED_OWNER=$(owner_pid "$STRICT_HOME")
+[ "$STRICT_RECOVERED_OWNER" != "$STRICT_FIRST_OWNER" ] || fail "strict same-binding recovery retained the terminated owner incarnation"
+[ "$(FM_HOME="$STRICT_HOME" node -e 'import("./bin/fm-feishu-state.mjs").then(m=>process.stdout.write(String(m.readActiveBinding(process.env.FM_HOME).generation)))')" = "$STRICT_BINDING_GENERATION" ] \
+  || fail "strict same-binding recovery changed the binding generation"
+FM_HOME="$STRICT_HOME" FM_FEISHU_SILENT=1 bash bin/fm-feishu-transport.sh stop
+
+printf '# changed identity\n' >> "$STRICT_HOME/config/feishu.env"
+if run_configured_recovery "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" \
+  "$STRICT_BINDING_ID" "$STRICT_BINDING_GENERATION" "$STRICT_CONFIG_IDENTITY" "$STRICT_LIVE_TOKEN" \
+  >"$TMP_ROOT/strict-config-change.out" 2>"$TMP_ROOT/strict-config-change.err"; then
+  fail "automatic process recovery accepted a changed configuration"
+fi
+grep -Fq 'configuration-changed' "$TMP_ROOT/strict-config-change.err" || fail "changed configuration refusal lost its concrete local diagnostic"
+[ ! -e "$STRICT_HOME/state/feishu/transport/owner.json" ] || fail "changed configuration refusal started a transport"
+
+write_feishu_config "$STRICT_HOME" true
+STRICT_CONFIG_IDENTITY=$(FM_HOME="$STRICT_HOME" node --input-type=module -e 'import { readFeishuConfig } from "./bin/fm-feishu-config.mjs"; process.stdout.write(readFeishuConfig(process.env.FM_HOME).fileIdentity)')
+set +e
+run_configured_recovery "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" \
+  "$STRICT_BINDING_ID" "$STRICT_BINDING_GENERATION" "$STRICT_CONFIG_IDENTITY" "$STRICT_LIVE_TOKEN" \
+  FM_FAKE_SDK_CHAT_STATUS=500 >"$TMP_ROOT/strict-retryable.out" 2>"$TMP_ROOT/strict-retryable.err"
+STRICT_RETRYABLE_STATUS=$?
+set -e
+[ "$STRICT_RETRYABLE_STATUS" -eq 75 ] || fail "retryable SDK process recovery refusal did not preserve exit 75"
+grep -Fq 'sdk-http-500' "$TMP_ROOT/strict-retryable.err" || fail "retryable SDK recovery refusal lost its bounded diagnostic"
+[ ! -e "$STRICT_HOME/state/feishu/transport/owner.json" ] || fail "retryable SDK probe failure started a transport before the next backoff attempt"
+
+if run_configured_recovery "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" \
+  "$STRICT_BINDING_ID" "$STRICT_BINDING_GENERATION" "$STRICT_CONFIG_IDENTITY" "$STRICT_LIVE_TOKEN" \
+  FM_FAKE_SDK_CHAT_STATUS=401 >"$TMP_ROOT/strict-auth.out" 2>"$TMP_ROOT/strict-auth.err"; then
+  fail "automatic process recovery retried through terminal SDK authentication refusal"
+fi
+grep -Fq 'sdk-http-401' "$TMP_ROOT/strict-auth.err" || fail "terminal SDK authentication refusal lost its bounded diagnostic"
+grep -Fq "$APP_SECRET" "$TMP_ROOT/strict-auth.out" "$TMP_ROOT/strict-auth.err" && fail "strict recovery refusal exposed the App Secret"
+[ ! -e "$STRICT_HOME/state/feishu/transport/owner.json" ] || fail "terminal SDK authentication refusal started a transport"
+
+printf 'owned\n' > "$STRICT_HOME/lock-mode"
+: > "$STRICT_SDK_LOG"
+(
+  set +e
+  run_configured_recovery "$STRICT_HOME" "$SID" "$TRANSPORT_FILE" "$TRANSPORT_SESSION" \
+    "$STRICT_BINDING_ID" "$STRICT_BINDING_GENERATION" "$STRICT_CONFIG_IDENTITY" "$STRICT_LIVE_TOKEN" \
+    FM_FAKE_SDK_CHAT_DELAY_MS=200 FM_FAKE_SDK_LOG="$STRICT_SDK_LOG" \
+    >"$TMP_ROOT/strict-lock-loss.out" 2>"$TMP_ROOT/strict-lock-loss.err"
+  printf '%s\n' "$?" > "$TMP_ROOT/strict-lock-loss.status"
+) &
+STRICT_RECOVERY_CALL_PID=$!
+for _ in $(seq 1 100); do
+  grep -Fq '"type":"chat-get"' "$STRICT_SDK_LOG" && break
+  sleep 0.01
+done
+grep -Fq '"type":"chat-get"' "$STRICT_SDK_LOG" || fail "lock-loss fixture did not enter the P2P recovery probe"
+printf 'other\n' > "$STRICT_HOME/lock-mode"
+wait "$STRICT_RECOVERY_CALL_PID"
+[ "$(cat "$TMP_ROOT/strict-lock-loss.status")" -ne 0 ] || fail "automatic process recovery continued after session-lock ownership loss"
+grep -Fq 'session-lock-ownership-lost' "$TMP_ROOT/strict-lock-loss.err" || fail "session-lock loss refusal lost its concrete local diagnostic"
+[ ! -e "$STRICT_HOME/state/feishu/transport/owner.json" ] || fail "session-lock loss started a replacement transport"
+kill -TERM "$STRICT_LIVE_PID"
+wait "$STRICT_LIVE_PID"
+untrack_feishu_daemon "$STRICT_LIVE_PID"
+
 pass "secure config parsing and automatic Feishu lifecycle converge silently and fail closed"
 
 write_feishu_config "$TRANSPORT_HOME" true
@@ -2004,7 +2411,7 @@ sleep 0.1
 [ ! -e "$RECOVERY_SEND_COUNT" ] || fail "reconnecting transport attempted an outbound send before identity verification"
 FM_HOME="$RECOVERY_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=JSON.parse(s);if(v.outbound_pending!==1||v.outbound_uncertain!==0)process.exit(1)})' \
   || fail "reconnecting transport changed pending outbound state without a send attempt"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="reconnecting"||h.healthy!==false||h.reconnects!==2||h.last_error_type!=="sdk-connection-closed")process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="reconnecting"||h.healthy!==false||h.reconnects!==2||h.last_error_type!=="sdk-connection-closed"||h.recovery_class!==null)process.exit(1)' \
   "$RECOVERY_HOME/state/feishu/transport/health.json" || fail "reconnecting health did not preserve bounded structural diagnostics"
 grep -RqF "$APP_SECRET" "$RECOVERY_HOME/state/feishu/transport" "$TMP_ROOT/recovery.err" \
   && fail "transient SDK diagnostics persisted a credential"
@@ -2022,7 +2429,7 @@ wait_for_transport_phase "$RECOVERY_HOME" healthy || fail "a stale duplicate rec
 kill -TERM "$RECOVERY_PID"
 wait "$RECOVERY_PID"
 untrack_feishu_daemon "$RECOVERY_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.healthy!==false||h.last_error_type!==null)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.healthy!==false||h.last_error_type!==null||h.recovery_class!==null)process.exit(1)' \
   "$RECOVERY_HOME/state/feishu/transport/health.json" || fail "deliberate stop after reconnect was not clean"
 
 PRE_READY_HOME="$TMP_ROOT/pre-ready-home"
@@ -2047,7 +2454,7 @@ wait_for_reconnect_count "$PRE_READY_HOME" 0 || fail "pre-ready recovery invente
 kill -TERM "$PRE_READY_PID"
 wait "$PRE_READY_PID"
 untrack_feishu_daemon "$PRE_READY_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.last_error_type!==null)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.phase!=="stopped"||h.last_error_type!==null||h.recovery_class!==null)process.exit(1)' \
   "$PRE_READY_HOME/state/feishu/transport/health.json" || fail "pre-ready recovered transport did not stop cleanly"
 
 STALL_HOME="$TMP_ROOT/stall-home"
@@ -2065,7 +2472,7 @@ TEST_DAEMON_PIDS+=("$STALL_PID")
 wait_for_transport_phase "$STALL_HOME" degraded || fail "stalled SDK recovery did not reach its bounded terminal state"
 if wait "$STALL_PID"; then fail "stalled SDK recovery exited successfully"; fi
 untrack_feishu_daemon "$STALL_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-recovery-timeout"||h.healthy!==false)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-recovery-timeout"||h.healthy!==false||h.recovery_class!=="retryable")process.exit(1)' \
   "$STALL_HOME/state/feishu/transport/health.json" || fail "stalled recovery did not persist its distinct terminal bound"
 [ ! -e "$STALL_HOME/state/feishu/transport/owner.json" ] || fail "stalled recovery retained transport ownership after terminal failure"
 [ "$(cat "$TMP_ROOT/stall.err")" = "fm-feishu-transport: sdk-recovery-timeout" ] || fail "stalled recovery emitted an unbounded or private diagnostic"
@@ -2088,7 +2495,7 @@ wait_for_transport_phase "$AUTH_HOME" healthy || fail "terminal-auth fixture did
 wait_for_transport_phase "$AUTH_HOME" degraded || fail "proven HTTP authentication error did not remain terminal"
 if wait "$AUTH_PID"; then fail "proven HTTP authentication error exited successfully"; fi
 untrack_feishu_daemon "$AUTH_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-http-401"||h.reconnects!==0)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="sdk-http-401"||h.reconnects!==0||h.recovery_class!=="terminal")process.exit(1)' \
   "$AUTH_HOME/state/feishu/transport/health.json" || fail "terminal HTTP authentication error entered a reconnect loop or lost its status"
 grep -RqF "$APP_SECRET" "$AUTH_HOME/state/feishu/transport" "$TMP_ROOT/auth.err" \
   && fail "terminal SDK authentication diagnostics persisted a credential"
@@ -2118,7 +2525,7 @@ wait_for_transport_phase "$IDENTITY_HOME" healthy || fail "reconnect-identity fi
 wait_for_transport_phase "$IDENTITY_HOME" degraded || fail "reconnect P2P identity failure did not remain terminal"
 if wait "$IDENTITY_PID"; then fail "reconnect P2P identity failure exited successfully"; fi
 untrack_feishu_daemon "$IDENTITY_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="configured-chat-is-not-p2p"||h.healthy!==false)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="configured-chat-is-not-p2p"||h.healthy!==false||h.recovery_class!=="terminal")process.exit(1)' \
   "$IDENTITY_HOME/state/feishu/transport/health.json" || fail "reconnect identity failure restored or obscured health"
 
 BINDING_HOME="$TMP_ROOT/binding-change-home"
@@ -2152,7 +2559,7 @@ JS
 wait_for_transport_phase "$BINDING_HOME" degraded || fail "binding generation change did not terminate the prior owner"
 if wait "$BINDING_PID"; then fail "binding generation change exited the prior owner successfully"; fi
 untrack_feishu_daemon "$BINDING_PID"
-node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="binding-generation-changed"||h.healthy!==false)process.exit(1)' \
+node -e 'const fs=require("fs");const h=JSON.parse(fs.readFileSync(process.argv[1]));if(h.last_error_type!=="binding-generation-changed"||h.healthy!==false||h.recovery_class!=="terminal")process.exit(1)' \
   "$BINDING_HOME/state/feishu/transport/health.json" || fail "binding generation terminal fence lost its distinct outcome"
 
 cat > "$SDK_EVENTS" <<JSON

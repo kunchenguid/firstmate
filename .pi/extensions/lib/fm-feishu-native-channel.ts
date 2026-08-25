@@ -29,6 +29,7 @@ import {
   readAssistantOutboundIntents,
   readPairing,
   readTransportHealth,
+  readTransportOwner,
   reconcileFeishuIngress,
   registerAssistantOutbound,
   releaseFeishuIngressOffer,
@@ -36,6 +37,7 @@ import {
   repairInboundLedgers,
   repairOutboundState,
   transportHealthAllowsDispatch,
+  transportOwnerIncarnationIsLive,
   type BindingRecord,
   type InboundEvent,
 } from "../../../bin/fm-feishu-state.mjs";
@@ -67,10 +69,28 @@ interface ActiveRuntime {
   lockRetryAttempt: number;
   nextPumpAt: number;
   lockContentionNotified: boolean;
+  configFileIdentity: string;
+  recoveryAttempt: number;
+  recoveryNextAt: number;
+  recoveryOwner: TransportOwnerFence | null;
+  recoveryTask: Promise<void> | null;
+  recoveryTerminalReason: string | null;
+  recoveryWarningNotified: boolean;
   timer: ReturnType<typeof setInterval> | null;
   captureAfterEntryId: string | null;
   registrationAlerts: Set<string>;
   lastStatus: string;
+}
+
+interface TransportOwnerFence {
+  pid: number;
+  nonce: string;
+  processStartToken: string;
+  configFileIdentity: string;
+}
+
+interface LifecycleRecoveryResult extends TransportOwnerFence {
+  status: "owner-active" | "started";
 }
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
@@ -83,13 +103,22 @@ const configFile = `${fmHome}/config/feishu.env`;
 const markerPattern = /^\u2063FIRSTMATE_FEISHU: v1 ref=(in_[a-f0-9]{24}) g=([1-9][0-9]*)$/u;
 const LOCK_RETRY_BASE_MS = 250;
 const LOCK_RETRY_MAX_MS = 4000;
+const PROCESS_RECOVERY_TEST_MODE = process.env.FM_FEISHU_PROCESS_RECOVERY_TEST_MODE === "1";
+const PUMP_INTERVAL_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PUMP_MS, 250) : 250;
+const PROCESS_RECOVERY_BASE_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PROCESS_RECOVERY_BASE_MS, 1000) : 1000;
+const PROCESS_RECOVERY_MAX_MS = PROCESS_RECOVERY_TEST_MODE ? positiveInteger(process.env.FM_FEISHU_PROCESS_RECOVERY_MAX_MS, 60000) : 60000;
 export interface FeishuNativeChannelControls {
   hardBind(ctx: ExtensionCommandContext): Promise<"already-current" | "hard-bound">;
 }
 
 const registeredApis = new WeakMap<object, FeishuNativeChannelControls>();
 let activeRuntime: ActiveRuntime | null = null;
-let lifecycleTask: Promise<void> = Promise.resolve();
+let lifecycleTask: Promise<unknown> = Promise.resolve();
+
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : fallback;
+}
 
 function configPathPresent(): boolean {
   try {
@@ -237,14 +266,53 @@ function updateStatus(runtime: ActiveRuntime): void {
   let transport = "stopped";
   try { transport = String(readTransportHealth(fmHome)?.phase ?? "stopped"); }
   catch { transport = "unreadable"; }
-  const value = `Feishu: bound g${runtime.binding.generation}; transport ${transport}`;
+  const recovery = runtime.recoveryTerminalReason
+    ? `; recovery stopped (${runtime.recoveryTerminalReason})`
+    : runtime.recoveryTask || runtime.recoveryOwner || runtime.recoveryNextAt > Date.now()
+      ? `; process recovery attempt ${Math.max(1, runtime.recoveryAttempt)}`
+      : "";
+  const value = `Feishu: bound g${runtime.binding.generation}; transport ${transport}${recovery}`;
   if (value === runtime.lastStatus) return;
   runtime.lastStatus = value;
   runtime.ctx.ui.setStatus("fm-feishu", value);
 }
 
-function reconcileConfiguredLifecycle(identity: SessionIdentity, action: "reconcile" | "hard-bind" = "reconcile"): Promise<void> {
-  const reconcile = () => new Promise<void>((resolvePromise, rejectPromise) => {
+function transportOwnerFence(value: Record<string, unknown> | undefined): TransportOwnerFence | undefined {
+  if (!value || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid <= 1) return undefined;
+  if (typeof value.nonce !== "string" || !/^[a-f0-9]{24,128}$/.test(value.nonce)) return undefined;
+  if (typeof value.process_start_token !== "string" || !/^[0-9]+$/.test(value.process_start_token)) return undefined;
+  if (typeof value.config_file_identity !== "string" || !/^[0-9]+:[0-9]+:[0-9.]+:[0-9]+$/.test(value.config_file_identity)) return undefined;
+  return {
+    pid: value.pid,
+    nonce: value.nonce,
+    processStartToken: value.process_start_token,
+    configFileIdentity: value.config_file_identity,
+  };
+}
+
+function sameTransportOwner(left: TransportOwnerFence | null | undefined, right: TransportOwnerFence | null | undefined): boolean {
+  return Boolean(left && right && left.pid === right.pid && left.nonce === right.nonce && left.processStartToken === right.processStartToken && left.configFileIdentity === right.configFileIdentity);
+}
+
+function parseLifecycleRecoveryResult(output: string): LifecycleRecoveryResult {
+  let value: Record<string, unknown>;
+  try { value = JSON.parse(output) as Record<string, unknown>; }
+  catch { throw new Error("configured recovery returned malformed status"); }
+  const owner = transportOwnerFence({
+    pid: value.ownerPid,
+    nonce: value.ownerNonce,
+    process_start_token: value.ownerProcessStartToken,
+    config_file_identity: value.configFileIdentity,
+  });
+  if (!owner || !new Set(["owner-active", "started"]).has(String(value.status))) throw new Error("configured recovery returned invalid owner status");
+  return { ...owner, status: value.status as LifecycleRecoveryResult["status"] };
+}
+
+function reconcileConfiguredLifecycle(
+  payload: SessionIdentity | Record<string, unknown>,
+  action: "reconcile" | "hard-bind" | "recover" = "reconcile",
+): Promise<LifecycleRecoveryResult | undefined> {
+  const reconcile = () => new Promise<LifecycleRecoveryResult | undefined>((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [lifecycleScript, action], {
       cwd: fmRoot,
       env: Object.fromEntries(Object.entries({
@@ -256,14 +324,28 @@ function reconcileConfiguredLifecycle(identity: SessionIdentity, action: "reconc
         FM_FEISHU_P2P_CHAT_ID: undefined,
         FM_FEISHU_CONFIG_IDENTITY: undefined,
       }).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
-      stdio: ["pipe", "ignore", "ignore"],
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let output = "";
+    let outputOverlength = false;
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (Buffer.byteLength(output, "utf8") + Buffer.byteLength(chunk, "utf8") > 4096) outputOverlength = true;
+      else output += chunk;
     });
     child.once("error", rejectPromise);
     child.once("close", (code) => {
-      if (code === 0) resolvePromise();
-      else rejectPromise(new Error("configured lifecycle refused"));
+      if (code === 0) {
+        try {
+          if (outputOverlength) throw new Error("configured lifecycle returned overlength status");
+          resolvePromise(action === "recover" ? parseLifecycleRecoveryResult(output.trim()) : undefined);
+        }
+        catch (error) { rejectPromise(error); }
+      } else {
+        rejectPromise(Object.assign(new Error("configured lifecycle refused"), { exitCode: code }));
+      }
     });
-    child.stdin.end(JSON.stringify(identity));
+    child.stdin.end(JSON.stringify(payload));
   });
   const result = lifecycleTask.then(reconcile, reconcile);
   lifecycleTask = result.catch(() => {});
@@ -274,14 +356,145 @@ function stopRuntime(runtime: ActiveRuntime): void {
   runtime.active = false;
   if (runtime.timer) clearInterval(runtime.timer);
   runtime.timer = null;
+  runtime.recoveryOwner = null;
+  runtime.recoveryNextAt = 0;
   runtime.ctx.ui.setStatus("fm-feishu", undefined);
   releaseLiveSession(fmHome, runtime.binding.binding_id, runtime.ownerToken);
   if (activeRuntime === runtime) activeRuntime = null;
 }
 
 function transportAllowsDispatch(runtime: ActiveRuntime): boolean {
-  try { return transportHealthAllowsDispatch(fmHome, runtime.binding); }
+  try {
+    const owner = transportOwnerFence(readTransportOwner(fmHome));
+    return owner?.configFileIdentity === runtime.configFileIdentity && transportHealthAllowsDispatch(fmHome, runtime.binding);
+  }
   catch { return false; }
+}
+
+function terminalProcessRecovery(runtime: ActiveRuntime, reason: string): void {
+  const alreadyTerminal = runtime.recoveryTerminalReason !== null;
+  runtime.recoveryTerminalReason = /^[a-z0-9-]{1,80}$/.test(reason) ? reason : "local-safety-refusal";
+  runtime.recoveryNextAt = 0;
+  runtime.recoveryOwner = null;
+  if (!alreadyTerminal) {
+    runtime.ctx.ui.notify(
+      "Feishu transport process recovery stopped safely. Run bin/fm-feishu-transport.sh status and config-check locally, then inspect docs/feishu-channel.md.",
+      "error",
+    );
+  }
+  updateStatus(runtime);
+}
+
+function recoveryHealth(runtime: ActiveRuntime): Record<string, unknown> | undefined {
+  const health = readTransportHealth(fmHome);
+  if (!health) return undefined;
+  if (health.binding_id !== runtime.binding.binding_id || health.binding_generation !== runtime.binding.generation) {
+    throw new Error("transport recovery health binding mismatch");
+  }
+  return health;
+}
+
+function recoveredTransportIsHealthy(runtime: ActiveRuntime, expected?: TransportOwnerFence | null): boolean {
+  if (!runtimeIsCurrent(runtime)) return false;
+  const owner = transportOwnerFence(readTransportOwner(fmHome));
+  if (!owner || owner.configFileIdentity !== runtime.configFileIdentity || (expected && !sameTransportOwner(owner, expected))) return false;
+  const health = recoveryHealth(runtime);
+  if (!health || health.phase !== "healthy" || health.healthy !== true || typeof health.last_identity_verified_at !== "string") return false;
+  if (health.owner_pid !== owner.pid || health.owner_nonce !== owner.nonce || health.owner_process_start_token !== owner.processStartToken) return false;
+  return transportHealthAllowsDispatch(fmHome, runtime.binding);
+}
+
+function resetProcessRecovery(runtime: ActiveRuntime): void {
+  runtime.recoveryAttempt = 0;
+  runtime.recoveryNextAt = 0;
+  runtime.recoveryOwner = null;
+  runtime.recoveryTerminalReason = null;
+  runtime.recoveryWarningNotified = false;
+}
+
+function deferProcessRecovery(runtime: ActiveRuntime): void {
+  const exponent = Math.min(runtime.recoveryAttempt, 16);
+  runtime.recoveryNextAt = Date.now() + Math.min(PROCESS_RECOVERY_BASE_MS * (2 ** exponent), PROCESS_RECOVERY_MAX_MS);
+  runtime.recoveryOwner = null;
+  if (!runtime.recoveryWarningNotified) {
+    runtime.recoveryWarningNotified = true;
+    runtime.ctx.ui.notify("Feishu transport is unhealthy; durable work remains pending while bounded automatic recovery continues.", "warning");
+  }
+  updateStatus(runtime);
+}
+
+function beginProcessRecovery(runtime: ActiveRuntime): void {
+  if (!runtime.active || runtime.recoveryTask || runtime.recoveryTerminalReason || Date.now() < runtime.recoveryNextAt) return;
+  const attemptBefore = runtime.recoveryAttempt;
+  runtime.recoveryAttempt += 1;
+  runtime.recoveryTask = (async () => {
+    const result = await reconcileConfiguredLifecycle({
+      session: runtime.identity,
+      bindingId: runtime.binding.binding_id,
+      bindingGeneration: runtime.binding.generation,
+      configFileIdentity: runtime.configFileIdentity,
+      liveOwnerToken: runtime.ownerToken,
+    }, "recover");
+    if (!runtime.active || activeRuntime !== runtime || !result) return;
+    if (result.configFileIdentity !== runtime.configFileIdentity) throw new Error("configured recovery changed identity");
+    runtime.recoveryOwner = result;
+    if (result.status === "owner-active") runtime.recoveryAttempt = attemptBefore;
+    if (recoveredTransportIsHealthy(runtime, result)) resetProcessRecovery(runtime);
+  })().catch((error: unknown) => {
+    if (!runtime.active || activeRuntime !== runtime) return;
+    const exitCode = Number((error as { exitCode?: unknown })?.exitCode);
+    if (exitCode === 75) deferProcessRecovery(runtime);
+    else terminalProcessRecovery(runtime, "lifecycle-refused");
+  }).finally(() => {
+    runtime.recoveryTask = null;
+  });
+}
+
+function observeProcessRecovery(runtime: ActiveRuntime): void {
+  if (transportAllowsDispatch(runtime)) {
+    if (recoveredTransportIsHealthy(runtime, runtime.recoveryOwner)) resetProcessRecovery(runtime);
+    return;
+  }
+  if (runtime.recoveryTerminalReason || runtime.recoveryTask) return;
+  let health: Record<string, unknown> | undefined;
+  try { health = recoveryHealth(runtime); }
+  catch {
+    terminalProcessRecovery(runtime, "state-corruption");
+    return;
+  }
+  if (runtime.recoveryOwner) {
+    let ownerRecord: Record<string, unknown> | undefined;
+    let owner: TransportOwnerFence | undefined;
+    try {
+      ownerRecord = readTransportOwner(fmHome);
+      owner = transportOwnerFence(ownerRecord);
+    }
+    catch {
+      terminalProcessRecovery(runtime, "owner-state-corruption");
+      return;
+    }
+    const expectedOwner = sameTransportOwner(owner, runtime.recoveryOwner);
+    if (expectedOwner && transportOwnerIncarnationIsLive(ownerRecord)) return;
+    if (owner && !expectedOwner) {
+      terminalProcessRecovery(runtime, "ambiguous-owner-change");
+      return;
+    }
+    if (health?.recovery_class === "terminal") {
+      terminalProcessRecovery(runtime, String(health.last_error_type || "terminal-transport-failure"));
+      return;
+    }
+    deferProcessRecovery(runtime);
+    return;
+  }
+  if (health?.recovery_class === "terminal") {
+    terminalProcessRecovery(runtime, String(health.last_error_type || "terminal-transport-failure"));
+    return;
+  }
+  if (runtime.recoveryNextAt === 0) {
+    deferProcessRecovery(runtime);
+    return;
+  }
+  beginProcessRecovery(runtime);
 }
 
 function captureAssistantHistory(runtime: ActiveRuntime): void {
@@ -376,6 +589,7 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
     updateStatus(runtime);
     captureAssistantHistory(runtime);
     flushAssistantOutbound(runtime);
+    observeProcessRecovery(runtime);
     if (!transportAllowsDispatch(runtime)) {
       clearLockRetry(runtime);
       return;
@@ -436,6 +650,8 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     ctx.ui.setStatus("fm-feishu", "Feishu: suspended - binding belongs to another Pi session; hard-bind it locally to move it");
     return undefined;
   }
+  const transportOwner = transportOwnerFence(readTransportOwner(fmHome));
+  if (!transportOwner) throw new Error("Feishu transport configuration identity is unavailable");
   const ownerToken = `pi_${process.pid}_${randomBytes(12).toString("hex")}`;
   const live = claimLiveSession(fmHome, binding, identity, ownerToken);
   if (!live.ok) {
@@ -454,6 +670,13 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     lockRetryAttempt: 0,
     nextPumpAt: 0,
     lockContentionNotified: false,
+    configFileIdentity: transportOwner.configFileIdentity,
+    recoveryAttempt: 0,
+    recoveryNextAt: 0,
+    recoveryOwner: null,
+    recoveryTask: null,
+    recoveryTerminalReason: null,
+    recoveryWarningNotified: false,
     timer: null,
     captureAfterEntryId: binding.outbound_after_entry_id,
     registrationAlerts: new Set(),
@@ -473,7 +696,7 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext, token: string): Activ
     stopRuntime(runtime);
     throw error;
   }
-  runtime.timer = setInterval(() => schedulePump(runtime), 250);
+  runtime.timer = setInterval(() => schedulePump(runtime), PUMP_INTERVAL_MS);
   runtime.timer.unref();
   schedulePump(runtime);
   updateStatus(runtime);

@@ -324,6 +324,7 @@ export function claimTransportOwner(home: string, owner: {
   configFileIdentity?: string;
 }): { ok: boolean; owner: Record<string, unknown> };
 export function readTransportOwner(home: string): Record<string, unknown> | undefined;
+export function transportOwnerIncarnationIsLive(owner: Record<string, unknown> | undefined): boolean;
 export function retireStaleTransportOwner(home: string, expected: Record<string, unknown>): boolean;
 export function releaseTransportOwner(home: string, nonce: string): boolean;
 export function recordTransportDiagnostic(home: string, kind: string, line: string): string;
