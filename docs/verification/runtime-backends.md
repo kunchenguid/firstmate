@@ -291,6 +291,7 @@ bin/fm-test-run.sh tests/fm-teardown.test.sh
 ```
 
 Observed output included `FM_TEST_END exit=0 duration_ms=216034 gate_skip=false`, `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`, and 58 `ok` results with no `not-ok` results.
+The 58-result teardown run includes a missing-Herdr-adapter case that exits non-zero, emits the existing `nothing was changed` refusal, and preserves the isolated copy and durable task records.
 The companion `tests/fm-backend-adapter-source.test.sh` regression covers missing and unreadable adapter files across tmux, Herdr, Zellij, Orca, and cmux, proving that each caller reaches its refusal branch.
 
 ## Composer classification matrix
