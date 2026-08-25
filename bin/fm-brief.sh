@@ -14,8 +14,8 @@
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
-#   captain-relevant escalations and marked from-firstmate replies append to this
-#   home's status file.
+#   tracked-code work loads the mandatory second-mate review-loop owner; captain-relevant
+#   escalations and marked from-firstmate replies append to this home's status file.
 #   --no-projects writes a project-less charter for a domain whose subject is the
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
@@ -231,6 +231,7 @@ $PROJECT_CLONES_BODY
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
 $PROJECT_CLONES_NOTE
+Before coordinating any task that will change tracked code, load \`secondmate-code-review\` and follow its mandatory developer-reviewer loop.
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
 You do not generate your own work.
