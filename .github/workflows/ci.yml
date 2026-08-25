@@ -407,6 +407,18 @@ jobs:
             exit 1
           }
 
+          # Teardown guards unlanded work, and its refusal paths are exactly the
+          # kind that diverge between Bash 3.2 and Bash 5: `set -e` makes 3.2
+          # abort the shell where 5 returns, so a refusal can silently become a
+          # reported success here while every other lane stays green.
+          teardown_output=$(/bin/bash tests/fm-teardown.test.sh)
+          printf '%s\n' "$teardown_output"
+          teardown_count=$(printf '%s\n' "$teardown_output" | grep -c '^ok - ')
+          [ "$teardown_count" -eq 58 ] || {
+            echo "::error::expected 58 teardown tests, got $teardown_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
