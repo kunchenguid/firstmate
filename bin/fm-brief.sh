@@ -3,11 +3,12 @@
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
-# when the task genuinely deviates (e.g. working an existing external PR instead
-# of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# description, acceptance criteria, and context, or passes --ticket <path> so
+# an approved planning ticket fills the task slot verbatim, and may adjust other
+# sections when the task genuinely deviates (e.g. working an existing external
+# PR instead of shipping a new one).
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--ticket <path>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--ticket <path>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -22,6 +23,15 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --ticket <path> fills the # Task section of a ship or scout brief verbatim
+#   from an approved planning ticket file instead of leaving {TASK} for manual
+#   replacement: the file's bytes become the task body unchanged and firstmate
+#   elaborates nothing. It also adds a ticket-source contract telling the worker
+#   that scope research or re-decided settled choices mean the review failed and
+#   the ticket gets fixed, not the brief patched. It applies only to crewmate
+#   ship and scout briefs; a secondmate charter fills through FM_SECONDMATE_CHARTER.
+#   Without the flag the generated output is byte-identical to the historical
+#   placeholder behavior.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -123,6 +133,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+TICKET=
+TICKET_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -132,6 +144,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      ticket) TICKET=$a; TICKET_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +157,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --ticket) want_value=ticket ;;
+    --ticket=*) TICKET=${a#--ticket=}; TICKET_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -170,6 +185,22 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# A ticket-sourced brief fills the task slot mechanically from an approved
+# planning ticket. Refuse unusable input loudly before anything is written.
+if [ "$TICKET_SET" -eq 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --ticket applies to crewmate ship and scout briefs; a charter fills through FM_SECONDMATE_CHARTER" >&2
+    exit 1
+  fi
+  [ -n "$TICKET" ] || { echo "error: --ticket requires a file path" >&2; exit 1; }
+  [ -f "$TICKET" ] || { echo "error: --ticket file not found: $TICKET" >&2; exit 1; }
+  [ -r "$TICKET" ] || { echo "error: --ticket file is not readable: $TICKET" >&2; exit 1; }
+  IFS= read -r -d '' TASK_BODY < "$TICKET" || true
+  [ -n "$TASK_BODY" ] || { echo "error: --ticket file is empty: $TICKET" >&2; exit 1; }
+else
+  TASK_BODY='{TASK}'
 fi
 ID=${POS[0]}
 
@@ -369,14 +400,31 @@ FAST_ABORT_SECTION=$(printf '%s\n' \
 '2. The same rule covers local validation commands that hang: if a command exceeds its own timeout or produces no output progress for 10 minutes, treat it as failed evidence rather than waiting longer.' \
 '3. Firstmate decides between bypassing the failing step and a later retry; you never choose to bypass a gate alone.')
 
+# When a planning ticket fills the task slot, add the boundary contract that
+# makes "ticket + common scaffold = brief" hold: the reviewed ticket is the
+# accepted scope, and gaps mean the review failed, so firstmate repairs the
+# ticket instead of patching clarifications into this brief. Empty when no
+# --ticket path is used, which keeps that output byte-identical.
+TICKET_SECTION=""
+if [ "$TICKET_SET" -eq 1 ]; then
+  # shellcheck disable=SC2016  # single quotes are deliberate: backtick-wrapped text must reach the reading agent verbatim.
+  TICKET_SECTION=$(printf '%s\n' \
+    '' \
+    '' \
+    '# Ticket source contract' \
+    'The # Task section above came verbatim from an approved planning ticket passed through `fm-brief.sh --ticket`; it already passed the planning family'\''s ticket-to-code contrast review.' \
+    'Treat it as the accepted scope and implement exactly what it names.' \
+    'If doing the work would require investigating scope the ticket should already cover, or re-deciding a choice the ticket records as settled, stop and append `needs-decision:` with what you found: that is evidence the ticket passed review wrongly, and firstmate fixes the ticket instead of patching this brief.')
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY
 
-$HERDR_SECTION
+$HERDR_SECTION$TICKET_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -423,7 +471,11 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+if [ "$TICKET_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (scout; task filled from $TICKET)"
+else
+  echo "scaffolded: $BRIEF (scout; replace {TASK})"
+fi
 exit 0
 fi
 
@@ -493,9 +545,9 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY
 
-$HERDR_SECTION
+$HERDR_SECTION$TICKET_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -549,4 +601,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+if [ "$TICKET_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; task filled from $TICKET)"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+fi

@@ -296,6 +296,95 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
+# A ticket-sourced brief fills the task slot verbatim from an approved planning
+# ticket: multi-line content, quotes, backticks, and dollar signs must survive
+# byte-for-byte, no {TASK} placeholder may remain, and the ticket-source
+# boundary contract must ride along.
+test_ticket_flag_fills_task_verbatim() {
+  local home id brief body count status
+  home="$TMP_ROOT/ticket-fill-home"
+  mkdir -p "$home/data"
+  id="brief-ticket-ship"
+  # shellcheck disable=SC2016  # literal fixture text: $(pwd) and backticks must stay unexpanded
+  body='# T04 - join backlog state
+
+## Consumers
+- card header aggregation reads widget.count (src/cards.ts)
+- sidebar counts open widgets (src/sidebar.ts)
+He said "stop sorting here"; use $(pwd) and `back ticks`.'
+  printf '%s\n' "$body" > "$home/ticket.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --ticket "$home/ticket.md" >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ticket-filled ship brief was not scaffolded"
+  count=$(grep -c -F '{TASK}' "$brief")
+  [ "$count" = 0 ] || fail "ticket-filled ship brief still carries a {TASK} placeholder (found $count)"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the metacharacters must be matched literally
+  assert_grep 'He said "stop sorting here"; use $(pwd) and `back ticks`.' "$brief" \
+    "ticket body did not reach the ship brief verbatim through quoting and expansion metacharacters"
+  assert_grep "- sidebar counts open widgets (src/sidebar.ts)" "$brief" \
+    "ticket body lost a consumer line in the ship brief"
+  assert_grep "# Ticket source contract" "$brief" \
+    "ticket-filled ship brief missing the ticket-source boundary contract"
+  assert_grep "firstmate fixes the ticket instead of patching this brief" "$brief" \
+    "ticket-source contract lost the fix-the-ticket boundary"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ticket-scout some-proj --scout --ticket "$home/ticket.md" >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "scout brief with a valid ticket should scaffold"
+  brief="$home/data/brief-ticket-scout/brief.md"
+  count=$(grep -c -F '{TASK}' "$brief")
+  [ "$count" = 0 ] || fail "ticket-filled scout brief still carries a {TASK} placeholder (found $count)"
+  assert_grep '# T04 - join backlog state' "$brief" \
+    "scout ticket fill lost the ticket heading"
+  assert_grep "# Ticket source contract" "$brief" \
+    "ticket-filled scout brief missing the ticket-source boundary contract"
+  pass "fm-brief.sh: --ticket fills the task slot verbatim for ship and scout briefs"
+}
+
+# Without --ticket the historical placeholder behavior is untouched (no flag,
+# no extra section), and unusable ticket inputs are refused before anything is
+# written.
+test_ticket_flag_absent_regression_and_refusals() {
+  local home out status
+  home="$TMP_ROOT/ticket-regression-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-no-ticket some-proj --mode direct-PR >/dev/null 2>&1
+  assert_grep "{TASK}" "$home/data/brief-no-ticket/brief.md" \
+    "no-flag ship brief lost the {TASK} placeholder"
+  assert_no_grep "# Ticket source contract" "$home/data/brief-no-ticket/brief.md" \
+    "no-flag ship brief grew the ticket-source section (output no longer stable)"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-no-ticket-scout some-proj --scout >/dev/null 2>&1
+  assert_grep "{TASK}" "$home/data/brief-no-ticket-scout/brief.md" \
+    "no-flag scout brief lost the {TASK} placeholder"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tk-missing some-proj --mode direct-PR --ticket "$home/nope.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "missing ticket file should be refused"
+  assert_contains "$out" "--ticket file not found" "missing-file refusal did not name the flag"
+  assert_absent "$home/data/tk-missing/brief.md" "refused missing-file scaffold still wrote a brief"
+
+  : > "$home/empty.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tk-empty some-proj --scout --ticket "$home/empty.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "empty ticket file should be refused"
+  assert_contains "$out" "--ticket file is empty" "empty-file refusal did not explain"
+  assert_absent "$home/data/tk-empty/brief.md" "refused empty-file scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tk-none some-proj --mode direct-PR --ticket= 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an empty --ticket value should be refused"
+  assert_contains "$out" "--ticket requires a file path" "empty-value refusal did not explain"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" tk-mate --secondmate --no-projects --ticket "$home/empty.md" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--ticket on a secondmate charter should be refused"
+  assert_contains "$out" "--ticket applies to crewmate ship and scout briefs" "charter refusal did not explain"
+  assert_absent "$home/data/tk-mate/brief.md" "refused charter scaffold still wrote a brief"
+  pass "fm-brief.sh: no-flag output keeps its placeholder and bad ticket inputs are refused loudly"
+}
+
+test_help_describes_ticket_input_path() {
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "--ticket <path> fills the # Task section" "--help does not describe the ticket input path"
+  assert_contains "$help" "[--ticket <path>]" "--help usage lines omit the ticket flag"
+  pass "fm-brief.sh: --help describes the --ticket input path"
+}
+
 # Registry with one project per delivery mode. fm-brief.sh no longer reads it -
 # the ship mode arrives as an explicit flag - so this fixture exists to prove the
 # scaffold ignores the registered posture (test_ship_mode_is_explicit_not_registry).
@@ -869,6 +958,9 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_ticket_flag_fills_task_verbatim
+test_ticket_flag_absent_regression_and_refusals
+test_help_describes_ticket_input_path
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

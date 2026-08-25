@@ -204,6 +204,7 @@ Two drafting rules bind every spec:
 
 - the user-story list is numbered and extensive, one story per capability, so every ticket traces back to at least one story and every story back to settled decisions;
 - the spec carries no file paths and no code snippets, with one exception: a validated prototype snippet that encodes a decision more precisely than prose may appear, explicitly noted as coming from the prototype that validated it.
+- the no-paths rule binds the spec alone: tickets carry concrete file paths and surface lists because they are execution contracts, so keep path detail out of the spec and push it down into the tickets that need it.
 
 Preserve project terminology.
 Explicitly record constraints that would otherwise be rediscovered by every crew.
@@ -234,6 +235,20 @@ A ticket should contain:
 
 ## Why this slice
 
+## Produces
+
+## Consumers
+
+## Touched surfaces
+
+## Explicitly out of scope
+
+## Locked decisions
+
+## Evidence anchors
+
+## Regression guards
+
 ## Scope
 
 ## Implementation notes
@@ -248,6 +263,21 @@ A ticket should contain:
 ## Can run in parallel with
 - ...
 ```
+
+The seven structural fields between the slice's identity and its notes are mandatory, and each exists because omitting it has already cost a follow-up PR:
+
+- `Produces` names the single value, state, or behavior change this slice creates, concretely enough to search the codebase for its other users.
+- `Consumers` lists every existing place that reads, displays, counts, sorts, filters, joins, or stores that value, found by sweeping the project structure before the ticket is written.
+  A ticket whose value touches existing seats never leaves this field empty; when the value is genuinely local, write the one line saying why instead.
+- `Touched surfaces` carries the concrete file paths, modules, and subsystems expected to change, including every consumer listed above; the spec stays path-free precisely because this field owns paths at ticket level.
+- `Explicitly out of scope` names neighboring surfaces the ticket deliberately leaves alone, so their absence later reads as a decision rather than a blind spot.
+- `Locked decisions` records choices already settled by the captain, grill, or spec, each pointing at where it was settled, so crews implement instead of reopening.
+- `Evidence anchors` points at the symbols, tests, or fixtures where implementation and verification start.
+- `Regression guards` names the existing tests or checks covering the touched surfaces that must keep passing.
+
+The producer-consumer rule behind `Produces` and `Consumers`: a ticket that creates or changes a value must name every existing place that reads, displays, counts, sorts, filters, joins, or stores that value.
+Those seats are structural facts found by sweeping, not judgment calls, so finding them is planning work that belongs in the ticket, never discovery left for the crew.
+A crew that lands a produced value while known seats still read the old shape has not finished the ticket.
 
 A ticket markdown file carries no status field - execution state lives in the backlog as separate work items with blocked-by edges, and consumers such as gootte join tickets by `<parent-id>-t<TNN>` id.
 
@@ -292,9 +322,37 @@ Before presenting the plan, check:
 - every ticket would pass the recursion gate today: one coherent change, no unresolved decisions, one context window;
 - the ticket graph is executable by Firstmate's existing dispatch lifecycle.
 
+The seven structural fields carry their own gate checks on top:
+
+- every producing ticket names its consumers; an empty `Consumers` field fails the gate unless the ticket carries its one-line genuine-locality justification;
+- `Touched surfaces` covers every listed consumer, so no seat that reads the produced value is left unowned;
+- deliberate exclusions appear under `Explicitly out of scope`, never nowhere;
+- locked decisions point at where they were settled, and evidence anchors plus regression guards resolve to real code and real tests.
+
 If a quality check fails, revise the decomposition before asking for approval.
 
-## 8. Captain review: the ticket quiz
+## 8. Ticket-to-code contrast review
+
+Between the quality gate and the captain quiz, contrast every ticket against the actual codebase structure.
+The quiz judges judgment; this step verifies the facts a structural sweep can settle mechanically, and the two stay separate.
+
+Split the sweep work by feature size:
+
+- a plan of two to three tickets: firstmate performs the sweep directly with structure queries against the target project;
+- a larger graph, or one spanning several subsystems: commission a dedicated scout whose report carries the per-ticket contrast evidence, then fold its findings back into the tickets before the quiz.
+
+Check mechanically, per ticket:
+
+- every claimed consumer exists in the code where the ticket says it does;
+- every place the codebase actually reads, displays, counts, sorts, filters, joins, or stores the produced value appears under `Consumers`;
+- every `Touched surfaces` path resolves;
+- every `Evidence anchors` and `Regression guards` entry resolves to real code and a real test or check.
+
+Ask the captain only what the sweep cannot answer: whether an explicit exclusion is the right call, and whether a newly discovered seat changes the plan.
+Findings are fixed by revising the tickets and re-running the gate - never by planning to explain gaps in the brief later.
+A ticket that passes this review but still sends its crew researching scope it should already cover, or re-deciding a choice recorded as settled, is evidence the review failed: the crew stops and escalates, and firstmate repairs the ticket instead of patching the brief.
+
+## 9. Captain review: the ticket quiz
 
 When this skill was invoked for Planned or Wayfinder-planned work, do not dispatch implementation crews merely because the artifacts were generated.
 
@@ -320,7 +378,7 @@ Then use Firstmate's existing decision/captain hold lifecycle for approval when 
 A captain approval of the plan authorizes implementation of the approved ticket graph only.
 It does not grant merge authority or override other Firstmate hard rules.
 
-## 9. Recursion gate at dispatch
+## 10. Recursion gate at dispatch
 
 Re-judge the section 2 complexity gate at EVERY dispatch, not only at intake.
 Before any ticket is briefed or spawned, ask the classification question again against everything learned since.
@@ -330,7 +388,7 @@ Give it a new `<feature-slug>` under the project's `docs/features/`, file it as 
 
 Dispatching an overgrown ticket anyway is precisely the failure this gate exists to prevent.
 
-## 10. Hand off to Firstmate execution
+## 11. Hand off to Firstmate execution
 
 After approval, stop planning and return to Firstmate's existing execution path.
 
@@ -338,7 +396,7 @@ For each ready ticket:
 
 1. run the recursion gate;
 2. resolve its concrete delivery mode and yolo posture using the existing Firstmate intake rules;
-3. file the ticket as its own backlog work item and create the normal brief at `data/<parent-id>-t<TNN>/brief.md`, embedding the ticket content and pointing at `projects/<project>/docs/features/<feature-slug>/spec.md`;
+3. file the ticket as its own backlog work item and create the normal brief at `data/<parent-id>-t<TNN>/brief.md` by passing the ticket file to `fm-brief.sh --ticket <projects/<project>/docs/features/<feature-slug>/tickets/TNN.md>`, which inserts the ticket body verbatim into the brief's task slot - never re-elaborate, paraphrase, or summarize it - and point at `projects/<project>/docs/features/<feature-slug>/spec.md`;
 4. spawn the existing crewmate using `fm-spawn.sh` and the selected harness/profile;
 5. supervise through the existing lifecycle;
 6. unlock dependent tickets only after their declared predecessor is actually complete; filing tickets as separate backlog items with explicit blocked-by notes lets ordinary queue re-evaluation own this unlocking.
@@ -349,7 +407,7 @@ The terminal captain-review ticket files and dispatches like any other ticket on
 **Do not create a second dispatch system.**
 `task-planning` ends at an approved ticket graph; `fm-brief.sh`, `fm-spawn.sh`, supervision, delivery, and merge rules remain authoritative.
 
-## 11. Verification is risk-based
+## 12. Verification is risk-based
 
 This planning layer records verification requirements per ticket, but it does not force `no-mistakes` on every ticket.
 
@@ -361,7 +419,7 @@ Use the ticket's verification section to distinguish:
 
 The planner must not call an external review agent merely because a ticket exists.
 
-## 12. Composition and imports
+## 13. Composition and imports
 
 This skill deliberately composes with, rather than replaces:
 

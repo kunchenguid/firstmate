@@ -45,13 +45,18 @@ Simple Planned Wayfinder-planned
  |       |
  +-------+---------->
           |
+ ticket-to-code contrast review
+          |
  ticket quiz + captain review
           |
           v
- Firstmate brief/spawn
+ Firstmate brief/spawn (--ticket)
           |
         crews
 ```
+
+The contrast review sits between decomposition and approval: each ticket is checked mechanically against the actual codebase structure - claimed consumers exist, every real seat of a produced value is listed, touched paths resolve - with the sweep split by feature size (two to three tickets, firstmate sweeps directly; larger or multi-subsystem graphs get a dedicated scout).
+At dispatch the approved ticket file itself fills the crew brief's task slot verbatim through `fm-brief.sh --ticket`, so "ticket + common scaffold = brief" holds without firstmate re-elaborating anything.
 
 Planning documents live inside the target project's clone at `projects/<project>/docs/features/<feature-slug>/`, so every planned or running feature is browsable per project instead of mixed into the Firstmate home's `data/`. Firstmate writes them under hard rule 1's enumerated `task-planning` exception and reads them back at intake and dispatch; they stay uncommitted working documents by default, and versioning them happens only through the project's normal delivery path when the captain asks. Runtime state (briefs, metadata, backlog) remains in the Firstmate home.
 
