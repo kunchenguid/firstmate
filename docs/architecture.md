@@ -69,6 +69,7 @@ On a Pi primary, supervision is default-on: the watcher extension can hand eligi
 The branch handles those rows, stores the outcome durably, and merges an append-only note back.
 A captain-facing outcome instead opens exactly one follow-up turn on the captain's conversation without printing or rendering a separate note - that turn is the captain-visible result.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility and dispatch architecture, and every other harness keeps the wake-to-main path unchanged.
+An explicitly configured Pi home can instead narrow that second session to a read-only structured router and add allowlisted Linear issue orchestration through main; [docs/pi-autonomous-development.md](pi-autonomous-development.md) is the single architecture owner for that opt-in mode.
 
 ### Registered secondmate current state
 

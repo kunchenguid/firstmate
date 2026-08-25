@@ -27,7 +27,17 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+#
+# --green-head <sha> is the machine-enforced autonomous path.
+# It refuses unless the live pull-request head exactly matches <sha>, the PR is
+# open, non-draft, mergeable and clean, and at least one current check passed
+# with none failed or pending.
+# No extra merge arguments are accepted on this path. GitHub then merges by
+# GraphQL expectedHeadOid through gh-axi, binding the mutation to that exact
+# verified head with the ordinary GitHub default here, squash.
+# GitLab already verifies and binds a successful current-head pipeline; the
+# option adds the same caller-supplied head equality requirement there.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--green-head <sha>] [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,7 +73,20 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+REQUIRE_GREEN_HEAD=
+if [ "${1:-}" = "--green-head" ]; then
+  if [ "$#" -lt 2 ] || ! fm_pr_head_valid "$2"; then
+    echo "error: --green-head requires a valid full commit SHA" >&2
+    exit 2
+  fi
+  REQUIRE_GREEN_HEAD=$2
+  shift 2
+fi
 [ "${1:-}" = "--" ] && shift
+if [ -n "$REQUIRE_GREEN_HEAD" ] && [ "$#" -ne 0 ]; then
+  echo "error: --green-head does not accept extra merge arguments" >&2
+  exit 2
+fi
 
 caller_has_merge_method() {
   local arg
@@ -209,6 +232,11 @@ FIELDS
     echo "error: could not read the GitLab merge request head commit before merging" >&2
     return 1
   fi
+  if [ -n "$REQUIRE_GREEN_HEAD" ] && [ "$REQUIRE_GREEN_HEAD" != "$live_head" ]; then
+    echo "error: refusing to merge $URL" >&2
+    echo "  - current head $live_head does not match required green head $REQUIRE_GREEN_HEAD" >&2
+    return 1
+  fi
   # A rebase moves the head and leaves the recorded value behind, so the
   # disagreement is reported and the live head is what gets verified and merged.
   if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
@@ -245,13 +273,103 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
 }
 
+github_merge_verified_green_head() {
+  local view node_id state_value draft mergeable merge_state live_head extra
+  local checks summary passed failed pending total mutation merged merge_commit
+  command -v gh-axi >/dev/null 2>&1 || {
+    echo "error: --green-head requires gh-axi on PATH" >&2
+    return 1
+  }
+  if [ "$#" -ne 0 ]; then
+    echo "error: --green-head does not accept extra merge arguments; it uses the guarded squash method" >&2
+    return 1
+  fi
+  if ! view=$(gh-axi api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
+    --template '{{printf "%s\t%s\t%v\t%v\t%s\t%s\n" .node_id .state .draft .mergeable .mergeable_state .head.sha}}' 2>/dev/null); then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r node_id state_value draft mergeable merge_state live_head extra <<FIELDS
+$view
+FIELDS
+  if [ -n "${extra:-}" ] || [ -z "$node_id" ] || ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not parse the GitHub pull request state before merging" >&2
+    return 1
+  fi
+  if [ "$live_head" != "$REQUIRE_GREEN_HEAD" ]; then
+    echo "error: refusing to merge $URL" >&2
+    echo "  - current head $live_head does not match required green head $REQUIRE_GREEN_HEAD" >&2
+    return 1
+  fi
+  local refusals=''
+  [ "$state_value" = open ] || refusals="$refusals  - state is \"${state_value:-unreadable}\", not open
+"
+  [ "$draft" = false ] || refusals="$refusals  - draft is \"${draft:-unreadable}\", not false
+"
+  [ "$mergeable" = true ] || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  [ "$merge_state" = clean ] || refusals="$refusals  - mergeable_state is \"${merge_state:-unreadable}\", not clean
+"
+  if ! checks=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+    refusals="$refusals  - current-head checks could not be read
+"
+  fi
+  summary=$(printf '%s\n' "${checks:-}" | grep '^summary:' | head -1 || true)
+  passed=$(printf '%s\n' "$summary" | sed -n 's/^summary:[^0-9]*\([0-9][0-9]*\) passed.*/\1/p')
+  failed=$(printf '%s\n' "$summary" | sed -n 's/.*[, ]\([0-9][0-9]*\) failed.*/\1/p')
+  pending=$(printf '%s\n' "$summary" | sed -n 's/.*[, ]\([0-9][0-9]*\) pending.*/\1/p')
+  total=$(printf '%s\n' "$summary" | sed -n 's/.*[, ]\([0-9][0-9]*\) total.*/\1/p')
+  [ -n "$pending" ] || pending=0
+  if [ -z "$passed" ] || [ -z "$failed" ] || [ -z "$total" ] || \
+    [ "${passed//[0-9]/}" ] || [ "${failed//[0-9]/}" ] || \
+    [ "${pending//[0-9]/}" ] || [ "${total//[0-9]/}" ] || [ "$total" -eq 0 ]; then
+    refusals="$refusals  - current-head check summary is absent or malformed
+"
+  else
+    [ "$passed" -gt 0 ] || refusals="$refusals  - no current-head check passed
+"
+    [ "$failed" -eq 0 ] || refusals="$refusals  - $failed current-head check(s) failed
+"
+    [ "$pending" -eq 0 ] || refusals="$refusals  - $pending current-head check(s) are pending
+"
+  fi
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  # GraphQL variable references are deliberately literal dollar-prefixed names.
+  # shellcheck disable=SC2016
+  if ! mutation=$(gh-axi api graphql \
+    --field 'query=mutation($pullRequestId:ID!,$expectedHeadOid:GitObjectID!,$mergeMethod:PullRequestMergeMethod!){mergePullRequest(input:{pullRequestId:$pullRequestId,expectedHeadOid:$expectedHeadOid,mergeMethod:$mergeMethod}){pullRequest{merged mergeCommit{oid}}}}' \
+    --field "pullRequestId=$node_id" \
+    --field "expectedHeadOid=$REQUIRE_GREEN_HEAD" \
+    --field 'mergeMethod=SQUASH' \
+    --template '{{printf "%v\t%s\n" .data.mergePullRequest.pullRequest.merged .data.mergePullRequest.pullRequest.mergeCommit.oid}}' 2>/dev/null); then
+    echo "error: GitHub refused the expected-head merge for $URL" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r merged merge_commit extra <<FIELDS
+$mutation
+FIELDS
+  if [ -n "${extra:-}" ] || [ "$merged" != true ] || ! fm_pr_head_valid "$merge_commit"; then
+    echo "error: GitHub did not confirm the expected-head merge for $URL" >&2
+    return 1
+  fi
+  printf 'verified: %s merged from green head %s as commit %s\n' "$URL" "$REQUIRE_GREEN_HEAD" "$merge_commit" >&2
+}
+
 case "$PROVIDER" in
   github)
-    merge_args=()
-    if ! caller_has_merge_method "$@"; then
-      merge_args=(--squash)
+    if [ -n "$REQUIRE_GREEN_HEAD" ]; then
+      github_merge_verified_green_head "$@"
+    else
+      merge_args=()
+      if ! caller_has_merge_method "$@"; then
+        merge_args=(--squash)
+      fi
+      gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1

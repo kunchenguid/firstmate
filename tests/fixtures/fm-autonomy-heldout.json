@@ -1,0 +1,359 @@
+{
+  "schema": "fm-autonomy-heldout.v1",
+  "cases": [
+    {
+      "id": "same-repository-disjoint-evidence",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "disconfirming": "Same repository is not itself a collision when concrete files, symbols, semantics, resources, dependencies, and schema impact are disjoint.",
+      "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-a",
+          "issueIdentifier": "ENG-1",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/alpha.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["alphaHandler"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["alpha-flow"],
+          "evidence": ["The issue names src/alpha.ts and alphaHandler."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-b",
+          "issueIdentifier": "ENG-2",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/beta.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["betaHandler"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["beta-flow"],
+          "evidence": ["The issue names src/beta.ts and betaHandler."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-a", "issue-b"],
+      "expectedEdges": []
+    },
+    {
+      "id": "glob-overlap-serializes",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-c",
+          "issueIdentifier": "ENG-3",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": [],
+          "predictedGlobs": ["src/auth/**"],
+          "predictedSymbols": ["authenticate"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["auth-flow"],
+          "evidence": ["The issue changes the auth module."],
+          "validation": "heavy",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-d",
+          "issueIdentifier": "ENG-4",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/auth/token.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["refreshToken"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["token-flow"],
+          "evidence": ["The issue names src/auth/token.ts."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-c"],
+      "expectedEdges": [{ "left": "issue-c", "right": "issue-d" }]
+    },
+    {
+      "id": "cross-repository-shared-resource",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "disconfirming": "Different repositories still collide through one shared mutable external resource.",
+      "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-e",
+          "issueIdentifier": "OPS-1",
+          "repository": "service-a",
+          "dependencies": [],
+          "predictedFiles": ["src/config.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["queueName"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": ["queue:billing-events"],
+          "semanticCoupling": ["billing-publish"],
+          "evidence": ["The issue changes the billing event queue producer."],
+          "validation": "light",
+          "surface": "internal",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-f",
+          "issueIdentifier": "OPS-2",
+          "repository": "service-b",
+          "dependencies": [],
+          "predictedFiles": ["src/consumer.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["consumeBilling"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": ["queue:billing-events"],
+          "semanticCoupling": ["billing-consume"],
+          "evidence": ["The issue changes the billing event queue consumer."],
+          "validation": "light",
+          "surface": "internal",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-e"],
+      "expectedEdges": [{ "left": "issue-e", "right": "issue-f" }]
+    },
+    {
+      "id": "dependency-serializes",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-g",
+          "issueIdentifier": "ENG-7",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/base.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["baseApi"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["base-contract"],
+          "evidence": ["The issue defines baseApi."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-h",
+          "issueIdentifier": "ENG-8",
+          "repository": "app",
+          "dependencies": ["issue-g"],
+          "predictedFiles": ["src/client.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["clientApi"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["client-contract"],
+          "evidence": ["Linear records issue-g as a blocker."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-g"],
+      "expectedEdges": [{ "left": "issue-g", "right": "issue-h" }]
+    },
+    {
+      "id": "unknown-scope-escalates-and-serializes",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-i",
+          "issueIdentifier": "ENG-9",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": [],
+          "predictedGlobs": [],
+          "predictedSymbols": [],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": [],
+          "evidence": ["The issue supplies no repository scope evidence."],
+          "validation": "heavy",
+          "surface": "unknown",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": true, "redValidation": false }
+        },
+        {
+          "issueId": "issue-j",
+          "issueIdentifier": "ENG-10",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/known.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["known"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["known-flow"],
+          "evidence": ["The issue names src/known.ts."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-j"],
+      "expectedEdges": [{ "left": "issue-j", "right": "issue-i" }]
+    },
+    {
+      "id": "heavy-validation-capacity",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "capacity": { "maxActiveIssues": 3, "maxParallelWorkers": 2, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-k",
+          "issueIdentifier": "ENG-11",
+          "repository": "a",
+          "dependencies": [],
+          "predictedFiles": ["src/a.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["a"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["a"],
+          "evidence": ["Bounded A scope."],
+          "validation": "heavy",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-l",
+          "issueIdentifier": "ENG-12",
+          "repository": "b",
+          "dependencies": [],
+          "predictedFiles": ["src/b.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["b"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["b"],
+          "evidence": ["Bounded B scope."],
+          "validation": "heavy",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        },
+        {
+          "issueId": "issue-m",
+          "issueIdentifier": "ENG-13",
+          "repository": "c",
+          "dependencies": [],
+          "predictedFiles": ["src/c.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["c"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["c"],
+          "evidence": ["Bounded C scope."],
+          "validation": "light",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-k", "issue-m"],
+      "expectedEdges": []
+    },
+    {
+      "id": "quoted-production-is-not-an-operation",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "disconfirming": "A documentation change that quotes the word production is not a production operation when concrete evidence proves the effect is docs-only.",
+      "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-n",
+          "issueIdentifier": "DOC-1",
+          "repository": "docs",
+          "dependencies": [],
+          "predictedFiles": ["docs/production-example.md"],
+          "predictedGlobs": [],
+          "predictedSymbols": [],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["docs-example"],
+          "evidence": ["The acceptance criteria only change a quoted documentation example and execute nothing."],
+          "validation": "light",
+          "surface": "internal",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": false, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": ["issue-n"],
+      "expectedEdges": []
+    },
+    {
+      "id": "security-small-change-still-escalates",
+      "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "disconfirming": "Small diff size does not remove the security-sensitive authority boundary.",
+      "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [
+        {
+          "issueId": "issue-o",
+          "issueIdentifier": "SEC-1",
+          "repository": "app",
+          "dependencies": [],
+          "predictedFiles": ["src/auth/policy.ts"],
+          "predictedGlobs": [],
+          "predictedSymbols": ["authorize"],
+          "migrationOrSchema": false,
+          "sharedExternalResources": [],
+          "semanticCoupling": ["authorization-policy"],
+          "evidence": ["The issue changes authorization policy."],
+          "validation": "heavy",
+          "surface": "product",
+          "boundaries": { "destructive": false, "irreversible": false, "production": false, "migration": false, "release": false, "credentials": false, "securitySensitive": true, "ambiguous": false, "redValidation": false }
+        }
+      ],
+      "expectedSelected": [],
+      "expectedEdges": []
+    },
+    {
+      "id": "routine-context-waits-for-next-turn",
+      "routing": { "urgency": "routine", "kind": "firstmate.routine-context", "expectedAction": "nextTurn" },
+      "disconfirming": "Routine retained context uses nextTurn and must not wake an idle or working main session.",
+      "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [],
+      "expectedSelected": [],
+      "expectedEdges": []
+    },
+    {
+      "id": "exact-duplicate-coalesces",
+      "routing": { "urgency": "routine", "kind": "journal.duplicate", "exactDuplicate": true, "expectedAction": "coalesce" },
+      "disconfirming": "Only exact already-accounted duplicate evidence coalesces without retained next-turn context.",
+      "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [],
+      "expectedSelected": [],
+      "expectedEdges": []
+    },
+    {
+      "id": "routine-operation-still-wakes",
+      "routing": { "urgency": "routine", "kind": "firstmate.operation-required", "requiresMainAction": true, "expectedAction": "wake" },
+      "disconfirming": "Routine urgency does not permit nextTurn when a main-session operation is required.",
+      "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
+      "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
+      "claims": [],
+      "expectedSelected": [],
+      "expectedEdges": []
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "fm-autonomy-baseline.v1",
+  "acceptedAt": "2026-08-25",
+  "contractFingerprint": "contract-d790ac73dac4fb4af15f15d0",
+  "decisionContractVersion": "2026-08-25.10",
+  "promptSha256": "a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22",
+  "modelPolicy": "runtime-authenticated-no-linear-credential-collision-context-fitting-distinct-strictly-cheaper-at-configured-uncached-ceiling-and-main-model-change; preflight-bounded-turn-cost; preserve-main-reasoning-policy-for-workers",
+  "corpus": "tests/fixtures/fm-autonomy-heldout.json",
+  "cases": 11,
+  "passed": 11,
+  "failed": 0,
+  "requiredDisconfirmingCases": [
+    "same-repository-disjoint-evidence",
+    "cross-repository-shared-resource",
+    "quoted-production-is-not-an-operation",
+    "security-small-change-still-escalates",
+    "routine-context-waits-for-next-turn",
+    "exact-duplicate-coalesces",
+    "routine-operation-still-wakes"
+  ]
+}

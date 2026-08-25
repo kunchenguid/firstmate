@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "enabled": true,
+  "ownerId": "my-firstmate-home",
+  "pollSeconds": 120,
+  "linear": {
+    "workspaceId": "00000000-0000-0000-0000-000000000001",
+    "credential": {
+      "env": "LINEAR_API_KEY",
+      "kind": "api-key"
+    },
+    "scopes": [
+      {
+        "teamId": "00000000-0000-0000-0000-000000000002",
+        "projectId": "00000000-0000-0000-0000-000000000003",
+        "statuses": {
+          "intake": [
+            "00000000-0000-0000-0000-000000000004"
+          ],
+          "claimed": "00000000-0000-0000-0000-000000000005",
+          "inProgress": "00000000-0000-0000-0000-000000000006",
+          "completed": "00000000-0000-0000-0000-000000000007"
+        },
+        "labels": {
+          "required": [
+            "00000000-0000-0000-0000-000000000008"
+          ],
+          "blocked": [
+            "00000000-0000-0000-0000-000000000009"
+          ]
+        }
+      }
+    ]
+  },
+  "repositories": [
+    {
+      "linearProjectId": "00000000-0000-0000-0000-000000000003",
+      "firstmateProject": "my-project",
+      "checkout": "my-project"
+    }
+  ],
+  "supervision": {
+    "model": {
+      "provider": "anthropic",
+      "id": "claude-haiku-4-5",
+      "thinkingLevel": "low"
+    },
+    "limits": {
+      "maxBatchEvents": 12,
+      "maxBatchIssues": 6,
+      "maxPromptInputTokens": 12000,
+      "maxOutputTokens": 2000,
+      "maxTurnMilliseconds": 45000,
+      "maxIterationsPerBatch": 1,
+      "maxCostUsdPerWindow": 0.5,
+      "costWindowSeconds": 3600,
+      "maxLinearPages": 4,
+      "maxLinearRetries": 2,
+      "maxLinearRetryMilliseconds": 10000
+    }
+  },
+  "capacity": {
+    "maxActiveIssues": 6,
+    "maxParallelWorkers": 3,
+    "maxHeavyValidations": 1
+  }
+}

@@ -105,6 +105,18 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/pi-autonomous-development.md",
+      "target": "docs/configuration.md"
+    },
+    {
+      "source": "docs/pi-autonomous-development.md",
+      "target": "docs/verification/pi-autonomous-development.md"
+    },
+    {
+      "source": "docs/verification/pi-autonomous-development.md",
+      "target": "docs/pi-autonomous-development.md"
     }
   ],
   "surfaces": [
@@ -158,6 +170,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/linear-autonomy/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -265,6 +281,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/pi-autonomy.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
@@ -291,6 +311,10 @@
     {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/pi-autonomous-development.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/pi-supervision-branch.md",
@@ -358,6 +382,10 @@
     },
     {
       "path": "docs/verification/muse.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/pi-autonomous-development.md",
       "audience": "maintainer-verification"
     },
     {

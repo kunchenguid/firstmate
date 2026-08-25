@@ -142,7 +142,8 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-autonomy-cli.test.sh|fm-autonomy-core.test.sh|\
+    fm-pi-autonomy-extension.test.sh|fm-pi-branch-extension.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -965,6 +966,15 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      ;;
+    .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-autonomy.ts|\
+    bin/fm-autonomy.sh|bin/fm-autonomy-prompt.sh|\
+    tests/fixtures/fm-autonomy-heldout.json|tests/fixtures/fm-autonomy-baseline.json|\
+    tests/fixtures/fm-linear-api.json)
+      printf '%s\n' pure-contract-unit
+      case "$path" in
+        .pi/extensions/*) printf '%s\n' live-harness-optin ;;
+      esac
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

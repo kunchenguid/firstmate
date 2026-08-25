@@ -112,6 +112,7 @@ Pi's `/calm` toggle hides supported transcript chrome, including canonically cla
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+Pi can also opt in to [strictly allowlisted Linear autonomous development](docs/configuration.md#pi-linear-autonomy-configpi-autonomyjson), with the feature inert until its local config, credential, project posture, model, and budgets all pass doctor.
 
 ### Talk to it
 

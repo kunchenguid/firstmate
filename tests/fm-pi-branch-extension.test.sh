@@ -22,9 +22,11 @@ install_pi_branch_extension_fixture() {
   mkdir -p \
     "$repo/.pi/extensions/lib" \
     "$repo/node_modules/@earendil-works/pi-coding-agent" \
+    "$repo/node_modules/@earendil-works/pi-ai" \
     "$repo/node_modules/@earendil-works/pi-tui" \
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-autonomy.ts" "$repo/.pi/extensions/lib/fm-autonomy.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
@@ -46,6 +48,15 @@ export function getMarkdownTheme() {
 }
 
 export class UserMessageComponent {}
+
+export class ModelRuntime {
+  static async create() {
+    return new ModelRuntime();
+  }
+  async getAvailable() {
+    return [];
+  }
+}
 
 export class DefaultResourceLoader {
   constructor(options) {
@@ -76,6 +87,9 @@ export class SessionManager {
     return sm;
   }
   getSessionFile() {
+    return this.file;
+  }
+  getSessionId() {
     return this.file;
   }
 }
@@ -120,6 +134,14 @@ export async function createAgentSession(options) {
   };
   (globalThis.__fmSessions ??= []).push(session);
   return { session, extensionsResult: {} };
+}
+JS
+  cat > "$repo/node_modules/@earendil-works/pi-ai/package.json" <<'JSON'
+{"name":"@earendil-works/pi-ai","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/@earendil-works/pi-ai/index.js" <<'JS'
+export function StringEnum(values) {
+  return { type: "string", enum: values };
 }
 JS
   cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
@@ -177,6 +199,9 @@ export const Type = {
   },
   Boolean(options) {
     return { type: "boolean", ...(options ?? {}) };
+  },
+  Array(schema, options) {
+    return { type: "array", items: schema, ...(options ?? {}) };
   },
   Optional(schema) {
     return { ...schema, optional: true };

@@ -46,6 +46,90 @@ Homes on any other primary harness never load this feature and are entirely unaf
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
+## Pi Linear autonomy (config/pi-autonomy.json)
+
+Pi Linear autonomy is a separate opt-in mode of the Pi supervision branch.
+It is disabled by default and creates no autonomy state when `config/pi-autonomy.json` is absent.
+A present file is accepted only when its complete allowlist, repository mappings, status and label policy, cheaper supervision model, budgets, and machine-capacity ceilings validate and the named runtime credential is present.
+A malformed, incomplete, ambiguous, over-256KB, symlinked, hardlinked, credentialless, or symlink-directory-backed file leaves the feature inert and reports the exact requirement through `/fm-autonomy doctor`, `fm_autonomy action=doctor`, and `bin/fm-autonomy.sh doctor`.
+[Pi autonomous development](pi-autonomous-development.md) owns the architecture, journal, claim, collision, delivery, and green-landing contracts.
+
+This feature is Pi-primary-only.
+The local file is not inherited into secondmate homes, never changes the selected primary harness, and has no effect on any other supported primary or worker tool.
+A secondmate home can operate only through a separately reviewed config and Pi primary in that home; this mode never hands an owned claim across homes.
+
+Start from the tracked non-secret example:
+
+```sh
+mkdir -p config
+cp docs/examples/pi-autonomy.json config/pi-autonomy.json
+```
+
+Replace every placeholder with stable IDs from the one intended Linear workspace.
+Do not put a Linear token in the JSON file.
+Make the environment variable named by `linear.credential.env` available to the Pi process as a bounded single-line secret, then run:
+
+```sh
+bin/fm-autonomy.sh doctor
+```
+
+The shell doctor must report preliminary `active: true` before live activation is attempted.
+After this change has landed and the captain has completed the local setup, start a new Pi session or run `/reload`, then use `/fm-autonomy status`; that in-process result must also report `active: true` before live intake is enabled.
+Development and CI use only fixture adapters and never mutate a live Linear workspace or external project.
+
+The top-level fields have one meaning each:
+
+- `version` must equal `1`, and `enabled` must equal `true`.
+- `ownerId` is a stable local-home identity used in idempotent Linear claim evidence.
+- `pollSeconds` is bounded from 30 through 3600.
+- `linear.workspaceId` is the only workspace this file permits.
+- `linear.credential.env` is an uppercase dedicated name with a `LINEAR_` segment, so a tracker token cannot alias a model-provider credential, and `linear.credential.kind` is `api-key` or `oauth`.
+- `linear.scopes` is a non-empty list of at most 50 exact team/project pairs with one status and label policy per pair.
+- `repositories` contains at most 50 entries and maps each allowlisted Linear project ID to exactly one registered Firstmate project and one exact Git repository root below this home's `projects/` directory.
+- `supervision.model` explicitly selects the provider, cheaper model ID, and thinking level for the independent read-only session.
+- `supervision.limits` bounds batches, tokens, turn time, model iterations, cost window, Linear pagination, retries, and retry delay.
+- `capacity` bounds active issues, parallel workers, and simultaneous heavy validations.
+
+The exact supervision bounds are 1-100 events, 1-50 issues, 4,096-100,000 estimated total input tokens, 64-32,000 output tokens, 1,000-300,000 milliseconds per turn, 1-4 model iterations, USD 0.001-1,000 per 60-86,400 second window, 1-100 global Linear pages, 0-8 retries, and 100-60,000 milliseconds maximum retry delay.
+Capacity allows 1-100 active issues, 1-32 parallel workers, and 1-16 simultaneous heavy validations, with workers no greater than active issues and heavy validations no greater than workers.
+
+Every `linear.scopes` entry requires four distinct status classes.
+`statuses.intake` is the non-empty set eligible for selection, while `claimed`, `inProgress`, and `completed` are exact destination IDs.
+Every entry also requires at least one `labels.required` ID and an explicit `labels.blocked` list, which may be empty.
+Each intake-status, required-label, and blocked-label list is bounded to 100 stable IDs.
+All required labels must be present, and any blocked label refuses intake.
+No label, status, author, assignee, issue priority, or issue text grants authority beyond this local file.
+Each durable claim binds the exact workspace, owner, team/project policy, statuses, labels, repository name, and checkout mapping; changing those fields while work is active stops reconciliation for main review rather than silently rebinding the claim.
+
+Every allowlisted project must already appear in `data/projects.md` with a PR-based mode and `+yolo`.
+A `local-only` mapping is refused.
+A `no-mistakes-prod-only` project keeps its existing classification rule, so only clearly internal work takes the direct-PR leg and product, mixed, or uncertain work keeps no-mistakes.
+The local config cannot lower that rigor.
+
+The model must exist in Pi's locally available catalog, have working Pi authentication, and fit the configured input and output ceilings inside its context window.
+At activation and after every main-model selection change, it must be distinct from main and its uncached cost at the configured maximum input and output tokens must be strictly lower than main's catalog cost.
+The shell doctor reads only local model state and does not refresh the network catalog; the in-session doctor performs the additional comparison with main's current model before activation.
+The branch lowers the selected model's maximum output to `maxOutputTokens` and refuses a classification whose projected bounded cost would exceed the configured window ceiling.
+Once a structurally valid config and credential load, Pi retains that token only in private extension memory for the Linear adapter and removes it from ambient provider and worker environments until session replacement or shutdown, even when a later model or project doctor blocks autonomy.
+Activation independently resolves main and supervision request authentication with the Linear variable removed and refuses when either model-auth value contains the configured Linear credential, so one token cannot silently cross the tracker/provider boundary.
+Model and credential diagnostics never print secret material.
+
+The runtime kill switch is `state/autonomy/KILL`.
+Use either surface:
+
+```sh
+bin/fm-autonomy.sh kill-on
+bin/fm-autonomy.sh kill-off
+```
+
+The equivalent Pi commands are `/fm-autonomy kill-on` and `/fm-autonomy kill-off`.
+The switch prevents new intake and claims while preserving and reconciling every existing journal record, claim, worker, PR, and pending delivery.
+It is not discard or cleanup authority.
+
+`bin/fm-autonomy.sh status` prints sanitized local status and usage totals without requiring a model turn.
+`bin/fm-autonomy.sh eval` compares the decision contract and stable prompt against the accepted held-out routing and collision baseline.
+Run eval before changing the autonomy prompt, model-selection policy, structured tool schema, collision procedure, or stronger-boundary routing.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

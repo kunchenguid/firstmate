@@ -12,6 +12,9 @@ An unresolvable row makes the scan unsafe and returns the whole wake to main, an
 Only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so Pi never separately prints or renders a captain-facing merge note.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
+A separate opt-in mode replaces this branch's ordinary tool-bearing session with the read-only structured attention router described in [Pi autonomous development](pi-autonomous-development.md) while its complete local Linear autonomy runtime is usable; the kill switch preserves existing reconciliation but never forces a broken router to own notifications.
+Without that activation, every contract below remains unchanged.
+
 This feature is Pi-only by construction and changes nothing anywhere else:
 
 - The branch lives in `.pi/extensions/fm-branch-supervision.ts`, which only a Pi primary ever loads; no other harness gains or loses behavior.

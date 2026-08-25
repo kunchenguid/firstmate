@@ -1,0 +1,101 @@
+{
+  "schema": "fm-linear-api-fixture.v1",
+  "workspaceId": "workspace-1",
+  "responses": {
+    "rateLimited": {
+      "status": 400,
+      "headers": { "X-RateLimit-Requests-Reset": "0" },
+      "body": { "errors": [{ "message": "retry later", "extensions": { "code": "RATELIMITED" } }] }
+    },
+    "page1": {
+      "status": 200,
+      "body": {
+        "data": {
+          "organization": { "id": "workspace-1" },
+          "issues": {
+            "nodes": [
+              {
+                "id": "issue-1",
+                "identifier": "ENG-1",
+                "title": "One",
+                "description": "Change src/one.ts",
+                "priority": 1,
+                "createdAt": "2026-08-25T00:00:00.000Z",
+                "updatedAt": "2026-08-25T01:00:00.000Z",
+                "url": "https://linear.app/acme/issue/ENG-1/one",
+                "team": { "id": "team-1" },
+                "project": { "id": "project-1" },
+                "state": { "id": "status-todo" },
+                "labels": { "nodes": [{ "id": "label-auto" }] },
+                "relations": { "nodes": [] },
+                "inverseRelations": { "nodes": [] }
+              }
+            ],
+            "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" }
+          }
+        }
+      }
+    },
+    "page2": {
+      "status": 200,
+      "body": {
+        "data": {
+          "organization": { "id": "workspace-1" },
+          "issues": {
+            "nodes": [
+              {
+                "id": "issue-2",
+                "identifier": "ENG-2",
+                "title": "Two",
+                "description": "Change src/two.ts",
+                "priority": 2,
+                "createdAt": "2026-08-25T00:30:00.000Z",
+                "updatedAt": "2026-08-25T01:30:00.000Z",
+                "url": "https://linear.app/acme/issue/ENG-2/two",
+                "team": { "id": "team-1" },
+                "project": { "id": "project-1" },
+                "state": { "id": "status-todo" },
+                "labels": { "nodes": [{ "id": "label-auto" }, { "id": "label-extra" }] },
+                "relations": { "nodes": [] },
+                "inverseRelations": { "nodes": [{ "type": "blocks", "issue": { "id": "issue-1" } }] }
+              },
+              {
+                "id": "issue-blocked-label",
+                "identifier": "ENG-3",
+                "title": "Blocked by local label policy",
+                "description": "Must not enter intake",
+                "priority": 1,
+                "createdAt": "2026-08-25T00:45:00.000Z",
+                "updatedAt": "2026-08-25T01:45:00.000Z",
+                "url": "https://linear.app/acme/issue/ENG-3/blocked",
+                "team": { "id": "team-1" },
+                "project": { "id": "project-1" },
+                "state": { "id": "status-todo" },
+                "labels": { "nodes": [{ "id": "label-auto" }, { "id": "label-blocked" }] },
+                "relations": { "nodes": [] },
+                "inverseRelations": { "nodes": [] }
+              }
+            ],
+            "pageInfo": { "hasNextPage": false, "endCursor": null }
+          }
+        }
+      }
+    },
+    "graphqlError": {
+      "status": 200,
+      "body": {
+        "data": { "organization": { "id": "workspace-1" } },
+        "errors": [{ "message": "scope denied", "extensions": { "code": "FORBIDDEN" } }]
+      }
+    },
+    "wrongWorkspace": {
+      "status": 200,
+      "body": {
+        "data": {
+          "organization": { "id": "workspace-other" },
+          "issues": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } }
+        }
+      }
+    }
+  }
+}

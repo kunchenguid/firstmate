@@ -793,6 +793,122 @@ test_gitlab_head_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses a GitLab head override before recording state"
 }
 
+add_gh_green_head_mocks() {
+  local case_dir=$1 recorded_head=$2 live_head=$3 checks=$4 merge_commit=$5
+  printf '%s\n' "$live_head" > "$case_dir/live-head"
+  printf '%s\n' "$checks" > "$case_dir/checks"
+  printf '%s\n' "$merge_commit" > "$case_dir/merge-commit"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "api repos/"*)
+    printf 'PR_node_fixture\topen\tfalse\ttrue\tclean\t%s\n' "$(cat "$(dirname "$FM_TEST_GH_AXI_LOG")/live-head")"
+    ;;
+  "pr checks")
+    cat "$(dirname "$FM_TEST_GH_AXI_LOG")/checks"
+    ;;
+  "api graphql")
+    printf 'true\t%s\n' "$(cat "$(dirname "$FM_TEST_GH_AXI_LOG")/merge-commit")"
+    ;;
+esac
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\n' '$recorded_head' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+test_green_head_path_binds_verified_current_head() {
+  local case_dir head merge_commit
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  merge_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case_dir=$(make_case github-green-head)
+  mkdir -p "$case_dir/wt"
+  : > "$case_dir/gh-axi.log"
+  add_gh_green_head_mocks "$case_dir" "$head" "$head" \
+    'summary: 2 passed, 0 failed, 2 total' "$merge_commit"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/45 --green-head "$head" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-green-head: verified merge failed"
+
+  assert_grep "api repos/example/repo/pulls/45 --template" "$case_dir/gh-axi.log" \
+    "github-green-head: live PR state was not read through gh-axi"
+  assert_grep "pr checks 45 --repo example/repo" "$case_dir/gh-axi.log" \
+    "github-green-head: current checks were not read"
+  assert_grep "api graphql" "$case_dir/gh-axi.log" \
+    "github-green-head: expected-head mutation was not used"
+  assert_grep "expectedHeadOid=$head" "$case_dir/gh-axi.log" \
+    "github-green-head: merge mutation was not bound to the verified head"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "github-green-head: autonomous path used an unbound pr merge command"
+  assert_grep "merged from green head $head" "$case_dir/stderr" \
+    "github-green-head: success evidence lost the verified head"
+  pass "fm-pr-merge binds the green autonomous GitHub merge to the exact current head"
+}
+
+test_green_head_path_refuses_red_or_moved_head() {
+  local case_dir required live merge_commit rc
+  required=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  live=cccccccccccccccccccccccccccccccccccccccc
+  merge_commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+  case_dir=$(make_case github-green-head-moved)
+  mkdir -p "$case_dir/wt"
+  : > "$case_dir/gh-axi.log"
+  add_gh_green_head_mocks "$case_dir" "$required" "$live" \
+    'summary: 2 passed, 0 failed, 2 total' "$merge_commit"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/46 --green-head "$required" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-green-head-moved: merge should refuse"
+  assert_grep "does not match required green head" "$case_dir/stderr" \
+    "github-green-head-moved: refusal lost the head mismatch"
+  assert_no_grep "api graphql" "$case_dir/gh-axi.log" \
+    "github-green-head-moved: moved head reached the merge mutation"
+
+  case_dir=$(make_case github-green-head-red)
+  mkdir -p "$case_dir/wt"
+  : > "$case_dir/gh-axi.log"
+  add_gh_green_head_mocks "$case_dir" "$required" "$required" \
+    'summary: 1 passed, 1 failed, 2 total' "$merge_commit"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/47 --green-head "$required" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-green-head-red: merge should refuse"
+  assert_grep "1 current-head check(s) failed" "$case_dir/stderr" \
+    "github-green-head-red: refusal lost the red check evidence"
+  assert_no_grep "api graphql" "$case_dir/gh-axi.log" \
+    "github-green-head-red: red head reached the merge mutation"
+  pass "fm-pr-merge refuses moved and red autonomous GitHub heads before mutation"
+}
+
+test_green_head_rejects_all_extra_args_before_recording() {
+  local case_dir head rc
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  case_dir=$(make_case green-head-extra-args)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/48 --green-head "$head" -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 2 "$rc" "green-head-extra-args: autonomous path should reject extra merge arguments"
+  assert_grep "does not accept extra merge arguments" "$case_dir/stderr" \
+    "green-head-extra-args: refusal lost its exact reason"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "green-head-extra-args: refusal recorded PR state"
+  pass "fm-pr-merge autonomous green path accepts no caller-controlled merge arguments"
+}
+
 test_github_still_forwards_sha_arg() {
   local case_dir
   case_dir=$(make_case github-sha-arg)
@@ -821,6 +937,9 @@ test_bundled_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_green_head_path_binds_verified_current_head
+test_green_head_path_refuses_red_or_moved_head
+test_green_head_rejects_all_extra_args_before_recording
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url

@@ -5,8 +5,8 @@
 # createAgentSession surface, the custom bash and fm_branch_report tool
 # definitions must be accepted by the real tool registry, the session file and
 # pointer must persist on disk, and - because the isolated agent dir carries no
-# credentials and no models - the branch's first prompt must fail fast and
-# prove the never-lose-a-wake fallback to main against the real SDK.
+# credentials and no models - the branch's first prompt cannot produce a
+# successful report and must prove the never-lose-a-wake fallback to main.
 #
 # No credentials are read and no provider call leaves the machine: the guard
 # points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
@@ -36,12 +36,14 @@ agentdir="$TMP_ROOT/agent-dir"
 mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
   "$home/state" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
+cp "$ROOT/.pi/extensions/lib/fm-autonomy.ts" "$repo/.pi/extensions/lib/fm-autonomy.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
 mkdir -p "$repo/bin"
 cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
 chmod +x "$repo/bin/fm-operational-input.sh"
 ln -s "$PI_PACKAGE_DIR" "$repo/node_modules/@earendil-works/pi-coding-agent"
+ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-ai" "$repo/node_modules/@earendil-works/pi-ai"
 ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$repo/node_modules/@earendil-works/pi-tui"
 ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$repo/node_modules/typebox"
 
@@ -111,8 +113,9 @@ if (!offer.accepted) throw new Error("branch did not accept the wake offer again
 for (let i = 0; i < 600 && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
-// With an empty agent dir there is no model, so the branch's first prompt
-// must fail fast and return the wake to main - proving both that the real
+// With an empty agent dir there is no usable model, so the branch's first
+// prompt cannot produce a successful report and returns the wake to main.
+// This proves both that the real
 // createAgentSession accepted our loader, tools, and custom definitions
 // (construction succeeds) and that the fallback keeps the wake.
 if (mainUserMessages.length !== 1) throw new Error("wake was lost: no fallback reached main");
