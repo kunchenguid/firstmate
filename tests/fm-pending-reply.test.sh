@@ -97,6 +97,16 @@ phase_of() {  # <state> <corr>
   fm_pending_reply_get "$(fm_pending_reply_path "$1" "$2")" phase
 }
 
+# A local steer now rides the durable steering inbox rather than the typed
+# channel, so marker/corr assertions read the latest enqueued record through
+# the production owner (bin/fm-task-inbox-lib.sh).
+latest_record_body() {  # <home> <task>
+  local rec
+  rec=$(find "$1/state/$2.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | sort | tail -1)
+  [ -n "$rec" ] || return 1
+  bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+}
+
 # --- tests ------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once() {
@@ -664,6 +674,60 @@ test_delivery_confirmation_fallback_reconciles() {
   pass "delivery confirmation fallback reconciles durably"
 }
 
+test_delivery_confirmation_serializes_with_reconciliation() {
+  (
+    local home state corr rec calls entered release confirm_pid reconcile_pid count i
+    home=$(setup_parent delivery-confirm-reconcile-race)
+    state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=5900
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "serialized delivery")
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    calls="$home/mark-delivered.calls"
+    entered="$home/mark-delivered.entered"
+    release="$home/mark-delivered.release"
+    fm_pending_reply_mark_delivered() {
+      local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
+      printf '%s\n' "$BASHPID" >> "$calls"
+      : > "$entered"
+      while [ ! -e "$release" ]; do /bin/sleep 0.01; done
+      pending_rec=$(fm_pending_reply_path "$pending_state" "$pending_corr")
+      fm_pending_reply_set "$pending_rec" delivered_epoch "$epoch" || return 1
+      phase=$(fm_pending_reply_get "$pending_rec" phase)
+      [ "$phase" != delivery_unknown ] \
+        || fm_pending_reply_set "$pending_rec" phase awaiting_report
+    }
+    fm_pending_reply_confirm_delivery "$state" "$corr" &
+    # The background PID is consumed within this isolated test subshell.
+    # shellcheck disable=SC2031
+    confirm_pid=$!
+    for i in $(seq 1 100); do
+      [ -e "$entered" ] && break
+      /bin/sleep 0.01
+    done
+    [ -e "$entered" ] || fail "delivery confirmation did not reach its commit boundary"
+    fm_pending_reply_reconcile_delivery "$state" "$corr" &
+    # The background PID is consumed within this isolated test subshell.
+    # shellcheck disable=SC2031
+    reconcile_pid=$!
+    /bin/sleep 0.1
+    : > "$release"
+    wait "$confirm_pid" || fail "delivery confirmation should commit"
+    wait "$reconcile_pid" || fail "reconciliation should observe committed delivery"
+    count=$(wc -l < "$calls" | tr -d ' ')
+    [ "$count" = 1 ] \
+      || fail "confirmation and reconciliation raced through $count delivery commits"
+    [ "$(fm_pending_reply_get "$rec" delivered_epoch)" = 5900 ] \
+      || fail "serialized confirmation should retain delivered_epoch"
+    [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+      || fail "serialized confirmation should retain awaiting_report phase"
+    [ ! -e "$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")" ] \
+      || fail "serialized delivery marker should be removed"
+  ) || fail "delivery confirmation serialization regression failed"
+  pass "delivery confirmation serializes with reconciliation"
+}
+
 test_unrelated_and_stale_corr_cannot_resolve() {
   local home state corr other
   home=$(setup_parent stale-corr)
@@ -765,8 +829,8 @@ test_unmarked_captain_input_creates_no_expectation() {
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
   expect_code 0 "$rc" "unmarked crewmate send should succeed"
-  [ "$(cat "$log")" = "captain says hello" ] \
-    || fail "crewmate send should stay unmarked"$'\n'"$(cat "$log" | od -An -c)"
+  [ "$(latest_record_body "$home" build)" = "captain says hello" ] \
+    || fail "crewmate steer should be recorded unmarked"$'\n'"$(latest_record_body "$home" build | od -An -c)"
   pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$pending_count" = 0 ] || fail "unmarked input must create no pending-reply records (got $pending_count)"
   pass "direct unmarked captain input creates no expectation"
@@ -780,10 +844,10 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
   run_send "$fb" "$home" "$log" "hibit" "audit the build"; rc=$?
   expect_code 0 "$rc" "secondmate send should succeed"
-  got=$(cat "$log")
+  got=$(latest_record_body "$home" hibit)
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "secondmate send must embed marker+corr"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    *) fail "secondmate steer record must embed marker+corr"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
   corr=$(fm_pending_reply_extract_corr "$got")
   [ "${#corr}" -eq 16 ] || fail "corr id should be 16 hex chars, got '$corr'"
@@ -1006,12 +1070,19 @@ test_correlations_reuse_only_for_matching_open_task() {
   fm_write_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
   fm_write_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
   run_send "$fb" "$home" "$log" domain "first request" || fail "first marked send failed"
-  got=$(cat "$log")
+  got=$(latest_record_body "$home" domain)
   corr1=$(fm_pending_reply_extract_corr "$got")
   export FM_PENDING_REPLY_EXISTING_CORR=$corr1
-  run_send "$fb" "$home" "$log" other "forwarded request" || fail "cross-task send failed"
+  if run_send "$fb" "$home" "$log" other "forwarded request"; then
+    fail "an explicit cross-task correlation must be refused"
+  fi
   unset FM_PENDING_REPLY_EXISTING_CORR
-  corr2=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  if latest_record_body "$home" other >/dev/null 2>&1; then
+    fail "a refused cross-task correlation must not enqueue a steer"
+  fi
+  run_send "$fb" "$home" "$log" other "forwarded request" \
+    || fail "fresh cross-task send failed"
+  corr2=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" other)")
   [ -n "$corr2" ] && [ "$corr2" != "$corr1" ] \
     || fail "cross-task send must receive a new correlation"
   rec=$(fm_pending_reply_path "$state" "$corr2")
@@ -1021,7 +1092,7 @@ test_correlations_reuse_only_for_matching_open_task() {
   fm_pending_reply_try_resolve "$state" "$corr1" || fail "first expectation should resolve"
   run_send "$fb" "$home" "$log" domain "${FM_FROMFIRST_MARK}corr=${corr1} follow-up" \
     || fail "resolved-correlation follow-up failed"
-  corr3=$(fm_pending_reply_extract_corr "$(cat "$log")")
+  corr3=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" domain)")
   [ -n "$corr3" ] && [ "$corr3" != "$corr1" ] \
     || fail "resolved correlation must not guard a new send"
   rec=$(fm_pending_reply_path "$state" "$corr3")
@@ -1197,6 +1268,7 @@ test_concurrent_escalation_yields_to_late_reply
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
+test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
