@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Secret-Scanner — macht den Repo-Teil von ENF-SECRET-001 mechanisch.
+# Wird nach ~/.config/git/hooks/pre-commit installiert (globaler core.hooksPath)
+# und gilt damit fuer JEDES Repo auf diesem Laptop.
+#
+# Geprueft wird NUR das, was gerade gestaged ist — nicht die Historie. Zwei
+# Gruende: es ist schnell genug fuer jeden Commit, und die vorhandenen
+# Fehlalarme in der Historie (Baseline-Lauf 2026-08-02: 14 Funde, alle
+# Fehlalarme) blockieren so keinen einzigen kuenftigen Commit. Eine Baseline-
+# Datei je Repo waere bei einem globalen Hook ohnehin nicht zu pflegen.
+#
+# WICHTIG: Der Scanner deckt nur den Weg ins Repo ab. ENF-SECRET-001 verbietet
+# Secrets auch in Logs und im Chat — dafuer gibt es keine Mechanik, dort gilt
+# weiter die Regel.
+set -uo pipefail
+
+command -v gitleaks >/dev/null 2>&1 || {
+  echo "  HINWEIS: gitleaks nicht gefunden — Secret-Pruefung uebersprungen." >&2
+  echo "  Installation siehe ~/projects/Rules/hooks/git/README.md" >&2
+  exit 0
+}
+
+if gitleaks git --staged --redact --no-banner --exit-code 1 >/dev/null 2>&1; then
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+
+  COMMIT GESTOPPT — moegliches Secret im gestageten Stand
+
+EOF
+# Fundstellen zeigen, Werte NICHT: --redact schwaerzt sie.
+gitleaks git --staged --redact -v --no-banner 2>&1 \
+  | grep -E "^(RuleID|File|Line):" | sed 's/^/    /' >&2
+cat >&2 <<'EOF'
+
+  Werte sind oben geschwaerzt und bleiben es — auch in dieser Meldung.
+
+  Ist es ein echtes Secret: NICHT committen. Wert aus der Datei nehmen, in
+  die .env verschieben (nur der Variablenname gehoert ins Repo), Fund beim
+  Owner melden und Rotation anbieten. So verlangt es ENF-SECRET-001.
+
+  Ist es ein Fehlalarm (Testdaten, oeffentlicher Bezeichner, Pfad): mit
+  `# gitleaks:allow` an der Zeile markieren — sichtbar im Diff, nicht still
+  in einer Allowlist versteckt.
+
+  Notausgang (nur der Owner, nur bewusst):  git commit --no-verify
+
+EOF
+exit 1

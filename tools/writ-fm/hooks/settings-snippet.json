@@ -1,0 +1,52 @@
+{
+  "_hinweis": "Wird in ~/.claude/settings.json unter 'hooks' eingefuegt. Hier versioniert, weil ~/.claude kein Repo ist. Vollstaendigkeit prueft `writ-light doctor`.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/fridjof/.claude/hooks/onboarding.sh",
+            "timeout": 20,
+            "statusMessage": "Regelwerk wird geladen"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/fridjof/.claude/hooks/prompt-regeln.sh",
+            "timeout": 20,
+            "statusMessage": "Regeln werden gesucht"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/fridjof/.claude/hooks/bash-guard.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/fridjof/.claude/hooks/prozess-ledger.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

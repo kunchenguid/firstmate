@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Push-Sperre — macht ENF-GIT-002 aus einer Bitte an das Modell eine Eigenschaft
+# der Umgebung. Gilt fuer JEDES Repo auf diesem Laptop (globaler core.hooksPath)
+# und unabhaengig davon, welche Runtime oder welcher Agent gerade laeuft.
+#
+# Push nur, wenn OWNER_PUSH_OK=1 gesetzt ist. Die Variable setzt der Owner
+# bewusst und einmalig fuer den jeweiligen Aufruf:
+#
+#     OWNER_PUSH_OK=1 git push
+#
+# Absichtlich NICHT dauerhaft exportieren — eine Variable in der Shell-Rc waere
+# dasselbe wie keine Sperre.
+set -uo pipefail
+
+if [ "${OWNER_PUSH_OK:-}" = "1" ]; then
+  exit 0
+fi
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null || echo "?")
+# Git uebergibt einem pre-push-Hook <remote-name> <remote-url>. Fuer die Meldung
+# ist nur der Name brauchbar — die URL im Beispielbefehl waere verwirrend.
+ziel="${1:-origin}"
+cat >&2 <<EOF
+
+  PUSH GESPERRT — $(basename "$repo")
+
+  Auf diesem Laptop pusht nur der Owner, und zwar ausdruecklich:
+
+      OWNER_PUSH_OK=1 git push $ziel
+
+  Grund: Regel ENF-GIT-002. Ein Commit ist lokal ruecknehmbar, ein Push nicht.
+  Bis 2026-08-02 war das eine Regel, an die sich Agenten halten sollten —
+  jetzt ist es eine Eigenschaft des Repos.
+
+  Sperre voruebergehend aufheben (nur der Owner, nur lokal):
+      git config --global --unset core.hooksPath
+
+EOF
+exit 1
