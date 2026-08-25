@@ -56,6 +56,8 @@ It verifies:
 - child-local removal of all conventional proxy variables while preserving an unrelated environment sentinel across SG probe, reconciliation, and create;
 - required-command discovery through domain-restricted MCP plus the exact parent-position `ida --region sg deep-research create` command through `run_command`, with refusal evidence if that placement drifts;
 - raw-session reconciliation after provider-driven renaming, exact private first-message marker verification, and structured empty-result identity normalization;
+- completed visible type-8 `deep_research_content.finalAnswer` readback with one file part and one inline-data part, normalized as an available artifact through the executable observe and process-event boundaries without creation, continuation, cancellation, or raw-content leakage;
+- explicit safe failures for malformed and unsupported structured final-answer forms, while exact-empty supported forms remain `zero`;
 - iDA running, successful, failed, cancelled, unavailable, ambiguous, exact-zero, and error outcomes;
 - private prompt carriage through MCP stdin, with no prompt in argv, state, normalized artifacts, or report, plus redaction of credential, OECID, long-id, and email shapes before the final answer crosses the adapter boundary;
 - the timeout case where a provider accepted submission but the client timed out, followed by exact session-marker reconciliation and adoption without a second create;
@@ -86,7 +88,8 @@ A wedged `ambiguous` or `submission-unknown` record can fail-terminal only throu
 
 Only a private normalized observation reaches process-event capture.
 Private prompts, credentials, tokens, OECIDs, PII-bearing request payloads, raw MCP JSON-RPC, raw SSE/event bodies, and unbounded provider messages are not durable task artifacts.
-Reports preserve only normalized task/session/agent/model identity, result availability, outcome, error class, and the final answer when available.
+Reports preserve only normalized task/session/agent/model identity, result availability and kind, outcome, error class, final text when available, or a safe statement that a structured artifact is available through the recorded session.
+The mode-`0600` normalized artifact reference carries only its schema, session-readback kind, artifact count, part count, and supported part kinds; artifact identifiers, names, file URIs, inline sheet data, bytes, and the provider message are discarded before the process-event boundary.
 Provider output grants no implementation, publication, merge, destructive, compliance/legal, or security authority.
 
 AIME cancellation remains explicitly unsupported.

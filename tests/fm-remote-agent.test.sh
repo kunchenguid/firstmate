@@ -167,13 +167,36 @@ bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
     row=$(head -1 "$sessions" 2>/dev/null || true); [ -n "$row" ] || { error HTTP_404 'not found'; exit 1; }
     name=$(printf '%s' "$row" | cut -f2); status=$(printf '%s' "$row" | cut -f3); marker=$(printf '%s' "$row" | cut -f4)
     [ -n "$marker" ] || marker=$name
-    case "$mode" in running) status=running ;; failed) status=failed ;; cancelled) status=cancelled ;; ambiguous-status) status=mystery_state ;; zero) status=completed ;; esac
+    case "$mode" in running) status=running ;; failed) status=failed ;; cancelled) status=cancelled ;; ambiguous-status) status=mystery_state ;; zero|structured-artifact|structured-empty|structured-malformed|structured-unsupported) status=completed ;; esac
     user="[Firstmate session marker: $marker]"$'\n\n'"PRIVATE_PROMPT_alpha OECID_sensitive"
-    if [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
-    jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" --arg answer "$answer" '
+    if [ "$status" = completed ] && [ "$mode" != zero ] && [ "$mode" != renamed-empty ] && [ "${mode#structured-}" = "$mode" ]; then answer=${FM_IDA_FAKE_ANSWER:-'Verified iDA answer. PRIVATE_PROMPT_alpha OECID_sensitive token=top-secret OECID=123456789012345678 user@example.com'}; else answer=''; fi
+    jq -cn --argjson sid "$session" --arg name "$name" --arg status "$status" --arg user "$user" --arg answer "$answer" --arg mode "$mode" '
       {status:"success",data:{session:{id:$sid,name:$name,agent_id:9001,agent_name:"iDA Test",latest_task_status:$status},
        messages:([{id:90,type:0,status:0,visible:true,text:$user}]
-         + (if $answer=="" then [] else [{id:91,type:8,status:1,visible:true,text:$answer}] end)),
+         + (if $answer=="" then [] else [{id:91,type:8,status:1,visible:true,text:$answer}] end)
+         + (if $mode=="structured-artifact" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{finalAnswer:[{artifact:{
+               artifactId:"PRIVATE_ARTIFACT_ID_92",name:"PRIVATE_ARTIFACT_NAME_92",
+               parts:[
+                 {type:"file",file:{fileUri:"PRIVATE_FILE_URI_92",fileName:"PRIVATE_FILE_NAME_92",mimeType:"application/json"}},
+                 {type:"data",data:{sheets:[{name:"PRIVATE_SHEET_92",rows:[["PRIVATE_CELL_92"]]}],rawBytes:"PRIVATE_ARTIFACT_BYTES_92"}}
+               ]
+             }}]}
+           }]
+           elif $mode=="structured-empty" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{finalAnswer:[{artifact:{parts:[{type:"file",file:{}},{type:"data",data:{}}]}}]}
+           }]
+           elif $mode=="structured-malformed" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{finalAnswer:[{artifact:{parts:"PRIVATE_MALFORMED_PARTS_92"}}]}
+           }]
+           elif $mode=="structured-unsupported" then [{
+             id:92,type:8,status:1,visible:true,
+             deep_research_content:{finalAnswer:[{artifact:{parts:[{type:"image",image:{bytes:"PRIVATE_UNSUPPORTED_BYTES_92"}}]}}]}
+           }]
+           else [] end)),
        queue_locked:false,queue_tasks:[]},error:null}'
     ;;
   *" ida --region sg chat completion close "*)
@@ -243,6 +266,9 @@ test_dispatch_success_and_redaction() {
       and .paths.report.present == true
   ' >/dev/null || fail "fleet snapshot did not preserve native remote-agent state/report/endpoint semantics"
   result=$(find "$home/state/procevent-inbox" -name "ida-$id.*.result" -print -quit)
+  jq -e '.result_availability == "available" and .result_kind == "text"
+    and (.answer | startswith("Verified iDA answer.")) and .artifact_reference == null' "$result" >/dev/null \
+    || fail "legacy text result behavior changed while adding structured artifacts"
   seq=${result%.result}; seq=${seq##*.}; revision=$(jq -r '.revision' "$(state_file "$home" "$id")")
   replay=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-procevent-ida.sh" autohandle "ida-$id" "$seq" "$result") || fail "iDA handled replay failed"
@@ -297,14 +323,101 @@ test_provider_rename_and_structured_empty_result() {
   pass "provider renaming and structured empty-result errors retain exact identity and normalize to zero"
 }
 
+test_structured_final_answer_readback() {
+  local home fakebin id=ida-structured-answer sha marker provider observation result seq replay revision result_path mode variant
+  home=$(new_home structured-answer); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  new_task "$home" "$id"; : >"$home/bytedcli.log"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}'); marker="firstmate:$id:${sha:0:16}"
+  printf '%s\t%s\tcompleted\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+  provider=$(jq -cn --arg marker "$marker" '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",agent_id:"9001",agent_name:"iDA Test",model:"ida-research-test",provider_status:"completed"}')
+  FM_HOME="$home" bash -c '
+    set -u
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"
+    fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 10
+    fm_remote_meta_write "$3" ida research || exit 11
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "structured-result state fixture failed"
+
+  observation="$home/observe.json"
+  FM_IDA_FAKE_MODE=structured-artifact FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$observation" \
+    || fail "structured final-answer observation failed"
+  chmod 0600 "$observation"
+  jq -e '
+    .terminal == true and .result_availability == "available" and .result_kind == "artifact"
+    and .answer == null
+    and .artifact_reference.schema == "fm-ida-artifact-reference.v1"
+    and .artifact_reference.kind == "deep-research-final-answer"
+    and .artifact_reference.part_kinds == ["data","file"]
+  ' "$observation" >/dev/null || {
+    jq -c '{terminal,result_availability,result_kind,artifact_reference,error_class}' "$observation" >&2
+    fail "structured final answer was not normalized as an available artifact"
+  }
+  if grep -R -E 'PRIVATE_(ARTIFACT|FILE|SHEET|CELL)' "$observation" "$home/bytedcli.log" >/dev/null; then
+    fail "structured result content leaked through observation or command logs"
+  fi
+  for variant in structured-malformed structured-unsupported; do
+    FM_IDA_FAKE_MODE="$variant" FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+      FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+      FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$home/$variant.json" \
+      || fail "$variant observation failed"
+  done
+  jq -e '.terminal == true and .result_availability == "error" and .error_class == "provider-result-malformed" and .answer == null' \
+    "$home/structured-malformed.json" >/dev/null || fail "malformed structured result was not explicit"
+  jq -e '.terminal == true and .result_availability == "error" and .error_class == "provider-result-unsupported" and .answer == null' \
+    "$home/structured-unsupported.json" >/dev/null || fail "unsupported structured result was not explicit"
+  if grep -R -E 'PRIVATE_(MALFORMED|UNSUPPORTED)' "$home/structured-malformed.json" "$home/structured-unsupported.json" "$home/bytedcli.log" >/dev/null; then
+    fail "malformed or unsupported structured content leaked through normalization"
+  fi
+
+  FM_IDA_FAKE_MODE=structured-artifact run_ida "$home" "$fakebin" adopt "$id" >/dev/null \
+    || fail "existing structured-result session adoption failed"
+  wait_phase "$home" "$id" terminal-success || fail "structured result did not cross the remote-agent result boundary"
+  result_path=$(jq -r '.result_path' "$(state_file "$home" "$id")")
+  [ -f "$result_path" ] && [ ! -L "$result_path" ] || fail "structured result was not recovered into the private result boundary"
+  if [ "$(uname)" = Darwin ]; then mode=$(stat -f '%Lp' "$result_path"); else mode=$(stat -c '%a' "$result_path"); fi
+  [ "$mode" = 600 ] || fail "structured result boundary mode was $mode instead of 600"
+  jq -e '.result_availability == "available" and .result_kind == "artifact" and .answer == null' "$result_path" >/dev/null \
+    || fail "private structured result did not preserve available artifact identity"
+  # shellcheck disable=SC2016 # Backticks are literal Markdown.
+  assert_grep 'Result availability: `available`' "$home/data/$id/report.md" "structured result report lost availability"
+  # shellcheck disable=SC2016 # Backticks are literal Markdown.
+  assert_grep 'Result kind: `artifact`' "$home/data/$id/report.md" "structured result report lost artifact kind"
+  assert_no_grep 'exact empty final answer' "$home/data/$id/report.md" "structured result was reported as exact empty"
+  if grep -R -E 'PRIVATE_(ARTIFACT|FILE|SHEET|CELL)' "$home/state" "$home/data/$id/report.md" "$home/bytedcli.log" >/dev/null; then
+    fail "structured file URI, inline data, or artifact bytes escaped the private normalization boundary"
+  fi
+  assert_no_grep 'deep-research create' "$home/bytedcli.log" "structured result recovery created a provider session"
+  assert_no_grep ' continue ' "$home/bytedcli.log" "structured result recovery continued a provider session"
+  assert_no_grep 'completion close' "$home/bytedcli.log" "structured result recovery closed a provider session"
+
+  result=$(find "$home/state/procevent-inbox" -name "ida-$id.*.result" -print -quit)
+  seq=${result%.result}; seq=${seq##*.}; revision=$(jq -r '.revision' "$(state_file "$home" "$id")")
+  replay=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent-ida.sh" autohandle "ida-$id" "$seq" "$result") || fail "structured-result replay failed"
+  assert_contains "$replay" 'duplicate=true' "structured result replay was applied twice"
+  [ "$(jq -r '.revision' "$(state_file "$home" "$id")")" = "$revision" ] || fail "structured replay mutated terminal state"
+  pass "completed structured final answers are privately recovered as artifacts without provider mutation or content leakage"
+}
+
 test_provider_states_and_zero_result() {
-  local home fakebin id out
+  local home fakebin id out observation
   home=$(new_home states); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
   id=ida-zero; new_task "$home" "$id"; : >"$home/sessions.tsv"
   FM_IDA_FAKE_MODE=zero dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "zero-result dispatch failed"
   wait_phase "$home" "$id" terminal-success
   # shellcheck disable=SC2016 # Backticks are literal Markdown.
   assert_grep 'Result availability: `zero`' "$home/data/$id/report.md" "zero result was conflated"
+  observation="$home/structured-empty.json"
+  FM_IDA_FAKE_MODE=structured-empty FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-procevent-ida.sh" observe "$id" >"$observation"
+  jq -e '.terminal == true and .result_availability == "zero" and .result_kind == null and .answer == null' "$observation" >/dev/null \
+    || fail "exact-empty supported structured final answer was not retained as zero"
 
   id=ida-live; new_task "$home" "$id"; marker="firstmate:$id:1234567890abcdef"
   sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}'); marker="firstmate:$id:${sha:0:16}"
@@ -524,6 +637,7 @@ SH
 test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result
+test_structured_final_answer_readback
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
 test_artifact_store_idempotency

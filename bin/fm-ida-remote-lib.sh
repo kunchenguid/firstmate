@@ -162,6 +162,25 @@ fm_ida_observation_validate() {
     and (.provider_status == null or (.provider_status | type == "string" and length <= 120))
     and (.result_availability == "available" or .result_availability == "zero" or .result_availability == "unavailable" or .result_availability == "error")
     and (.answer == null or (.answer | type == "string"))
+    and ((has("result_kind") | not) or .result_kind == null or .result_kind == "text" or .result_kind == "artifact")
+    and ((has("artifact_reference") | not) or .artifact_reference == null or (
+      (.artifact_reference | type) == "object"
+      and (.artifact_reference | keys | sort) == ["artifact_count","kind","part_count","part_kinds","readback","schema"]
+      and .artifact_reference.schema == "fm-ida-artifact-reference.v1"
+      and .artifact_reference.kind == "deep-research-final-answer"
+      and .artifact_reference.readback == "session-get"
+      and (.artifact_reference.artifact_count | type == "number" and . >= 1 and floor == .)
+      and (.artifact_reference.part_count | type == "number" and . >= 1 and floor == .)
+      and (.artifact_reference.part_kinds | type == "array" and length >= 1
+        and all(.[]; . == "file" or . == "data"))
+    ))
+    and (
+      if .result_kind == "text" then .result_availability == "available" and (.answer | type == "string" and length > 0) and .artifact_reference == null
+      elif .result_kind == "artifact" then .result_availability == "available" and .answer == null and (.artifact_reference | type == "object")
+      elif has("result_kind") then .answer == null and .artifact_reference == null
+      else true
+      end
+    )
     and (.error_class == null or (.error_class | type == "string" and length <= 120))
   ' "$file" >/dev/null 2>&1
 }
