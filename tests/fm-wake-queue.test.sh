@@ -319,7 +319,7 @@ SH
 }
 
 test_secondmate_stall_follows_actionable_handoff_progress() {
-  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready lock_pid lock_ready lock_release queue_pid queue_ready queue_release inflight_pid
+  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready lock_pid lock_ready lock_release queue_pid queue_ready queue_release inflight_pid future_pid
   dir=$(make_case secondmate-stall-handoff)
   state="$dir/state"
   sub="$dir/secondmate"
@@ -463,6 +463,25 @@ SH
 
   : > "$sub/state/.wake-queue"
   PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check future-inflight "check: future-dated in-flight publication"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the future-dated in-flight append failed"
+  sleep 5 &
+  future_pid=$!
+  printf 'inflight\t%s\t14\t%s\n' "$same" "$future_pid" > "$sub/state/.watch-delivery-progress"
+  touch -t 209901010000 "$sub/state/.watch-delivery-progress"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/future-inflight.out" 2> "$dir/future-inflight.err" || true
+  kill "$future_pid" 2>/dev/null || true
+  wait "$future_pid" 2>/dev/null || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=14' "$dir/future-inflight.out" >/dev/null \
+    || fail "a future-dated in-flight publication blinded its row: $(cat "$dir/future-inflight.out"); err=$(cat "$dir/future-inflight.err")"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
     bash -c '. "$1"; fm_wake_append check blocked-progress "check: blocked progress lock"' \
     _ "$ROOT/bin/fm-wake-lib.sh" || fail "the blocked-progress append failed"
   lock_ready="$dir/progress-lock-ready"
@@ -505,7 +524,7 @@ SH
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/blocked-progress.out" 2> "$dir/blocked-progress.err" || true
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=14' "$dir/blocked-progress.out" >/dev/null \
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=15' "$dir/blocked-progress.out" >/dev/null \
     || fail "unavailable progress serialization published optimistic state: $(cat "$dir/blocked-progress.out"); err=$(cat "$dir/blocked-progress.err")"
   pass "foreign queue stalls distinguish committed handoffs from abandoned progress"
 }

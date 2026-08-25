@@ -466,7 +466,7 @@ EOF
               case "$progress_age" in
                 ''|*[!0-9]*) ;;
                 *)
-                  if [ "$progress_age" -lt "$WATCH_DELIVERY_INFLIGHT_MAX_AGE" ] && fm_pid_alive "$progress_pid"; then
+                  if [ "$progress_age" -ge 0 ] && [ "$progress_age" -lt "$WATCH_DELIVERY_INFLIGHT_MAX_AGE" ] && fm_pid_alive "$progress_pid"; then
                     continue
                   fi
                   ;;
