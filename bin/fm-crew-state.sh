@@ -111,6 +111,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wait-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-delivery-proof-lib.sh
+. "$SCRIPT_DIR/fm-delivery-proof-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -905,6 +907,18 @@ fi
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" = "done" ]; then
+    # A done line in the log is a self-report; prove it against the task's
+    # recorded delivery contract (bin/fm-delivery-proof-lib.sh) before reporting
+    # it as terminal current state. A refuted claim is not done: the worker
+    # stopped with nothing delivered, which needs firstmate action, so it reads
+    # blocked with the concrete absence. An unverified probe is never evidence
+    # of absence and keeps today's behavior.
+    delivery=$(fm_delivery_proof "$ID") && delivery_rc=0 || delivery_rc=$?
+    if [ "$delivery_rc" -eq 1 ]; then
+      emit blocked status-log "done widerlegt - keine Lieferung am Ziel (${delivery#*$'\t'})"
+    fi
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

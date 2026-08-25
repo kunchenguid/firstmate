@@ -2,6 +2,8 @@
 # Shared durable wake queue and portable lock helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-delivery-proof-lib.sh
+. "$FM_WAKE_LIB_DIR/fm-delivery-proof-lib.sh"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -1529,6 +1531,21 @@ EOF
       fi
       line="$prefix: $status_key: $event_line"
       printf '%s\n' "$line" || return 1
+      # A presented done claim for a ship task is proven against its recorded
+      # delivery contract before supervision may treat it as terminal. The verb
+      # gate is what keeps the probes (one ls-remote, one PR list) off every
+      # non-done line; a refuted claim stays loud and non-terminal here, an
+      # unverified probe stays silent rather than reading as absence.
+      delivery=
+      case ${event_line%%:*} in
+        done)
+          delivery=$(fm_delivery_proof "${status_key%.status}") && delivery_rc=0 || delivery_rc=$?
+          if [ "$delivery_rc" -eq 1 ]; then
+            line="done WIDERLEGT - keine Lieferung am Ziel (${delivery#*$'\t'}): $status_key: $event_line"
+            printf '%s\n' "$line" || return 1
+          fi
+          ;;
+      esac
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
