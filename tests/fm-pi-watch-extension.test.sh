@@ -339,6 +339,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/config/wake-context-presentation"
   cp "$ROOT/tests/fixtures/pi-actionable-close-context.sh" "$repo/bin/fm-wake-context.sh"
   cp "$ROOT/tests/fixtures/pi-actionable-close-arm.sh" "$repo/bin/fm-watch-arm.sh"
   chmod +x "$repo/bin/fm-wake-context.sh" "$repo/bin/fm-watch-arm.sh"
@@ -348,6 +349,22 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
   pass "Pi actionable close starts one successor before wake delivery settles"
+}
+
+test_pi_actionable_close_without_opt_in_uses_manual_drain_fallback() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-default-off-root"; home="$TMP_ROOT/pi-default-off-home"
+  log="$TMP_ROOT/pi-default-off.log"; stop="$TMP_ROOT/pi-default-off.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"; plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-context.sh" "$repo/bin/fm-wake-context.sh"
+  cp "$ROOT/tests/fixtures/pi-actionable-close-arm.sh" "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-wake-context.sh" "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_EXPECT_WAKE_CONTEXT=disabled node "$ROOT/tests/fixtures/pi-actionable-close-probe.mjs" 2>&1)
+  status=$?; expect_code 0 "$status" "Pi default-off wake must preserve actionable delivery"
+  [ -z "$out" ] || fail "Pi default-off wake test printed output: $out"
+  pass "Pi actionable close preserves one manual-drain fallback while wake context is default-off"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -2590,6 +2607,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_close_without_opt_in_uses_manual_drain_fallback
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_with_main_owned_queue_row_stays_on_main

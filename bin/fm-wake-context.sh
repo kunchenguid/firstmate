@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 MAX_WAKES=16
 MAX_TASKS=12
 MAX_STATUS_LINES=8
@@ -42,6 +43,11 @@ usage() {
 fail_before_presentation() {
   printf 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: %s; run bin/fm-wake-drain.sh once.\n' "$1"
   exit 3
+}
+
+wake_context_enabled() {
+  [ -f "$CONFIG/wake-context-presentation" ] \
+    && [ ! -L "$CONFIG/wake-context-presentation" ]
 }
 
 cache_matches_queue() { # <cache>
@@ -370,6 +376,8 @@ prepare_presentation() {
     exit 3
   fi
   replay_cached && exit 0
+  wake_context_enabled \
+    || fail_before_presentation "automatic wake context is disabled until config/wake-context-presentation exists"
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
     || rm -f -- "$CACHE_CURSOR" || fail_before_presentation "an orphaned cursor stage could not be retired"
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || exit 1

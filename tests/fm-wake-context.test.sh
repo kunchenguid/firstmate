@@ -24,7 +24,8 @@ process_tree_has_sleep() { # <root-pid>
 
 install_fixture() { # <home>
   local home=$1
-  mkdir -p "$home/bin" "$home/state" "$home/data/alpha" "$home/worktree"
+  mkdir -p "$home/bin" "$home/state" "$home/config" "$home/data/alpha" "$home/worktree"
+  : > "$home/config/wake-context-presentation"
   cp "$ROOT/bin/fm-wake-context.sh" "$home/bin/fm-wake-context.sh"
   printf 'report body must stay out of the packet' > "$home/data/alpha/report.md"
   printf 'window=fleet:alpha\nbackend=tmux\nworktree=%s\nkind=ship\n' "$home/worktree" > "$home/state/alpha.meta"
@@ -137,6 +138,38 @@ test_packet_is_bounded_and_complete() {
   pass "wake context is one bounded complete adapter presentation"
 }
 
+test_missing_opt_in_falls_back_without_mutation() {
+  local home="$TMP_ROOT/default-off" status=0
+  install_fixture "$home"; rm "$home/config/wake-context-presentation"; append_wake "$home" 1
+  cp "$home/state/.wake-queue" "$home/queue.before"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  [ "$status" -eq 3 ] || fail "default-off wake context did not return the fallback status"
+  grep -Fx 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: automatic wake context is disabled until config/wake-context-presentation exists; run bin/fm-wake-drain.sh once.' "$home/out" >/dev/null \
+    || fail "default-off wake context lost its single manual-drain action"
+  cmp -s "$home/queue.before" "$home/state/.wake-queue" || fail "default-off wake context mutated the durable queue"
+  [ ! -e "$home/drain.calls" ] || fail "default-off wake context ran the drain"
+  [ ! -e "$home/state/.wake-context-cache" ] && [ ! -e "$home/state/.wake-context-cache.status-cursor" ] \
+    && [ ! -e "$home/state/.wake-context-fallback-receipt" ] || fail "default-off wake context published durable presentation state"
+  ! grep -F 'WAKE_ACK_REQUIRED' "$home/err" >/dev/null || fail "default-off wake context published an ACK"
+  pass "wake context is default-off and leaves durable wake state untouched"
+}
+
+test_config_override_owns_opt_in_resolution() {
+  local home="$TMP_ROOT/config-override" config="$TMP_ROOT/config-override-choice" status=0
+  install_fixture "$home"; append_wake "$home" 1; mkdir -p "$config"
+  FM_CONFIG_OVERRIDE="$config" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/off" 2> "$home/off.err" || status=$?
+  [ "$status" -eq 3 ] || fail "empty FM_CONFIG_OVERRIDE did not keep wake context disabled"
+  [ ! -e "$home/drain.calls" ] || fail "empty FM_CONFIG_OVERRIDE fell back to the home opt-in"
+  : > "$config/wake-context-presentation"
+  FM_CONFIG_OVERRIDE="$config" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/on" 2> "$home/on.err" || fail "FM_CONFIG_OVERRIDE opt-in did not enable presentation"
+  packet_json "$home/on" | jq -e '.schema == "fm-wake-context.v1"' >/dev/null \
+    || fail "FM_CONFIG_OVERRIDE enabled an invalid wake-context presentation"
+  pass "FM_CONFIG_OVERRIDE exclusively owns wake-context opt-in resolution when set"
+}
+
 test_utf8_packet_uses_true_byte_bound() {
   local home="$TMP_ROOT/utf8-bound" payload
   install_fixture "$home"
@@ -152,6 +185,7 @@ test_utf8_packet_uses_true_byte_bound() {
 
 install_real_drain_fixture() { # <home>
   local home=$1; mkdir -p "$home/bin" "$home/state" "$home/data/alpha" "$home/data/beta" "$home/config"
+  : > "$home/config/wake-context-presentation"
   cp -R "$ROOT/bin/." "$home/bin/"
   printf '%s\n' 'fm_session_lock_owned_by_self() { return 0; }' > "$home/bin/fm-session-lock-lib.sh"
   cat > "$home/bin/fm-crew-state.sh" <<'SH'
@@ -205,11 +239,12 @@ test_real_drain_presentation_replays_identically_before_ack() {
   local home="$TMP_ROOT/real-drain" packet
   prepare_real_wake "$home"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/first" 2> "$home/first.err" || fail "real drain packet failed"
+  rm "$home/config/wake-context-presentation"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/replay" 2> "$home/replay.err" || fail "real drain replay failed"
   cmp -s "$home/first" "$home/replay" || fail "pre-ACK replay changed the presented packet"
   packet=$(packet_json "$home/first")
   assert_real_packet_and_ack "$home" "$packet"
-  pass "real drain presentation and replay preserve unread status and divergence"
+  pass "published wake context replays identically after opt-out until acknowledgement"
 }
 
 test_sigkill_before_cache_publish_keeps_unread_note() {
@@ -613,6 +648,8 @@ test_resolved_is_not_primary_actionable() {
 }
 
 test_packet_is_bounded_and_complete
+test_missing_opt_in_falls_back_without_mutation
+test_config_override_owns_opt_in_resolution
 test_utf8_packet_uses_true_byte_bound
 test_real_drain_presentation_replays_identically_before_ack
 test_sigkill_before_cache_publish_keeps_unread_note

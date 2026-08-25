@@ -411,6 +411,18 @@ test_propagate_lib() {
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }
 
+test_wake_context_presentation_is_not_inherited() {
+  local primary="$TMP_ROOT/wake-context-not-inherited/primary"
+  local secondmate="$TMP_ROOT/wake-context-not-inherited/secondmate"
+  mkdir -p "$primary/config" "$secondmate"
+  printf 'codex\n' > "$primary/config/crew-harness"
+  : > "$primary/config/wake-context-presentation"
+  propagate_inheritable_config "$primary/config" "$secondmate/config"
+  [ "$(cat "$secondmate/config/crew-harness")" = codex ] || fail "control config did not reach the secondmate"
+  [ ! -e "$secondmate/config/wake-context-presentation" ] || fail "wake-context opt-in leaked into the secondmate"
+  pass "wake-context presentation remains an explicit per-home opt-in after real propagation"
+}
+
 # ===========================================================================
 # B/A integration: a secondmate spawn resolves the secondmate harness and
 # propagates the crew harness into the home's config.
@@ -2553,6 +2565,7 @@ test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
+test_wake_context_presentation_is_not_inherited
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat

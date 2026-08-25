@@ -96,6 +96,10 @@ printf 'signal: context fallback fixture\n'
 SH
 cat > "$1/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
+if [ ! -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wake-context-presentation" ]; then
+  printf 'WAKE_CONTEXT_FALLBACK: automatic wake context is disabled; run bin/fm-wake-drain.sh once.\n'
+  exit 3
+fi
 if [ "${FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION:-0}" = 1 ]; then
   printf 'WAKE_CONTEXT_PRESENTED: durable presentation complete; do not run bin/fm-wake-drain.sh again.\n'
   printf 'durable Codex presentation\n'
@@ -112,6 +116,7 @@ test_context_failure_surfaces_codex_fallback() {
   local home repo out err status
   home=$(make_home context-fallback); repo="$home/repo"
   install_context_failure_checkpoint "$repo"
+  : > "$home/config/wake-context-presentation"
   out="$home/out.txt"; err="$home/err.txt"; status=0
   FM_HOME="$home" "$repo/bin/fm-watch-checkpoint.sh" --seconds 2 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "Codex actionable checkpoint must survive context failure"
@@ -125,6 +130,7 @@ test_context_failure_relays_post_presentation_result() {
   local home repo out err status
   home=$(make_home context-presented); repo="$home/repo"
   install_context_failure_checkpoint "$repo"
+  : > "$home/config/wake-context-presentation"
   out="$home/out.txt"; err="$home/err.txt"; status=0
   FM_WAKE_CONTEXT_FIXTURE_POST_PRESENTATION=1 FM_HOME="$home" \
     "$repo/bin/fm-watch-checkpoint.sh" --seconds 2 >"$out" 2>"$err" || status=$?
@@ -135,9 +141,24 @@ test_context_failure_relays_post_presentation_result() {
   pass "checkpoint relays post-presentation result without re-drain"
 }
 
+test_actionable_checkpoint_without_opt_in_uses_manual_drain_fallback() {
+  local home repo out err status
+  home=$(make_home context-default-off); repo="$home/repo"
+  install_context_failure_checkpoint "$repo"
+  out="$home/out.txt"; err="$home/err.txt"; status=0
+  FM_HOME="$home" "$repo/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$err" || status=$?
+  expect_code 0 "$status" "default-off context must preserve the Codex actionable checkpoint"
+  assert_contains "$(cat "$out")" "signal: context fallback fixture" "default-off Codex wake lost its reason"
+  assert_contains "$(cat "$out")" "WAKE_CONTEXT_FALLBACK:" "default-off Codex wake lost its manual-drain fallback"
+  assert_not_contains "$(cat "$out")" "WAKE_ACK_REQUIRED" "default-off Codex wake exposed an acknowledgement"
+  [ "$(grep -c 'WAKE_CONTEXT_FALLBACK:' "$out")" -eq 1 ] || fail "Codex duplicated the default-off fallback"
+  pass "checkpoint preserves one actionable fallback while wake context is default-off"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_actionable_checkpoint_without_opt_in_uses_manual_drain_fallback
 test_context_failure_surfaces_codex_fallback
 test_context_failure_relays_post_presentation_result

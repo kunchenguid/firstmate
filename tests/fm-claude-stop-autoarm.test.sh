@@ -26,6 +26,10 @@ install_autoarm_wake_context_fixture() {
   local dir=$1
   cat > "$dir/bin/fm-wake-context.sh" <<'SH'
 #!/usr/bin/env bash
+if [ ! -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wake-context-presentation" ]; then
+  printf 'WAKE_CONTEXT_FALLBACK: automatic wake context is disabled; run bin/fm-wake-drain.sh once.\n'
+  exit 3
+fi
 if [ "${FM_WAKE_CONTEXT_FIXTURE_FAIL:-0}" = 1 ]; then
   printf 'context fixture failed on stderr\nWAKE_CONTEXT_FALLBACK: run bin/fm-wake-drain.sh once.\n' >&2
   exit 1
@@ -55,7 +59,8 @@ install_autoarm_scripts() {
 
 make_primary_dir() {
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state" "$dir/config"
+  : > "$dir/config/wake-context-presentation"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
@@ -362,6 +367,21 @@ test_actionable_close_rewakes_with_reason() {
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
+}
+
+test_actionable_close_without_opt_in_uses_manual_drain_fallback() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-default-off")
+  rm "$dir/config/wake-context-presentation"; : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "default-off context must preserve Claude's actionable rewake"
+  assert_contains "$out" "stale: fixture-win actionable" "default-off Claude wake lost its reason"
+  assert_contains "$out" "WAKE_CONTEXT_FALLBACK:" "default-off Claude wake lost its manual-drain fallback"
+  assert_not_contains "$out" "CLAUDE_CONTEXT_PACKET" "default-off Claude wake attached enriched context"
+  assert_not_contains "$out" "WAKE_ACK_REQUIRED" "default-off Claude wake exposed an acknowledgement"
+  [ "$(printf '%s\n' "$out" | grep -c 'WAKE_CONTEXT_FALLBACK:')" -eq 1 ] || fail "Claude duplicated the default-off fallback: $out"
+  pass "auto-arm: default-off wake context preserves one actionable Claude fallback"
 }
 
 test_actionable_close_surfaces_context_fallback() {
@@ -838,6 +858,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_actionable_close_without_opt_in_uses_manual_drain_fallback
 test_actionable_close_surfaces_context_fallback
 test_actionable_close_relays_post_presentation_result
 test_actionable_close_with_live_successor_rewakes_once

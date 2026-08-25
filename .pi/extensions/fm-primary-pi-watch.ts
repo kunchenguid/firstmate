@@ -267,7 +267,7 @@ async function sendWake(runtime: PiWatchRuntime, owner: SessionGeneration, messa
   if (!generationIsLive(owner)) return;
   const content = encodeFirstmateOperationalInput(
     "watcher",
-    `FIRSTMATE WATCHER WAKE: ${message}\n\n${wakeContextPresentation()}\n\nHandle this presentation without rebuilding fleet context. Watcher continuity is extension-owned.`,
+    `FIRSTMATE WATCHER WAKE: ${message}\n\n${wakeContextPresentation()}\n\nHandle the attached wake-context packet or fallback instruction without rebuilding fleet context. Watcher continuity is extension-owned.`,
   );
   await runtime.pi.sendUserMessage(content, { deliverAs: "followUp" });
 }
