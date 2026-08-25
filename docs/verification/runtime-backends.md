@@ -287,11 +287,11 @@ The composer-classification record below observes the same gate from the other s
 The adapter-source refusal boundary was reverified on 2026-08-25 with GNU bash 3.2.57(1)-release (arm64-apple-darwin25), the stock macOS shell where a failed `.` builtin can abort before a trailing `|| return 1`.
 
 ```sh
-/bin/bash tests/fm-teardown.test.sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh
 ```
 
 Observed output included `FM_TEST_END exit=0 duration_ms=216034 gate_skip=false`, `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`, and 58 `ok` results with no `not-ok` results.
-The companion `tests/fm-backend.test.sh` regression covers missing and unreadable adapter files across tmux, Herdr, Zellij, Orca, and cmux, proving that each caller reaches its refusal branch.
+The companion `tests/fm-backend-adapter-source.test.sh` regression covers missing and unreadable adapter files across tmux, Herdr, Zellij, Orca, and cmux, proving that each caller reaches its refusal branch.
 
 ## Composer classification matrix
 
