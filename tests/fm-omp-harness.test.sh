@@ -339,7 +339,7 @@ test_omp_version_probe_is_hard_bounded() {
 
 # --- launch shape ----------------------------------------------------------
 
-test_omp_launch_argv_is_contained() {
+test_omp_launch_request_is_rendered() {
   local manifest template
   manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
     /isolated/agent /isolated/cwd /task/worktree /opt/omp "$OMP_MODEL" /state/task.omp-ext.ts) \
@@ -347,8 +347,9 @@ test_omp_launch_argv_is_contained() {
   template=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template) \
     || fail "candidate OMP launch template did not render"
   MANIFEST=$manifest TEMPLATE=$template node <<'NODE' \
-    || fail "candidate OMP manifest or launch template widened its containment boundary"
+    || fail "candidate OMP manifest or launch template drifted from its requested output contract"
 const manifest = JSON.parse(process.env.MANIFEST);
+if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(["argv", "environment", "unsetEnvironment"])) process.exit(1);
 const expectedUnset = [
   "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "OMP_PROFILE", "PI_PROFILE", "GROK_AGENT",
   "FM_PI_HARNESS", "CURSOR_AGENT", "CURSOR_INVOKED_AS", "TRACEPARENT",
@@ -365,8 +366,6 @@ if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit
 if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
 if (manifest.argv.includes("--tools")) process.exit(1);
 if (!manifest.argv.includes("--no-tools")) process.exit(1);
-if (!Array.isArray(manifest.effectiveTools) || manifest.effectiveTools.length !== 0) process.exit(1);
-if (!manifest.effectiveAstEdit || manifest.effectiveAstEdit.enabled !== false) process.exit(1);
 const templateManifest = {
   ...manifest,
   environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
@@ -385,7 +384,7 @@ words.push(...templateManifest.argv);
 const expectedTemplate = words.join(" ") + ' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"';
 if (process.env.TEMPLATE !== expectedTemplate) process.exit(1);
 NODE
-  pass "OMP candidate renderer emits one contained argv with no tool surface"
+  pass "OMP candidate renderer emits its requested argv and environment contract"
 }
 
 test_omp_consumer_proof_gate_checks_version_then_fails_closed() {
@@ -427,7 +426,7 @@ SH
   pass "OMP consumer proof gate bounds identity and fails closed before sessions"
 }
 
-test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
+test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation() {
   local state id gen agent_dir isolated_cwd ambient_agent ambient_project ambient_overlay manifest ext record turnend
   state="$TMP_ROOT/candidate-artifacts/state"
   id=omp-candidate-artifacts
@@ -453,7 +452,7 @@ test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
   MANIFEST=$manifest AGENT_DIR=$agent_dir ISOLATED_CWD=$isolated_cwd \
     AMBIENT_AGENT=$ambient_agent AMBIENT_PROJECT=$ambient_project \
     PI_CONFIG_FILES=$ambient_overlay node <<'NODE' \
-    || fail "candidate OMP settings artifacts did not preserve their isolated boundary"
+    || fail "candidate OMP settings artifacts drifted from their requested isolation contract"
 const fs = require("node:fs");
 const path = require("node:path");
 const manifest = JSON.parse(process.env.MANIFEST);
@@ -470,10 +469,7 @@ const config = JSON.parse(fs.readFileSync(path.join(manifest.environment.PI_CODI
 const retry = config.retry;
 if (!retry || retry.modelFallback !== false || retry.usageAwareFallback !== false) process.exit(1);
 if (!retry.fallbackChains || Array.isArray(retry.fallbackChains) || Object.keys(retry.fallbackChains).length !== 0) process.exit(1);
-if (JSON.stringify(retry) !== JSON.stringify(manifest.effectiveRetry)) process.exit(1);
 if (!config.astEdit || config.astEdit.enabled !== false) process.exit(1);
-if (JSON.stringify(config.astEdit) !== JSON.stringify(manifest.effectiveAstEdit)) process.exit(1);
-if (!Array.isArray(manifest.effectiveTools) || manifest.effectiveTools.length !== 0) process.exit(1);
 NODE
   "$ROOT/bin/fm-omp-candidate-artifacts.sh" extension "$ext" \
     "$ROOT/bin/fm-busy-event.sh" "$state" "$id" "$gen" "$turnend" \
@@ -501,7 +497,7 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 NODE
   assert_grep 'state=idle source=omp-ext event=agent-end' "$record" \
     "the final OMP settle event did not record idle"
-  pass "OMP candidate renders isolated fallbacks and preserves busy across willContinue"
+  pass "OMP candidate renders requested settings and preserves busy across willContinue"
 }
 
 # --- refusal ordering probes ------------------------------------------------
@@ -1161,8 +1157,8 @@ test_omp_relaunch_still_requires_the_model() {
 test_omp_semantic_source_remains_untrusted() {
   local trusted out state id=omp-untrusted
   trusted=$(fm_busy_sources_for_harness omp)
-  [ -z "$trusted" ] || fail "omp must trust no semantic source before ATX-2170, got '$trusted'"
-  ! fm_busy_source_trusted omp omp-ext || fail "omp-ext must remain untrusted before lifecycle proof"
+  [ -z "$trusted" ] || fail "omp must trust no semantic source before both mandatory proofs, got '$trusted'"
+  ! fm_busy_source_trusted omp omp-ext || fail "omp-ext must remain untrusted before consumer and lifecycle proofs"
   ! fm_busy_source_trusted omp pi-ext || fail "pi-ext must not be trusted for omp"
   ! fm_busy_source_trusted pi omp-ext || fail "omp-ext must not be trusted for pi"
   state="$TMP_ROOT/omp-untrusted-state"
@@ -1170,7 +1166,7 @@ test_omp_semantic_source_remains_untrusted() {
   out=$(fm_busy_classify tmux fake:w omp "$id" "$state" 'idle')
   [ "$out" = "unknown omp-unverified" ] \
     || fail "unverified OMP must classify unknown, got '$out'"
-  pass "OMP semantic events remain untrusted and classify unknown pending ATX-2170"
+  pass "OMP semantic events remain untrusted pending both mandatory proofs"
 }
 
 
@@ -1181,9 +1177,9 @@ test_omp_refuses_a_missing_binary
 test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_version_probe_is_hard_bounded
-test_omp_launch_argv_is_contained
+test_omp_launch_request_is_rendered
 test_omp_consumer_proof_gate_checks_version_then_fails_closed
-test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation
+test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix
 test_omp_selection_policy_matrix

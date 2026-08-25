@@ -222,7 +222,7 @@ fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_cleanup_json worktree_not_found \
+  fm_backend_orca_run_cleanup_json selector_not_found \
     orca worktree rm --worktree "id:$worktree_id" --force --json
 }
 
@@ -328,7 +328,7 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
 
 fm_backend_orca_close_terminal() {  # <terminal-id>
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_cleanup_json terminal_not_found \
+  fm_backend_orca_run_cleanup_json terminal_handle_stale \
     orca terminal close --terminal "$1" --json
 }
 

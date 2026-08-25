@@ -198,9 +198,10 @@
 # byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
 # --provider flag. This script does not inspect where a caller obtained that
 # value and claims nothing about it; it reads no ambient omp default. Its
-# isolated per-launch agent directory and clean settings cwd exclude every
-# lower-priority settings layer; their config disables model fallback,
-# usage-aware fallback, and every fallback chain. On a fresh spawn, an absent,
+# isolated per-launch agent directory and clean settings cwd request exclusion
+# of lower-priority settings layers; their rendered config requests disabled
+# model fallback, usage-aware fallback, and fallback chains. Effective consumer
+# behavior remains unproven until the independent consumer gate passes. On a fresh spawn, an absent,
 # unqualified, or malformed value
 # refuses before the watcher guard and before any lock, endpoint, worktree,
 # state, config, registry, metadata, or extension mutation. On a relaunch, the
@@ -1665,12 +1666,11 @@ launch_template() {
     # every auto-discovered user/project extension, and --no-skills drops the
     # ambient skill surface, so the only loaded extension is the firstmate-owned
     # -e __OMPEXT__ busy-state file written below.
-    # --no-tools disables every built-in tool, including implied, expanded, and
-    # automatically injected tools. The isolated settings also disable AST edit,
-    # while --no-lsp disables its subprocess surface. Widening this empty tool
-    # boundary is a captain decision. The portable suite pins the emitted
-    # manifest; tests/fm-omp-tools-live-e2e.test.sh fails closed until an exact
-    # importable session-free consumer can prove the effective boundary.
+    # --no-tools requests an empty built-in tool registry, the isolated settings
+    # request disabled AST edit, and --no-lsp requests disabled LSP. The portable
+    # suite pins only this emitted request; tests/fm-omp-tools-live-e2e.test.sh
+    # fails closed until an exact importable session-free consumer proves the
+    # effective configuration and constructed tool registry.
     # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
     # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
     # --add-dir. __OMPMODEL__ appears exactly once and always renders because

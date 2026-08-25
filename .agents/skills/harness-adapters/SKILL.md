@@ -543,11 +543,11 @@ It remains dormant: every runnable selection is refused until that consumer proo
 Until both proofs exist, OMP operational verdicts are untrusted and classify unknown; do not dispatch work or describe the adapter as containment-complete, supervised, or live-ready.
 
 The candidate is designed to preserve Orca as the only execution backend and First Mate as the only supervisor.
-Its capability boundary requires an explicit qualified provider/model, disables model and usage-aware fallback and clears fallback chains, forces trace propagation off, and excludes command execution, delegation, network, MCP, browser, and desktop tools.
+Its requested launch boundary requires an explicit qualified provider/model, requests disabled model and usage-aware fallback with cleared fallback chains, forces trace propagation off, and requests exclusion of command execution, delegation, network, MCP, browser, and desktop tools. These requested settings are not consumer-behavior proof.
 It is never a secondmate, coordinator, backend, implicit default, or live pilot.
 
 `bin/fm-spawn.sh --help` owns selection, ordering, model/backend validation, version pinning, dormancy, and state paths.
-`bin/fm-omp-candidate-artifacts.sh` owns the exact launch flags, environment boundary, per-launch fallback overlay, candidate input policy, and lifecycle extension.
+`bin/fm-omp-candidate-artifacts.sh` owns the exact launch flags, environment boundary, requested per-launch fallback settings and tool containment, candidate input policy, and lifecycle extension.
 `bin/fm-busy-lib.sh` owns the untrusted operational verdict.
 `bin/fm-teardown.sh` owns artifact cleanup.
 Portable policy regressions live in `tests/fm-omp-harness.test.sh`, `tests/fm-send-inbox.test.sh`, and `tests/fm-busy-adapter-wiring.test.sh`; the unresolved session-free consumer proof gate lives in `tests/fm-omp-tools-live-e2e.test.sh`.

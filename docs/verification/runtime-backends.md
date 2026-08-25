@@ -703,6 +703,22 @@ github:kunchenguid/firstmate::<absolute-worktree-path>
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+On 2026-08-24, the installed Orca app still reported 1.4.188. Read-only `terminal list --json` and `worktree list --json` inventories first established that separate UUID-qualified synthetic terminal and worktree identifiers had no exact collision. Bounded cleanup probes then used only those verified-nonexistent identifiers:
+
+```sh
+orca terminal list --json
+orca worktree list --json
+orca terminal close --terminal 'fm-review-absent-terminal-<uuid>' --json
+orca worktree rm --worktree 'id:fm-review-absent-worktree-<uuid>' --force --json
+```
+
+```text
+terminal close: exit=1 ok=false error.code=terminal_handle_stale
+worktree rm: exit=1 ok=false error.code=selector_not_found
+```
+
+Those two observed structured codes are the only Orca cleanup errors classified as already absent by the adapter; other `ok:false` codes remain failures.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh

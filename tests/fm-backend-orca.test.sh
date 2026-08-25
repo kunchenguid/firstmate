@@ -33,10 +33,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -363,11 +363,12 @@ test_remove_worktree_refuses_empty_id() {
 test_remove_worktree_accepts_already_absent_json() {
   local out status
   orca_case remove-error-json
-  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"worktree selector not found"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-gone' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -eq 0 ] || fail "remove_worktree should accept authoritative worktree_not_found JSON: $out"
+  [ "$status" -eq 0 ] || fail "remove_worktree should accept authoritative selector_not_found JSON: $out"
   [ -z "$out" ] || fail "already-absent worktree cleanup should be quiet, got '$out'"
   pass "fm_backend_orca_remove_worktree: accepts authoritative already-absent state"
 }
@@ -375,25 +376,41 @@ test_remove_worktree_accepts_already_absent_json() {
 test_remove_worktree_rejects_other_orca_error_json() {
   local out status
   orca_case remove-other-error-json
-  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"unverified absence code"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-stuck' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "remove_worktree should fail on non-idempotent Orca error JSON"
-  assert_contains "$out" "worktree not removed" "remove_worktree should surface the Orca removal error"
+  assert_contains "$out" "unverified absence code" "remove_worktree should surface the unverified Orca error"
   pass "fm_backend_orca_remove_worktree: rejects other ok:false JSON"
 }
 
 test_close_terminal_accepts_already_absent_json() {
   local out status
   orca_case close-absent-json
-  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_close_terminal term-gone' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -eq 0 ] || fail "close_terminal should accept authoritative terminal_not_found JSON: $out"
+  [ "$status" -eq 0 ] || fail "close_terminal should accept authoritative terminal_handle_stale JSON: $out"
   [ -z "$out" ] || fail "already-absent terminal cleanup should be quiet, got '$out'"
   pass "fm_backend_orca_close_terminal: accepts authoritative already-absent state"
+}
+
+test_close_terminal_rejects_unverified_absence_json() {
+  local out status
+  orca_case close-unverified-absent-json
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"unverified terminal absence code"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_close_terminal term-gone' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "close_terminal should reject an unverified absence code"
+  assert_contains "$out" "unverified terminal absence code" \
+    "close_terminal should surface the unverified Orca error"
+  pass "fm_backend_orca_close_terminal: rejects unverified absence codes"
 }
 
 test_worktree_path_resolves_id() {
@@ -1416,7 +1433,8 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
     "orca_worktree_id=wt-recovery-retry" "orca_allocation=worktree-only"
 
   orca_case recovery-retry-remove-fails
-  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1435,7 +1453,8 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
     "recovery teardown did not close the retained terminal"
 
   orca_case recovery-retry-remove-succeeds
-  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"worktree selector not found"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
   printf 'malformed\n' > "$state/.status-presentation-cursor"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1861,6 +1880,7 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_accepts_already_absent_json
 test_remove_worktree_rejects_other_orca_error_json
 test_close_terminal_accepts_already_absent_json
+test_close_terminal_rejects_unverified_absence_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes

@@ -29,7 +29,9 @@
 # task's recorded harness classifies unknown, so one adapter's writer can
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
-#   omp-ext          dormant omp candidate extension (untrusted until ATX-2170)
+#   omp-ext          dormant omp candidate extension (untrusted until both a
+#                    supported session-free omp/17.2.9 consumer proof and
+#                    ATX-2170 First Mate interrupt/exit/relaunch proof pass)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   codex-hook, codex-appserver  reserved: Codex, gated by

@@ -7,8 +7,8 @@
 #   fm-omp-candidate-artifacts.sh validate-submission <text>
 #   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
 # `prepare` creates a new agent directory containing config.yml and a new,
-# empty launch cwd. `manifest` emits the environment boundary and argv as JSON,
-# with every built-in tool and LSP disabled;
+# empty launch cwd. `manifest` emits the requested environment boundary and argv
+# as JSON, including the flags that request disabled built-in tools and LSP;
 # `launch-template` emits the same boundary with spawn-time placeholders.
 # `validate-submission` rejects text whose first non-whitespace character would
 # enter OMP's slash-command or bang-command parser.
@@ -60,8 +60,7 @@ prepare_isolated_settings() {
 render_manifest() {
   local agent_dir=$1 cwd=$2 worktree=$3 binary=$4 model=$5 extension=$6
   OMP_AGENT_DIR=$agent_dir OMP_CWD=$cwd OMP_WORKTREE=$worktree \
-    OMP_BINARY=$binary OMP_MODEL=$model OMP_EXTENSION=$extension \
-    OMP_RETRY_JSON=$OMP_RETRY_JSON OMP_AST_EDIT_JSON=$OMP_AST_EDIT_JSON node <<'NODE'
+    OMP_BINARY=$binary OMP_MODEL=$model OMP_EXTENSION=$extension node <<'NODE'
 const manifest = {
   unsetEnvironment: [
     "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "OMP_PROFILE", "PI_PROFILE", "GROK_AGENT",
@@ -84,9 +83,6 @@ const manifest = {
     "--model", process.env.OMP_MODEL,
     "-e", process.env.OMP_EXTENSION,
   ],
-  effectiveRetry: JSON.parse(process.env.OMP_RETRY_JSON),
-  effectiveAstEdit: JSON.parse(process.env.OMP_AST_EDIT_JSON),
-  effectiveTools: [],
 };
 process.stdout.write(JSON.stringify(manifest));
 NODE
