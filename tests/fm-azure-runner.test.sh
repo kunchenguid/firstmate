@@ -44,6 +44,8 @@ import importlib.util,os,sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 assert m.environment()["cost_admission_mode"]=="strict"
 assert m.environment()["operator_data_plane_ip"]==""
+assert m.environment()["capacity_wait_seconds"]==7200
+assert m.environment()["capacity_poll_seconds"]==5
 os.environ["FM_AZURE_OPERATOR_DATA_PLANE_IP"]="203.0.113.10/32"
 assert m.environment()["operator_data_plane_ip"]=="203.0.113.10/32"
 os.environ.pop("FM_AZURE_OPERATOR_DATA_PLANE_IP")
@@ -60,6 +62,16 @@ os.environ["FM_AZURE_RUNNER_MAX_CONCURRENCY"]="17"
 try: m.environment()
 except m.RunnerError: pass
 else: raise AssertionError("environment accepted concurrency above 16")
+os.environ["FM_AZURE_RUNNER_MAX_CONCURRENCY"]="4"
+for name,value in (
+    ("FM_AZURE_RUNNER_CAPACITY_WAIT_SECONDS","86401"),
+    ("FM_AZURE_RUNNER_CAPACITY_POLL_SECONDS","0"),
+):
+    os.environ[name]=value
+    try: m.environment()
+    except m.RunnerError: pass
+    else: raise AssertionError("environment accepted invalid "+name)
+    os.environ.pop(name)
 PY
   rm -rf "$home"
   pass "normal environment defaults to strict without commissioning evidence or confirmation variables"
@@ -682,49 +694,146 @@ PY2
 
 shared_allocator_bridge_unit() {
   python3 - "$HOST" <<'PY' || fail "shared allocator runner bridge failed"
-import importlib.util, json, pathlib, subprocess, tempfile, sys
+import contextlib, importlib.util, json, pathlib, subprocess, tempfile, sys
 spec=importlib.util.spec_from_file_location("runner_shared",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 fixture_home=pathlib.Path(tempfile.mkdtemp())
-env={"subscription":"sub","resource_group":"rg","prefix":"prefix","budget_limit":1500,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
+env={"subscription":"sub","resource_group":"rg","prefix":"prefix","budget_limit":1500,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0,"capacity_wait_seconds":10,"capacity_poll_seconds":1}
 limits={**m.RESOURCE_CLASSES["behavior-heavy"],"sku":"Standard_D4as_v7","sku_family":"StandardDasv7Family"}
 state={"schema":m.SCHEMA,"invocation":"azr-aaaaaaaaaaaa","resources":{},"request":{"fence":"sha256:"+"a"*64,"resource_class":"behavior-heavy","limits":limits}}
 m.save_state=lambda *_a,**_k:None
 calls=[]
 def completed(value):
-    return subprocess.CompletedProcess(["python"],0,stdout=json.dumps(value),stderr="")
+    stdout=value if isinstance(value,str) else json.dumps(value)
+    return subprocess.CompletedProcess(["python"],0,stdout=stdout,stderr="")
+def response(status="reserved",reason="",actual=100.0,forecast=200.0):
+    return {"reservation_id":"azr-aaaaaaaaaaaa","status":status,"reason":reason,"actual_usd":actual,"forecast_usd":forecast,"admission_limit_usd":1500.0}
+sequence=[
+    response("queued","exact selected-family observed-plus-reserved capacity is exhausted"),
+    response(),
+]
+sleeps=[]
 def allocator_run(command,**kwargs):
     assert kwargs["env"]["FM_HOME"]==str(fixture_home)
     assert kwargs["env"]["FM_AZURE_WORKER_STATE_DIR"]==str((fixture_home/"state"/"azure-workers").resolve())
     calls.append(command)
-    return completed({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":100.0,"forecast_usd":200.0,"admission_limit_usd":1500.0})
+    if "capacity-release" in command:return completed({})
+    return completed(sequence.pop(0))
 old_home=m.os.environ.get("FM_HOME")
 m.os.environ["FM_HOME"]=str(fixture_home)
 m.run=allocator_run
+m.time.sleep=lambda seconds:sleeps.append(seconds)
 cost={"max_increment":25.0}
 result=m.shared_capacity_reserve(env,state,cost)
 assert result["actual"]==100.0 and result["forecast"]==200.0
-assert "capacity-reserve" in calls[-1] and calls[-1][calls[-1].index("--sku-family")+1]=="StandardDasv7Family"
+reserve_calls=[command for command in calls if "capacity-reserve" in command]
+assert len(reserve_calls)==2 and sleeps
+assert all(command[command.index("--reservation-id")+1]=="azr-aaaaaaaaaaaa" for command in reserve_calls)
+assert len({command[command.index("--fence-binding")+1] for command in reserve_calls})==1
+assert reserve_calls[-1][reserve_calls[-1].index("--sku-family")+1]=="StandardDasv7Family"
 assert state["shared_capacity_reservation"]["status"]=="reserved"
-# Queue, unreadable telemetry, and shared actual/forecast pressure each refuse before compute.
-for payload,text in (
-    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"queued","reason":"family full","actual_usd":100.0,"forecast_usd":200.0,"admission_limit_usd":1500.0},"queued"),
-    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":None,"forecast_usd":200.0,"admission_limit_usd":1500.0},"readable"),
-    ({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":100.0,"forecast_usd":1490.0,"admission_limit_usd":1500.0},"pressure"),
-):
-    m.run=lambda *_a,payload=payload,**_k:completed(payload)
+# A non-capacity queue refusal is immediate and releases its exact row.
+state.pop("shared_capacity_reservation")
+calls.clear()
+def non_capacity(command,**_kwargs):
+    calls.append(command)
+    if "capacity-release" in command:return completed({})
+    return completed(response("queued","shared actual or forecast spend is unreadable"))
+m.run=non_capacity
+try:m.shared_capacity_reserve(env,state,{"max_increment":25.0})
+except m.RunnerError as exc:assert "shared actual or forecast" in str(exc)
+else:raise AssertionError("non-capacity allocator refusal entered the wait loop")
+assert state["shared_capacity_reservation"]["status"]=="released"
+assert sum("capacity-release" in command for command in calls)==1
+# A zero-second bounded wait releases a transient queue row before failing.
+state.pop("shared_capacity_reservation")
+calls.clear()
+def always_queued(command,**_kwargs):
+    calls.append(command)
+    if "capacity-release" in command:return completed({})
+    return completed(response("queued","exact selected-family observed-plus-reserved capacity is exhausted"))
+m.run=always_queued
+try:m.shared_capacity_reserve({**env,"capacity_wait_seconds":0},state,{"max_increment":25.0})
+except m.RunnerError as exc:assert "timed out after 0 seconds" in str(exc)
+else:raise AssertionError("transient capacity timeout was bypassed")
+assert state["shared_capacity_reservation"]["status"]=="released"
+assert sum("capacity-release" in command for command in calls)==1
+# A malformed retry response after a queue also releases before failing.
+state.pop("shared_capacity_reservation")
+calls.clear()
+sequence=[
+    response("queued","exact selected-family observed-plus-reserved capacity is exhausted"),
+    "not-json",
+]
+def malformed_after_queue(command,**_kwargs):
+    calls.append(command)
+    if "capacity-release" in command:return completed({})
+    return completed(sequence.pop(0))
+m.run=malformed_after_queue
+try:m.shared_capacity_reserve(env,state,{"max_increment":25.0})
+except m.RunnerError as exc:assert "malformed" in str(exc)
+else:raise AssertionError("malformed allocator retry was bypassed")
+assert state["shared_capacity_reservation"]["status"]=="released"
+# Unreadable telemetry and shared actual/forecast pressure release admitted capacity.
+for payload,text in ((response(actual=None),"readable"),(response(forecast=1490.0),"pressure")):
+    state.pop("shared_capacity_reservation")
+    calls.clear()
+    def reserved_then_release(command,**_kwargs):
+        calls.append(command)
+        return completed({} if "capacity-release" in command else payload)
+    m.run=reserved_then_release
     try:m.shared_capacity_reserve(env,state,{"max_increment":25.0})
     except m.RunnerError as exc:assert text in str(exc)
     else:raise AssertionError("shared allocator failure was bypassed: "+text)
+    assert state["shared_capacity_reservation"]["status"]=="released"
 # Release is sent only from the post-cleanup bridge with one digest-bound receipt.
 m.run=lambda command,**_kwargs:calls.append(command) or completed({})
 state["shared_capacity_reservation"]={"status":"reserved"}
 m.shared_capacity_release(env,state)
 assert "capacity-release" in calls[-1] and len(calls[-1][calls[-1].index("--cleanup-receipt")+1])==64
 assert state["shared_capacity_reservation"]["status"]=="released"
+# A refusal after shared admission but before VM creation releases rather than
+# retaining an idle reservation behind the local concurrency safety cap.
+precompute={
+    "phase":"prepared","invocation":"azr-aaaaaaaaaaaa","parent_invocation":None,
+    "request":{
+        "fence":"sha256:"+"a"*64,
+        "lineage_root_invocation":"azr-aaaaaaaaaaaa",
+        "cost_admission_mode":m.STRICT_COST_ADMISSION_MODE,
+        "compute_deallocation_deadline":m.iso_utc(m.now_utc()+m.dt.timedelta(hours=1)),
+        "limits":limits,
+    },
+}
+dispatch_env={**env,"cost_admission_mode":m.STRICT_COST_ADMISSION_MODE,"max_concurrency":4,"cell_ordinal":None}
+released=[]
+m.bind_operation_context=lambda *_a:None
+m.scope_gate=lambda *_a:None
+m.validation_capacity_parent_gate=lambda *_a:None
+m.budget_gate=lambda *_a,**_k:{"max_increment":25.0}
+m.foundation_gate=lambda *_a:None
+def reserve(_env,got_state,cost):
+    got_state["shared_capacity_reservation"]={"status":"reserved"}
+    return cost
+m.shared_capacity_reserve=reserve
+m.reprove_public_request=lambda *_a:None
+m.stage_private_snapshot=lambda *_a:None
+m.admission_lock=lambda *_a:contextlib.nullcontext()
+m.active_runner_vms=lambda *_a:[{}]*4
+m.shared_capacity_release=lambda _env,got_state:released.append(got_state["invocation"]) or got_state["shared_capacity_reservation"].update(status="released")
+m.transition=lambda _env,got_state,phase,note=None,**updates:got_state.update({"phase":phase,**updates})
+try:m.dispatch_prepared(dispatch_env,precompute,"sub",None)
+except m.RunnerError as exc:assert "bounded concurrency limit" in str(exc)
+else:raise AssertionError("pre-compute local concurrency refusal was bypassed")
+assert released==["azr-aaaaaaaaaaaa"] and precompute["phase"]=="failed-retained"
+# A restarted command re-enters the same queued invocation instead of fencing it.
+queued={"phase":"prepared","invocation":"azr-aaaaaaaaaaaa","shared_capacity_reservation":{"status":"queued"},"request":{"cost_admission_mode":m.STRICT_COST_ADMISSION_MODE}}
+seen=[]
+m.dispatch_prepared=lambda got_env,got_state,subscription,confirmation:seen.append((got_state["invocation"],subscription,confirmation)) or 7
+assert m.resume({"subscription":"sub"},queued)==7
+assert seen==[("azr-aaaaaaaaaaaa","sub",None)]
 if old_home is None:m.os.environ.pop("FM_HOME",None)
 else:m.os.environ["FM_HOME"]=old_home
 PY
-  pass "runner queues behind the shared allocator and requires actual/forecast evidence before compute"
+  pass "runner durably waits only on transient shared capacity and releases every pre-compute refusal"
 }
 
 commissioning_admission_unit() {

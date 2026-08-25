@@ -65,6 +65,11 @@ BOOTSTRAP_RATE_BITS_PER_SECOND = 1_000_000
 MAX_BILLABLE_LIFETIME_HOURS = 24
 STRICT_COST_ADMISSION_MODE = "strict"
 COMMISSIONING_COST_ADMISSION_MODE = "commissioning-bounded"
+TRANSIENT_SHARED_CAPACITY_REFUSALS = frozenset({
+    "exact selected-family observed-plus-reserved capacity is exhausted",
+    "specialized observed-plus-reserved demand exceeds its shared 40-vCPU shape",
+    "combined observed-plus-reserved demand would consume the shared East US ceiling",
+})
 TTL_SCHEDULE_HOURS_AFTER_PREPARATION = 23
 AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS = 30 * 60
 SHELLCHECK_ARCHIVE_BYTES = 2_559_196
@@ -457,6 +462,26 @@ def environment():
     max_concurrency = int(os.environ.get("FM_AZURE_RUNNER_MAX_CONCURRENCY", "4"))
     if max_concurrency < 1 or max_concurrency > 16:
         raise RunnerError("FM_AZURE_RUNNER_MAX_CONCURRENCY must be between 1 and 16")
+    try:
+        capacity_wait_seconds = int(
+            os.environ.get("FM_AZURE_RUNNER_CAPACITY_WAIT_SECONDS", "7200")
+        )
+        capacity_poll_seconds = int(
+            os.environ.get("FM_AZURE_RUNNER_CAPACITY_POLL_SECONDS", "5")
+        )
+    except ValueError:
+        raise RunnerError(
+            "FM_AZURE_RUNNER_CAPACITY_WAIT_SECONDS and "
+            "FM_AZURE_RUNNER_CAPACITY_POLL_SECONDS must be integers"
+        )
+    if not 0 <= capacity_wait_seconds <= 86400:
+        raise RunnerError(
+            "FM_AZURE_RUNNER_CAPACITY_WAIT_SECONDS must be between 0 and 86400"
+        )
+    if not 1 <= capacity_poll_seconds <= 60:
+        raise RunnerError(
+            "FM_AZURE_RUNNER_CAPACITY_POLL_SECONDS must be between 1 and 60"
+        )
     budget_limit = int(os.environ.get("FM_AZURE_RUNNER_BUDGET_LIMIT_USD", "1000"))
     if budget_limit not in (1000, 1500):
         raise RunnerError("FM_AZURE_RUNNER_BUDGET_LIMIT_USD must be 1000 or 1500")
@@ -484,6 +509,8 @@ def environment():
         "deployment_generation": generation,
         "resource_group": resource_group,
         "max_concurrency": max_concurrency,
+        "capacity_wait_seconds": capacity_wait_seconds,
+        "capacity_poll_seconds": capacity_poll_seconds,
         "budget_limit": budget_limit,
         "cost_admission_mode": cost_admission_mode,
         "cell_ordinal": cell_ordinal,
@@ -2098,40 +2125,107 @@ def shared_capacity_reserve(env, state, cost):
         "--amount-usd", str(cost["max_increment"]),
         "--confirm-subscription", env["subscription"],
     ]
-    result = run(command, env=shared_capacity_environment(env))
+    previous = state.get("shared_capacity_reservation", {})
+    wait_deadline_text = previous.get("wait_deadline")
+    if wait_deadline_text:
+        try:
+            wait_deadline = dt.datetime.fromisoformat(
+                wait_deadline_text.replace("Z", "+00:00")
+            )
+            if wait_deadline.utcoffset() is None:
+                raise ValueError("capacity wait deadline has no timezone")
+        except (TypeError, ValueError):
+            if previous.get("status") == "queued":
+                shared_capacity_release(env, state)
+            raise RunnerError("shared allocator capacity wait deadline is malformed")
+    else:
+        wait_deadline = now_utc() + dt.timedelta(
+            seconds=env["capacity_wait_seconds"]
+        )
+        wait_deadline_text = iso_utc(wait_deadline)
+    monotonic_deadline = time.monotonic() + max(
+        0.0, (wait_deadline - now_utc()).total_seconds()
+    )
+    last_reason = "capacity unavailable"
+    while True:
+        try:
+            result = run(command, env=shared_capacity_environment(env))
+        except RunnerError:
+            if state.get("shared_capacity_reservation", {}).get("status") == "queued":
+                shared_capacity_release(env, state)
+            raise
+        try:
+            reservation = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError):
+            if state.get("shared_capacity_reservation", {}).get("status") == "queued":
+                shared_capacity_release(env, state)
+            raise RunnerError("shared allocator returned a malformed capacity reservation")
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("reservation_id") != state["invocation"]
+            or reservation.get("status") not in ("queued", "reserved")
+        ):
+            if state.get("shared_capacity_reservation", {}).get("status") == "queued":
+                shared_capacity_release(env, state)
+            raise RunnerError("shared allocator returned a reservation with the wrong identity")
+        previous = state.get("shared_capacity_reservation", {})
+        last_reason = str(reservation.get("reason") or "capacity unavailable")[:500]
+        state["shared_capacity_reservation"] = {
+            "reservation_id": state["invocation"],
+            "fence_binding": fence,
+            "status": reservation["status"],
+            "amount_usd": cost["max_increment"],
+            "sku": limits["sku"],
+            "sku_family": limits["sku_family"],
+            "actual_usd": reservation.get("actual_usd"),
+            "forecast_usd": reservation.get("forecast_usd"),
+            "admission_limit_usd": reservation.get("admission_limit_usd"),
+            "reason": last_reason if reservation["status"] == "queued" else "",
+            "wait_deadline": wait_deadline_text,
+            "queued_at": previous.get("queued_at") or (
+                iso_utc() if reservation["status"] == "queued" else None
+            ),
+        }
+        save_state(env, state)
+        if reservation["status"] == "reserved":
+            break
+        if last_reason not in TRANSIENT_SHARED_CAPACITY_REFUSALS:
+            shared_capacity_release(env, state)
+            raise RunnerError(
+                "shared allocator queued disposable-runner demand: {}".format(
+                    last_reason
+                )
+            )
+        remaining = min(
+            monotonic_deadline - time.monotonic(),
+            (wait_deadline - now_utc()).total_seconds(),
+        )
+        if remaining <= 0:
+            shared_capacity_release(env, state)
+            raise RunnerError(
+                "shared allocator capacity wait timed out after {} seconds: {}".format(
+                    env["capacity_wait_seconds"], last_reason
+                )
+            )
+        time.sleep(min(env["capacity_poll_seconds"], remaining))
     try:
-        reservation = json.loads(result.stdout)
-    except (TypeError, json.JSONDecodeError):
-        raise RunnerError("shared allocator returned a malformed capacity reservation")
-    if (
-        not isinstance(reservation, dict)
-        or reservation.get("reservation_id") != state["invocation"]
-        or reservation.get("status") not in ("queued", "reserved")
-    ):
-        raise RunnerError("shared allocator returned a reservation with the wrong identity")
-    state["shared_capacity_reservation"] = {
-        "reservation_id": state["invocation"],
-        "fence_binding": fence,
-        "status": reservation["status"],
-        "amount_usd": cost["max_increment"],
-        "sku": limits["sku"],
-        "sku_family": limits["sku_family"],
-        "actual_usd": reservation.get("actual_usd"),
-        "forecast_usd": reservation.get("forecast_usd"),
-        "admission_limit_usd": reservation.get("admission_limit_usd"),
-    }
-    save_state(env, state)
-    if reservation["status"] != "reserved":
-        raise RunnerError("shared allocator queued disposable-runner demand: {}".format(
-            str(reservation.get("reason") or "capacity unavailable")[:500]
-        ))
-    cost["actual"] = reservation.get("actual_usd")
-    cost["forecast"] = reservation.get("forecast_usd")
-    cost["shared_admission_limit"] = reservation.get("admission_limit_usd")
-    if not isinstance(cost["actual"], (int, float)) or not isinstance(cost["forecast"], (int, float)):
-        raise RunnerError("shared allocator omitted readable actual or forecast spend evidence")
-    if max(float(cost["actual"]), float(cost["forecast"])) + float(cost["max_increment"]) >= env["budget_limit"]:
-        raise RunnerError("shared actual/forecast cost pressure reaches the runner admission limit")
+        cost["actual"] = reservation.get("actual_usd")
+        cost["forecast"] = reservation.get("forecast_usd")
+        cost["shared_admission_limit"] = reservation.get("admission_limit_usd")
+        if not isinstance(cost["actual"], (int, float)) or not isinstance(cost["forecast"], (int, float)):
+            raise RunnerError("shared allocator omitted readable actual or forecast spend evidence")
+        if max(float(cost["actual"]), float(cost["forecast"])) + float(cost["max_increment"]) >= env["budget_limit"]:
+            raise RunnerError("shared actual/forecast cost pressure reaches the runner admission limit")
+    except RunnerError as exc:
+        try:
+            shared_capacity_release(env, state)
+        except RunnerError as release_exc:
+            raise RunnerError(
+                "{}; shared capacity release also failed: {}".format(
+                    exc, release_exc
+                )
+            ) from release_exc
+        raise
     return cost
 
 
@@ -2390,7 +2484,7 @@ def adopt_vm_identity(env, state, vm):
     save_state(env, state)
 
 
-def create_vm(env, state):
+def require_compute_deallocation_lead(state):
     deadline = dt.datetime.fromisoformat(
         state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
     )
@@ -2401,6 +2495,10 @@ def create_vm(env, state):
         raise RunnerError(
             "control-plane TTL schedule has insufficient lead for Azure's 30-minute activation window and bounded deployment"
         )
+
+
+def create_vm(env, state):
+    require_compute_deallocation_lead(state)
     params = write_private_json(env, ".vm-params-", deployment_parameters(env, state))
     try:
         az_command(env, [
@@ -2975,6 +3073,7 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
         raise RunnerError("--confirm-cost-admission-mode is accepted only for commissioning-bounded")
     elif env.get("cell_ordinal") is not None:
         raise RunnerError("FM_AZURE_RUNNER_CELL_ORDINAL is accepted only for commissioning-bounded")
+    compute_create_attempted = False
     try:
         deadline = dt.datetime.fromisoformat(
             state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
@@ -2983,7 +3082,6 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
             raise RunnerError("prepared invocation has insufficient time remaining before its control-plane deallocation deadline")
         scope_gate(env)
         limits = state["request"]["limits"]
-        sku_quota_gate(env, limits)
         validation_capacity_parent_gate(env, state)
         cost = (
             commissioning_cost_gate(env, state, limits)
@@ -3022,19 +3120,41 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
             )
             if mode == COMMISSIONING_COST_ADMISSION_MODE:
                 commissioning_cost_gate(env, state, limits)
-                sku_quota_gate(env, limits)
+            sku_quota_gate(env, limits)
             foundation_gate(env)
             validation_capacity_parent_gate(env, state)
         # The ledger entry recorded above is the durable spend claim; VM
         # creation only materializes it, so concurrent transports create
         # their compute in parallel instead of holding the admission lock
         # through a multi-minute control-plane operation.
+        require_compute_deallocation_lead(state)
+        compute_create_attempted = True
         create_vm(env, state)
         create_run_command(env, state)
         poll_run_command(env, state)
         result = collect_result(env, state)
         cleanup(env, state)
     except Exception as exc:
+        if (
+            not compute_create_attempted
+            and state.get("shared_capacity_reservation", {}).get("status")
+            in ("queued", "reserved")
+        ):
+            if state.get("reservation_recorded"):
+                spend_ledger_mark_cleaned(env, state)
+            try:
+                shared_capacity_release(env, state)
+            except RunnerError as release_exc:
+                combined = RunnerError(
+                    "{}; pre-compute shared capacity release also failed: {}".format(
+                        exc, release_exc
+                    )
+                )
+                if state.get("phase") not in (
+                    "cleanup-retained", "complete", "absent-fenced"
+                ):
+                    transition(env, state, "failed-retained", str(combined)[:500])
+                raise combined from release_exc
         if state.get("phase") not in ("cleanup-retained", "complete", "absent-fenced"):
             transition(env, state, "failed-retained", str(exc)[:500])
         raise
@@ -3071,6 +3191,19 @@ def resume(env, state):
         print_logs_and_summary(state, state["result"])
         return int(state["result"]["exit_code"])
     scope_gate(env)
+    if (
+        phase == "prepared"
+        and state.get("shared_capacity_reservation", {}).get("status") == "queued"
+    ):
+        mode = state["request"].get(
+            "cost_admission_mode", STRICT_COST_ADMISSION_MODE
+        )
+        confirmation = (
+            COMMISSIONING_COST_ADMISSION_MODE
+            if mode == COMMISSIONING_COST_ADMISSION_MODE
+            else None
+        )
+        return dispatch_prepared(env, state, env["subscription"], confirmation)
     if phase in ("result-published", "failed-retained") and state.get("expected_result_digest"):
         result = collect_result(env, state)
         cleanup(env, state)

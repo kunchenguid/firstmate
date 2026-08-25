@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -210,6 +211,14 @@ def prepare_exact_snapshot(
         )
         runner.normalize_command(arguments)
         env = runner.environment()
+        crosscheck_wait = int(
+            os.environ.get("FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS", "7200")
+        )
+        if not 0 <= crosscheck_wait <= 86400:
+            raise BridgeError(
+                "FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS must be between 0 and 86400"
+            )
+        env["capacity_wait_seconds"] = crosscheck_wait
         state = runner.prepare(env, arguments)
     repository = state["request"]["repository"]
     for field, expected in (

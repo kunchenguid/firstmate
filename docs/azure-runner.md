@@ -175,7 +175,7 @@ Under the ARM CAS admission lease, every invocation gets a finite positive compl
 The strict runner-local gate remains mandatory whenever the operator has not explicitly selected commissioning mode, and it is intentionally defense in depth rather than a separate capacity owner.
 Both modes acquire one exact reservation from the durable allocator in [Elastic task workers](azure-workers.md) before any runner management reservation or VM creation.
 That allocator merges author assignments and disposable-runner reservations into one observed-plus-reserved 128-vCPU East US and exact-family schedule, and applies shared readable actual/forecast spend plus all durable reservation amounts even during commissioning.
-A queued shared reservation stops the runner before compute; cleanup releases it only after exact VM/NIC/OS-disk absence, and ambiguity retains it.
+A queued shared reservation caused by exact-family or regional capacity pressure waits with the same durable reservation identity for up to `FM_AZURE_RUNNER_CAPACITY_WAIT_SECONDS` (7200 seconds by default, 86400 maximum). Crosscheck evidence runners inherit the Crosscheck queue deadline. Budget, telemetry, identity, and other non-capacity refusals remain immediate. Timeout or any other pre-compute refusal releases the queued reservation after exact zero-compute proof; cleanup releases an admitted reservation only after exact VM/NIC/OS-disk absence, and ambiguity retains it.
 
 The normal budget limit is the active $1,000 target.
 An operator may select the commissioning ceiling of $1,500 through `FM_AZURE_RUNNER_BUDGET_LIMIT_USD=1500` only during the approved commissioning window.

@@ -1839,6 +1839,7 @@ PY
 bridge_private_snapshot_unit() {
   python3 - "$BRIDGE" <<'PY' || fail "Azure bridge private snapshot contract failed"
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -1867,11 +1868,12 @@ with tempfile.TemporaryDirectory() as temporary:
     ).stdout.strip()
     observed = {}
     runner.environment = lambda: {"fixture": True}
+    os.environ["FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS"] = "17"
 
     def prepare(env, arguments):
         bundle = Path(arguments.private_snapshot_bundle)
         observed["bundle"] = bundle
-        assert env == {"fixture": True}
+        assert env == {"fixture": True, "capacity_wait_seconds": 17}
         assert arguments.public_ref is None
         assert arguments.source_ref == "refs/pull/7/head"
         assert arguments.capacity_parent is None
@@ -1905,7 +1907,7 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert state["request"]["repository"]["source_head"] == head
     assert arguments.private_snapshot_bundle
-    assert env == {"fixture": True}
+    assert env == {"fixture": True, "capacity_wait_seconds": 17}
     assert not observed["bundle"].exists()
 PY
   pass "Azure evidence bridge privately bundles an exact detached PR checkout without GitHub credentials"
