@@ -30,8 +30,9 @@ and in front of people, it is the most visible defect in the service.
 
 ## Goal
 
-Make both checks legible to an engineer who has never heard of this project, and make the risk
-grade complete by re-evaluating as CI reports.
+Make both checks legible to an engineer who has never heard of this project; make the risk grade
+complete by re-evaluating as CI reports; and make it say plainly whether it is complete yet, so a
+half-graded result is never mistaken for a finished one.
 
 Shadow mode is unchanged. The conclusion stays structurally `neutral`, nothing is approved, merged
 or blocked.
@@ -106,7 +107,7 @@ This is what PR #27 would actually render after CI completes, on the demo repo a
 today — **5 of 6**, not 6, because Dependabot alerts are disabled on that repository:
 
 ```markdown
-**Risk: medium** — graded on 5 of 6 signals
+**Risk: medium** — graded on 5 of 6 signals · final
 
 | | Signal | Observed |
 |---|---|---|
@@ -127,6 +128,20 @@ This check is informational. It is **not required** and **will never block your 
 Risk signals are graded, not pass/fail, so grade maps onto the same icon vocabulary rather than
 introducing a second one — `✅` low, `⚠️` medium, `❌` high, `❓` unavailable — with the legend
 inline so nobody has to guess.
+
+**The trailing `· final` is the completeness marker** (see "The signal-dependency set" below). While
+CI is still reporting it reads instead:
+
+```markdown
+**Risk: medium** — graded on 3 of 6 signals · provisional
+
+_Still waiting on: `Cycode: SAST`, `Cycode: Secrets`, `Cycode: Vulnerable Dependencies`,
+`codecov/project`. This check will update as they report._
+```
+
+Naming the outstanding checks matters more than the word "provisional": a reader who sees a
+half-graded result should be able to tell whether it is mid-flight or permanently stuck, and the
+list is the difference.
 
 An unavailable signal keeps its row and puts its reason in the `Observed` column, which replaces
 today's separate "Not available for this evaluation" list. One table, one place to look.
@@ -164,7 +179,10 @@ Contents:
    someone.
 5. **Repository classification and CI-trust tier** — what `sandbox` / `internal-tool` /
    `prod-service` mean and what a tier is.
-6. **How to suggest a check, or argue one is wrong** — open a PR against `policy-rules.yaml`, which
+6. **Why a risk check sometimes says "provisional"** — that the risk signals read other checks'
+   results, that the service waits for a declared list of them, and that a check stuck on
+   provisional means one of those never reported.
+7. **How to suggest a check, or argue one is wrong** — open a PR against `policy-rules.yaml`, which
    is reviewed like any other change, and the thresholds are the numbers in that file. This is the
    section the whole page exists for.
 
@@ -223,18 +241,110 @@ check-suite path fetches the pull request — `GET /repos/{owner}/{repo}/pulls/{
 Both paths converge on the same `EvalContext` through a new `src/pr-context.ts`, so `evaluate()` is
 unchanged and cannot tell which trigger it is serving.
 
-### Why every completion, rather than waiting for the last
+### Knowing when the inputs are ready
 
-GitHub never emits an "all checks finished" event, and each App completes its own suite — Cycode,
-Codecov and Actions are three separate suites on this repo. Waiting for the expected set to be
-complete is PLAT-1192's job and needs its expected-set enumeration across rulesets and classic
-branch protection.
+The natural question is whether a pull request event can tell us which checks are going to run, so
+we could evaluate once, after they finish. It cannot, and the two obvious approximations are both
+wrong in ways that are only visible from live data.
 
-Re-evaluating on **every** non-self completion is simpler and self-healing: roughly three or four
-re-evaluations per push, each upserting the same two check runs, with the check becoming more
-complete as each CI system lands. The last one to finish leaves a fully-populated grade. Because the
-evaluator is a stateless full recompute pinned to the head SHA, running it repeatedly is correct by
-construction rather than by care.
+**"Wait until every check suite completes" never fires.** PR #27's head SHA carries **fourteen check
+suites. Four of them ever produced a check run.**
+
+| App | Suite status | Check runs |
+|---|---|---|
+| `cycode-security` (39308) | completed | 3 |
+| `bankrate-codecov` (370480) | completed | 2 |
+| `github-actions` (15368) | completed | 6 |
+| `neutral-planet` (4702073) — us | completed | 2 |
+| `circleci-checks`, `aws-amplify-us-east-1`, `rv-github-reporting`, **`codecov`**, `rv-volt`, `devin-ai-integration`, `claude`, `aws-devops-agent-us-east-1`, `platform-github-pr-jira-check` | **queued** | **0** |
+
+Those ten are apps installed across the org. GitHub creates a check suite for each of them on every
+commit; they do nothing and their suites stay `queued` forever. Any rule that waits for all suites
+waits for eternity.
+
+Note the trap inside that: the app literally named **`codecov` (id 254) is one of the
+permanently-queued ones**, while the real `codecov/project` check comes from **`bankrate-codecov`
+(id 370480)**. Matching on "the codecov app" would wait on the wrong app indefinitely.
+
+**"Wait for the required checks" misses what we actually need.** This repo's required contexts —
+from classic branch protection, since its only ruleset carries `repository_visibility` — are exactly
+`Cycode: Secrets`, `Cycode: SAST`, `Cycode: Vulnerable Dependencies`. **Codecov is not required**, so
+enumerating required checks (PLAT-1192's approach) would never wait for the coverage signal.
+
+Reading `.github/workflows` does not help either: Cycode and Codecov are Apps, not workflows, and
+Actions jobs carry `if:` conditions and path filters that make static parsing unreliable even for
+the jobs it can see.
+
+### The signal-dependency set
+
+So the expected set is **declared, not inferred**. We know exactly which check names our signals
+read, and `policy-rules.yaml` says so:
+
+```yaml
+rules:
+  # Check runs the risk signals read. The evaluation is FINAL once every one of
+  # these has a completed run for the head SHA; until then it is provisional.
+  #
+  # Declared rather than discovered: "wait for all check suites" never fires
+  # (ten of this repo's fourteen suites are org-installed apps that sit queued
+  # forever), and "wait for required checks" misses codecov/project, which is
+  # not a required context here.
+  signalChecks:
+    - "Cycode: SAST"
+    - "Cycode: Secrets"
+    - "Cycode: Vulnerable Dependencies"
+    - "codecov/project"
+```
+
+Per-repo override lives on the enrollment record, because not every repo runs Codecov:
+
+```yaml
+repos:
+  - repo: bankrate/platform-cicd-v2-demo
+    classification: sandbox
+    ciTrustTier: 2
+    mode: shadow
+    stageEnabled: false
+    # Omit to inherit rules.signalChecks. An empty list means this repo has no
+    # signal dependencies, so every evaluation is immediately final.
+    # signalChecks: ["Cycode: SAST"]
+```
+
+An evaluation is **final** when every declared check has a `completed` run for the head SHA, and
+**provisional** otherwise. The check run says which, and names what it is still waiting for.
+
+This is what makes the answer honest in both directions. A repo that never runs Codecov simply does
+not declare it, and its evaluations go final without it. A repo that declares a check which never
+arrives keeps a provisional result that says what is missing — visible and diagnosable, rather than
+a grade that quietly pretends to be complete.
+
+### Why still re-evaluate on every completion
+
+The declared set decides when we are **done**; it does not decide when to **look**. We still
+re-evaluate on every non-self `check_suite: completed`, for three reasons:
+
+- **A repo with no CI at all still gets a check.** Suppressing output until the set completes would
+  leave those pull requests with nothing.
+- **The check improves visibly as CI lands**, rather than sitting stale and then jumping.
+- **It is self-healing.** A dropped webhook costs one refresh, not a permanently provisional result.
+
+Because the evaluator is a stateless full recompute pinned to the head SHA, running it repeatedly is
+correct by construction rather than by care, and Part 3's upsert means repetition costs no extra
+check runs.
+
+Once an evaluation is final, further `check_suite: completed` events for that head SHA are logged
+and dropped rather than re-evaluated — there is nothing left to learn, and it bounds the API cost on
+a busy repo. The check is determined by re-reading the declared set, not by remembering state, so a
+restart or a dropped delivery cannot strand this.
+
+### Eligibility is always final
+
+Only the risk check waits. All eleven eligibility gates are computable from the pull request payload,
+its diff, the enrollment record and the rules — none of them reads another check's result. So the
+eligibility check carries no provisional marker and is correct the first time it posts.
+
+That asymmetry is worth stating in the output rather than leaving a reader to infer it from one
+check having a marker and the other not.
 
 ## Consequence: the ledger becomes a time series
 
@@ -246,15 +356,23 @@ Records are appended, not overwritten. The sequence is genuinely useful evidence
 filling in as CI reports, and a Phase 1 reviewer asking "what did we know, and when?" can answer it.
 Overwriting would erase exactly that.
 
-Two things make the series navigable:
+Three things make the series navigable:
 
 - A new top-level `trigger` attribute on each record — `pull_request` or `check_suite` — so a query
   can select one kind or count re-evaluations.
+- A new top-level `final` boolean, plus `pendingChecks` listing the declared checks that had not
+  reported. **`final` is what a Phase 1 analysis should filter on**: a provisional record is a
+  snapshot of an evaluation mid-flight, and averaging those in with completed ones would understate
+  every signal that arrives late.
 - `sk` is already `eval#<ISO timestamp>`, so the **latest record for a head SHA is the
   authoritative one** and a `ScanIndexForward: false, Limit: 1` query returns it.
 
-The revised criterion: *every evaluation produces exactly one eval record, and the most recent
-record for a head SHA is the one that saw the most complete data.*
+The revised criterion: *every evaluation produces exactly one eval record; the most recent record
+for a head SHA is the one that saw the most complete data; and exactly one record per head SHA is
+marked `final` once the declared signal checks have reported.*
+
+Eligibility is unaffected by `final` — it never waits on another check, so its verdict is identical
+across every record for a given head SHA.
 
 ## Error handling
 
@@ -263,6 +381,9 @@ record for a head SHA is the one that saw the most complete data.*
 | `check_suite` from our own App | Dropped first, logged `self_check_suite_ignored`. Never evaluated. |
 | `check_suite` action other than `completed` | Dropped, logged |
 | `check_suite.pull_requests` empty | Dropped, logged `check_suite_no_pull_requests` |
+| Head SHA already evaluated as final | Dropped, logged `already_final`. Re-derived from the declared set each time, never remembered. |
+| A declared signal check never reports | The result stays provisional and names it. No timeout, no silent promotion to final. |
+| `signalChecks` empty for a repo | Every evaluation is immediately final — a valid configuration, not an error |
 | `GET /pulls/{n}` fails | Throw — claim released, SQS retries, as with any GitHub failure |
 | Check-run lookup GET fails | Fall back to `POST`. A duplicate check run is a far better outcome than a lost one. |
 | `PATCH` fails | Throw — the delivery retries |
@@ -286,6 +407,14 @@ body are not.
 - **Check-suite routing** — a completed suite from another app evaluates; **a completed suite from
   app id `4702073` does not**, asserted by the evaluator never being called; a non-`completed`
   action drops; an empty `pull_requests` array drops.
+- **Completeness** — every declared check `completed` on the head SHA yields `final`; one missing
+  yields `provisional` naming exactly that one; a declared check present but `in_progress` yields
+  `provisional`; an **empty** `signalChecks` yields `final` immediately; a per-repo `signalChecks`
+  overrides the global list rather than merging with it. Plus the negative case that motivated the
+  whole design: a fixture containing the ten permanently-`queued` zero-run suites must not delay
+  `final`, because none of their apps posts a declared check.
+- **Rules validation** — `signalChecks` must be an array of strings globally and, when present, on
+  an enrollment record; a non-string entry fails the build, like every other rules error.
 - **Context parity** — a context built from a `check_suite` payload plus a fetched pull request is
   field-for-field identical to one built from the equivalent `pull_request` payload. This is what
   keeps the two trigger paths from diverging.
@@ -297,9 +426,13 @@ Push a commit to PR #27 and watch the checks through CI completion. Success is:
 
 - Exactly **one** `merge-policy/eligibility` and **one** `merge-policy/risk` on the head SHA after
   all CI has finished — the upsert working.
-- The risk check reading **5 of 6 signals**, with scanner findings and coverage now populated —
-  up from the 4 of 6 it shows today. The sixth stays `❓` while Dependabot alerts remain disabled on
-  the repository; expect 6 of 6 only if that setting is turned on first.
+- The risk check reading **5 of 6 signals · final**, with scanner findings and coverage now
+  populated — up from the 4 of 6 it shows today. The sixth stays `❓` while Dependabot alerts remain
+  disabled on the repository; expect 6 of 6 only if that setting is turned on first.
+- The check observed **provisional** at least once mid-flight, naming outstanding checks, before
+  settling to final. Watch it while CI runs rather than only reading the end state — a marker that
+  only ever says `final` would pass this check while being broken.
+- The ten permanently-queued zero-run suites present on every commit did not prevent it going final.
 - Both tables rendering, neither check mentioning PLAT-1184, both linking the policy doc.
 - Multiple eval records for that SHA, the latest being the most complete.
 - No runaway: the count of `merge-policy/*` check runs stops growing once CI settles, and the logs
@@ -307,9 +440,15 @@ Push a commit to PR #27 and watch the checks through CI completion. Success is:
 
 ## Out of scope
 
-- **PLAT-1192 (T8)** — the required-checks snapshot, the expected-set enumeration, and the
-  ten-minute reconcile sweep. This spec gets complete signals by re-evaluating often rather than by
-  knowing when to stop.
+- **PLAT-1192 (T8)** — the required-checks snapshot, its enumeration across rulesets *and* classic
+  branch protection, and the ten-minute reconcile sweep. The `signalChecks` list here is a
+  deliberately narrower thing and should not be mistaken for it: it answers *"are the inputs to our
+  own risk signals ready?"*, whereas T8 answers *"is this pull request's own required-check state
+  green?"* — a rule about the PR, not about us. They overlap on the Cycode contexts by coincidence
+  of this repo's configuration, not by design.
+- **A timeout that promotes provisional to final.** A declared check that never reports leaves a
+  permanently provisional result on purpose. Guessing that a missing scanner is fine after N minutes
+  is exactly the fail-open this service must not do.
 - **Routing `check_run`, `status`, `push`** — still dropped. `check_suite` is coarser and enough.
 - **Enabling Dependabot alerts** on the demo repo — still a repo-owner decision. If it stays
   disabled, the risk table shows `❓` on that row with the reason, which is now visible in the table
@@ -330,6 +469,13 @@ Push a commit to PR #27 and watch the checks through CI completion. Success is:
 - [ ] `check_suite: completed` from another app triggers re-evaluation
 - [ ] `check_suite` from app id `4702073` is dropped, with a test proving the evaluator is not called
 - [ ] Contexts built from either trigger are field-for-field identical
-- [ ] Eval records carry `trigger`; the latest record per head SHA is the most complete
+- [ ] `rules.signalChecks` exists, is validated at build time, and is overridable per enrollment record
+- [ ] The risk check reads `final` once every declared check has completed, and `provisional` naming
+      the outstanding ones before that
+- [ ] The eligibility check carries no completeness marker — it never waits on another check
+- [ ] Permanently-queued zero-run check suites do not prevent an evaluation from going final
+- [ ] Further `check_suite` events for an already-final head SHA are dropped
+- [ ] Eval records carry `trigger`, `final` and `pendingChecks`; the latest record per head SHA is
+      the most complete, and exactly one per head SHA is `final`
 - [ ] PR #27 shows **5 of 6** signals after CI completes (6 of 6 only if Dependabot alerts get
       enabled on the repo), with exactly one check run per name
