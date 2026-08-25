@@ -535,7 +535,8 @@ test_backend_source_shell_portable() {
 # REFUSED when the call returned non-zero and REACHED_CALLER when the caller
 # survived to its next statement; an aborted shell prints neither.
 backend_source_refusal_probe() {  # <fixture-root> <backend>
-  bash -c '
+  # shellcheck disable=SC2016 # The single-quoted body expands inside the child shell.
+  "$BASH" -c '
     set -eu
     . "$1/bin/fm-backend.sh"
     if ! fm_backend_source "$2"; then printf "REFUSED\n"; fi
