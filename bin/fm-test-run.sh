@@ -984,10 +984,16 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-treehouse-return-lib.sh|bin/fm-review-diff.sh|\
-    bin/fm-x-*|bin/fm-check*)
+    bin/fm-teardown.sh|bin/fm-treehouse-return-lib.sh)
+      # These two own tests/fm-treehouse-return.test.sh, which is classified
+      # real-herdr-gated. The other pr-forge scripts below do not reach it, so
+      # they must not drag the pinned-runtime Herdr family into a --changed run.
       printf '%s\n' pr-forge
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
+    bin/fm-x-*|bin/fm-check*)
+      printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both

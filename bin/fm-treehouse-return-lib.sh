@@ -55,7 +55,7 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
   return "$rc"
 }
 
-# An unborn HEAD - `git init` or `checkout --orphan` with nothing committed yet -
+# An unborn HEAD in a worktree nothing has ever been checked out or committed in
 # names no commit at all, so there is no committed work for the guard to
 # certify. That is a determined state, not an undeterminable one, and it is the
 # only HEAD-resolution failure this returns true for: the branch HEAD points at
@@ -65,7 +65,7 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
 # a HEAD that is not a symbolic refs/heads ref, stays a refusal so damaged
 # worktrees keep failing closed.
 fm_treehouse_return_head_is_unborn() {  # <worktree-path>
-  local worktree_path=$1 head_ref
+  local worktree_path=$1 head_ref head_log
 
   fm_treehouse_return_git "$worktree_path" symbolic-ref -q HEAD || return 1
   head_ref=$FM_TREEHOUSE_RETURN_GIT_OUT
@@ -74,7 +74,21 @@ fm_treehouse_return_head_is_unborn() {  # <worktree-path>
     *) return 1 ;;
   esac
   fm_treehouse_return_git "$worktree_path" for-each-ref --format='%(refname)' "$head_ref" || return 1
-  [ -z "$FM_TREEHOUSE_RETURN_GIT_OUT" ] && [ -z "$FM_TREEHOUSE_RETURN_GIT_ERR" ]
+  [ -z "$FM_TREEHOUSE_RETURN_GIT_OUT" ] && [ -z "$FM_TREEHOUSE_RETURN_GIT_ERR" ] || return 1
+
+  # A missing branch ref alone cannot tell "never committed here" apart from a
+  # branch deleted out of band while still checked out, which does hold commits.
+  # This worktree's own HEAD reflog does: it is absent only while nothing has
+  # ever been checked out or committed here. Anything that leaves a HEAD reflog
+  # entry - including an orphan checkout over prior history - stays a refusal.
+  fm_treehouse_return_git "$worktree_path" rev-parse --git-path logs/HEAD || return 1
+  head_log=$FM_TREEHOUSE_RETURN_GIT_OUT
+  [ -n "$head_log" ] || return 1
+  case "$head_log" in
+    /*) ;;
+    *) head_log="$worktree_path/$head_log" ;;
+  esac
+  [ ! -s "$head_log" ]
 }
 
 fm_treehouse_return_guard() {

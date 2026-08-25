@@ -188,7 +188,13 @@ fake_orca_bin() {  # <fakebin-dir>
 set -u
 case "${1:-} ${2:-}" in
   'status '*) printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
-  'worktree show') printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_ORCA_WT_PATH:?}" ;;
+  'worktree show')
+    if [ -n "${FM_ORCA_SHOW_UNRESOLVABLE:-}" ]; then
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-1"}}}\n'
+      exit 0
+    fi
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_ORCA_WT_PATH:?}"
+    ;;
   'worktree rm')
     : > "${FM_ORCA_RM_MARKER:?}"
     rm -rf "${FM_ORCA_WT_PATH:?}"
@@ -304,6 +310,36 @@ test_unborn_head_passes_through_without_refusing() {
   [ "$rc" -eq 0 ] || fail "an unborn HEAD refused a return that can lose nothing: $out"
   [ -z "$out" ] || fail "an unborn HEAD reported a rescue or refusal it never needed: $out"
   pass "an unborn HEAD passes through instead of refusing forever"
+}
+
+test_deleted_branch_ref_is_not_mistaken_for_an_unborn_head() {
+  local case_dir repo wt head out rc
+  case_dir="$TMP_ROOT/deleted-branch-ref"
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$repo"
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q "$wt" -b fm/deleted-branch
+  git -C "$wt" commit -q --allow-empty -m committed-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  # An out-of-band ref deletion git does not block the way it blocks `branch -D`
+  # on a checked-out branch. HEAD still points at the missing ref, so it looks
+  # exactly like an unborn HEAD - but the commit is real and the worktree is now
+  # the only thing naming it.
+  git -C "$repo" update-ref -d refs/heads/fm/deleted-branch
+  [ "$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{commit}' || true)" != "$head" ] \
+    || fail "fixture did not reproduce a HEAD that no longer resolves"
+
+  errexit_off
+  out=$(fm_treehouse_return_guard deleted-branch-ref "$wt" 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] \
+    || fail "a branch ref deleted out of band was treated as an unborn HEAD: $out"
+  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "a deleted branch ref did not refuse with a concrete reason"
+  pass "a branch ref deleted while checked out refuses instead of passing as unborn"
 }
 
 test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head() {
@@ -559,6 +595,47 @@ test_child_orca_stale_record_still_guards_the_removed_worktree() {
   assert_contains "$out" 'RESCUED: committed work' \
     "the id-resolved child Orca removal did not report its rescue"
   pass "a stale child Orca record still guards the worktree its id resolves to"
+}
+
+test_child_orca_unresolvable_id_refuses_instead_of_removing() {
+  local case_dir childproj live head out rc
+  case_dir=$(make_child_orca_case child-orca-unresolvable)
+  childproj="$case_dir/projects/alpha"
+  live="$case_dir/live-orca-worktree"
+  # The record's path is stale and Orca answers `worktree show` without a path,
+  # so the worktree its id would remove cannot be inspected at all - while
+  # `worktree rm` on that same id still succeeds.
+  git -C "$childproj" worktree add -q --detach "$live" HEAD
+  git -C "$live" commit -q --allow-empty -m unnamed-live-orca-work
+  head=$(git -C "$live" rev-parse HEAD)
+  fm_write_meta "$case_dir/subhome/state/child-orca.meta" \
+    'window=fm-child-orca' \
+    'endpoint_task_id=child-orca' \
+    'terminal=term-7' \
+    "worktree=$case_dir/renamed-away-orca-worktree" \
+    "project=$childproj" \
+    'backend=orca' \
+    'orca_worktree_id=wt-1' \
+    'kind=ship' \
+    'mode=local-only'
+
+  errexit_off
+  out=$(FM_ORCA_SHOW_UNRESOLVABLE=1 run_child_orca_teardown "$case_dir" "$live")
+  rc=$?
+  errexit_restore
+  [ "$rc" -eq 5 ] \
+    || fail "an unresolvable child Orca id did not refuse with the reserved status (got $rc): $out"
+  [ ! -e "$case_dir/child-orca-worktree-removed" ] \
+    || fail "an unresolvable child Orca id still asked Orca to remove a worktree: $out"
+  [ -d "$live" ] \
+    || fail "an unresolvable child Orca id deleted an uncertified worktree: $out"
+  [ "$(git -C "$live" rev-parse HEAD)" = "$head" ] \
+    || fail "the preserved Orca worktree no longer holds its unreferenced commit"
+  assert_present "$case_dir/subhome/state/child-orca.meta" \
+    "an unresolvable child Orca id removed the child task record"
+  assert_contains "$out" 'REFUSED: cannot resolve Orca worktree id' \
+    "an unresolvable child Orca id did not report why removal could not be certified"
+  pass "an unresolvable child Orca worktree id refuses instead of removing uncertified work"
 }
 
 test_child_orca_id_path_mismatch_refuses_removal() {
@@ -973,6 +1050,7 @@ test_orca_drops_a_task_branch_whose_work_is_already_contained() {
 test_broken_ref_store_still_rescues_detached_commit
 test_unborn_head_passes_through_without_refusing
 test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head
+test_deleted_branch_ref_is_not_mistaken_for_an_unborn_head
 test_pooled_guard_refusal_keeps_hooks_and_reserved_status
 test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo
 test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree
@@ -987,6 +1065,7 @@ test_orca_drops_a_task_branch_whose_work_is_already_contained
 test_child_orca_detached_commit_is_rescued_before_removal
 test_child_orca_guard_refusal_preserves_the_worktree
 test_child_orca_id_path_mismatch_refuses_removal
+test_child_orca_unresolvable_id_refuses_instead_of_removing
 test_child_orca_stale_record_still_guards_the_removed_worktree
 test_secondmate_home_return_reports_a_guard_refusal_as_one
 test_child_worktree_without_treehouse_rescues_committed_work

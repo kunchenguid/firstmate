@@ -2471,7 +2471,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_resolved child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_resolved child_orca_resolve_rc child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2535,9 +2535,14 @@ cleanup_firstmate_home_children() {
       else
         # A stale or empty worktree record still leaves Orca removing whatever
         # its id resolves to, so certify that worktree instead of skipping the
-        # guard entirely. An id Orca cannot resolve names nothing to inspect,
-        # and its removal fails on the same id.
-        child_orca_resolved=$(fm_backend_worktree_path orca "$child_orca_worktree_id" 2>/dev/null || true)
+        # guard entirely. A resolution that does not answer leaves the worktree
+        # Orca would remove uncertifiable, which is a refusal, not a pass.
+        child_orca_resolved=$(fm_backend_worktree_path orca "$child_orca_worktree_id") \
+          && child_orca_resolve_rc=0 || child_orca_resolve_rc=$?
+        if [ "$child_orca_resolve_rc" -ne 0 ]; then
+          echo "REFUSED: cannot resolve Orca worktree id $child_orca_worktree_id recorded for child $child_id, so the worktree Orca would remove cannot be certified; preserving that child's worktree and records" >&2
+          return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+        fi
         if [ -n "$child_orca_resolved" ] && [ -d "$child_orca_resolved" ]; then
           guard_child_worktree_removal "$child_id" "$child_orca_resolved" "child Orca worktree" || return $?
         fi
