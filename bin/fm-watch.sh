@@ -407,7 +407,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress progress_epoch progress_seq extra tab reason
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -444,14 +444,27 @@ EOF
     [ "$age" -ge "$threshold" ] || continue
     progress=
     if [ -f "$home/state/.watch-delivery-progress" ] && [ ! -L "$home/state/.watch-delivery-progress" ]; then
-      progress=$(cat "$home/state/.watch-delivery-progress" 2>/dev/null || true)
+      progress=$(awk -F '\t' '
+        NR == 1 && NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { value = $1 "\t" $2 }
+        END { if (NR == 1) print value }
+      ' "$home/state/.watch-delivery-progress" 2>/dev/null || true)
     fi
-    case "$progress" in
+    tab=$(printf '\t')
+    IFS="$tab" read -r progress_epoch progress_seq extra <<EOF
+$progress
+EOF
+    case "$progress_epoch" in
       ''|*[!0-9]*) ;;
       *)
-        if [ "$progress" -ge "$epoch" ] && [ "$progress" -le "$now" ]; then
-          continue
-        fi
+        case "$progress_seq" in
+          ''|*[!0-9]*) ;;
+          *)
+            if [ -z "$extra" ] && [ "$progress_epoch" -le "$now" ] \
+              && [ "$progress_epoch" -ge "$epoch" ] && [ "$progress_seq" -ge "$seq" ]; then
+              continue
+            fi
+            ;;
+        esac
         ;;
     esac
     row_key="$epoch-$seq"

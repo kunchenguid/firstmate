@@ -319,7 +319,7 @@ SH
 }
 
 test_secondmate_stall_follows_actionable_handoff_progress() {
-  local dir state sub fakebin transitionbin now aged handoff oldest i
+  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready
   dir=$(make_case secondmate-stall-handoff)
   state="$dir/state"
   sub="$dir/secondmate"
@@ -354,7 +354,7 @@ SH
   chmod +x "$transitionbin/date"
 
   PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$handoff" \
-    bash -c '. "$1"; FM_WATCH_DELIVERY_PID=$$; FM_WATCH_DELIVERY_IDENTITY=fixture; wake "check: sustained handoff"' \
+    bash -c '. "$1"; wake "check: sustained handoff"' \
     _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/handoff.out" \
     || fail "the actionable handoff boundary failed"
   grep -Fx 'check: sustained handoff' "$dir/handoff.out" >/dev/null \
@@ -395,7 +395,46 @@ SH
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/abandoned.out" 2> "$dir/abandoned.err" || true
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/abandoned.out" >/dev/null \
     || fail "an abandoned foreign queue lost its stall notification: $(cat "$dir/abandoned.out"); err=$(cat "$dir/abandoned.err")"
-  pass "foreign queue stalls distinguish actionable handoff from no progress"
+
+  : > "$sub/state/.wake-queue"
+  same=$((now - 500))
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check before "check: before same-second handoff"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the pre-handoff same-second append failed"
+  holder_ready="$dir/ledger-ready"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.watch-deliveries.lock"; : > "$2"; sleep 2; fm_lock_release "$STATE/.watch-deliveries.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$holder_ready" &
+  holder_pid=$!
+  while [ ! -e "$holder_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; FM_WATCH_DELIVERY_PID=$$; FM_WATCH_DELIVERY_IDENTITY=fixture; wake "check: locked-ledger handoff"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/locked-handoff.out" \
+    || fail "the handoff failed while its diagnostic ledger was locked"
+  wait "$holder_pid" || fail "the diagnostic-ledger lock holder failed"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check after "check: after same-second handoff"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the post-handoff same-second append failed"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/pre-handoff.out" 2> "$dir/pre-handoff.err" || true
+  ! grep -F 'secondmate wake-loop stalled: mate=mate row=11' "$dir/pre-handoff.out" >/dev/null \
+    || fail "a row preceding a same-second handoff alerted despite progress: $(cat "$dir/pre-handoff.out")"
+  tail -n +2 "$sub/state/.wake-queue" > "$sub/state/.wake-queue.next"
+  mv "$sub/state/.wake-queue.next" "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/post-handoff.out" 2> "$dir/post-handoff.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=12' "$dir/post-handoff.out" >/dev/null \
+    || fail "a row following a same-second handoff was blinded: $(cat "$dir/post-handoff.out"); err=$(cat "$dir/post-handoff.err")"
+  pass "foreign queue stalls distinguish causal handoffs from same-second appends"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {

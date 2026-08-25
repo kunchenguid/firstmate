@@ -28,6 +28,7 @@ FM_WATCH_DELIVERY_IDENTITY=
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 WATCH_DELIVERY_PROGRESS="$STATE/.watch-delivery-progress"
+WATCH_DELIVERY_PROGRESS_LOCK="$STATE/.watch-delivery-progress.lock"
 WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
 WATCH_DELIVERY_KEEP_LINES=${FM_WATCH_DELIVERY_KEEP_LINES:-64}
 case "$WATCH_DELIVERY_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_DELIVERY_MAX_BYTES=65536 ;; esac
@@ -41,21 +42,57 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+watch_delivery_progress_watermark() {
+  local watermark
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  watermark=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  case "$watermark" in ''|*[!0-9]*) watermark=0 ;; esac
+  printf '%s\n' "$watermark"
+}
+
 watch_delivery_progress_publish() {
-  local transition previous tmp
-  transition=$(date +%s 2>/dev/null) || return 0
-  case "$transition" in ''|*[!0-9]*) return 0 ;; esac
-  if [ -f "$WATCH_DELIVERY_PROGRESS" ] && [ ! -L "$WATCH_DELIVERY_PROGRESS" ]; then
-    previous=$(cat "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
-    case "$previous" in
-      ''|*[!0-9]*) ;;
-      *) [ "$previous" -le "$transition" ] || transition=$previous ;;
-    esac
+  local watermark=$1 transition previous previous_transition previous_watermark extra tab tmp status=0
+  case "$watermark" in ''|*[!0-9]*) return 1 ;; esac
+  transition=$(date +%s 2>/dev/null) || return 1
+  case "$transition" in ''|*[!0-9]*) return 1 ;; esac
+  fm_lock_acquire_wait "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+  previous=$(awk -F '\t' '
+    NR == 1 && NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { value = $1 "\t" $2 }
+    END { if (NR == 1) print value }
+  ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
+  tab=$(printf '\t')
+  IFS="$tab" read -r previous_transition previous_watermark extra <<EOF
+$previous
+EOF
+  case "$previous_transition" in
+    ''|*[!0-9]*) ;;
+    *)
+      case "$previous_watermark" in
+        ''|*[!0-9]*) ;;
+        *)
+          if [ -z "$extra" ]; then
+            if [ "$previous_transition" -gt "$transition" ]; then
+              transition=$previous_transition
+            fi
+            if [ "$previous_watermark" -gt "$watermark" ]; then
+              watermark=$previous_watermark
+            fi
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || status=1
+  if [ "$status" -eq 0 ]; then
+    printf '%s\t%s\n' "$transition" "$watermark" > "$tmp" || status=1
   fi
-  tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || return 0
-  if ! printf '%s\n' "$transition" > "$tmp" || ! mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null; then
-    rm -f -- "$tmp" 2>/dev/null || true
+  if [ "$status" -eq 0 ]; then
+    mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || status=1
   fi
+  [ "$status" -eq 0 ] || rm -f -- "${tmp:-}" 2>/dev/null || true
+  fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+  return "$status"
 }
 
 watch_delivery_publish() {
@@ -68,7 +105,6 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
-  watch_delivery_progress_publish
   printf '%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
     "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
@@ -105,18 +141,27 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0
+  local output_status=0 progress_watermark
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  progress_watermark=$(watch_delivery_progress_watermark) || {
+    printf 'fm-watch: could not capture actionable wake progress.\n' >&2
+    exit 1
+  }
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
   if echo "$1"; then
-    output_status=0
-    watch_delivery_publish "$1" || true
-    # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
-    FM_WATCH_DELIVERED_REASON=$1
+    if watch_delivery_progress_publish "$progress_watermark"; then
+      output_status=0
+      watch_delivery_publish "$1" || true
+      # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
+      FM_WATCH_DELIVERED_REASON=$1
+    else
+      printf 'fm-watch: could not publish actionable wake progress.\n' >&2
+      output_status=1
+    fi
   else
     output_status=1
   fi
