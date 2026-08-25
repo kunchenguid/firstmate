@@ -2816,7 +2816,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|dialog|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then

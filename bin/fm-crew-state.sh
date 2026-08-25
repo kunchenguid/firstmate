@@ -749,6 +749,10 @@ fi
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
+  COMPOSER_STATE=$(fm_backend_composer_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null)
+  if [ "$COMPOSER_STATE" = dialog ]; then
+    emit blocked pane "modal dialog"
+  fi
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;

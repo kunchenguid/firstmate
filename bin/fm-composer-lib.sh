@@ -571,7 +571,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
 #                or `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
-# Prints exactly one verdict: empty | pending | pending-unproven | unknown,
+# Prints exactly one verdict: empty | pending | pending-unproven | dialog | unknown,
 # or the internal sentinel `need-identity` when caps declare identity=1, no
 # identity result was supplied, and the verdict depends on it. Adapters answer
 # `need-identity` by running their identity probe once and re-calling with
@@ -893,28 +893,35 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
 }
 
 # _fm_composer_classify_rows: shared multi-row container verdict for the box
-# and separated shapes: pending beats empty, an unreadable row is unknown, and
-# geometry ambiguity turns pending into pending-unproven and empty into
-# unknown (an ambiguous container is not positive proof).
+# and separated shapes: multiple pending rows without a prompt glyph read
+# dialog (a modal safety interlock), pending beats empty, an unreadable row is
+# unknown, and geometry ambiguity turns pending into pending-unproven and empty
+# into unknown (an ambiguous container is not positive proof).
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
-  local row raw content plain state unknown_seen=0
+  local row raw content plain state unknown_seen=0 pending_count=0 prompt_seen=0 glyph=''
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     plain=$(_fm_composer_row_content "$raw" 0)
+    if fm_composer_leading_prompt_glyph_var glyph "$content"; then prompt_seen=1; fi
     state=$(fm_composer_classify_content 1 "$content" \
       "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
     case "$state" in
-      pending)
-        if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
-        return 0
-        ;;
+      pending) pending_count=$((pending_count + 1)) ;;
       unknown) unknown_seen=1 ;;
     esac
     row=$((row + 1))
   done
+  if [ "$prompt_seen" = 0 ] && [ "$pending_count" -gt 1 ]; then
+    printf 'dialog'
+    return 0
+  fi
+  if [ "$pending_count" -gt 0 ]; then
+    if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
+    return 0
+  fi
   if [ "$unknown_seen" = 1 ] || [ "$ambiguous" = 1 ]; then
     printf 'unknown'
   else

@@ -118,10 +118,15 @@ case "${1:-}" in
     case "$fmt" in
       '#{pane_tty}') printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/fm-no-such-tty}" ;;
       '#{pane_current_command}') printf '%s\n' "${FM_FAKE_PANE_COMMAND:-%1}" ;;
+      '#{cursor_y}') printf '1\n' ;;
       *) printf '%%1\n' ;;
     esac ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    if [ "${FM_FAKE_TMUX_DIALOG:-0}" = 1 ]; then
+      printf '╭─────────────────╮\n│ dialog text     │\n│ 1. yes 2. no    │\n╰─────────────────╯\n'
+      exit 0
+    fi
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -848,6 +853,22 @@ test_no_run_busy_pane() {
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
   pass "no run + a busy semantic record reads working, attributed to its source"
+}
+
+test_no_run_dialog_pane() {
+  reset_fakes
+  local d; d=$(new_case dialog-pane)
+  make_repo_on_branch "$d/wt" fm/feat-d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  # The dialog overrides any busy record, but let's test without one first.
+  local out; out=$(FM_FAKE_TMUX_DIALOG=1 run_crew_state "$d" feat-d)
+  assert_contains "$out" "state: blocked" "dialog returns blocked"
+  assert_contains "$out" "source: pane" "dialog returns pane source"
+  assert_contains "$out" "modal dialog" "dialog detail"
+  pass "no run + a modal dialog pane reads blocked"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -1755,6 +1776,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_dialog_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
