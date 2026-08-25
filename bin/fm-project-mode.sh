@@ -34,7 +34,7 @@
 # --list-paths is the only bulk operation and exposes the resolved pairs to callers.
 # --entry and --child-entry keep registry serialization inside this format owner.
 # Every registry entry is validated before any result is returned, including
-# duplicate identifiers and two identifiers resolving to the same path.
+# duplicate identifiers and two identifiers resolving to the same clone.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -265,8 +265,13 @@ resolve_declared_path() {
 }
 
 path_key() {
-  local path=$1 component out old_ifs
+  local path=$1 component out old_ifs git_root
   if [ -d "$path" ]; then
+    git_root=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$git_root" ]; then
+      (cd "$git_root" && pwd -P)
+      return
+    fi
     (cd "$path" && pwd -P)
     return
   fi
@@ -335,7 +340,7 @@ load_registry() {
     fi
     key=$(path_key "$path")
     if [[ ${PROJECT_PATH_OWNERS[$key]+present} ]]; then
-      echo "error: projects '${PROJECT_PATH_OWNERS[$key]}' and '$id' resolve to the same path '$path'" >&2
+      echo "error: projects '${PROJECT_PATH_OWNERS[$key]}' and '$id' resolve to the same clone '$key'" >&2
       return 1
     fi
     index=${#PROJECT_IDS[@]}

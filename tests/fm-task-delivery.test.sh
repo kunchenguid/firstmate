@@ -353,7 +353,7 @@ EOF
 # Path lookup is identifier-only, never a filesystem search, and the registry
 # cannot contain malformed path variants or two identifiers for one clone.
 test_project_mode_rejects_ambiguous_and_duplicate_paths() {
-  local home err status
+  local home out err status
   home="$TMP_ROOT/project-path-validation/home"
   mkdir -p "$home/data" "$home/projects/ambiguous"
 
@@ -366,7 +366,29 @@ EOF
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "two identifiers resolving to one path were accepted"
-  assert_contains "$err" 'same path' "duplicate resolved paths did not fail visibly"
+  assert_contains "$err" 'same clone' "duplicate resolved paths did not fail visibly"
+
+  mkdir -p "$home/git-clone/subdir"
+  git -C "$home/git-clone" init -q
+  cat > "$home/data/projects.md" <<EOF
+- root [direct-PR] - fixture (added 2026-01-01) [path=$home/git-clone]
+- nested [direct-PR] - fixture (added 2026-01-01) [path=$home/git-clone/subdir]
+EOF
+  set +e
+  err=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --list-paths 2>&1 >/dev/null)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a Git root and its subdirectory were accepted as separate clones"
+  assert_contains "$err" 'same clone' "shared Git top-level identity did not fail visibly"
+
+  mkdir -p "$home/non-git/subdir"
+  cat > "$home/data/projects.md" <<EOF
+- root [direct-PR] - fixture (added 2026-01-01) [path=$home/non-git]
+- nested [direct-PR] - fixture (added 2026-01-01) [path=$home/non-git/subdir]
+EOF
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-path-validation/home-dir" "$PROJECT_MODE" --list-paths)
+  assert_contains "$out" $'root\t'"$home/non-git" "non-Git root path lost its physical identity"
+  assert_contains "$out" $'nested\t'"$home/non-git/subdir" "non-Git nested path lost its physical identity"
 
   cat > "$home/data/projects.md" <<'EOF'
 - alpha [direct-PR] - fixture (added 2026-01-01) [path=shared]
