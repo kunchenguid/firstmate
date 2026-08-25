@@ -17,8 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
 
 DRAIN_TMP=
+DRAIN_VIEW_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
@@ -29,6 +32,112 @@ ACK_THROUGH=
 ACK_GENERATION=
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+
+# --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
+# main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
+# - the same actor identity fm-send.sh/fm-control.sh/fm-teardown.sh already use)
+# claims every row not already granted to branch, then drains and acks only
+# that claimed set. branch (FM_SUPERVISION_ACTOR=branch, injected
+# deterministically by the Pi branch extension's bash tool - never agent
+# memory) drains and acks only the row set the extension granted to it.
+# .pi/extensions/lib/fm-branch-dispatch.ts is the single owner of that
+# eligibility classification (which signal/stale rows resolve to a known
+# project, and the existing all-unread-rows-safe rule for a heartbeat); this
+# script never reclassifies a row itself, it only consumes the extension's
+# already-computed verdict. The extension writes the exact eligible sequence
+# numbers to ELIGIBLE_ROWS_FILE under the queue lock, immediately before every
+# branch prompt, so the file is always fresh for the one wake that prompt is about to
+# handle (the branch drains and acks exactly once per prompt, serialized by
+# its own branchChain, before the next wake can overwrite the file).
+# A row whose sequence number is not in that file is left completely
+# untouched by a branch-actor drain or ack, no matter its sequence number
+# relative to what the branch presents or consumes - that per-row scoping,
+# not a cutoff comparison, is what makes a mixed main-only + task-local queue
+# safe to split: the branch's ack can never remove a row it was not granted,
+# so it can never swallow a main-owned row still waiting for main.
+ACTOR=$(fm_lease_actor) || exit 2
+ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
+ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
+MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
+
+rows_file_valid() {
+  [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
+}
+
+branch_grant_live_locked() {
+  local version pid identity generation current
+  [ -f "$ELIGIBLE_OWNER_FILE" ] && [ ! -L "$ELIGIBLE_OWNER_FILE" ] || return 1
+  exec 8< "$ELIGIBLE_OWNER_FILE" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r pid <&8 || { exec 8<&-; return 1; }
+  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
+  IFS= read -r generation <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
+  exec 8<&-
+  [ "$version" = fm-branch-eligible-owner-v1 ] || return 1
+  case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
+  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] && [ "$current" = "$identity" ]
+}
+
+reclaim_stale_branch_grant_locked() {
+  [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
+  if ! rows_file_valid "$ELIGIBLE_ROWS_FILE" || ! branch_grant_live_locked; then
+    rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"
+  fi
+}
+
+write_rows_file_locked() { # <target> <source>
+  local target=$1 source=$2
+  if [ ! -s "$source" ]; then
+    rm -f -- "$target"
+    return
+  fi
+  chmod 0600 "$source" || return 1
+  _fm_atomic_replace "$source" "$target"
+}
+
+claim_main_rows_locked() {
+  DRAIN_TMP=$(mktemp "$STATE/.main-eligible-rows.tmp.XXXXXX") || return 1
+  awk -F '\t' -v branch="$ELIGIBLE_ROWS_FILE" -v main="$MAIN_ROWS_FILE" '
+    BEGIN {
+      while ((getline line < branch) > 0) reserved[line]=1
+      while ((getline line < main) > 0) owned[line]=1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ {
+      present[$2]=1
+      if (!($2 in reserved)) owned[$2]=1
+    }
+    END { for (seq in owned) if (seq in present) print seq }
+  ' "$FM_WAKE_QUEUE" | LC_ALL=C sort -n > "$DRAIN_TMP" || return 1
+  write_rows_file_locked "$MAIN_ROWS_FILE" "$DRAIN_TMP" || return 1
+  DRAIN_TMP=
+}
+
+consume_actor_rows_locked() { # <rows-file> <cutoff>
+  local rows=$1 cutoff=$2
+  if [ ! -e "$rows" ] && [ ! -L "$rows" ]; then
+    return 0
+  fi
+  DRAIN_TMP=$(mktemp "$STATE/.wake-rows.consume.XXXXXX") || return 1
+  awk -v cutoff="$cutoff" '$1 ~ /^[0-9]+$/ && $1 > cutoff { print $1 }' "$rows" > "$DRAIN_TMP" || return 1
+  write_rows_file_locked "$rows" "$DRAIN_TMP" || return 1
+  DRAIN_TMP=
+}
+
+# A branch-actor drain or ack requires a snapshot to already exist and name at
+# least one row. The extension always writes a non-empty snapshot before it
+# ever prompts the branch (an empty eligible set means no prompt at all), so a
+# missing or empty file here means this ran outside that handoff - a wiring
+# bug, never "nothing eligible" - and must fail loudly rather than silently
+# draining or acking nothing.
+require_branch_eligible_rows() {
+  rows_file_valid "$ELIGIBLE_ROWS_FILE" || {
+    echo "wake drain: no branch-eligible row snapshot at $ELIGIBLE_ROWS_FILE; refusing to guess what this actor may consume" >&2
+    return 1
+  }
+}
 
 case "${1:-}" in
   '') ;;
@@ -43,6 +152,8 @@ case "${1:-}" in
     ;;
   *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
+
+[ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -63,12 +174,13 @@ assert_watcher_liveness() {
 # turn has completed and before this acknowledgement consumes its queue rows.
 # The helper ignores non-presentation and legacy keys, so this is a narrow
 # receipt path rather than a second interpretation of general check wakes.
-inactive_outcome_fingerprints() { # <sequence> <key-prefix>
-  local cutoff=$1 prefix=$2 epoch seq kind key payload
+inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
+  local cutoff=$1 prefix=$2 rows=${3:-} epoch seq kind key payload
   while IFS=$(printf '\t') read -r epoch seq kind key payload; do
     [ "$kind" = check ] || continue
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     [ "$seq" -le "$cutoff" ] || continue
+    if [ -n "$rows" ] && ! grep -qxF "$seq" "$rows"; then continue; fi
     case "$key" in
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
@@ -268,6 +380,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
 cleanup() {
   local status=$?
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
+  [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -280,10 +393,35 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
+reclaim_stale_branch_grant_locked || exit 1
+[ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then
-  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
-  ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
+  if [ "$ACTOR" = main ]; then
+    # Preserve main's original whole-cutoff acknowledgement contract: rows may
+    # arrive after presentation but before the printed ack runs, and a direct
+    # or replayed main ack still owns every unreserved row through its cutoff.
+    # Claim again under the queue lock so those rows cannot be stranded merely
+    # because they were not present during the earlier drain. A live branch
+    # grant remains excluded by claim_main_rows_locked.
+    claim_main_rows_locked || exit 1
+  fi
+  if [ "$ACTOR" = branch ]; then
+    # check-kind rows (inactive-outcome receipts, secondmate stall markers)
+    # are never in a branch's eligible snapshot - they are main-only by
+    # construction (docs/pi-supervision-branch.md) - so a branch-actor ack
+    # never removes one and these scans would find nothing relevant anyway.
+    ACK_FINGERPRINTS=
+    ACK_NOTICE_FINGERPRINTS=
+  else
+    if { [ -e "$MAIN_ROWS_FILE" ] || [ -L "$MAIN_ROWS_FILE" ]; } \
+      && ! rows_file_valid "$MAIN_ROWS_FILE"; then
+      echo "wake drain: main acknowledgement has an invalid presented-row claim" >&2
+      exit 1
+    fi
+    ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:' "$MAIN_ROWS_FILE") || exit 1
+    ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:' "$MAIN_ROWS_FILE") || exit 1
+  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
@@ -295,13 +433,25 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_LOCK_HELD=true
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
-  awk -F '\t' -v cutoff="$ACK_THROUGH" '
-    NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
-  ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
-  fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" || {
-    echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
-    exit 1
-  }
+  if [ "$ACTOR" = branch ]; then
+    require_branch_eligible_rows || exit 1
+    # Delete a row only when its sequence is <= cutoff AND it is named in the
+    # extension's eligible snapshot; every other row - including one whose
+    # sequence is below cutoff but not in the snapshot - is kept untouched.
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" '
+      BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
+    ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+  else
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" '
+      BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
+    ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+    fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
+      echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
+      exit 1
+    }
+  fi
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
@@ -325,6 +475,11 @@ if [ -n "$ACK_THROUGH" ]; then
     exit 1
   fi
   DRAIN_TMP=
+  if [ "$ACTOR" = branch ]; then
+    consume_actor_rows_locked "$ELIGIBLE_ROWS_FILE" "$ACK_THROUGH" || exit 1
+  else
+    consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
+  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
@@ -359,6 +514,20 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   exit 0
 fi
 
+if [ "$ACTOR" = main ]; then
+  if [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ]; then
+    require_branch_eligible_rows || exit 1
+  fi
+  claim_main_rows_locked || exit 1
+  if [ ! -s "$MAIN_ROWS_FILE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    DRAIN_LOCK_HELD=false
+    (print_status_presentation) || true
+    assert_watcher_liveness
+    exit 0
+  fi
+fi
+
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 if [ -z "$RECOVERY_MARKER_TOKEN" ]; then
@@ -382,8 +551,20 @@ fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
 }
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 
-RAW_ROWS=$(fm_wake_print_deduped "$FM_WAKE_QUEUE") || exit "$?"
-ACK_THROUGH=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_QUEUE") || exit 1
+DRAIN_VIEW_TMP=$(mktemp "$STATE/.wake-queue.actor-view.XXXXXX") || exit 1
+if [ "$ACTOR" = branch ]; then
+  ACTOR_ROWS_FILE=$ELIGIBLE_ROWS_FILE
+else
+  ACTOR_ROWS_FILE=$MAIN_ROWS_FILE
+fi
+awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
+  BEGIN { while ((getline line < seqs) > 0) keep[line]=1 }
+  NF >= 5 && ($2 in keep)
+' "$FM_WAKE_QUEUE" > "$DRAIN_VIEW_TMP" || exit 1
+RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
+rm -f -- "$DRAIN_VIEW_TMP" || exit 1
+DRAIN_VIEW_TMP=
+ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;

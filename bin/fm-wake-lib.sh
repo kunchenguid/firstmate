@@ -1220,8 +1220,8 @@ fm_wake_secondmate_stall_receipt_write() { # <task> <row-key>
   fi
 }
 
-fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff>
-  local cutoff=$1 key seq rest epoch task row_key
+fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
+  local cutoff=$1 rows=${2:-} key seq rest epoch task row_key
   while IFS= read -r key; do
     seq=${key##*-}
     rest=${key%-*}
@@ -1233,8 +1233,10 @@ fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff>
     case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
     row_key="$epoch-$seq"
     fm_wake_secondmate_stall_receipt_write "$task" "$row_key" || return 1
-  done < <(awk -F '\t' -v cutoff="$cutoff" '
-    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && $3 == "check" \
+  done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+      && (rows == "" || ($2 in owned)) && $3 == "check" \
       && $4 ~ /^secondmate-wake-loop-[A-Za-z0-9._-]+-[0-9]+-[0-9]+$/ { print $4 }
   ' "$FM_WAKE_QUEUE" 2>/dev/null)
 }
