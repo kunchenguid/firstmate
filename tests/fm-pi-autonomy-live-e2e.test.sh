@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 if [ "${FM_PI_AUTONOMY_LIVE_E2E:-0}" != 1 ]; then
@@ -15,15 +16,15 @@ PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-ag
 [ -f "$PI_PACKAGE_DIR/dist/index.js" ] || fail "Pi package absent at $PI_PACKAGE_DIR"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-autonomy-live)
-PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
-ROOT="$ROOT" \
-MODULE="$ROOT/.pi/extensions/lib/fm-autonomy.ts" \
-CORPUS="$ROOT/tests/fixtures/fm-autonomy-heldout.json" \
-PROMPT_SCRIPT="$ROOT/bin/fm-autonomy-prompt.sh" \
-SESSION_DIR="$TMP_ROOT/sessions" \
-FM_PI_AUTONOMY_LIVE_PROVIDER="$FM_PI_AUTONOMY_LIVE_PROVIDER" \
-FM_PI_AUTONOMY_LIVE_MODEL="$FM_PI_AUTONOMY_LIVE_MODEL" \
-FM_PI_AUTONOMY_CAPTURE_OUTPUT="${FM_PI_AUTONOMY_CAPTURE_OUTPUT:-}" \
+export PI_PACKAGE_DIR="$PI_PACKAGE_DIR"
+export ROOT="$ROOT"
+export MODULE="$ROOT/.pi/extensions/lib/fm-autonomy.ts"
+export CORPUS="$ROOT/tests/fixtures/fm-autonomy-heldout.json"
+export PROMPT_SCRIPT="$ROOT/bin/fm-autonomy-prompt.sh"
+export SESSION_DIR="$TMP_ROOT/sessions"
+export FM_PI_AUTONOMY_LIVE_PROVIDER="$FM_PI_AUTONOMY_LIVE_PROVIDER"
+export FM_PI_AUTONOMY_LIVE_MODEL="$FM_PI_AUTONOMY_LIVE_MODEL"
+export FM_PI_AUTONOMY_CAPTURE_OUTPUT="${FM_PI_AUTONOMY_CAPTURE_OUTPUT:-}"
 node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";

@@ -1956,7 +1956,7 @@ ${context.command}
       : context.isError
         ? (text: string) => theme.bg("toolErrorBg", text)
         : (text: string) => theme.bg("toolSuccessBg", text);
-    const shell = shellState.shell ?? new Box(1, 1, background);
+    const shell = shellState.shell ?? new Box(0, 0, background);
     shellState.shell = shell;
     shell.setBgFn(background);
     shell.clear();
@@ -1991,8 +1991,7 @@ ${context.command}
         .join("\n");
       const shellState = context.state as OutcomesToolShellState;
       shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
-      refreshOutcomesToolShell(shellState, theme, context);
-      return new Container();
+      return refreshOutcomesToolShell(shellState, theme, context);
     },
     execute: async (_toolCallId, params) => {
       const recentRaw = (params as { recent?: unknown }).recent;

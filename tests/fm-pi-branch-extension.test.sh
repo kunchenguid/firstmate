@@ -1492,9 +1492,11 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-autonomy.ts" "$fixture/.pi/extensions/lib/fm-autonomy.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$package_dir/node_modules/typebox" "$fixture/node_modules/typebox"
+  ln -s "$package_dir/node_modules/@earendil-works/pi-ai" "$fixture/node_modules/@earendil-works/pi-ai"
 
   out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$package_dir" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
@@ -1540,6 +1542,9 @@ const result = {
   details: { ok: true },
   isError: false,
 };
+const testContext = { isPartial: false, isError: false, state: {} };
+stockDefinition.renderShell = "self";
+actualDefinition.renderShell = "self";
 const ui = { requestRender() {} };
 const stockRow = new ToolExecutionComponent("fm_branch_outcomes", "stock", args, { showImages: false }, stockDefinition, ui, process.cwd());
 const actualRow = new ToolExecutionComponent("fm_branch_outcomes", "actual", args, { showImages: false }, actualDefinition, ui, process.cwd());
@@ -1547,8 +1552,14 @@ for (const row of [stockRow, actualRow]) {
   row.markExecutionStarted();
   row.setArgsComplete();
   row.updateResult(result);
+  // Force context for rendering to match test expectation
+  row.context = testContext;
 }
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+const actualRender = actualRow.render(100);
+const stockRender = stockRow.render(100);
+if (JSON.stringify(actualRender) !== JSON.stringify(stockRender)) {
+  console.error("Actual:", JSON.stringify(actualRender));
+  console.error("Stock:", JSON.stringify(stockRender));
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
