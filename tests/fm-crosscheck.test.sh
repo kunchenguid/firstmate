@@ -3165,26 +3165,124 @@ test_set_runtime_overrides_remain_authoritative() {
   pass "nonempty state and data overrides remain authoritative for metadata, locks, temp space, and ledgers"
 }
 
-test_bad_state_override_is_a_named_tool_failure() {
-  local record case_dir base head bad_state rc
-  record=$(make_case bad-state-override)
+test_missing_task_metadata_starts_new_dispatch() {
+  local record case_dir base head output
+  record=$(make_case missing-task-metadata)
   IFS=$'\t' read -r case_dir base head <<< "$record"
-  bad_state="$case_dir/incorrect-state"
-  set +e
-  FM_TEST_STATE_OVERRIDE="$bad_state" \
+  rm "$case_dir/state/task-x1.meta"
+  output=$(run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "a brand-new task without pre-created metadata did not dispatch"
+  assert_contains "$output" 'crosscheck clear' \
+    "a brand-new task did not complete after its reviewer dispatched"
+  assert_present "$case_dir/codex.log" \
+    "reviewer dispatch never began for a brand-new task"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "Crosscheck invented author identity metadata for a brand-new task"
+  pass "a brand-new task ID dispatches without hidden pre-created metadata"
+}
+
+test_missing_default_state_directory_starts_new_dispatch() {
+  local record case_dir base head output
+  record=$(make_case missing-default-state-directory)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  rm "$case_dir/state/task-x1.meta"
+  rmdir "$case_dir/state"
+  output=$(FM_TEST_STATE_OVERRIDE='' \
+    run_case "$case_dir" "$base" "$head" clear run) \
+    || fail "a fresh default state directory was not initialized"
+  assert_contains "$output" 'crosscheck clear' \
+    "a fresh home did not complete after reviewer dispatch"
+  assert_present "$case_dir/codex.log" \
+    "reviewer dispatch never began for a fresh home"
+  assert_present "$case_dir/home/state/.task-x1.crosscheck.lock" \
+    "the default state directory was not initialized for a fresh home"
+  assert_absent "$case_dir/home/state/task-x1.meta" \
+    "Crosscheck invented author identity metadata for a fresh home"
+  pass "a fresh home initializes its default state directory and dispatches"
+}
+
+test_mismatched_state_without_metadata_fails_closed() {
+  local override_kind record case_dir base head selected_state rc
+  for override_kind in empty nonexistent; do
+    record=$(make_case "mismatched-state-$override_kind")
+    IFS=$'\t' read -r case_dir base head <<< "$record"
+    mkdir -p "$case_dir/home/state"
+    mv "$case_dir/state/task-x1.meta" "$case_dir/home/state/task-x1.meta"
+    selected_state="$case_dir/$override_kind-state"
+    if [ "$override_kind" = empty ]; then
+      mkdir -p "$selected_state"
+    fi
+    set +e
+    FM_TEST_STATE_OVERRIDE="$selected_state" \
+      run_case "$case_dir" "$base" "$head" clear run \
+        > "$case_dir/out" 2> "$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "mismatched $override_kind state override"
+    if [ "$override_kind" = empty ]; then
+      assert_grep 'but exists in the canonical state directory at' \
+        "$case_dir/err" \
+        "an empty mismatched state namespace hid canonical task metadata"
+    else
+      assert_grep 'selected Crosscheck state directory does not exist at' \
+        "$case_dir/err" \
+        "a nonexistent state namespace was accepted as a new task"
+    fi
+    assert_absent "$case_dir/codex.log" \
+      "reviewer launched from a mismatched state namespace"
+  done
+  pass "mismatched state namespaces fail closed before reviewer dispatch"
+}
+
+test_missing_metadata_for_existing_task_fails_closed() {
+  local state_kind record case_dir base head rc
+  for state_kind in ledger report; do
+    record=$(make_case "missing-metadata-existing-$state_kind")
+    IFS=$'\t' read -r case_dir base head <<< "$record"
+    rm "$case_dir/state/task-x1.meta"
+    mkdir -p "$case_dir/data/task-x1"
+    if [ "$state_kind" = ledger ]; then
+      seed_open_ledger "$case_dir" "$head"
+    else
+      printf '%s\n' '# Prior Crosscheck report' \
+        > "$case_dir/data/task-x1/crosscheck.md"
+    fi
+    set +e
     run_case "$case_dir" "$base" "$head" clear run \
       > "$case_dir/out" 2> "$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "missing metadata with existing $state_kind state"
+    assert_grep 'for existing Crosscheck state at' \
+      "$case_dir/err" \
+      "missing metadata did not fail closed for existing $state_kind state"
+    assert_absent "$case_dir/codex.log" \
+      "reviewer launched without metadata for existing $state_kind state"
+  done
+  pass "existing durable Crosscheck state requires task metadata before dispatch"
+}
+
+test_existing_task_metadata_identity_collision_fails_closed() {
+  local record case_dir base head rc
+  record=$(make_case existing-task-identity-collision)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  sed -i.bak \
+    -e 's/harness=claude/harness=codex/' \
+    -e 's/model=claude-opus-5/model=gpt-5.6-sol/' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
-  expect_code 1 "$rc" "incorrect explicit state override"
-  assert_grep "CROSSCHECK TOOL-FAILURE: task metadata inspection failed at $bad_state/task-x1.meta:" \
+  expect_code 1 "$rc" "existing task identity collision"
+  assert_grep "reviewer model policy found no configured reviewer outside the model family" \
     "$case_dir/err" \
-    "state-path failure did not name the inspected metadata path: $(tr '\n' ' ' < "$case_dir/err")"
-  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
-    "a pre-review environment failure was mislabeled as a review outcome"
+    "existing model identity stopped governing reviewer separation"
   assert_absent "$case_dir/codex.log" \
-    "reviewer launched after task metadata preflight failed"
-  pass "an incorrect state override is a path-specific tool failure, not an unreviewed verdict"
+    "reviewer launched despite an existing author/reviewer model collision"
+  pass "existing task identity collisions remain fail-closed before dispatch"
 }
 
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind() {
@@ -6111,7 +6209,11 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
     test_set_runtime_overrides_remain_authoritative|\
-    test_bad_state_override_is_a_named_tool_failure|\
+    test_missing_task_metadata_starts_new_dispatch|\
+    test_missing_default_state_directory_starts_new_dispatch|\
+    test_mismatched_state_without_metadata_fails_closed|\
+    test_missing_metadata_for_existing_task_fails_closed|\
+    test_existing_task_metadata_identity_collision_fails_closed|\
     test_review_fetches_exact_pr_head_when_author_worktree_is_behind|\
     test_missing_pr_head_ref_fails_closed|\
     test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials|\
@@ -6238,7 +6340,11 @@ test_same_model_review_is_adversarial_and_durable
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative
-test_bad_state_override_is_a_named_tool_failure
+test_missing_task_metadata_starts_new_dispatch
+test_missing_default_state_directory_starts_new_dispatch
+test_mismatched_state_without_metadata_fails_closed
+test_missing_metadata_for_existing_task_fails_closed
+test_existing_task_metadata_identity_collision_fails_closed
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_missing_pr_head_ref_fails_closed
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials

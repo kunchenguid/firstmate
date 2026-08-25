@@ -2997,6 +2997,15 @@ elif effective == "terminal-error-controls":
     message["errorMessage"] = (
         "provider\x1b[31m failed\x00\x07\r\n\t" + "X" * 2000
     )
+elif effective == "terminal-error-secrets":
+    message["content"] = []
+    message["stopReason"] = "error"
+    message["errorMessage"] = (
+        "provider rejected credentials; Authorization: Bearer bearer-visible; "
+        "api_key=key-visible; token: token-visible; "
+        "secret='secret-visible'; access_token=access-visible; opaque="
+        + "Z" * 48
+    )
 print(json.dumps({"type": "turn_end", "message": message}))
 print(json.dumps({"type": "agent_end"}))
 if effective == "internal-retry":
@@ -3134,6 +3143,21 @@ assert not any(
 )
 stderr_bytes = completed.stderr.encode("utf-8")
 assert len(stderr_bytes) < 640, len(stderr_bytes)
+assert_launch(captured, account, prompt, schema, attempts=2)
+
+completed, captured, value, account, prompt, schema = run("terminal-error-secrets")
+assert completed.returncode == 125 and value is None, (
+    completed.returncode, completed.stderr, value,
+)
+assert "provider rejected credentials" in completed.stderr
+assert "[redacted]" in completed.stderr
+assert not any(
+    secret in completed.stderr
+    for secret in (
+        "bearer-visible", "key-visible", "token-visible", "secret-visible",
+        "access-visible", "Z" * 48,
+    )
+)
 assert_launch(captured, account, prompt, schema, attempts=2)
 
 for scenario in ("wrong-model", "nonzero"):

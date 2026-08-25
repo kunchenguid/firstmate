@@ -1451,7 +1451,13 @@ def git(cwd: Path, *arguments: str, timeout: float = 60) -> str:
     return result.stdout.strip()
 
 
-def parse_meta(path: Path) -> dict[str, str]:
+def parse_meta(path: Path) -> dict[str, str] | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        fail(f"task metadata inspection failed at {path}: {exc}")
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
@@ -1473,6 +1479,64 @@ def parse_meta(path: Path) -> dict[str, str]:
             f"task metadata at {path} is missing {key}",
         )
     return result
+
+
+def require_new_task_if_meta_missing(
+    meta: dict[str, str] | None,
+    state: Path,
+    default_state: Path,
+    meta_path: Path,
+    ledger_path: Path,
+    report_path: Path,
+) -> None:
+    if meta is not None:
+        return
+    try:
+        state_stat = state.stat()
+    except FileNotFoundError:
+        fail(f"selected Crosscheck state directory does not exist at {state}")
+    except OSError as exc:
+        fail(f"selected Crosscheck state directory inspection failed at {state}: {exc}")
+    require(
+        stat.S_ISDIR(state_stat.st_mode),
+        f"selected Crosscheck state path is not a directory at {state}",
+    )
+    try:
+        uses_default_state = os.path.samefile(state, default_state)
+    except FileNotFoundError:
+        uses_default_state = False
+    except OSError as exc:
+        fail(f"Crosscheck state directory comparison failed: {exc}")
+    if not uses_default_state:
+        default_meta_path = default_state / meta_path.name
+        try:
+            default_meta_path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            fail(
+                "canonical task metadata inspection failed at "
+                f"{default_meta_path}: {exc}"
+            )
+        else:
+            fail(
+                f"task metadata is missing at {meta_path}, but exists in the "
+                f"canonical state directory at {default_meta_path}"
+            )
+    durable_paths = []
+    for path in (ledger_path, report_path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            fail(f"durable task state inspection failed at {path}: {exc}")
+        durable_paths.append(path)
+    if durable_paths:
+        fail(
+            f"task metadata is missing at {meta_path} for existing Crosscheck "
+            f"state at {durable_paths[0]}"
+        )
 
 
 def github_snapshot(root: Path, url: str) -> dict[str, Any]:
@@ -3661,7 +3725,7 @@ def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
 
 def reviewer_candidates(
     home: Path,
-    meta: dict[str, str],
+    meta: dict[str, str] | None,
 ) -> list[dict[str, str]]:
     """Return every policy-eligible reviewer in configured order.
 
@@ -3677,7 +3741,8 @@ def reviewer_candidates(
     # review this requirement exists to prevent (cc-4dcd7873f71a). The durable
     # ledger marker keeps its `same-model` spelling, which older records
     # already carry; it now means "shares the author's model family".
-    author_family = model_family(meta["model"])
+    author_model = meta["model"] if meta is not None else ""
+    author_family = model_family(author_model)
     eligible: list[dict[str, str]] = []
     for roster_entry in validated:
         reviewer = dict(roster_entry)
@@ -3690,7 +3755,7 @@ def reviewer_candidates(
         return eligible
     fail(
         "reviewer model policy found no configured reviewer outside the model "
-        f"family of {meta['model']!r}"
+        f"family of {author_model!r}"
     )
 
 
@@ -6122,17 +6187,27 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
     # the recorded `total` covers everything the caller waits for, including
     # the unattributed gaps between the named phases.
     timer = PhaseTimer()
-    state = Path(environment_value("FM_STATE_OVERRIDE", str(home / "state")))
+    default_state = home / "state"
+    state = Path(environment_value("FM_STATE_OVERRIDE", str(default_state)))
     azure_adapter = load_azure_crosscheck_adapter(root)
     use_azure = azure_adapter.azure_review_enabled(home)
     data = Path(environment_value("FM_DATA_OVERRIDE", str(home / "data")))
-    with timer.phase("snapshot"):
-        try:
-            meta = parse_meta(state / f"{task_id}.meta")
-        except CrosscheckError as exc:
-            tool_fail(str(exc))
+    meta_path = state / f"{task_id}.meta"
     ledger_path = data / task_id / "crosscheck-ledger.json"
     report_path = data / task_id / "crosscheck.md"
+    with timer.phase("snapshot"):
+        try:
+            meta = parse_meta(meta_path)
+            require_new_task_if_meta_missing(
+                meta,
+                state,
+                default_state,
+                meta_path,
+                ledger_path,
+                report_path,
+            )
+        except CrosscheckError as exc:
+            tool_fail(str(exc))
     with timer.phase("snapshot"):
         try:
             snapshot_value = github_snapshot(root, url)
@@ -6975,6 +7050,35 @@ def main() -> int:
         if args.command == "economics":
             # Read-only, outside the task lock like timings.
             return economics_crosscheck(home, args.task_id)
+        if args.command == "run":
+            try:
+                selected_state_stat = state.stat()
+            except FileNotFoundError:
+                default_state = home / "state"
+                try:
+                    selected_is_default = state.resolve(strict=False) == (
+                        default_state.resolve(strict=False)
+                    )
+                except (OSError, RuntimeError) as exc:
+                    tool_fail(
+                        "selected Crosscheck state directory comparison failed: "
+                        f"{exc}"
+                    )
+                if not selected_is_default:
+                    tool_fail(
+                        "selected Crosscheck state directory does not exist at "
+                        f"{state}"
+                    )
+            except OSError as exc:
+                tool_fail(
+                    "selected Crosscheck state directory inspection failed at "
+                    f"{state}: {exc}"
+                )
+            else:
+                if not stat.S_ISDIR(selected_state_stat.st_mode):
+                    tool_fail(
+                        f"selected Crosscheck state path is not a directory at {state}"
+                    )
         state.mkdir(parents=True, exist_ok=True)
         lock_path = state / f".{args.task_id}.crosscheck.lock"
         with lock_path.open("a+", encoding="utf-8") as lock:

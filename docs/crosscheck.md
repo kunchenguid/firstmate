@@ -87,9 +87,9 @@ The regular-lane reviewer record binds `review_depth_passes: "2"`, `review_depth
 Successful current-contract `clear` and `blocking` records, including reusable records, fail validation when any of those fields is missing or contradictory.
 Failed `tool-failure`, `unreviewed`, and `cannot-certify` attempts may omit terminal and depth evidence they never earned, so their ledgers remain reloadable for a later retry; they are never reusable.
 Crosscheck accepts exactly one verdict tool call from each successful pass and preserves usage across Pi auto-retries.
-If an otherwise completed pass makes zero, multiple, or malformed verdict calls, the same isolated reviewer session receives one fixed verdict-only repair prompt and retains the exact-head packet plus that pass's reasoning without repeating the review.
+If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral minimal-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
 The repair is attempted once per pass, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
-Provider terminal-error diagnostics are whitespace-normalized, stripped of non-printable characters, and limited to 512 characters before they reach operator-visible failure output.
+Provider terminal-error diagnostics have credential-shaped values redacted, are whitespace-normalized and stripped of non-printable characters, and are limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
@@ -133,6 +133,13 @@ The reviewer is a real policy-grade agent invocation and normally takes minutes,
 ```sh
 bin/fm-crosscheck.sh run <task-id> <https://github.com/owner/repo/pull/number>
 ```
+
+A brand-new task ID does not need a pre-created `state/<task-id>.meta` file.
+On a fresh `FM_HOME`, Crosscheck creates the default `state/` directory; an explicitly selected nonexistent state override still fails closed.
+Metadata-free dispatch is allowed only when that task ID has neither an existing Crosscheck ledger nor report.
+In that case, Crosscheck starts with no recorded author model and dispatches the configured reviewer roster normally.
+Existing durable Crosscheck state plus missing metadata fails closed before reviewer dispatch.
+When metadata exists, its author harness/model identity remains authoritative: unreadable, malformed, duplicate, blank, or model-colliding metadata still fails closed.
 
 The run writes `data/<task-id>/crosscheck-ledger.json` and the readable `data/<task-id>/crosscheck.md` report.
 The run exits zero only when the exact head has a complete review, the reviewer supplied a successfully gate-reexecuted exact-base/exact-head reproduction, the durable ledger has no active blocker, and the reviewer returned no unreproduced suspicion.

@@ -103,7 +103,7 @@ Reporting the historical Fast selector or another route fails before a verdict c
 Pi's explicit `auto_retry_start` may open a continuation only after a completed attempt executed a turn and did not stop successfully.
 The continuation resets attempt-local terminal and verdict state, preserves aggregate usage for economics, and must execute its own turn before completing.
 The bounded verdict-repair contract owned by [`docs/crosscheck.md`](crosscheck.md) applies unchanged inside the isolated model compartment.
-The prompt is passed by `@file`, Pi starts with `--offline`, and a deterministic session identifier enables Fireworks session affinity without persisting a Pi conversation.
+The prompt is passed by `@file`, and every Pi attempt starts with `--offline` in a fresh ephemeral session with no persisted conversation.
 The stable system prompt and byte-stable verdict tool schema precede all untrusted pull-request material.
 The guest returns input, output, cache-read, cache-write, turn, and Pi-calculated cost data from the complete event stream when available.
 The host records those values, recomputes declared regular-lane cost, keeps provider-reported cost separate, and adds reviewer latency before publishing the run.

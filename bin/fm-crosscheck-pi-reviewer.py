@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -23,10 +24,21 @@ class VerdictProtocolError(ReviewError):
         self.telemetry = telemetry
 
 
+TOKEN_LIKE = re.compile(r"[A-Za-z0-9_-]{40,}")
+BEARER_CREDENTIAL = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+LABELED_CREDENTIAL = re.compile(
+    r"(?i)(\b(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|secret|token)"
+    r"\b[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
+)
+
+
 def provider_error_diagnostic(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = " ".join(value.split())
+    redacted = LABELED_CREDENTIAL.sub(r"\1[redacted]", value)
+    redacted = BEARER_CREDENTIAL.sub("Bearer [redacted]", redacted)
+    redacted = TOKEN_LIKE.sub("[redacted]", redacted)
+    normalized = " ".join(redacted.split())
     printable = "".join(
         character for character in normalized if character.isprintable()
     )
