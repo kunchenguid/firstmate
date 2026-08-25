@@ -51,6 +51,7 @@
 475500	tests/fm-checkout-refresh.test.sh
 336	tests/fm-checkout-return-boundary.test.sh
 1000	tests/fm-cloud-state.test.sh
+5000	tests/fm-cloud-result.test.sh
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
 4000	tests/fm-credential-expiry.test.sh

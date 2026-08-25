@@ -4661,7 +4661,23 @@ spawn_cloud_persist_convergence_artifacts() {
       exit 1
     }
     if [ -f "$DATA/$ID/brief.md" ]; then
-      cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+      if [ "$KIND" = secondmate ]; then
+        cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+      else
+        # The generated brief names the task home's authorized report, visual,
+        # and status paths. Those host paths do not exist on a worker. Rewrite
+        # only the exact task-home prefix into the fixed return staging root;
+        # the guest collector later accepts only the digest-bound task paths,
+        # so this does not authorize arbitrary worker files to come home.
+        python3 - "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" "$TASK_HOME" <<'PY' || exit 1
+from pathlib import Path
+import sys
+source, destination, task_home = sys.argv[1:]
+body = Path(source).read_bytes()
+prefix = task_home.encode()
+Path(destination).write_bytes(body.replace(prefix, b"/mnt/task/.fm-return"))
+PY
+      fi
     elif [ "$KIND" = secondmate ] && [ -f "$WT/data/charter.md" ]; then
       # A secondmate's standing brief is its persistent charter in the home;
       # the compartment payload carries a copy so the cloud agent's brief is
@@ -4699,6 +4715,8 @@ spawn_cloud_persist_convergence_artifacts() {
     fi
     {
       printf 'export FM_SPAWN_CLOUD_WALL_SECONDS=%q\n' "$wall"
+      [ "$KIND" = secondmate ] \
+        || printf 'export FM_SPAWN_CLOUD_RETURN_KIND=%q\n' "$KIND"
       [ -z "${FM_WORKER_PROVIDER_COMMAND:-}" ] \
         || printf 'export FM_WORKER_PROVIDER_COMMAND=%q\n' "$FM_WORKER_PROVIDER_COMMAND"
       if [ "$KIND" = secondmate ]; then
@@ -4868,7 +4886,7 @@ spawn_cloud_dispatch() {
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --assignment-generation "$assignment" --wall-seconds "$wall" \
     --payload-dir "$STATE/$ID.cloud-payload" --account-dir "$STATE/$ID.cloud-account" \
-    --outcome-dir "$STATE/$ID.cloud-outcome" \
+    --outcome-dir "$STATE/$ID.cloud-outcome" --return-kind "$KIND" \
     --confirm-execute --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" \
     -- /bin/bash -lc "$CLOUD_WORKER_LAUNCH" \
     > "$STATE/$ID.worker-result.json" 2> "$STATE/$ID.worker-execute.log" < /dev/null &

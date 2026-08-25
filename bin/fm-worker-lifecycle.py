@@ -2129,7 +2129,8 @@ def apply_action_result(env, state, action, result):
         ):
             if execution.get(field) != expected:
                 raise LifecycleError("provider execution {} binding differs".format(field))
-        if (action.get("request") or {}).get("outcome_expected"):
+        execution_request = action.get("request") or {}
+        if execution_request.get("outcome_expected"):
             # A worker whose pinned supervisor predates the outcome contract
             # would run the command and answer with no outcome fields at all.
             # Refusing here turns that version skew into a visible failure
@@ -2138,6 +2139,21 @@ def apply_action_result(env, state, action, result):
                 raise LifecycleError(
                     "provider execution reports no outcome disposition for a landing task"
                 )
+        if execution_request.get("return_contract"):
+            if execution.get("return_present") is not True:
+                raise LifecycleError(
+                    "provider execution reports no authorized return artifact bundle"
+                )
+            for field in ("return_ref", "return_commit", "return_manifest_sha256", "outcome_tip"):
+                if not isinstance(execution.get(field), str) or not execution[field]:
+                    raise LifecycleError(
+                        "provider execution return {} is absent".format(field)
+                    )
+            for field in ("return_commit", "return_manifest_sha256", "outcome_tip"):
+                if not re.fullmatch(r"[0-9a-f]{40,64}", execution[field]):
+                    raise LifecycleError(
+                        "provider execution return {} is malformed".format(field)
+                    )
         state["executions"][action["request_digest"]] = execution
         worker["last_execution_digest"] = supplied
         worker["last_execution_at"] = iso_utc()
@@ -2811,6 +2827,7 @@ def parser():
     execute.add_argument("--payload-dir", default=None)
     execute.add_argument("--account-dir", default=None)
     execute.add_argument("--outcome-dir", default=None)
+    execute.add_argument("--return-kind", choices=("ship", "scout"), default=None)
     execute.add_argument("--confirm-execute", action="store_true")
     execute.add_argument("--confirm-subscription", required=True)
     execute.add_argument("argv", nargs=argparse.REMAINDER)
@@ -3849,6 +3866,8 @@ def command_execute(env, args):
         raise LifecycleError("payload and account staging directories travel together or not at all")
     if args.outcome_dir is not None and args.payload_dir is None:
         raise LifecycleError("an outcome can only be collected from a staged repository")
+    if args.return_kind is not None and args.outcome_dir is None:
+        raise LifecycleError("an authorized task return requires an outcome directory")
     if args.outcome_dir is not None:
         outcome_root = Path(args.outcome_dir)
         if outcome_root.is_symlink() or not outcome_root.is_dir():
@@ -3904,6 +3923,17 @@ def command_execute(env, args):
             # silently turn a landing task into a fire-and-forget one: the
             # guest refuses instead.
             request["outcome_expected"] = True
+        if args.return_kind is not None:
+            report_name = "completion.md" if args.return_kind == "ship" else "report.md"
+            request["return_contract"] = {
+                "schema": "fm.worker-return-contract/v1",
+                "kind": args.return_kind,
+                "report_required": True,
+                "report_path": "data/{}/{}".format(args.task, report_name),
+                "status_path": "state/{}.status".format(args.task),
+                "visuals_path": "data/{}/visuals".format(args.task),
+                "branch": "fm/{}".format(args.task) if args.return_kind == "ship" else "",
+            }
         request["request_digest"] = digest_value(request)
         existing = state["executions"].get(request["request_digest"])
         if existing is not None:

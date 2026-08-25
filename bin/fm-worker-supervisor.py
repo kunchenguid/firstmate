@@ -83,6 +83,34 @@ def read_request(path):
     outcome_expected = request.get("outcome_expected", False)
     if not isinstance(outcome_expected, bool):
         raise SupervisorError("execution outcome expectation is malformed")
+    return_contract = request.get("return_contract")
+    if return_contract is not None:
+        if not isinstance(return_contract, dict) or set(return_contract) != {
+            "schema", "kind", "report_required", "report_path", "status_path",
+            "visuals_path", "branch",
+        }:
+            raise SupervisorError("execution return contract is malformed")
+        if return_contract.get("schema") != "fm.worker-return-contract/v1":
+            raise SupervisorError("execution return contract schema is not supported")
+        if return_contract.get("kind") not in ("ship", "scout"):
+            raise SupervisorError("execution return kind is not supported")
+        if return_contract.get("report_required") is not True:
+            raise SupervisorError("execution return contract must require its task report")
+        for field in ("report_path", "status_path", "visuals_path"):
+            value = return_contract.get(field)
+            if (
+                not isinstance(value, str) or not value or value.startswith("/")
+                or ".." in Path(value).parts or "\x00" in value
+            ):
+                raise SupervisorError("execution return {} is unsafe".format(field))
+        branch = return_contract.get("branch")
+        if return_contract["kind"] == "ship":
+            if not isinstance(branch, str) or not branch.startswith("fm/") or not SAFE_ID.fullmatch(branch[3:]):
+                raise SupervisorError("execution return branch is malformed")
+        elif branch != "":
+            raise SupervisorError("a scout return contract must not name a task branch")
+        if not outcome_expected:
+            raise SupervisorError("execution return contract requires the outcome transport")
     if outcome_expected:
         # An outcome is bundled out of the staged repository, so the request
         # that arms it must also be the one that stages that repository.
@@ -134,6 +162,11 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
 MAX_OUTCOME_BYTES = 256 * 1024 * 1024
+MAX_RETURN_REPORT_BYTES = 16 * 1024 * 1024
+MAX_RETURN_STATUS_BYTES = 4 * 1024 * 1024
+MAX_RETURN_VISUAL_BYTES = 20 * 1024 * 1024
+MAX_RETURN_VISUAL_ENTRIES = 512
+MAX_RETURN_SCRATCH_BYTES = 128 * 1024 * 1024
 
 # Every bounded step that runs OUTSIDE the wall, named once and used at the
 # call site, so the budget below is the same number the code actually spends.
@@ -292,6 +325,142 @@ def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
     )
 
 
+def _safe_return_file(root, relative, limit):
+    path = root / relative
+    try:
+        relative_parts = Path(relative).parts
+        current = root
+        for part in relative_parts:
+            current = current / part
+            if current.is_symlink():
+                raise SupervisorError("returned artifact is redirected: {}".format(relative))
+        if not path.is_file():
+            return None
+        body = path.read_bytes()
+    except OSError as exc:
+        raise SupervisorError("returned artifact is unreadable: {}: {}".format(relative, exc))
+    if len(body) > limit:
+        raise SupervisorError("returned artifact exceeds its byte bound: {}".format(relative))
+    return body
+
+
+def _deterministic_tar(root, relative_paths, byte_limit, entry_limit):
+    """Archive already-authorized relative paths without following redirects."""
+    output = io.BytesIO()
+    total = 0
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for relative in sorted(relative_paths):
+            if len(relative_paths) > entry_limit:
+                raise SupervisorError("returned artifact archive has too many entries")
+            source = root / relative
+            current = root
+            for part in Path(relative).parts:
+                current = current / part
+                if current.is_symlink():
+                    raise SupervisorError("returned artifact archive contains a redirect: {}".format(relative))
+            if not source.is_file():
+                raise SupervisorError("returned artifact archive entry is not a regular file: {}".format(relative))
+            body = source.read_bytes()
+            total += len(body)
+            if total > byte_limit:
+                raise SupervisorError("returned artifact archive exceeds its byte bound")
+            info = tarfile.TarInfo(relative)
+            info.size = len(body)
+            info.mode = 0o600
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(body))
+    return output.getvalue()
+
+
+def _visual_archive(return_root, relative):
+    root = return_root / relative
+    if not root.exists():
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise SupervisorError("returned visual evidence root is redirected or not a directory")
+    paths = []
+    for directory, names, files in os.walk(root, followlinks=False):
+        names.sort()
+        files.sort()
+        directory_path = Path(directory)
+        if directory_path.is_symlink():
+            raise SupervisorError("returned visual evidence contains a redirected directory")
+        for name in files:
+            source = directory_path / name
+            paths.append(str(source.relative_to(return_root)))
+    if not paths:
+        return None
+    return _deterministic_tar(
+        return_root, paths, MAX_RETURN_VISUAL_BYTES, MAX_RETURN_VISUAL_ENTRIES,
+    )
+
+
+def _scratch_artifacts(repo):
+    patch = git_in(repo, "diff", "--binary", "HEAD", timeout=GIT_STATUS_TIMEOUT)
+    if patch.returncode != 0:
+        raise SupervisorError("returned scratch diff is unreadable")
+    listed = git_in(
+        repo, "ls-files", "-z", "--others", "--exclude-standard",
+        timeout=GIT_STATUS_TIMEOUT,
+    )
+    if listed.returncode != 0:
+        raise SupervisorError("returned untracked scratch is unreadable")
+    try:
+        untracked = [item.decode("utf-8") for item in listed.stdout.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise SupervisorError("returned untracked scratch path is not UTF-8: {}".format(exc))
+    archive = None
+    if untracked:
+        archive = _deterministic_tar(
+            repo, untracked, MAX_RETURN_SCRATCH_BYTES, MAX_RETURN_VISUAL_ENTRIES,
+        )
+    if len(patch.stdout) > MAX_RETURN_SCRATCH_BYTES:
+        raise SupervisorError("returned scratch diff exceeds its byte bound")
+    return patch.stdout or None, archive
+
+
+def _hash_blob(repo, body):
+    result = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=body,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    )
+    if result.returncode != 0:
+        raise SupervisorError("returned artifact could not be stored in the repository")
+    return result.stdout.decode().strip()
+
+
+def _return_commit(repo, base, artifacts, request):
+    entries = []
+    for name, body in sorted(artifacts.items()):
+        entries.append("100644 blob {}\t{}\n".format(_hash_blob(repo, body), name))
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"], input="".join(entries).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT, check=False,
+    )
+    if tree.returncode != 0:
+        raise SupervisorError("returned artifact tree could not be created")
+    environment = dict(os.environ)
+    environment.update({
+        "GIT_AUTHOR_NAME": "Firstmate worker return",
+        "GIT_AUTHOR_EMAIL": "worker-return@localhost",
+        "GIT_COMMITTER_NAME": "Firstmate worker return",
+        "GIT_COMMITTER_EMAIL": "worker-return@localhost",
+        "GIT_AUTHOR_DATE": "@0 +0000",
+        "GIT_COMMITTER_DATE": "@0 +0000",
+    })
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "commit-tree", tree.stdout.decode().strip(), "-p", base],
+        input=("Firstmate worker return {}\n".format(request["request_digest"])).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_HEAD_TIMEOUT,
+        check=False, env=environment,
+    )
+    if committed.returncode != 0:
+        raise SupervisorError("returned artifact commit could not be created")
+    return committed.stdout.decode().strip()
+
+
 def outcome_bundle_path(request, worktree):
     """Where the collected bundle lives on the RETAINED task disk.
 
@@ -365,28 +534,100 @@ def collect_outcome(request, repo, worktree_root):
         commits = int(counted.stdout.decode().strip())
     except ValueError:
         raise SupervisorError("outcome commit count is not a number")
-    if commits == 0:
-        # A crewmate that edited without committing looks identical here, so
-        # the result says so explicitly rather than reading as "nothing to do".
-        dirty = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
-        if dirty.returncode != 0:
-            # Unknown is not clean. Reporting False here would render an
-            # unreadable tree as a tidy read-only task, which is the exact
-            # confusion this field exists to prevent.
-            raise SupervisorError(
-                "outcome working-tree state is unreadable: {}".format(
-                    dirty.stderr.decode("utf-8", errors="replace")[-200:]
-                )
+    dirty = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
+    if dirty.returncode != 0:
+        # Unknown is not clean. Reporting False here would render an
+        # unreadable tree as a tidy read-only task, which is the exact
+        # confusion this field exists to prevent.
+        raise SupervisorError(
+            "outcome working-tree state is unreadable: {}".format(
+                dirty.stderr.decode("utf-8", errors="replace")[-200:]
             )
+        )
+    contract = request.get("return_contract")
+    if commits == 0 and contract is None:
         return {
             "outcome_present": False, "outcome_sha256": "", "outcome_bytes": 0,
             "outcome_commits": 0, "outcome_sink": "",
             "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
         }
+
     bundle = outcome_bundle_path(request, worktree_root)
     bundle.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bundle_refs = []
+    returned = {}
+    if contract is not None:
+        return_root = worktree_root / ".fm-return"
+        report = _safe_return_file(return_root, contract["report_path"], MAX_RETURN_REPORT_BYTES)
+        status = _safe_return_file(return_root, contract["status_path"], MAX_RETURN_STATUS_BYTES)
+        visuals = _visual_archive(return_root, contract["visuals_path"])
+        scratch_patch, scratch_untracked = _scratch_artifacts(repo)
+        artifact_bodies = {}
+        artifact_sources = {
+            "report.md": (report, contract["report_path"]),
+            "status.log": (status, contract["status_path"]),
+            "visuals.tar": (visuals, contract["visuals_path"]),
+            "scratch.patch": (scratch_patch, "git-diff"),
+            "scratch-untracked.tar": (scratch_untracked, "git-untracked"),
+        }
+        manifest_artifacts = {}
+        for name, (body, source) in artifact_sources.items():
+            if body is None:
+                continue
+            artifact_bodies[name] = body
+            manifest_artifacts[name] = {
+                "source": source, "bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+            }
+        manifest = {
+            "schema": "fm.worker-return/v1",
+            "task": request["task"],
+            "task_generation": request["task_generation"],
+            "assignment_generation": request["assignment_generation"],
+            "request_digest": request["request_digest"],
+            "repository_generation": base,
+            "kind": contract["kind"],
+            "branch": contract["branch"],
+            "report_required": contract["report_required"],
+            "report_path": contract["report_path"],
+            "status_path": contract["status_path"],
+            "visuals_path": contract["visuals_path"],
+            "outcome_commits": commits,
+            "outcome_tip": git_in(repo, "rev-parse", "HEAD", timeout=GIT_HEAD_TIMEOUT).stdout.decode().strip(),
+            "uncommitted_changes": bool(dirty.stdout.strip()),
+            "artifacts": manifest_artifacts,
+        }
+        manifest_body = canonical(manifest) + b"\n"
+        artifact_bodies["manifest.json"] = manifest_body
+        return_commit = _return_commit(repo, base, artifact_bodies, request)
+        return_ref = "refs/fm-return/{}".format(request["request_digest"][:32])
+        updated = git_in(repo, "update-ref", return_ref, return_commit, timeout=GIT_HEAD_TIMEOUT)
+        if updated.returncode != 0:
+            raise SupervisorError("returned artifact ref could not be created")
+        bundle_refs.append(return_ref)
+        if commits:
+            outcome_ref = "refs/fm-outcome/{}".format(request["request_digest"][:32])
+            updated = git_in(repo, "update-ref", outcome_ref, manifest["outcome_tip"], timeout=GIT_HEAD_TIMEOUT)
+            if updated.returncode != 0:
+                raise SupervisorError("returned outcome ref could not be created")
+            bundle_refs.append(outcome_ref)
+        # The local repository already has the exact dispatched generation.
+        # Excluding it keeps the bundle to the artifact commit plus only the
+        # project commits this assignment added, rather than retransmitting
+        # arbitrary repository history.
+        bundle_refs.append("^{}".format(base))
+        returned = {
+            "return_present": True,
+            "return_ref": return_ref,
+            "return_commit": return_commit,
+            "return_manifest_sha256": hashlib.sha256(manifest_body).hexdigest(),
+            "outcome_tip": manifest["outcome_tip"],
+        }
+    elif commits:
+        bundle_refs.append("{}..HEAD".format(base))
+
     created = git_in(
-        repo, "bundle", "create", str(bundle), "{}..HEAD".format(base),
+        repo, "bundle", "create", str(bundle), *bundle_refs,
         timeout=BUNDLE_CREATE_TIMEOUT,
     )
     if created.returncode != 0 or not bundle.is_file():
@@ -400,11 +641,13 @@ def collect_outcome(request, repo, worktree_root):
     body = bundle.read_bytes()
     sink = put_outcome_blob(body)
     return {
-        "outcome_present": True,
+        "outcome_present": commits > 0,
         "outcome_sha256": hashlib.sha256(body).hexdigest(),
         "outcome_bytes": len(body),
         "outcome_commits": commits,
         "outcome_sink": sink,
+        "outcome_uncommitted_changes": bool(dirty.stdout.strip()),
+        **returned,
     }
 
 
@@ -418,7 +661,7 @@ def replay_outcome_upload(request, worktree, recorded):
     the crewmate's commits die with the VM. A failure here must not stop the
     replay from answering, so it is reported and swallowed.
     """
-    if not recorded.get("outcome_present"):
+    if not (recorded.get("outcome_present") or recorded.get("return_present")):
         return False
     retained = outcome_bundle_path(request, worktree)
     try:

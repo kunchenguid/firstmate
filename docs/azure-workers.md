@@ -209,24 +209,38 @@ A visible VM with another task or assignment binding refuses instead of being ad
 ## Outcome collection and landing
 
 A crewmate on a worker holds no forge or provider credential, so the work comes home as bytes, not as a push: nothing on the worker pushes anywhere, and the local side keeps the landing authority.
-`execute --outcome-dir` records `outcome_expected` inside the digest-bound execution request and the provider mints one short-lived user-delegation SAS with create/write on exactly one blob name, delivered as a protected Run Command parameter.
+`execute --outcome-dir --return-kind <ship|scout>` records both `outcome_expected` and one closed `fm.worker-return-contract/v1` inside the digest-bound execution request.
+The contract authorizes only that task's report, status trail, visual directory, required ship branch, and repository scratch.
+The spawned brief rewrites only the exact task-home prefix to `/mnt/task/.fm-return`, so its authorized completion paths exist on the guest without making arbitrary guest paths returnable.
+The provider mints one short-lived user-delegation SAS with create/write on exactly one blob name, delivered as a protected Run Command parameter.
 That SAS scopes the credential, not the guest: the worker identity already holds Storage Blob Data Contributor on its whole state container, so what makes a landing safe is the digest in the signed result, not the narrowness of the SAS.
 Because the expectation is digest-bound, a stripped parameter cannot silently downgrade a landing task: the guest refuses before the argv runs.
 
-After the bounded execute, the supervisor counts the commits the crewmate added over the bound repository generation, bundles exactly those commits, refuses a bundle over 256 MiB, uploads it, and records `outcome_present`, `outcome_commits`, `outcome_sha256`, `outcome_bytes`, and `outcome_error` inside the signed result.
+After the bounded execute, the supervisor counts the commits the crewmate added over the bound repository generation and records tracked and untracked scratch without applying it locally.
+It places the authorized report, status, visuals, and scratch in one synthetic Git artifact commit, places project commits on a distinct outcome ref, and creates one bundle containing both refs while excluding the already-bound repository generation.
+The result records `return_present`, the exact return ref and commit, the manifest digest, the project outcome tip, and the existing bundle digest and byte fields.
+A scout with no commits therefore still returns its report and scratch, while a ship's project history and completion artifacts remain distinguishable inside one provider-neutral blob.
 A collection failure never aborts the result: the command has already had its effects, so the failure is recorded instead, which both blocks an unverifiable landing and stops a replay from running the command a second time.
-A worker whose pinned supervisor predates this contract answers with no outcome disposition at all, and the controller refuses that result rather than reporting a task whose commits silently never came home.
+A worker whose pinned supervisor predates this contract answers with no return disposition, and the controller refuses that result rather than reporting a task whose commits or required deliverables silently never came home.
 
 The controller downloads the blob only after the digest-bound result commits to its bytes, verifies size and SHA-256, and stores it in the requesting task's outcome directory.
-The tracking monitor then fast-forwards the leased local worktree, but only when that worktree still sits on the dispatched generation and is clean; otherwise the verified bundle is kept and its path reported.
-Landing authority, push, and release receipts stay exactly where the ordinary local flow already puts them.
-The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet. Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
+`bin/fm-cloud-result.py` independently validates the result, bundle, refs, manifest, and each artifact digest before publishing anything locally.
+For ship work it creates or fast-forwards `fm/<task>` and checks that branch out only when the leased worktree and any existing task branch have not diverged; a divergence keeps the fetched custody ref and never overwrites local work.
+For scout work it leaves the scratch worktree on its dispatched generation and stores any returned patch and untracked archive with the report.
+A missing authored report produces a substantive local failure report, never a false finding, and the local terminal status is synthesized only after the required report and branch or scratch custody exist.
+Replaying the same result converges on the same refs, files, branch, and one terminal status line.
+The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet.
+Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
 
 ## Release, reset, and cooldown
 
 The controller never infers safe deletion from a terminal chat line, a missing VM, elapsed time, or budget pressure.
-The ordinary Firstmate owners first remove the endpoint, publish the report, prove landed work, release the provider account, and complete their normal cleanup checks.
-`authority-receipt` invokes `bin/fm-worker-authority.py`, which reads the ordinary task metadata, endpoint backend oracle, completion-report contract, Git landing graph, account task/home binding, and clean exact worktree root rather than accepting operator-entered digests.
+The ordinary Firstmate owners first establish the task's required local authorities, then release the provider account and complete their normal cleanup checks.
+For a local placement, that still means endpoint absence, report publication, and forge-reachable landing before release.
+For an Azure author return, the exact local tracking endpoint may still be alive only while it performs this finalization: the digest-bound result has ended remote execution, and the endpoint receipt accepts that narrow return-localized state after the terminal status exists.
+The Azure landing receipt proves local custody rather than forge landing: the return bundle and manifest match the result, the required report and terminal status exist, ship commits are reachable from the checked-out `fm/<task>` branch, and any declared uncommitted scratch has a retained artifact.
+This releases billable remote capacity without weakening the ordinary later teardown gate, which still protects the unpushed local task branch until it reaches a remote or default branch.
+`authority-receipt` invokes `bin/fm-worker-authority.py`, which reads the ordinary task metadata, endpoint backend oracle, completion-report contract, Git landing or cloud-return custody graph, account task/home binding, and clean exact worktree root rather than accepting operator-entered digests.
 For Azure placement, the task's `account_home` is the vendor-neutral Pi pool selected above, so account authority instead requires the task-recorded selected profile and single-profile home to equal the controller queue's exact lease, then reads its owner-private credential without following links and reproduces the controller-owned upstream-account binding.
 It produces an `fm.worker-release/v2` bundle with five independently canonical `fm.worker-authority/v1` receipts for endpoint absence, report validity, landed work, account ownership, and writable-worktree cleanliness, plus the exact home, task, generations, cloud instance, account, worktree, repository, and every resource identity.
 When the CONTROLLER-OWNED worker role is `secondmate`, the same five receipts carry compartment evidence semantics: endpoint proves the compartment monitor pane absent through the same backend oracle; report proves the session closeout - the monitor's terminal status file, the chained close ack in its durable state, and the ordered `completion.md` contract; landing proves every chained outbox bundle landed into the local secondmate home worktree (or provably none) by REACHABILITY - each collected bundle's own tip commit must be an ancestor of the home worktree's HEAD, which also descends from the assignment's exact starting repository generation; account is unchanged; and worktree proves the home quiesced - exact repository root, no uncommitted or untracked work - while staying advisory for children, whose refusal `command_release` owns.
@@ -252,6 +266,8 @@ The compartment bundle is the identical `fm.worker-release/v2` shape and verifie
 `proof-template` remains diagnostic only: its placeholders are deliberately invalid and hand-filling them is unsupported.
 A missing, stale, malformed, or conflicting receipt retains everything.
 
+The tracking monitor retries collection, receipt minting, release recording, and reconcile by re-running the same idempotent steps until the queue entry is complete.
+Only then does it remove the locally staged provider credential and convergence files; the credential-free outcome bundle and task report remain.
 After an exact release receipt, reconcile deallocates the VM promptly.
 Azure deallocation stops compute billing but not disks, NICs, public foundation meters, monitoring, or storage operations.
 After deallocation it deletes the named execute and bootstrap Run Commands and monitor extension before the VM, then proves VM absence and disk/NIC detach before deleting NIC and OS disk; the TTL remains enabled until those proofs complete and is deleted last among compute children.

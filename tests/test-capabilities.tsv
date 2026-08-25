@@ -43,6 +43,7 @@ fm-checkout-identity-cost.test.sh	hermetic
 fm-checkout-refresh.test.sh	hermetic
 fm-checkout-return-boundary.test.sh	hermetic
 fm-cloud-provider-seal.test.sh	hermetic
+fm-cloud-result.test.sh	hermetic
 fm-cloud-state.test.sh	hermetic
 fm-composer-ghost.test.sh	hermetic
 fm-composer-lib.test.sh	hermetic
