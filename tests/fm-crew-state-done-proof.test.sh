@@ -28,7 +28,14 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%%1\n' ;;
+  list-windows)
+    # An UNREADABLE inventory (not "missing") keeps the process-evidence read
+    # ambiguous so the case falls through to the semantic busy verdict, the
+    # same convention tests/fm-crew-state.test.sh uses for legacy paths.
+    printf 'fake inventory unavailable\n'; exit 1 ;;
+  display-message)
+    case "$*" in *pane_tty*) exit 1 ;; esac
+    printf '%%1\n' ;;
   capture-pane) printf 'all quiet\n> \n' ;;
 esac
 exit 0

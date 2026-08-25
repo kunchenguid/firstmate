@@ -64,21 +64,25 @@ prime_cursor() {  # <case-dir>
 }
 
 test_refuted_done_is_loud_and_non_terminal() {
-  local dir out err
+  local dir out
   dir=$(make_proof_case refute-loud no-mistakes)
   prime_cursor "$dir"
   export GH_STUB_LOG="$dir/gh.log" GH_STUB_OUT='[]'
 
   printf 'done: Klassenbahn abgeschlossen, 4 Commits auf fm/%s\n' "$TASK" >> "$dir/state/$TASK.status"
   append_wake "$dir/state" signal "$TASK.status" 'status change'
-  run_drain "$dir" "$TMP_ROOT/refute.out" "$TMP_ROOT/refute.err"
+  run_drain "$dir" "$TMP_ROOT/refute.out" /dev/null
   out=$(cat "$TMP_ROOT/refute.out")
 
   assert_contains "$out" 'done WIDERLEGT - keine Lieferung am Ziel (ls-remote leer, kein PR)' \
     "the refutation is loud with its evidence"
   assert_contains "$out" "$TASK.status: done: Klassenbahn abgeschlossen" \
     "the refutation names the claimed done line"
-  assert_grep 'WAKE_ACK_REQUIRED' "$TMP_ROOT/refute.err" "the wake still waits for handling"
+  # U1.3b presentation-consume: one further drain invocation consumes what
+  # this one presented.
+  run_drain "$dir" "$TMP_ROOT/refute2.out" /dev/null
+  out=$(cat "$TMP_ROOT/refute2.out")
+  assert_not_contains "$out" 'signal' "the presented wake is consumable by the next drain"
   unset GH_STUB_LOG GH_STUB_OUT
   pass "a done claim without delivery is loudly refuted in the presentation"
 }
