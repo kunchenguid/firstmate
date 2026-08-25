@@ -447,6 +447,39 @@ EOF
   pass "a branch update between merged proof and deletion is left intact"
 }
 
+test_branch_rewind_at_delete_is_left_alone() {
+  local home clone fakegit merged_tip rewind_tip real_git
+  home=$(new_home)
+  clone=$(build_pair "$home" rewind_race)
+  ff_merge_task_branch "$clone" fm/task-rewind feature.txt merged
+  merged_tip=$(git -C "$clone" rev-parse fm/task-rewind)
+  rewind_tip=$(git -C "$clone" rev-parse "$merged_tip^")
+  fakegit="$home/fake-git"; mkdir -p "$fakegit"
+  real_git=$(command -v git)
+  cat > "$fakegit/git" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
+  && [ "$3" = "update-ref" ] && [ "$4" = "-d" ] \
+  && [ "$5" = "refs/heads/$RACE_BRANCH" ]; then
+  "$REAL_GIT" -C "$RACE_REPO" update-ref "refs/heads/$RACE_BRANCH" "$RACE_REWIND_TIP"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$fakegit/git"
+
+  PATH="$fakegit:$PATH" REAL_GIT="$real_git" RACE_REPO="$clone" \
+    RACE_BRANCH=fm/task-rewind RACE_REWIND_TIP="$rewind_tip" \
+    bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-rewind refs/heads/main' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
+    && fail "concurrent-branch-rewind: deletion unexpectedly succeeded"
+
+  branch_exists "$clone" fm/task-rewind \
+    || fail "concurrent-branch-rewind: branch was deleted after its tip changed"
+  [ "$(git -C "$clone" rev-parse fm/task-rewind)" = "$rewind_tip" ] \
+    || fail "concurrent-branch-rewind: rewound tip was not preserved"
+  pass "a branch rewind at final deletion is left intact"
+}
+
 test_worktree_added_between_proof_and_delete_is_left_alone() {
   local home clone fakegit real_git worktree
   home=$(new_home)
@@ -455,10 +488,10 @@ test_worktree_added_between_proof_and_delete_is_left_alone() {
   fakegit="$home/fake-git"; mkdir -p "$fakegit"
   worktree="$home/active-task-worktree"
   real_git=$(command -v git)
-  cat > "$fakegit/git" <<'EOF'
+cat > "$fakegit/git" <<'EOF'
 #!/bin/sh
-if [ "$1" = "-C" ] && [ "$3" = "branch" ] \
-  && [ "$4" = "-d" ] && [ "$6" = "$RACE_BRANCH" ]; then
+if [ "$1" = "-C" ] && [ "$3" = "worktree" ] \
+  && [ "$4" = "add" ] && [ "$5" = "--detach" ]; then
   "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
 fi
 exec "$REAL_GIT" "$@"
@@ -478,7 +511,7 @@ EOF
   pass "a worktree checkout between merged proof and deletion leaves the branch intact"
 }
 
-test_gone_unmerged_task_branch_is_left_alone() {
+test_gone_upstream_task_branch_is_pruned() {
   local home clone remote out
   home=$(new_home)
   clone=$(build_pair "$home" upsilon)
@@ -487,15 +520,14 @@ test_gone_unmerged_task_branch_is_left_alone() {
   commit_file "$clone" feature.txt hello "unmerged work"
   git -C "$clone" push -q -u origin fm/task-gone
   git --git-dir="$remote" update-ref -d refs/heads/fm/task-gone
+  git -C "$clone" checkout -q main
   git -C "$clone" fetch -q --prune origin
   out=$(run_sync "$home" "$clone")
 
-  assert_not_contains "$out" "pruned fm/task-gone" "a [gone] upstream without a merge must never be reported as pruned"
+  assert_contains "$out" "pruned fm/task-gone" "an inactive [gone] upstream must be reported as pruned"
   branch_exists "$clone" fm/task-gone \
-    || fail "gone-unmerged-prune: fm/task-gone was deleted despite never being merged"
-  [ "$(git -C "$clone" for-each-ref --format='%(upstream:track)' refs/heads/fm/task-gone)" = "[gone]" ] \
-    || fail "gone-unmerged-prune: expected pruned tracking branch to report [gone]"
-  pass "the gone-upstream sweep leaves an unmerged fm/* branch untouched"
+    && fail "gone-upstream-prune: fm/task-gone was retained despite its [gone] upstream"
+  pass "the gone-upstream sweep prunes an inactive fm/* branch"
 }
 
 test_routine_prune_defaults_on_and_allows_disable() {
@@ -814,8 +846,9 @@ test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
 test_branch_update_between_proof_and_delete_is_left_alone
+test_branch_rewind_at_delete_is_left_alone
 test_worktree_added_between_proof_and_delete_is_left_alone
-test_gone_unmerged_task_branch_is_left_alone
+test_gone_upstream_task_branch_is_pruned
 test_routine_prune_defaults_on_and_allows_disable
 test_checked_out_task_branch_is_left_alone
 test_prune_never_targets_the_default_branch
