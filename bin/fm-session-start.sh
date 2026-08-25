@@ -382,6 +382,32 @@ print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
+# print_captain_style <path> <label>: like print_file_or_absent, but a
+# present, non-empty file is run through `fm-helm.sh show` first so the same
+# schema check /helm enforces on write (JSON object, string
+# "language"/"response_tone" fields) also gates what reaches the standing
+# session context - a file that /helm would refuse is never surfaced as if it
+# were an active preference.
+print_captain_style() {
+  local path=$1 label=$2
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return
+  fi
+  if [ ! -s "$path" ]; then
+    printf '(present, empty)\n'
+    return
+  fi
+  local out
+  if out=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-helm.sh" show 2>&1); then
+    printf '%s\n' "$out"
+  else
+    printf 'INVALID: %s failed /helm'"'"'s schema validation - ignored, firstmate defaults apply (%s)\n' \
+      "$label" "$out"
+  fi
+}
+
 # A queued title line whose own text already marks it held or blocked. The
 # manual renderer has no task model, so this is the only signal it gets, and it
 # is the one tasks-axi's markdown backend writes: "(hold: ...)", "(hold-kind:
@@ -897,7 +923,7 @@ stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$CONFIG/captain-style.json" "config/captain-style.json (canonical language/response_tone captain-style preferences, set via /helm; ABSENT means firstmate's built-in defaults apply)"
+print_captain_style "$CONFIG/captain-style.json" "config/captain-style.json (canonical language/response_tone captain-style preferences, set via /helm; ABSENT means firstmate's built-in defaults apply)"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
