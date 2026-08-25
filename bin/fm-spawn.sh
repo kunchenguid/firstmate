@@ -1215,10 +1215,8 @@ launch_template() {
   esac
 }
 
-VERIFIED_LAUNCH=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    VERIFIED_LAUNCH=0
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
