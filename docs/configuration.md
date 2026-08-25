@@ -35,13 +35,12 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 ## Claude Remote Control (config/claude-remote-control)
 
-Every claude-harness crewmate, scout, and secondmate launches with Claude Code's `--remote-control <task-id>` flag, so the ordinary interactive session is also reachable from claude.ai/code and the Claude mobile app under that task's name.
-Nothing else about the session changes: the folder-trust prompt, the per-task turn-end notification, and the semantic busy-state hooks all behave exactly as they do without the flag, and `fm-peek` and `fm-send` read and steer such a pane unchanged; [runtime backend verification](verification/runtime-backends.md#claude-remote-control) owns that evidence.
-Write `off` into the local, gitignored `config/claude-remote-control` file to opt a home out.
-Absent, empty, or `on` enables it, and an unrecognized value warns and keeps the default rather than failing a spawn over a reachability setting.
+Write `on` into the local, gitignored `config/claude-remote-control` file, and every claude-harness crewmate, scout, and secondmate launches with Claude Code's `--remote-control <task-id>` flag, so the ordinary interactive session is also reachable from claude.ai/code and the Claude mobile app under that task's name.
+Publishing a worker beyond the local machine is reachability the home has to grant, so it stays off by default: absent, empty, or `off` launches claude workers exactly as before, and an unrecognized value warns and keeps them local-only rather than failing a spawn over a reachability setting.
+Nothing else about an opted-in session changes: the folder-trust prompt, the per-task turn-end notification, and the semantic busy-state hooks all behave exactly as they do without the flag, and `fm-peek` and `fm-send` read and steer such a pane unchanged; [runtime backend verification](verification/runtime-backends.md#claude-remote-control) owns that evidence.
 Only the claude harness is affected; every other adapter's launch command is unchanged.
 An installed claude whose `--help` does not advertise the flag launches without it and prints one warning line, so an older CLI still spawns.
-This preference is local to each Firstmate home and is not part of secondmate inherited configuration, so a secondmate home that wants Remote Control off needs its own file.
+This preference is local to each Firstmate home and is not part of secondmate inherited configuration, so a secondmate home that wants Remote Control needs its own file.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

@@ -113,13 +113,13 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
-#   A claude launch additionally carries --remote-control <task-id>, which leaves
-#   the session an ordinary interactive one but also makes it reachable from
-#   claude.ai/code and the Claude mobile app under that task's name. The local
-#   gitignored config/claude-remote-control file opts a home out with "off"
-#   (absent or "on" enables it). An installed claude whose --help does not
-#   advertise the flag launches unchanged and warns once, so an older CLI still
-#   spawns.
+#   A claude launch additionally carries --remote-control <task-id> when the home
+#   opts in, which leaves the session an ordinary interactive one but also makes
+#   it reachable from claude.ai/code and the Claude mobile app under that task's
+#   name. It is off unless the local gitignored config/claude-remote-control file
+#   says "on" (absent, empty, or "off" keeps it off). An installed claude whose
+#   --help does not advertise the flag launches unchanged and warns once, so an
+#   older CLI still spawns.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -168,7 +168,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
-#     __CLAUDEREMOTE__ optional --remote-control <task-id> for a claude launch
+#     __CLAUDEREMOTE__ opt-in --remote-control <task-id> for a claude launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1106,22 +1106,24 @@ pi_supports_tui_mode() {
 
 # Claude Remote Control makes an ordinary interactive session additionally
 # reachable from claude.ai/code and the Claude mobile app, so the captain can
-# read and steer a firstmate-launched claude worker from a phone. It is on by
-# default; the local gitignored config/claude-remote-control file opts a home
-# out with "off". The value is read with the whole-file whitespace-stripped,
-# case-folded convention the other scalar config items already use
-# (config/crew-harness, config/backlog-backend). An unrecognized value warns and
-# keeps the default rather than failing a spawn over a reachability setting.
+# read and steer a firstmate-launched claude worker from a phone. Publishing a
+# worker beyond the local machine is new reachability, so it is off until a home
+# grants it explicitly: the local gitignored config/claude-remote-control file
+# turns it on with "on". The value is read with the whole-file
+# whitespace-stripped, case-folded convention the other scalar config items
+# already use (config/crew-harness, config/backlog-backend). An unrecognized
+# value warns and keeps the default rather than failing a spawn over a
+# reachability setting.
 claude_remote_control_enabled() {  # <config-dir>
   local file=$1/claude-remote-control value
-  [ -f "$file" ] || return 0
+  [ -f "$file" ] || return 1
   value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
   case "$value" in
-    off) return 1 ;;
-    ''|on) return 0 ;;
+    on) return 0 ;;
+    ''|off) return 1 ;;
     *)
-      echo "warning: $file: unrecognized value \"$value\"; Remote Control stays on (write \"off\" to opt out)" >&2
-      return 0
+      echo "warning: $file: unrecognized value \"$value\"; Remote Control stays off (write \"on\" to enable it)" >&2
+      return 1
       ;;
   esac
 }
@@ -1278,7 +1280,7 @@ case "$LAUNCH" in
       if claude_supports_remote_control; then
         CLAUDE_REMOTE="--remote-control $(shell_quote "$ID") "
       elif command -v claude >/dev/null 2>&1; then
-        echo "warning: the installed claude CLI does not support --remote-control; launching $ID without Remote Control (upgrade claude, or write \"off\" to $CONFIG/claude-remote-control to stop resolving it)" >&2
+        echo "warning: the installed claude CLI does not support --remote-control; launching $ID without Remote Control (upgrade claude, or remove $CONFIG/claude-remote-control to stop resolving it)" >&2
       fi
     fi
     LAUNCH=${LAUNCH//__CLAUDEREMOTE__/$CLAUDE_REMOTE}

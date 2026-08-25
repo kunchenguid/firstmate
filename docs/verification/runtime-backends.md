@@ -917,12 +917,13 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Claude Remote Control
 
-Claude Code's `--remote-control <name>` leaves the session an ordinary interactive one and additionally publishes it to claude.ai/code and the Claude mobile app, so `bin/fm-spawn.sh` passes it on every claude-harness launch unless `config/claude-remote-control` says `off`.
+Claude Code's `--remote-control <name>` leaves the session an ordinary interactive one and additionally publishes it to claude.ai/code and the Claude mobile app, so `bin/fm-spawn.sh` passes it on every claude-harness launch once `config/claude-remote-control` says `on`.
 Whether firstmate's per-task supervision survives that flag is harness-dependent: the verdict comes from hooks the vendor fires and from what the vendor renders in the pane.
 
 Verified on 2026-08-20 with Claude Code 2.1.234 and tmux 3.7b on macOS 26.5.1 arm64, against a throwaway scout spawned through the modified `bin/fm-spawn.sh` into an isolated tmux server and a scratch firstmate home.
 
 ```sh
+echo on > <scratch-home>/config/claude-remote-control
 bin/fm-spawn.sh rc-probe-a1 <scratch-project> --scout --harness claude
 # spawned rc-probe-a1 harness=claude kind=scout window=firstmate:fm-rc-probe-a1 worktree=...
 ps -o pid,ppid,command -ax | grep -F -- --remote-control

@@ -186,7 +186,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --remote-control '$id' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -847,19 +847,19 @@ test_claude_remote_control_knob_selects_reachability() {
     status=$?
     expect_code 0 "$status" "claude spawn with claude-remote-control=$value should succeed"
     launch=$(cat "$LAUNCH_LOG")
-    if [ "$value" = off ]; then
-      assert_not_contains "$launch" "--remote-control" \
-        "config/claude-remote-control=off must launch the worker without Remote Control"
-    else
+    if [ "$value" = on ]; then
       assert_contains "$launch" "--remote-control '$id'" \
-        "config/claude-remote-control=$value must name the Remote Control session after the task"
+        "config/claude-remote-control=on must name the Remote Control session after the task"
+    else
+      assert_not_contains "$launch" "--remote-control" \
+        "config/claude-remote-control=$value must leave the worker local-only"
     fi
     if [ "$value" = bogus ]; then
       assert_contains "$out" "unrecognized value" \
         "an unrecognized claude-remote-control value must warn instead of deciding silently"
     fi
   done
-  pass "config/claude-remote-control: absent, empty, and on enable Remote Control; off opts out; a typo warns and keeps the default"
+  pass "config/claude-remote-control: only on enables Remote Control; absent, empty, and off stay local-only; a typo warns and keeps the default"
 }
 
 test_claude_remote_control_omitted_when_installed_cli_lacks_the_flag() {
@@ -867,6 +867,7 @@ test_claude_remote_control_omitted_when_installed_cli_lacks_the_flag() {
   id=profile-claude-remote-oldcli-z21
   rec=$(make_spawn_case profile-claude-remote-oldcli claude "$id")
   read_case_record "$rec"
+  printf 'on\n' > "$HOME_DIR/config/claude-remote-control"
 
   out=$(FM_TEST_CLAUDE_REMOTE=no \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -885,6 +886,7 @@ test_claude_secondmate_launch_carries_remote_control() {
   id=profile-claude-remote-secondmate-z22
   rec=$(make_spawn_case profile-claude-remote-secondmate claude "$id")
   read_case_record "$rec"
+  printf 'on\n' > "$HOME_DIR/config/claude-remote-control"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
@@ -895,8 +897,8 @@ test_claude_secondmate_launch_carries_remote_control() {
     "secondmate launch did not resolve the claude harness"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--remote-control '$id'" \
-    "a claude secondmate must be reachable through Remote Control like any other claude worker"
-  pass "a claude secondmate launch carries Remote Control named after its task"
+    "an opted-in claude secondmate must be reachable through Remote Control like any other claude worker"
+  pass "a claude secondmate launch carries Remote Control when the launching home opts in"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
