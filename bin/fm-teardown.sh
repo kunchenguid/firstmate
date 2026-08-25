@@ -2292,7 +2292,7 @@ fi
 # Missing remotes, changed refs, inconclusive proofs, and any branch still
 # checked out elsewhere are silent best-effort skips.
 teardown_drop_task_branch() {
-  local wt=$1 branch tip expected origin_tip='' no_mistakes_tip='' remote remote_tip
+  local wt=$1 branch tip expected default local_landed=0 origin_tip='' no_mistakes_tip='' remote remote_tip
   branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   [ "$branch" != HEAD ] || return 0
   tip=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 0
@@ -2301,6 +2301,7 @@ teardown_drop_task_branch() {
     expected=${TEARDOWN_WORKTREE_TIP_FOR_SAFETY:-}
     [ "$branch" = "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ] || return 0
     [ -n "$expected" ] && [ "$tip" = "$expected" ] || return 0
+    fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$tip" && local_landed=1
     for remote in origin no-mistakes; do
       remote_tip=$(fm_branch_remote_tip "$wt" "$remote" "$branch") || continue
       fm_branch_fetch_remote_tip "$wt" "$remote" "$branch" "$remote_tip" || continue
@@ -2316,7 +2317,15 @@ teardown_drop_task_branch() {
   if [ "$FORCE" = --force ] || [ "$KIND" = scout ]; then
     git -C "$wt" branch -D -- "$branch" >/dev/null 2>&1 || true
   else
-    fm_branch_delete_local_proven_tip "$wt" "$branch" "$tip" || true
+    default=$(fm_branch_default_branch "$wt" 2>/dev/null || true)
+    if [ -n "$default" ] \
+      && fm_branch_delete_if_safely_merged "$wt" "$branch" "refs/heads/$default"; then
+      :
+    elif fm_branch_delete_if_safely_gone "$wt" "$branch"; then
+      :
+    elif [ "$local_landed" = 1 ]; then
+      fm_branch_delete_local_proven_tip "$wt" "$branch" "$tip" || true
+    fi
   fi
   if [ -n "$origin_tip" ] \
     && fm_branch_delete_remote_proven_tip "$wt" origin "$branch" "$origin_tip"; then

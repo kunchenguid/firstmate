@@ -675,7 +675,7 @@ test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt unmerged "unmerged work"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -689,7 +689,9 @@ test_no_mistakes_origin_remote_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  task_branch_exists "$case_dir" \
+    || fail "nm-origin: teardown deleted a pushed-but-unmerged task branch"
+  pass "no-mistakes teardown preserves a pushed-but-unmerged task branch"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
