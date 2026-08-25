@@ -1498,6 +1498,29 @@ test_custody_head_terminal_run_is_not_attributed() {
   pass "a terminal run whose head cannot be placed is not attributed"
 }
 
+# The narrow exception to the same rule: a ci-green override may still promote
+# an ACTIVE, unverifiable run to done, because that promotion is reached through
+# the active-phase exception in fm_nm_run_attributable, not through a terminal
+# run-step word or a coarse terminal row - both of which the test above pins as
+# still refused at the same unplaceable head. A wrong done from a genuinely
+# green CI signal is recoverable, unlike a wrong failed.
+test_custody_head_ci_green_override_is_attributed_despite_unverifiable_head() {
+  reset_fakes
+  local d out; d=$(new_case custody-cigreen)
+  make_repo_on_branch "$d/wt" fm/vault-k2cig
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/k2cig.meta" "window=fm:fm-k2cig" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/k2cig.status"
+  FM_FAKE_RUN_HEAD="$CUSTODY_HEAD"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/vault-k2cig)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state "$d" k2cig)
+  assert_contains "$out" "state: done" "a green ci-monitor run at an unverifiable head is still promoted to done"
+  assert_contains "$out" "source: run-step" "the ci-green override supplies the verdict"
+  assert_contains "$out" "checks green" "the ci-green override keeps its detail"
+  pass "the ci-green override attributes done at an unverifiable head, unlike every other terminal verdict"
+}
+
 # The protection the identity rule exists for is unchanged: a sha that DOES
 # resolve here and is neither ancestor nor descendant is a rewritten or diverged
 # tip, and stays rejected even for a running row.
@@ -1781,6 +1804,7 @@ test_missing_run_head_falls_back_to_current_state
 test_custody_head_running_row_beats_older_cancelled_row
 test_custody_head_active_axi_status_dominates_coarse_table
 test_custody_head_terminal_run_is_not_attributed
+test_custody_head_ci_green_override_is_attributed_despite_unverifiable_head
 test_coarse_unrelated_sha_still_rejected
 test_coarse_terminal_row_never_outranks_active_named_run
 test_custody_run_closes_unknown_none_after_resolved_event

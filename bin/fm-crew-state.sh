@@ -33,9 +33,13 @@
 #      branch whose head was rewritten or diverged must not be attributed. Where
 #      the run's head sits relative to the worktree HEAD, and what that permits
 #      for an active versus a concluded run, is owned by fm_nm_run_attributable
-#      in bin/fm-nm-run-lib.sh; the one rule that must survive with nothing
-#      loaded is that a head this worktree cannot place NEVER yields a terminal
-#      verdict, because a false `failed` invites tearing down live work.
+#      in bin/fm-nm-run-lib.sh; the rule that must survive with nothing loaded is
+#      that a head this worktree cannot place never yields a terminal verdict
+#      FROM THE RUN-STEP MAPPING OR THE COARSE TABLE, because a false `failed`
+#      invites tearing down live work. The one narrow exception is the ci-green
+#      override immediately below: it may still promote an active, unverifiable
+#      run to `done`, because a wrong `done` from a genuinely green CI signal is
+#      recoverable in a way a wrong `failed` is not.
 #      `axi status` outranks the coarse runs list whenever it names this crew's
 #      own branch with a run that has not concluded: it knows the run id and the
 #      live step, while the coarse table knows only a sha that a fix round is
@@ -610,6 +614,13 @@ if [ "$HAVE_RUN" = 1 ]; then
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
+              # Deliberately allowed to fire at an unverifiable head: this is
+              # the one place a terminal verdict may come from an active run
+              # this worktree cannot place. A wrong `done` here only means the
+              # captain is told a PR is ready when checks are in fact green -
+              # recoverable - whereas a wrong `failed` from the same head would
+              # invite tearing down live work, the incident this file exists to
+              # prevent.
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             fi

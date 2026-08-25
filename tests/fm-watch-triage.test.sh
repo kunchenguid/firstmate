@@ -580,6 +580,14 @@ test_run_activity_parsers() {
   trailing=$(printf 'run:\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,50m,"40m2s ago: log: applying the fix","1827880",fix 1\nupdated: 3s ago\n')
   [ "$(fm_nm_last_activity_secs "$trailing")" = 2402 ] \
     || fail "a scalar after the active_steps table was read as step activity"
+  # last_activity is a truncated, frozen agent log line: a later " ago"-shaped
+  # substring in its own free text (here a retry message quoting "3s ago") must
+  # never win over the row's own leading age, because that text never changes
+  # and a smaller bogus reading would permanently suppress a genuine wedge.
+  local in_row_free_text
+  in_row_free_text=$(printf 'run:\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,fixing,50m,"40m2s ago: log: gave up after 3s ago retrying","1827880",fix 1\n')
+  [ "$(fm_nm_last_activity_secs "$in_row_free_text")" = 2402 ] \
+    || fail "a smaller ago token in a row's own free text won over the row's own leading age"
   pass "run-activity parsers: durations, the newest active step, and no-evidence cases"
 }
 

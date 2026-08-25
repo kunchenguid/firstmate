@@ -614,8 +614,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # window per STALE_ESCALATE_SECS. The run probe goes first because the
         # case it answers is the one that blinds the other: while the pipeline
         # holds branch custody the worktree receives no writes at all, so the
-        # walk would come back empty and be pure cost. Where there is no run to
-        # find, it returns without spending its bound.
+        # walk would come back empty and be pure cost. It skips the bounded
+        # `axi status` call outright only for a missing task id, a bad window,
+        # no no-mistakes binary, a missing or torn-down worktree, a non-ship
+        # crew, or a detached HEAD; for any other stale ship crew on a branch
+        # the call IS made, and a refusal is decided afterward on branch
+        # equality against whatever the call answered.
         if crew_run_active_within "$task" "$STATE" "$age"; then
           wedge_suppress_run_active "$win" "$since_file" "$label" "$age"
           return 0

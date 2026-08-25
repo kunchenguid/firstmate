@@ -209,6 +209,14 @@ fm_nm_duration_secs() {  # <token>
 # 2m10s, 2m39s and 7m50s, and `active_for` values (20m15s, 58m59s, 1h51m, 2h31m)
 # sit in the same row without an " ago" suffix, which is what keeps them out.
 #
+# last_activity is a TRUNCATED, FROZEN agent log line, so only the FIRST " ago"
+# token in each row - the one that opens the cell - is read as that row's own
+# age. Any later " ago"-shaped substring in the row's free text (a retry message,
+# a quoted elapsed time, a pasted log fragment) is ignored: once written that
+# text never changes, so treating it as evidence would let a single small
+# duration inside it permanently suppress every future wedge escalation for
+# that crew, which is the opposite of what this probe exists to catch.
+#
 # The table ends at the first line that is not one of its own data rows, decided
 # by INDENTATION relative to the header: a row of this table is always indented
 # deeper than the header that introduced it, so anything at or left of the header
@@ -234,11 +242,17 @@ fm_nm_last_activity_secs() {  # <toon-output>
     }
   ')
   [ -n "$block" ] || return 0
-  for tok in $(printf '%s\n' "$block" | grep -oE '[0-9][0-9hms]*[[:space:]]+ago' | sed 's/[[:space:]]*ago$//'); do
+  local row
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    tok=$(printf '%s\n' "$row" | grep -oE '[0-9][0-9hms]*[[:space:]]+ago' | head -n1 | sed 's/[[:space:]]*ago$//')
+    [ -n "$tok" ] || continue
     secs=$(fm_nm_duration_secs "$tok")
     [ -n "$secs" ] || continue
     if [ -z "$min" ] || [ "$secs" -lt "$min" ]; then min=$secs; fi
-  done
+  done <<EOF
+$block
+EOF
   [ -n "$min" ] && printf '%s' "$min"
   return 0
 }
