@@ -1315,13 +1315,26 @@ trim_log() {
 # ============================================================================
 
 fm_super_stop_watcher() {  # <watcher-pid>
-  local watcher_pid=$1 child current_parent
+  local watcher_pid=$1 child current_parent i children=""
   while read -r child; do
     [ -n "$child" ] || continue
     current_parent=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]')
     [ "$current_parent" = "$watcher_pid" ] || continue
+    children="${children}${children:+ }$child"
     kill -TERM "$child" 2>/dev/null || true
   done < <(ps -axo pid=,ppid= | awk -v parent="$watcher_pid" '$2 == parent { print $1 }')
+  # A bounded-command owner traps TERM so it can terminate and reap its own
+  # process group. Keep its watcher parent alive long enough to wait for that
+  # owner; killing both at once reparents the cleanup owner to launchd/init.
+  for child in $children; do
+    i=0
+    while [ "$i" -lt 50 ]; do
+      current_parent=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]')
+      [ "$current_parent" = "$watcher_pid" ] || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
   kill -TERM "$watcher_pid" 2>/dev/null || true
 }
 

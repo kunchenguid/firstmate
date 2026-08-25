@@ -964,7 +964,7 @@ test_pid_identity_is_locale_invariant() {
 }
 
 test_watcher_bounded_command_reaped_on_owner_shutdown() {
-  local dir marker owner child i
+  local dir marker owner child bounded_owner i
   dir=$(make_case bounded-owner-shutdown)
   marker="$dir/child.pid"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -979,6 +979,9 @@ test_watcher_bounded_command_reaped_on_owner_shutdown() {
   done
   [ -s "$marker" ] || { kill "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true; fail "bounded watcher command never started"; }
   child=$(cat "$marker")
+  bounded_owner=$(ps -axo pid=,ppid= | awk -v parent="$owner" '$2 == parent { print $1; exit }')
+  [ -n "$bounded_owner" ] \
+    || { kill "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true; fail "bounded watcher owner was not observable"; }
   fm_super_stop_watcher "$owner"
   wait "$owner" 2>/dev/null || true
   i=0
@@ -988,6 +991,8 @@ test_watcher_bounded_command_reaped_on_owner_shutdown() {
   done
   ! is_live_non_zombie "$child" \
     || { kill -KILL "$child" 2>/dev/null || true; fail "watcher shutdown orphaned bounded child $child"; }
+  ! is_live_non_zombie "$bounded_owner" \
+    || { kill -KILL "$bounded_owner" 2>/dev/null || true; fail "watcher shutdown orphaned bounded owner $bounded_owner"; }
   pass "watcher shutdown terminates and reaps its bounded command tree"
 }
 
