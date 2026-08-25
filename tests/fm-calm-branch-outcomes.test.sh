@@ -102,22 +102,24 @@ check("failed read with no detail", calmBranchOutcomeAttention("", true), [
 // Output Calm does not recognize as the store's records is carried through
 // byte-for-byte rather than swallowed by a format it has not been taught.
 const unrecognized = [
-  "not json at all",
+  "  not json at all",
   '{"seq":9}',
   '["task-1","captain","summary"]',
   '{"task":"task-7","verdict":"escalate","summary":"unknown verdict"}',
   '{"task":"task-8","verdict":"captain","summary":42}',
+  '{"task":"task-9","verdict":"routine","summary":"ok"}',
   "  ",
 ].join("\n");
 check(
   "unrecognized output",
   calmBranchOutcomeAttention(unrecognized, false),
   [
-    { glyph: false, text: "not json at all" },
-    { glyph: false, text: '{"seq":9}' },
-    { glyph: false, text: '["task-1","captain","summary"]' },
-    { glyph: false, text: '{"task":"task-7","verdict":"escalate","summary":"unknown verdict"}' },
-    { glyph: false, text: '{"task":"task-8","verdict":"captain","summary":42}' },
+    { glyph: true, text: "  not json at all" },
+    { glyph: true, text: '{"seq":9}' },
+    { glyph: true, text: '["task-1","captain","summary"]' },
+    { glyph: true, text: '{"task":"task-7","verdict":"escalate","summary":"unknown verdict"}' },
+    { glyph: true, text: '{"task":"task-8","verdict":"captain","summary":42}' },
+    { glyph: true, text: '{"task":"task-9","verdict":"routine","summary":"ok"}' },
   ],
 );
 
@@ -144,7 +146,7 @@ check(
 check(
   "partial recognition",
   calmBranchOutcomeAttention(`${routineOnly.trim()}\nstore truncated`, false),
-  [{ glyph: false, text: "store truncated" }],
+  [{ glyph: true, text: "store truncated" }],
 );
 console.log("COLLAPSE_OK");
 JS
