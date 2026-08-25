@@ -85,7 +85,8 @@ error_observation() { # <id> <kind> <class>
     --arg kind "$2" --arg class "$3" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
        session_id:null,task_id_remote:null,agent_id:null,agent_name:null,model:null,provider_status:null,
-       terminal:false,ambiguous:false,result_availability:"error",answer:null,error_class:$class,observed_at:(now|todateiso8601)}'
+       terminal:false,ambiguous:false,result_availability:"error",result_kind:null,answer:null,
+       artifact_reference:null,error_class:$class,observed_at:(now|todateiso8601)}'
 }
 
 ambiguous_observation() { # <id> <kind> <class> [count]
@@ -93,7 +94,8 @@ ambiguous_observation() { # <id> <kind> <class> [count]
     --arg kind "$2" --arg class "$3" --arg count "${4:-0}" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
        session_id:null,task_id_remote:null,agent_id:null,agent_name:null,model:null,provider_status:null,
-       terminal:false,ambiguous:true,result_availability:"unavailable",answer:null,error_class:$class,
+       terminal:false,ambiguous:true,result_availability:"unavailable",result_kind:null,answer:null,
+       artifact_reference:null,error_class:$class,
        match_count:($count|tonumber),observed_at:(now|todateiso8601)}'
 }
 
@@ -175,7 +177,7 @@ session_payload_has_marker() { # <structured session get>
 
 session_observation() { # <id> <session-id> <kind>
   local id=$1 session_id=$2 kind=$3 root out err normalized status status_kind answer availability terminal ambiguous=false class=""
-  local agent_id agent_name
+  local agent_id agent_name result_kind="" artifact_reference=null structured structured_state=empty
   root=$(temp_root); out="$root/get.out"; err="$root/get.err"; normalized="$root/error.json"
   run_ida_json "$out" "$err" session get --session-id "$session_id"
   if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$out" \
@@ -195,10 +197,103 @@ session_observation() { # <id> <session-id> <kind>
   status_kind=$(fm_ida_status_kind "$status")
   answer=$(jq -r '[.data.messages[]? | select(.visible == true and .type == 8 and (.text | type == "string" and length > 0)) | .text] | last // ""' "$out" \
     | fm_remote_redact_result_text "$REMOTE_STATE_INSTRUCTION_FILE") || die "cannot normalize iDA final answer"
+  if [ -n "$answer" ]; then
+    result_kind=text
+  else
+    structured=$(jq -c '
+      def meaningful:
+        if type == "null" then false
+        elif type == "string" then length > 0
+        elif type == "array" then any(.[]; meaningful)
+        elif type == "object" then any(.[]; meaningful)
+        else true
+        end;
+      def part_summary:
+        if type != "object" then {state:"malformed"}
+        elif has("file") and has("data") then {state:"unsupported"}
+        elif has("file") then
+          if ((.type? // "file") != "file") then {state:"unsupported"}
+          elif (.file | type) != "object" then {state:"malformed"}
+          elif (.file | meaningful | not) then {state:"empty",kind:"file"}
+          elif ([.file.fileUri?,.file.file_uri?,.file.uri?]
+            | any(.[]; type == "string" and length > 0)) then {state:"available",kind:"file"}
+          else {state:"unsupported"}
+          end
+        elif has("data") then
+          if ((.type? // "data") != "data") then {state:"unsupported"}
+          elif (.data | type) != "object" then {state:"malformed"}
+          elif (.data | meaningful | not) then {state:"empty",kind:"data"}
+          elif (.data | has("sheets") | not) then {state:"unsupported"}
+          elif (.data.sheets | type) != "array" then {state:"malformed"}
+          elif (.data.sheets | meaningful) then {state:"available",kind:"data"}
+          else {state:"empty",kind:"data"}
+          end
+        elif ((.type? // "") == "file" or (.type? // "") == "data") then {state:"malformed"}
+        else {state:"unsupported"}
+        end;
+      def artifact_summary:
+        if type != "object" then {state:"malformed"}
+        elif (has("artifact") | not) then {state:"unsupported"}
+        elif (.artifact | type) != "object" then {state:"malformed"}
+        elif (.artifact | has("parts") | not) then {state:"malformed"}
+        elif (.artifact.parts | type) != "array" then {state:"malformed"}
+        else [.artifact.parts[] | part_summary] as $parts
+          | if any($parts[]; .state == "malformed") then {state:"malformed"}
+            elif any($parts[]; .state == "unsupported") then {state:"unsupported"}
+            elif any($parts[]; .state == "available") then
+              {state:"available",part_count:($parts | length),
+               part_kinds:([$parts[] | select(.kind != null) | .kind] | unique)}
+            else {state:"empty"}
+            end
+        end;
+      def final_answer_summary:
+        if . == null then {state:"empty"}
+        elif type != "array" then {state:"malformed"}
+        elif length == 0 then {state:"empty"}
+        else [.[] | artifact_summary] as $artifacts
+          | if any($artifacts[]; .state == "malformed") then {state:"malformed"}
+            elif any($artifacts[]; .state == "unsupported") then {state:"unsupported"}
+            elif any($artifacts[]; .state == "available") then
+              {state:"available",artifact_count:($artifacts | length),
+               part_count:([$artifacts[] | .part_count // 0] | add),
+               part_kinds:([$artifacts[] | .part_kinds[]?] | unique)}
+            else {state:"empty"}
+            end
+        end;
+      [.data.messages[]?
+        | select(.visible == true and .type == 8 and has("deep_research_content"))
+        | if .deep_research_content == null then {state:"empty"}
+          elif (.deep_research_content | type) != "object" then {state:"malformed"}
+          elif (.deep_research_content | has("finalAnswer") | not) then {state:"empty"}
+          else (.deep_research_content.finalAnswer | final_answer_summary)
+          end
+      ] as $results
+      | ([$results[] | select(.state != "empty")] | last // {state:"empty"}) as $selected
+      | if $selected.state == "available" then
+          {state:"available",reference:{schema:"fm-ida-artifact-reference.v1",
+           kind:"deep-research-final-answer",readback:"session-get",
+           artifact_count:$selected.artifact_count,part_count:$selected.part_count,
+           part_kinds:$selected.part_kinds}}
+        else {state:$selected.state}
+        end
+    ' "$out") || die "cannot classify iDA structured final answer"
+    structured_state=$(printf '%s' "$structured" | jq -r '.state')
+    if [ "$structured_state" = available ]; then
+      result_kind=artifact
+      artifact_reference=$(printf '%s' "$structured" | jq -c '.reference')
+    fi
+  fi
   agent_id=$(jq -r '.data.session.agent_id // "" | tostring' "$out")
   agent_name=$(jq -r '.data.session.agent_name // ""' "$out")
   case "$status_kind" in
-    success) terminal=true; [ -n "$answer" ] && availability=available || availability=zero ;;
+    success)
+      terminal=true
+      if [ -n "$answer" ] || [ "$structured_state" = available ]; then availability=available
+      elif [ "$structured_state" = malformed ]; then availability=error; class='provider-result-malformed'
+      elif [ "$structured_state" = unsupported ]; then availability=error; class='provider-result-unsupported'
+      else availability=zero
+      fi
+      ;;
     failure) terminal=true; availability=error; class='provider-terminal-failure' ;;
     cancelled) terminal=true; availability=unavailable; class='provider-cancelled' ;;
     running) terminal=false; availability=unavailable ;;
@@ -207,13 +302,14 @@ session_observation() { # <id> <session-id> <kind>
   jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$id" --arg marker "$IDA_STATE_MARKER" \
     --arg kind "$kind" --arg session_id "$session_id" --arg agent_id "$agent_id" \
     --arg agent_name "$agent_name" --arg model "$IDA_STATE_MODEL" --arg status "$status" \
-    --arg answer "$answer" --arg availability "$availability" --arg class "$class" \
-    --argjson terminal "$terminal" --argjson ambiguous "$ambiguous" '
+    --arg answer "$answer" --arg result_kind "$result_kind" --arg availability "$availability" --arg class "$class" \
+    --argjson artifact_reference "$artifact_reference" --argjson terminal "$terminal" --argjson ambiguous "$ambiguous" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
        session_id:$session_id,task_id_remote:null,agent_id:(if $agent_id=="" then null else $agent_id end),
        agent_name:(if $agent_name=="" then null else $agent_name end),model:(if $model=="" then null else $model end),
        provider_status:(if $status=="" then null else $status end),terminal:$terminal,ambiguous:$ambiguous,
-       result_availability:$availability,answer:(if $answer=="" then null else $answer end),
+       result_availability:$availability,result_kind:(if $result_kind=="" then null else $result_kind end),
+       answer:(if $answer=="" then null else $answer end),artifact_reference:$artifact_reference,
        error_class:(if $class=="" then null else $class end),observed_at:(now|todateiso8601)}'
   rm -rf -- "$root"
 }
@@ -279,7 +375,8 @@ submit_observation() { # <id> <root>
     jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$id" --arg marker "$IDA_STATE_MARKER" --arg class "$class" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:"submission",session_marker:$marker,
        session_id:null,task_id_remote:null,agent_id:null,agent_name:null,model:null,provider_status:"rejected",
-       terminal:true,ambiguous:false,result_availability:"error",answer:null,error_class:$class,observed_at:(now|todateiso8601)}'
+       terminal:true,ambiguous:false,result_availability:"error",result_kind:null,answer:null,
+       artifact_reference:null,error_class:$class,observed_at:(now|todateiso8601)}'
   else
     ambiguous_observation "$id" submission "submission-acceptance-unknown-$class" "${LIST_COUNT:-0}"
   fi
@@ -380,11 +477,12 @@ source_observe_with_backoff() ( # <id>
 )
 
 write_report() { # <id> <observation> <outcome>
-  local id=$1 observation=$2 outcome=$3 report answer availability class
+  local id=$1 observation=$2 outcome=$3 report answer availability class result_kind
   report=$(fm_remote_report_path "$id") || return 1
   fm_remote_report_replaceable "$id" || return 1
   answer=$(jq -r '.answer // ""' "$observation")
   availability=$(jq -r '.result_availability' "$observation")
+  result_kind=$(jq -r '.result_kind // ""' "$observation")
   class=$(jq -r '.error_class // ""' "$observation")
   # shellcheck disable=SC2016 # Backticks are literal Markdown.
   {
@@ -397,14 +495,16 @@ write_report() { # <id> <observation> <outcome>
       "$(jq -r '.model // "unavailable"' "$observation")"
     [ -z "$REMOTE_STATE_BYTEDCLI_VERSION" ] || printf -- '- Legacy bytedcli version: `%s` (informational)\n' "$REMOTE_STATE_BYTEDCLI_VERSION"
     printf -- '- Outcome: `%s`\n- Result availability: `%s`\n' "$outcome" "$availability"
+    [ -z "$result_kind" ] || printf -- '- Result kind: `%s`\n' "$result_kind"
     [ -z "$class" ] || printf -- '- Error class: `%s`\n' "$class"
     printf '\n## Provider Result\n\n'
-    if [ "$availability" = available ]; then printf '%s\n' "$answer";
+    if [ "$availability:$result_kind" = available:artifact ]; then printf '%s\n' 'A structured Deep Research final-answer artifact is available through the recorded iDA session.';
+    elif [ "$availability" = available ]; then printf '%s\n' "$answer";
     elif [ "$availability" = zero ]; then printf '%s\n' 'The provider completed successfully but returned an exact empty final answer.';
     elif [ "$availability" = unavailable ]; then printf '%s\n' 'No final provider answer is available for this terminal outcome.';
     else printf '%s\n' 'The provider returned an error; no final answer was recovered.'; fi
     printf '\n## Evidence Boundary\n\n'
-    printf '%s\n' '- This report contains only normalized iDA identity, terminal state, and final-answer fields.'
+    printf '%s\n' '- This report contains only normalized iDA identity, terminal state, final-answer text, or a safe structured-artifact reference.'
     printf '%s\n' '- Private prompts, credentials, tokens, PII-bearing payloads, and raw event streams are not preserved.'
     printf '%s\n' '- Provider output grants no implementation, publication, merge, destructive, legal, or security authority.'
   } >"$report" || return 1
@@ -421,7 +521,7 @@ cmd_handle_locked() {
   if fm_procevent_is_handled "$STATE" "$source" "$seq"; then printf 'handled: %s duplicate=true\n' "$id"; return 0; fi
   artifact=$(fm_remote_artifact_store "$id" observation "$result") || die "cannot store normalized iDA observation"
   session_id=$(jq -r '.session_id // ""' "$result")
-  patch=$(jq -c '{session_id:.session_id,task_id:.task_id_remote,agent_id:.agent_id,agent_name:.agent_name,model:.model,provider_status:.provider_status} | with_entries(select(.value != null))' "$result")
+  patch=$(jq -c '{session_id:.session_id,task_id:.task_id_remote,agent_id:.agent_id,agent_name:.agent_name,model:.model,provider_status:.provider_status,result_kind:.result_kind} | with_entries(select(.value != null))' "$result")
   availability=$(jq -r '.result_availability' "$result")
   class=$(jq -r '.error_class // ""' "$result")
   if jq -e '.ambiguous == true' "$result" >/dev/null; then
@@ -438,8 +538,9 @@ cmd_handle_locked() {
     cmd_arm_locked "$id" >/dev/null || die "cannot re-arm iDA readback"
   else
     status_kind=$(fm_ida_status_kind "$(jq -r '.provider_status // ""' "$result")")
-    case "$status_kind:$class" in
-      success:|running:) outcome=succeeded ;;
+    case "$status_kind:$availability:$class" in
+      success:error:*) outcome=failed ;;
+      success:*:|running:*:) outcome=succeeded ;;
       cancelled:*|*:provider-cancelled) outcome=cancelled ;;
       *) outcome=failed ;;
     esac
