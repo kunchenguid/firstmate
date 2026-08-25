@@ -200,7 +200,7 @@ Firstmate uses the same `/<skill>` form for `/no-mistakes` and relies on Enter-o
 ## Runtime backend inspection
 
 Tmux uses the shared separated-composer classifier, the Agy-only `esc to cancel` busy fallback, and `agy` foreground process liveness.
-The separated-composer classifier is harness-scoped through `FM_COMPOSER_HARNESS`, mirroring the busy-signature rule: `fm-send` sets it from the task meta, `fm-spawn`'s Agy path sets it directly, and the away-mode daemon derives it from its own harness ancestry, so another harness's rule/quote/rule transcript tail is never claimed as an Agy composer.
+The separated-composer classifier is harness-scoped through `FM_COMPOSER_HARNESS`, mirroring the busy-signature rule: `fm-send` and `fm-control` declare the target task's recorded harness resolved to its verified adapter family, `fm-spawn` declares every launch's harness only after the backend container exists so the value never becomes a tmux server's ambient environment, and the away-mode daemon always re-detects its own pane's harness instead of trusting an inherited value, so another harness's rule/quote/rule transcript tail is never claimed as an Agy composer.
 Herdr prefers native agent state when available and otherwise uses the same harness-scoped busy fallback and separated-composer classifier.
 Zellij retains its existing screen-diff submission proof because it exposes no cursor or ANSI composer primitive.
 Orca and cmux use the shared separated-composer classifier over their plain screen captures.
