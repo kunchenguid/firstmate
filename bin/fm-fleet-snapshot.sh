@@ -803,6 +803,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         kind:(($work.kind // $task.kind // null) | if . == null then null else trunc(40) end),
         risk:($work.risk // {level:"unknown",rationale:null,source:"absent"}),
         context:(($work.body_excerpt // null) | if . == null then null else trunc(240) end),
+        deferred_marker:($work.deferred_marker // false),
         pr_url:(($work.pr_url // $task.pr.url // null) | if . == null then null else trunc(500) end),
         report_path:(($work.report_path //
           (if $task.paths.report.present == true then $task.paths.report.path else null end) // null)
@@ -883,6 +884,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             | backlog_record($t.id) as $work
             | card_fields($work; $t) +
               {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+    | ([ $decisions_all[] | select(.deferred_marker != true) ]) as $active_decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | . as $work
@@ -915,7 +917,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
        else {kind:null,ids:[]} end) as $invalidity
     | (if $valid | not then "unknown"
-       elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
+       elif any($active_decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
        elif (($active_programs_all | length) + ($active_all | length)) > 0 then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state

@@ -215,10 +215,11 @@ function reconcileBoardState(pending, drafts, selectedKey, cards) {
   for (const [key, draft] of drafts) {
     const card = cardsByKey.get(key);
     if (draft.submitted === true) {
-      if (!card || draft.fingerprint !== cardFingerprint(card)) {
+      if (!draftIsAvailable(draft, card)) {
         drafts.delete(key);
         pending.delete(key);
       } else {
+        draft.fingerprint = cardFingerprint(card);
         pending.set(key, { action: draft.action, fingerprint: draft.fingerprint });
       }
     } else if (!draftIsAvailable(draft, card)) {

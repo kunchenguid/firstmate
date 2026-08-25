@@ -147,13 +147,13 @@ def main_lane(record: dict[str, Any], task: dict[str, Any] | None) -> str:
     current_state = current.get("state")
     if record.get("state") == "done" and (task is None or current_state == "done"):
         return "done"
+    if record.get("deferred_marker"):
+        return "waiting"
     hints = (task or {}).get("hints") or {}
     if record.get("captain_actionable") or hints.get("pending_decision") or hints.get("blocked_event"):
         return "needs_you"
     if hints.get("open_decisions"):
         return "needs_you"
-    if record.get("deferred_marker"):
-        return "waiting"
     if record.get("state") == "in_flight" and record.get("current_role") == "program":
         return "in_progress"
     # A task's live state is newer than its backlog row. Backlog movement can lag
@@ -515,9 +515,11 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
             )
 
         for item in mate.get("queued") or []:
-            if item.get("captain_actionable"):
+            if item.get("deferred_marker"):
+                lane = "waiting"
+            elif item.get("captain_actionable"):
                 lane = "needs_you"
-            elif item.get("deferred_marker") or item.get("hold_reason") or item.get("unresolved_blocker_ids"):
+            elif item.get("hold_reason") or item.get("unresolved_blocker_ids"):
                 lane = "waiting"
             else:
                 lane = "backlog"
@@ -531,7 +533,8 @@ def board_from_snapshot(snapshot: Any) -> dict[str, Any]:
             lane = "verification" if item.get("source") == "run-step" else "in_progress"
             merge_card(cards, mate_card(item, lane))
         for item in mate.get("decisions_open") or []:
-            merge_card(cards, mate_card(item, "needs_you"))
+            lane = "waiting" if item.get("deferred_marker") else "needs_you"
+            merge_card(cards, mate_card(item, lane))
         for item in mate.get("landed") or []:
             merge_card(cards, mate_card(item, "done", source="backlog"))
 

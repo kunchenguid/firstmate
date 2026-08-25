@@ -937,6 +937,23 @@ EOF
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
+- [ ] parked - Parked child (repo: sample) (kind: ship) (since 2026-07-11)
+  DEFERRED - revisit after planning.
+
+## Queued
+
+## Done
+EOF
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "externally_held"
+      and (.decisions_open
+        | any(.id == "parked" and .key == "parked" and .deferred_marker == true))
+  ' >/dev/null || fail "deferred child decision remained an urgent captain call: $canonical"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
 
 ## Queued
 

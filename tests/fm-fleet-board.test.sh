@@ -61,7 +61,7 @@ cat <<'JSON' | filter_snapshot
     {"order":3,"structured":true,"id":"verify-task","title":"Verify the rigging","state":"in_flight","repo":"firstmate","kind":"ship","risk":{"level":"high","rationale":"Production behavior changes.","source":"task-body"},"body_excerpt":"Verification context.","captain_actionable":false,"unresolved_blocker_ids":[],"pr_url":"https://github.com/example/repo/pull/7","links":["https://github.com/example/repo/pull/7"]},
     {"order":4,"structured":true,"id":"captain-task","title":"Choose the safe route","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"high","rationale":"Irreversible data choice.","source":"task-body"},"body_excerpt":"Two valid choices remain.","hold_reason":"Choose the migration strategy","hold_kind":"captain","captain_actionable":true,"unresolved_blocker_ids":[],"links":[]},
     {"order":5,"structured":true,"id":"waiting-task","title":"Wait for the tide","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"unknown","rationale":null,"source":"absent"},"blocked_reason":"Awaiting vendor approval","captain_actionable":false,"unresolved_blocker_ids":["vendor-approval"],"links":[]},
-    {"order":6,"structured":true,"id":"deferred-task","title":"Revisit the harbor plan","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"body_excerpt":"Deferred until the next planning cycle.","deferred_marker":true,"captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
+    {"order":6,"structured":true,"id":"deferred-task","title":"Revisit the harbor plan","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"body_excerpt":"Deferred until the next planning cycle.","deferred_marker":true,"captain_actionable":true,"unresolved_blocker_ids":[],"links":[]},
     {"order":7,"structured":true,"id":"done-task","title":"Land the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Documentation only.","source":"task-body"},"captain_actionable":false,"unresolved_blocker_ids":[],"report_path":"data/done-task/report.md","links":[]},
     {"order":8,"structured":true,"id":"reactivated-task","title":"Reopen the chart","state":"done","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"The completed task was reactivated.","source":"task-body"},"body_excerpt":"The live worker is canonical.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
     {"order":9,"structured":true,"id":"queued-live-task","title":"Start before charting","state":"queued","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Contained live work.","source":"task-body"},"body_excerpt":"The backlog row has not caught up.","captain_actionable":false,"unresolved_blocker_ids":[],"links":[]},
@@ -79,12 +79,12 @@ cat <<'JSON' | filter_snapshot
   "main_inventory":{"valid":true,"reason":null},
   "secondmate_current":{"registry":{"complete":false,"reason":null,"reasons":["record_limit"]},"records":[{
     "id":"design-mate","remote":false,"current":{"state":"captain_decision","reason":null},
-    "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]}],
+    "queued":[{"id":"mate-ready","title":"Polish mobile cards","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI change.","source":"task-body"},"context":"Mobile context.","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-held","title":"Hold for vendor keys","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Reversible integration.","source":"task-body"},"context":"Held context.","hold_reason":"Waiting on vendor API keys","captain_actionable":false,"unresolved_blocker_ids":[]},{"id":"mate-deferred-choice","title":"Revisit the deferred choice","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"context":"Deferred choice context.","hold_reason":"DEFERRED until planning","deferred_marker":true,"captain_actionable":true,"unresolved_blocker_ids":[]}],
     "programs":[{"id":"mate-program","title":"Coordinate the design program","repo":"firstmate","kind":"program","state":"working","source":"backlog","risk":{"level":"low","rationale":"Coordination only.","source":"task-body"},"context":"Program context."},{"id":"mate-deferred-program","title":"Revisit the deferred program","repo":"firstmate","kind":"program","state":"deferred","source":"backlog","deferred_marker":true,"risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"context":"Deferred program context."}],
     "active_children":[{"id":"mate-working","title":"Tune board spacing","repo":"firstmate","kind":"ship","state":"working","source":"pane","doing":"Checking spacing","risk":{"level":"low","rationale":"Reversible CSS.","source":"task-body"},"context":"Spacing context."}],
-    "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]}],
+    "decisions_open":[{"id":"mate-choice","key":"contrast","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the contrast direction","reason":"Choose navy or rust","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/contrast"]},{"id":"mate-choice","key":"type-scale","verb":"needs-decision","title":"Set the visual direction","summary":"Approve the type scale","reason":"Choose compact or relaxed","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible UI choice.","source":"task-body"},"context":"Visual direction context.","links":["https://example.com/type-scale"]},{"id":"mate-deferred-choice","key":"mate-deferred-choice","verb":"captain-hold","title":"Revisit the deferred choice","summary":"Deferred captain choice","reason":"DEFERRED until planning","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"No active impact.","source":"task-body"},"context":"Deferred choice context.","deferred_marker":true,"source":"backlog","links":[]}],
     "holds":[],"landed":[{"id":"mate-done","title":"Ship the companion card","repo":"firstmate","kind":"ship","risk":{"level":"medium","rationale":"Visible completion change.","source":"task-body"},"context":"Completion context.","pr_url":"https://github.com/example/repo/pull/8","report_path":"data/mate-done/report.md","links":["https://github.com/example/repo/pull/8"]}],"endpoints":[],
-    "counts":{"programs":2,"active_children":1,"decisions_open":2,"holds":2,"queued":2,"landed":1,"endpoints":0},"omitted":[]
+    "counts":{"programs":2,"active_children":1,"decisions_open":3,"holds":2,"queued":3,"landed":1,"endpoints":0},"omitted":[]
   },{
     "id":"primary","remote":false,"current":{"state":"ready","reason":null},
     "queued":[{"id":"ready-task","title":"Secondmate task with a reserved id","repo":"firstmate","kind":"ship","risk":{"level":"low","rationale":"Namespace fixture.","source":"task-body"},"context":"Secondmate namespace context.","captain_actionable":false,"unresolved_blocker_ids":[]}],
@@ -277,8 +277,8 @@ printf '%s' "$board" | jq -e '
   .schema == "fm-fleet-board.v1"
   and (.actions.operation_scope | test("^[a-f0-9]{64}$"))
   and .actions.max_text_bytes == 8192
-  and .counts == {backlog:3,in_progress:7,verification:1,needs_you:2,waiting:4,done:2}
-  and .summary == {open:17,needs_you:2,high_risk_open:2}
+  and .counts == {backlog:3,in_progress:7,verification:1,needs_you:2,waiting:5,done:2}
+  and .summary == {open:18,needs_you:2,high_risk_open:2}
   and ([.cards[] | select(.id == "captain-task")][0]
        | .lane == "needs_you" and .actions.answer == true and .risk.level == "high"
          and .home.namespace == "primary"
@@ -307,7 +307,10 @@ printf '%s' "$board" | jq -e '
   and ([.cards[] | select(.id == "mate-deferred-program")][0]
        | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
   and ([.cards[] | select(.id == "deferred-task")][0]
-       | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context")
+       | .lane == "waiting" and .status.wait_reason == "Marked deferred in task context"
+         and .actions.answer == false)
+  and ([.cards[] | select(.id == "mate-deferred-choice")][0]
+       | .lane == "waiting" and .actions.answer == false)
   and ([.cards[] | select(.id == "mate-held")][0]
        | .lane == "waiting" and .status.wait_reason == "Waiting on vendor API keys")
   and ([.cards[] | select(.id == "mate-done")][0]
@@ -1153,6 +1156,18 @@ if (
   reloadedPending.get(card.key)?.fingerprint !== cardFingerprint(card)
   || reloadedOperations.get(card.key)?.requestId !== "request-submitted"
   || reloadedOperations.get(card.key)?.submitted !== true
+) process.exit(1);
+const routineRefresh = clone(card);
+routineRefresh.status = {
+  label: "Waiting for you",
+  detail: "Fresh status detail while the inbox note is still pending",
+  source: "fresh-status",
+  wait_reason: "Choose the migration route after reviewing fresh evidence",
+};
+reconcileBoardState(reloadedPending, reloadedOperations, card.key, [routineRefresh]);
+if (
+  reloadedPending.size !== 1
+  || reloadedOperations.get(card.key)?.requestId !== "request-submitted"
 ) process.exit(1);
 reconcileBoardState(reloadedPending, reloadedOperations, card.key, [moved]);
 if (reloadedPending.size !== 0 || reloadedOperations.size !== 0) process.exit(1);
