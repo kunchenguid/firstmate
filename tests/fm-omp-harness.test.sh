@@ -639,7 +639,31 @@ test_omp_model_policy_matrix() {
   pass "omp model policy matrix: $OMP_MODEL_CLASSES/12 rejected-model classes refuse before the watcher guard, the task lock, and every other mutation"
 }
 
-# --- policy matrix 2: selection shapes, 12 rows -----------------------------
+# assert_raw_launch_refused_before_mutation <case> <task-id> <raw-command> <message>
+assert_raw_launch_refused_before_mutation() {
+  local case_name=$1 id=$2 raw=$3 want=$4 rec out status guard_marker tmux_log
+  rec=$(make_omp_case "$case_name" claude "$id")
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  tmux_log="$CASE_DIR/tmux-sends"
+  : > "$tmux_log"
+  arm_ordering_probes "$id"
+  out=$(FM_TMUX_LOG="$tmux_log" run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" "$raw" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "$case_name raw launch must be refused: $out"
+  assert_contains "$out" "$want" "$case_name refusal did not name the raw-launch boundary: $out"
+  assert_not_contains "$out" "another spawn is already creating" \
+    "$case_name reached the task lock: $out"
+  assert_absent "$guard_marker" "$case_name was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/$id.meta" "$case_name published task metadata"
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "$case_name wrote the extension"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "$case_name armed a busy contract"
+  [ ! -s "$tmux_log" ] || fail "$case_name sent a raw command to the backend: $(cat "$tmux_log")"
+  rm -rf "$HOME_DIR/state/.spawn-$id.lock"
+}
+
+# --- policy matrix 2: selection shapes, 16 rows -----------------------------
 
 test_omp_selection_policy_matrix() {
   local rec out status guard_marker sub_home launch tmux_log rows=0 enforced=0
@@ -836,24 +860,51 @@ test_omp_selection_policy_matrix() {
   rm -rf "$HOME_DIR/state/.spawn-omp-s11.lock"
   enforced=$((enforced + 1))
 
-  # Row 12: the negative control that stops the fix from over-reaching. A raw
+  # Rows 12-15: shell wrappers, compound expressions, and a nested env argv
+  # parser cannot disguise OMP.
+  # The public spawn command must refuse each form before the watcher guard,
+  # task lock, metadata publication, or backend submission.
+  rows=$((rows + 1))
+  assert_raw_launch_refused_before_mutation \
+    omp-sel-command-wrapper omp-s12 "command omp --approval-mode yolo" "$want_explicit"
+  enforced=$((enforced + 1))
+
+  rows=$((rows + 1))
+  assert_raw_launch_refused_before_mutation \
+    omp-sel-shell-wrapper omp-s13 "sh -c 'omp --approval-mode yolo'" \
+    "raw launch command must be one literal command"
+  enforced=$((enforced + 1))
+
+  rows=$((rows + 1))
+  assert_raw_launch_refused_before_mutation \
+    omp-sel-compound omp-s14 "true && omp --approval-mode yolo" \
+    "raw launch command must be one literal command"
+  enforced=$((enforced + 1))
+
+  rows=$((rows + 1))
+  assert_raw_launch_refused_before_mutation \
+    omp-sel-env-split omp-s15 "env -Somp --approval-mode yolo" \
+    "raw launch command must be one literal command"
+  enforced=$((enforced + 1))
+
+  # Row 16: the negative control that stops the fix from over-reaching. A raw
   # launch naming nothing known must still succeed exactly as today. Without
   # this row, governing omp's raw shape could silently become a blanket
   # refusal of every raw launch.
-  rec=$(make_omp_case omp-sel-raw-unverified claude omp-s12)
+  rec=$(make_omp_case omp-sel-raw-unverified claude omp-s16)
   read_case_record "$rec"
   rows=$((rows + 1))
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    omp-s12 "$PROJ_DIR" "someunverifiedagent --flag" --mode no-mistakes --yolo off)
+    omp-s16 "$PROJ_DIR" "someunverifiedagent --flag" --mode no-mistakes --yolo off)
   expect_code 0 $? "a raw launch naming an unverified adapter should succeed: $out"
-  assert_contains "$out" "spawned omp-s12 harness=someunverifiedagent" \
+  assert_contains "$out" "spawned omp-s16 harness=someunverifiedagent" \
     "raw unverified launch did not keep its claimed identity: $out"
   enforced=$((enforced + 1))
 
-  [ "$rows" -eq 12 ] || fail "the omp selection policy matrix must carry 12 rows, found $rows"
+  [ "$rows" -eq 16 ] || fail "the omp selection policy matrix must carry 16 rows, found $rows"
   [ "$enforced" -eq "$rows" ] || fail "omp selection policy matrix: only $enforced/$rows rows enforced"
   printf 'omp selection-policy matrix: %d/%d rows enforced before any mutation\n' "$enforced" "$rows"
-  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, the non-omp control, raw omp, env-wrapped raw omp, raw omp secondmate, and the raw unverified control - enforce the candidate boundary before any mutation"
+  pass "omp selection policy matrix: $enforced/$rows selection shapes - explicit, positional, configured, batch, three secondmate models, the non-omp control, direct and wrapped raw omp, compound raw omp, raw omp secondmate, and the raw unverified control - enforce the candidate boundary before any mutation"
 }
 
 # --- relaunch ---------------------------------------------------------------
@@ -1053,8 +1104,8 @@ test_relaunch_lifecycle_lock_precedes_watcher_guard() {
   ready="$CASE_DIR/control-ready"
   release="$CASE_DIR/control-release"
   fm_write_meta "$meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
-    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "window=fm-$task_id" "endpoint_task_id=$task_id" "terminal=term-$task_id" \
+    "orca_worktree_id=wt-$task_id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
   rm -f "$HOME_DIR/state/.last-watcher-beat" "$guard_marker"
   printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"

@@ -107,9 +107,12 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. A raw command whose effective command is omp, including one
-#   behind ordinary assignment or env prefixes, is refused before mutation;
-#   OMP is candidate-only and requires the canonical --harness omp template.
+#   new adapters. A raw launch must be one literal, space-delimited command whose
+#   words contain no shell quoting, expansion, redirection, globbing, or compound
+#   operators. Any word that names omp, including one behind ordinary assignment,
+#   env, or command prefixes, is refused before mutation; OMP is candidate-only
+#   and requires the canonical --harness omp template. env split-string modes are
+#   also refused because they introduce a second command parser.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
@@ -737,16 +740,33 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# Identity a raw launch command claims: the basename of its effective command.
-# spawn_selection_is_omp and the raw-launch branch share this so assignments
-# and a leading env wrapper cannot disguise omp before the early policy gate.
+# Validate the raw launch as one literal argv-shaped command, then return the
+# basename it claims. This deliberately does not emulate a shell parser: quoting,
+# expansion, redirection, globbing, and compound expressions are refused before
+# mutation. Every literal word is checked for omp before assignment/env prefix
+# handling, so wrappers such as `command omp` cannot disguise the candidate.
 spawn_raw_launch_identity() {
-  local word base env_mode=0 skip_env_arg=0
-  # Unquoted split matches the raw-launch branch. This is an identity check,
-  # not a shell parser; it recognizes the ordinary assignment/env prefixes
-  # accepted by the escape hatch and leaves execution semantics unchanged.
+  local raw=$1 word base env_mode=0 skip_env_arg=0
+  local safe_shape='^[A-Za-z0-9_./:@%+=,-]+( [A-Za-z0-9_./:@%+=,-]+)*$'
+  [[ $raw =~ $safe_shape ]] || return 1
+
+  # Unquoted splitting is safe only after safe_shape has excluded every shell
+  # syntax character and every whitespace byte except the literal separator.
+  # Reject omp in any argv position before interpreting harmless prefixes.
   # shellcheck disable=SC2086
-  for word in $1; do
+  for word in $raw; do
+    base=${word##*/}
+    if [ "$base" = omp ]; then
+      printf '%s\n' omp
+      return 0
+    fi
+  done
+
+  # Unquoted split matches the raw-launch branch. This is an identity check,
+  # not a shell parser; validation above makes the shell's input one simple
+  # literal command while this recognizes ordinary assignment/env prefixes.
+  # shellcheck disable=SC2086
+  for word in $raw; do
     if [ "$skip_env_arg" -eq 1 ]; then
       skip_env_arg=0
       continue
@@ -755,6 +775,7 @@ spawn_raw_launch_identity() {
       case "$word" in
         --) env_mode=2; continue ;;
         -u|--unset|-C|--chdir|-S|--split-string) skip_env_arg=1; continue ;;
+        -S?*|--split-string=*) return 1 ;;
         --unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
         -*) continue ;;
         [A-Za-z_]*=*) continue ;;
@@ -778,6 +799,16 @@ spawn_raw_launch_identity() {
   return 1
 }
 
+RAW_LAUNCH_IDENTITY=
+case "$ARG3" in
+  *' '*)
+    if ! RAW_LAUNCH_IDENTITY=$(spawn_raw_launch_identity "$ARG3"); then
+      echo "error: raw launch command must be one literal command with space-delimited words; shell quoting, expansion, redirection, globbing, compound expressions, and nested argument parsing are refused" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 # Does this invocation select omp? Read exactly the way the launch path resolves
 # the harness below - an explicit --harness, then the back-compat positional
 # argument, then this home's configured crew/secondmate harness - without copying
@@ -789,7 +820,7 @@ spawn_selection_is_omp() {
   local identity=
   case "$ARG3" in
     *' '*)
-      identity=$(spawn_raw_launch_identity "$ARG3") || return 1
+      identity=$RAW_LAUNCH_IDENTITY
       [ "$identity" = omp ]
       return
       ;;
@@ -1695,7 +1726,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    HARNESS=$(spawn_raw_launch_identity "$LAUNCH") || HARNESS=
+    HARNESS=$RAW_LAUNCH_IDENTITY
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
