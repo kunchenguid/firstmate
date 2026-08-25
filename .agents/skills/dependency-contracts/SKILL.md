@@ -18,7 +18,7 @@ Do this before recording, changing, or clearing an edge, not after the blocker s
 Read blocker and dependent acceptance criteria, relevant issue discussion, existing reports, current repository behavior, and backlog records.
 Do not infer hard dependency from preferred order, overlapping files, or broad issue titles.
 
-Select one authoritative owner for the product dependency contract: a project issue or spec when either exists, otherwise the backlog task body.
+Select one authoritative owner for the product dependency contract: a project issue or spec when either exists; only when neither exists may the backlog task body own it.
 When an issue or spec owns the contract, the backlog mirrors task identity and the scheduling edge with a concise pointer; otherwise the backlog body states the contract.
 The task brief is an execution snapshot, not a second authority.
 
@@ -32,7 +32,7 @@ Record one contract per blocker and dependent pair:
 - executable proof capability works
 - earliest safe spawn base: exact default-branch ref a fresh `fm-spawn.sh` will reset the dependent worktree to
 - blocker scope dependent does not require
-- unblocking task whose completion clears edge
+- release task and lifecycle owner whose owner-specific completion clears edge
 
 Minimum capability belongs to edge, not blocker issue generally.
 One blocker may expose different slices to different dependents.
@@ -70,16 +70,28 @@ Use the configured backlog backend under `AGENTS.md` section 10; when it selects
 Create the blocker task before the dependent task when recording an edge.
 Preserve full structured dependency identifiers in backlog metadata; in the dependent task body, preserve the full contract when the backlog owns it or the concise pointer when an issue or spec owns it.
 
-An edge becomes clear only through normal completion flow after:
+Choose the release task's normal owner-specific completion path when recording the edge.
+A ship release task becomes complete for dependency purposes only after:
 
-1. unblocking task landed through configured delivery path and capability is present in exact fresh dependent spawn base
-2. executable proof passes against that base
-3. consumed contract matches dependent contract's selected authoritative owner
+1. the task lands through its configured delivery path and the capability is present in the exact fresh dependent spawn base
+2. the executable proof passes against that base
+3. the consumed contract matches the selected authoritative owner
 
-After all checks pass, run normal guarded `bin/fm-teardown.sh` for unblocking task.
-A teardown refusal leaves task and edge active.
-Only successful teardown's configured-backend reminder may record backlog completion and trigger readiness re-evaluation.
-Follow that reminder, then dispatch newly ready items whose other gates cleared.
+After all ship checks pass, run normal guarded `bin/fm-teardown.sh` for the release task.
+A teardown refusal leaves the ship task and edge active.
+Only successful teardown's configured-backend reminder may record ship-task completion.
+
+A non-ship release task becomes complete for dependency purposes only after:
+
+1. its selected lifecycle owner durably completes it
+2. that owner's durable result satisfies the consumed contract
+3. the executable proof passes against the exact fresh dependent spawn base and matches the selected authoritative owner
+
+For a captain-held task whose answer is the release deliverable, `captain-hold-lifecycle`'s recorded answer and closed task are the authoritative durable completion proof.
+A hold, status transfer, or recorded answer that releases the task to resume work does not complete it.
+Follow the non-ship owner's normal completion mechanics rather than imposing ship landing or ship teardown.
+
+After the selected completion path succeeds, re-evaluate readiness and dispatch newly ready items whose other gates cleared.
 Do not use `tasks-axi unblock` to treat an unmerged commit, passing local branch, or partial validation as landed capability.
 
 ## Task brief handoff
@@ -115,4 +127,4 @@ A closed issue with unfinished acceptance work, open issue whose only task is do
 Reconcile selected authoritative owner and backlog before dispatch.
 Never close issue from unblocking-slice PR unless slice completes whole issue.
 
-Completion: every active edge has one owner, exact consumed capability, executable landed proof, and one task whose completion releases dependent work.
+Completion: every active edge has one authoritative contract owner, exact consumed capability, executable proof, exact fresh spawn base, and one release task with owner-specific completion proof.

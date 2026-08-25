@@ -292,7 +292,10 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
-On a `no-mistakes-prod-only` project, classify technical risk before audience. Product-facing, mixed, and uncertain work ships `no-mistakes`. Internal work also ships `no-mistakes` when it changes migrations, database roles, identity, authorization, permissions, persistence, concurrency, idempotency, secrets, or merge and release automation. Only low-risk internal-only tooling, documentation, contributor process, or operator process ships `direct-PR`; never infer either risk or audience from file location or project name.
+On a `no-mistakes-prod-only` project, classify technical risk before audience.
+Product-facing, mixed, and uncertain work ships `no-mistakes`.
+Internal work also ships `no-mistakes` when it changes migrations, database roles, identity, authorization, permissions, persistence, concurrency, idempotency, secrets, or merge or release automation.
+Only low-risk internal-only tooling, documentation, contributor process, or operator process ships `direct-PR`; never infer either risk or audience from file location or project name.
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 

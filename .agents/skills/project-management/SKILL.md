@@ -41,12 +41,16 @@ Choose that posture when adding or creating the project:
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
-- `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
+- `no-mistakes-prod-only` is a conditional policy rather than one flat mode.
+  Classify technical risk before audience.
+  Product-facing, mixed, uncertain, and trust-boundary internal changes ship `no-mistakes`.
+  Trust-boundary internal changes include migrations, database roles, identity, authorization, permissions, persistence, concurrency, idempotency, secrets, and merge or release automation.
+  Only low-risk internal-only work ships `direct-PR`.
 
 `no-mistakes-prod-only` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
 State that resolved default while confirming the source, local name, and posture instead of asking the captain to choose from scratch, and record a flat mode instead whenever they ask for one.
 Existing registry entries keep the meaning they already have and are never migrated or reinterpreted, so a legacy entry with no bracket stays `no-mistakes`.
-Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task surface classification happens at each task's intake, and internal-only is never inferred from file location or project name.
+Registering a conditional policy is a one-time choice and never requires classifying any change; the per-task technical-risk and audience classification happens at each task's intake, and neither is inferred from file location or project name.
 
 The optional `+yolo` posture changes merge authority only and does not change the delivery mode.
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
@@ -56,7 +60,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
-A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
+A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because either posture can select the pipeline.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
