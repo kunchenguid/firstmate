@@ -97,6 +97,10 @@ args=" $* "
 case "$args" in
   *" --version "*) error UNEXPECTED_VERSION_PROBE 'iDA must not probe bytedcli version'; exit 1 ;;
   *" mcp --allow-domains ida "*)
+    if [ "${FM_IDA_FAKE_MCP_AUTH_FAIL:-0}" = 1 ]; then
+      printf 'sso ticket expired: HTTP 401\n' >&2
+      exit 1
+    fi
     while IFS= read -r line; do
       request_id=$(printf '%s\n' "$line" | jq -r '.id // empty' 2>/dev/null || true)
       method=$(printf '%s\n' "$line" | jq -r '.method // empty' 2>/dev/null || true)
@@ -277,6 +281,15 @@ test_dispatch_model_selection_and_validation() {
   assert_no_grep 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" "provider-incompatible model reached provider mutation"
   assert_absent "$home/state/$id.meta" "provider-incompatible model published task metadata"
 
+  id=ida-model-auth-outage; new_task "$home" "$id"; : >"$home/bytedcli.log"; rc=0
+  FM_IDA_FAKE_MCP_AUTH_FAIL=1 dispatch_ida "$home" "$fakebin" "$id" --model ida-explicit-test \
+    >"$home/auth.out" 2>"$home/auth.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "iDA model validation during an MCP auth outage was accepted"
+  assert_grep "cannot validate iDA model 'ida-explicit-test': auth" "$home/auth.err" "auth outage error was not reported with its classified cause"
+  assert_no_grep 'does not support --model' "$home/auth.err" "auth outage was misreported as a CLI incompatibility"
+  assert_no_grep 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" "auth outage reached provider mutation"
+  assert_absent "$home/state/$id.meta" "auth outage published task metadata"
+
   state=$(state_file "$home" ida-explicit-model)
   jq 'del(.provider_state.model)' "$state" >"$home/legacy-model-state.json"
   chmod 0600 "$home/legacy-model-state.json"
@@ -284,7 +297,19 @@ test_dispatch_model_selection_and_validation() {
   run_ida "$home" "$fakebin" state ida-explicit-model >"$home/legacy-model.out" \
     || fail "legacy state without a model field became unreadable"
   assert_grep 'state: done' "$home/legacy-model.out" "legacy model-less state did not preserve terminal state"
-  pass "iDA dispatch validates an optional model, preserves omission, and round-trips explicit intent"
+  pass "iDA dispatch validates an optional model, preserves omission, round-trips explicit intent, and classifies capability failures"
+}
+
+test_ida_usage_help_boundary() {
+  local out rc=0
+  out="$TMP_ROOT/ida-usage.out"
+  "$IDA" --help >"$out" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "iDA usage did not exit with the usage status"
+  # shellcheck disable=SC2016 # Backticks are literal Markdown.
+  assert_grep '`retire` requires a terminal normalized state' "$out" "iDA usage dropped the retire paragraph"
+  assert_grep 'removes only the volatile iDA metadata/state for that task.' "$out" "iDA usage truncated the final documented paragraph"
+  assert_no_grep 'set -u' "$out" "iDA usage leaked past the documented header"
+  pass "iDA usage prints the complete documented command header"
 }
 
 test_dispatch_success_and_redaction() {
@@ -613,6 +638,7 @@ SH
 }
 
 test_dispatch_model_selection_and_validation
+test_ida_usage_help_boundary
 test_dispatch_success_and_redaction
 test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result

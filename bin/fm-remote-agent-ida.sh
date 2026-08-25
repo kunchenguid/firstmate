@@ -53,7 +53,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-ida-remote-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 
 temp_root() {
   local root
@@ -101,11 +101,20 @@ cmd_probe() {
 }
 
 validate_dispatch_model() { # <model>
-  local model=$1 root out err capability class
+  local model=$1 root out err capability class code
   root=$(temp_root); out="$root/models.out"; err="$root/models.err"; capability="$root/capability.json"
   if ! "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities >"$capability" 2>"$err" \
-      || ! fm_ida_structured_success "$capability" \
-      || ! jq -e '.data.required_options | index("--model") != null' "$capability" >/dev/null 2>&1; then
+      || ! fm_ida_structured_success "$capability"; then
+    fm_ida_normalize_error "$capability" "$err" "$root/error.json"
+    code=$(jq -r '.error.code // ""' "$root/error.json")
+    class=$(fm_remote_error_classify "$root/error.json")
+    rm -rf -- "$root"
+    if [ "$code" = MCP_CAPABILITY_UNSUPPORTED ]; then
+      die "installed iDA create command does not support --model; update bytedcli or omit the selection"
+    fi
+    die "cannot validate iDA model '$model': $class; run 'fm-remote-agent-ida.sh probe' to check iDA availability"
+  fi
+  if ! jq -e '.data.required_options | index("--model") != null' "$capability" >/dev/null 2>&1; then
     rm -rf -- "$root"
     die "installed iDA create command does not support --model; update bytedcli or omit the selection"
   fi
