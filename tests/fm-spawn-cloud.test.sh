@@ -321,6 +321,14 @@ if request["operation"] == "mutate":
                     "outcome_commits": 0, "outcome_sha256": "", "outcome_bytes": 0,
                     "outcome_sink": "", "outcome_uncommitted_changes": False,
                 })
+                if request_value.get("return_contract"):
+                    execution.update({
+                        "return_present": True,
+                        "return_ref": "refs/fm-return/" + action["request_digest"][:32],
+                        "return_commit": "c" * 40,
+                        "return_manifest_sha256": "d" * 64,
+                        "outcome_tip": request_value["repository_generation"],
+                    })
             execution["streams_persisted"] = True
             execution["result_digest"] = hashlib.sha256(canonical(execution)).hexdigest()
             result = {"idempotency_key": key, "action": kind, "worker": state["workers"][slot], "execution": execution}
@@ -394,7 +402,8 @@ make_cloud_case() {
   git -C "$project" worktree add --quiet --detach "$worktree"
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf 'brief for %s; write %s/data/%s/completion.md and %s/state/%s.status\n' \
+    "$id" "$home" "$id" "$home" "$id" > "$home/data/$id/brief.md"
   printf '# Backlog\n\n## In flight\n- [ ] %s - cloud placement test (repo: project)\n\n## Queued\n\n## Done\n' \
     "$id" > "$home/data/backlog.md"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
@@ -488,6 +497,12 @@ test_cloud_spawn_places_worker_and_runs_the_entrypoint() {
   assert_grep 'harness=pi' "$meta" "the cloud spawn did not record the pi-codex runtime"
   assert_grep "account_home=$CASE_DIR/pi-agent-home" "$meta" "the cloud spawn did not record the pi coding-agent account home"
   assert_grep '--fast' "$HOME_DIR/state/$id.cloud-entrypoint" "the cloud worker entrypoint did not force Fast Mode"
+  assert_grep '/mnt/task/.fm-return/data/' "$HOME_DIR/state/$id.cloud-payload/brief.md" \
+    "the cloud brief did not map its report path into the authorized return root"
+  assert_grep '/mnt/task/.fm-return/state/' "$HOME_DIR/state/$id.cloud-payload/brief.md" \
+    "the cloud brief did not map its status path into the authorized return root"
+  assert_no_grep "$HOME_DIR/data/$id/completion.md" "$HOME_DIR/state/$id.cloud-payload/brief.md" \
+    "the staged cloud brief still names the unavailable local report path"
   assert_grep 'worktree_git_dir_identity=' "$meta" "the cloud spawn did not record the worktree Git-dir identity"
   assert_grep 'worktree_git_dir=' "$meta" "the cloud spawn did not record the worktree Git dir"
   # R5: the controller leased ONE profile out of that pool, and the credential
@@ -919,7 +934,7 @@ test_cloud_switch_off_and_on_share_the_same_base_metadata() {
 # a silent exemption. The compartment block (FM_SECONDMATE_*) is listed even
 # though a crewmate spawn never writes it, so the contract is stated once for
 # both lanes rather than depending on which lane a test happens to drive.
-CLOUD_ENV_NON_ALLOWLIST_EXPORTS='FM_SPAWN_CLOUD_WALL_SECONDS FM_WORKER_PROVIDER_COMMAND FM_SECONDMATE_LEG_SECONDS FM_SECONDMATE_POLL_SECONDS FM_SECONDMATE_IDLE_SECONDS FM_SECONDMATE_TTL_HOURS FM_SECONDMATE_CHILD_PROJECT'
+CLOUD_ENV_NON_ALLOWLIST_EXPORTS='FM_SPAWN_CLOUD_WALL_SECONDS FM_SPAWN_CLOUD_RETURN_KIND FM_WORKER_PROVIDER_COMMAND FM_SECONDMATE_LEG_SECONDS FM_SECONDMATE_POLL_SECONDS FM_SECONDMATE_IDLE_SECONDS FM_SECONDMATE_TTL_HOURS FM_SECONDMATE_CHILD_PROJECT'
 
 # A shape-valid value for one contract name. The SHAPES are what the readers
 # accept (a phase enum, a bounded integer, a directory); the NAMES they are
@@ -1188,6 +1203,12 @@ test_queued_spawn_converges_through_the_monitor() {
   local spawn_generation
   spawn_generation=$(sed -n 's/^generation_id=//p' "$HOME_DIR/state/$id.meta" | head -1)
   test -n "$spawn_generation" || fail "the queued spawn recorded no generation_id"
+  # This case owns queued-dispatch convergence, not the return finalizer. The
+  # latter is driven end to end in fm-cloud-result.test.sh; keep this monitor
+  # on the legacy no-return fixture so it exits without invoking release.
+  grep -v '^export FM_SPAWN_CLOUD_RETURN_KIND=' "$HOME_DIR/state/$id.cloud-env" \
+    > "$HOME_DIR/state/$id.cloud-env.tmp"
+  mv "$HOME_DIR/state/$id.cloud-env.tmp" "$HOME_DIR/state/$id.cloud-env"
   env -u FM_WORKER_PROVIDER_COMMAND FM_HOME="$HOME_DIR" \
     FIXTURE_STATE="$CASE_DIR/provider-state.json" \
     FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \

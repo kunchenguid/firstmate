@@ -2784,7 +2784,9 @@ def execute_terminal_disposition(controller, action, resources):
 
 def persist_execute_result(controller, action, names, tags, execution):
     request = action["request"]
-    if request.get("outcome_expected") and execution.get("outcome_present"):
+    if request.get("outcome_expected") and (
+        execution.get("outcome_present") or execution.get("return_present")
+    ):
         outcome_target = action.get("outcome_dir")
         if not outcome_target:
             raise ProviderError("execution collected an outcome with no controller directory to land it in")
