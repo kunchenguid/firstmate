@@ -51,6 +51,7 @@ log_delivery() {
   case "$line" in
     touch\ /*)
       path=${line#touch }
+      path=${path% 2>/dev/null}
       : > "$path"
       ;;
   esac
@@ -302,13 +303,14 @@ assert_not_delivered_prefix() {
 # the intact text - `treehouse get` would arrive as `reehouse get` and no
 # prefix-anchored check on the intact form could ever fire. A probe line is an
 # intact `touch <marker>` or one of its head-truncated forms, and every marker
-# lives under a `fm-spawn-ready.` directory and is named `ready`, so anything
-# else on the wire is a leak whichever way it arrived.
+# lives under a `fm-spawn-ready.` directory and is named `ready` before the
+# probe's own stderr redirect, so anything else on the wire is a leak whichever
+# way it arrived.
 assert_only_probes_delivered() {
   local stray
   stray=$(awk '
     /^key / { next }
-    index($0, "fm-spawn-ready.") > 0 && /\/ready$/ { next }
+    index($0, "fm-spawn-ready.") > 0 && /\/ready( 2>\/dev\/null)?$/ { next }
     { print }
   ' "$DELIVERED" 2>/dev/null)
   [ -z "$stray" ] || fail \

@@ -126,6 +126,7 @@ case "${1:-} ${2:-}" in
     case "${4:-}" in
       "touch /"*)
         delivered=${4#touch }
+        delivered=${delivered% 2>/dev/null}
         : > "$delivered" 2>/dev/null || true
         ;;
     esac

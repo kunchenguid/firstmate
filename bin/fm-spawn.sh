@@ -148,7 +148,10 @@
 #   bricking every spawn; FM_SPAWN_READY_BYPASS=1 is a test-fixture escape hatch
 #   for suites whose fake backend has no shell behind it, never for a live home.
 #   The marker command is sent unquoted so no truncation can strand the pane's
-#   shell in a quote continuation. The probe directory is created under TMPDIR
+#   shell in a quote continuation, and discards its own stderr so that probes a
+#   blocked shell drains after the gate has already passed and removed the probe
+#   directory leave no failure debris on the pane ahead of the guarded command.
+#   The probe directory is created under TMPDIR
 #   when that yields a plain absolute marker path, and otherwise under the same
 #   fixed /tmp root TASK_TMP uses, with one stderr notice; only a /tmp that also
 #   cannot yield a plain path refuses the spawn. A probe the backend cannot even
@@ -728,6 +731,14 @@ parse_orca_worktree_result() {
   fi
 }
 
+# Sole owner of readiness-probe scratch removal, defined here so the EXIT trap
+# below can call it from any exit point in this script.
+spawn_ready_cleanup() {
+  [ -n "$SPAWN_READY_DIR" ] || return 0
+  rm -rf "$SPAWN_READY_DIR" 2>/dev/null || true
+  SPAWN_READY_DIR=
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -817,7 +828,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
-  [ -z "$SPAWN_READY_DIR" ] || rm -rf "$SPAWN_READY_DIR" 2>/dev/null || true
+  spawn_ready_cleanup
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -2220,12 +2231,14 @@ spawn_send_key() {  # <target> <key>
 # would time out on fixtures that are not testing a shell. tests/lib.sh exports
 # the bypass for those, while the real-backend smoke suites - which do not source
 # it - exercise the gate for real, and tests/fm-spawn-first-send.test.sh strips
-# it to verify the gate itself.
-spawn_ready_cleanup() {
-  [ -n "$SPAWN_READY_DIR" ] || return 0
-  rm -rf "$SPAWN_READY_DIR" 2>/dev/null || true
-  SPAWN_READY_DIR=
-}
+# it to verify the gate itself. No portable CI lane proves the gate's premise
+# against a real shell: the tmux and herdr smoke suites never invoke this script
+# at all, and every suite that does either bypasses the gate or is classified
+# real-herdr-gated and excluded from those lanes. So "a live pane shell executes
+# the marker touch, and this script observes that marker" is unproven against any
+# real shell there; follow-up task spawn-ready-live-backend-evidence owns closing
+# that, and tests/fm-spawn-first-send.test.sh covers only the gate's logic against
+# a modelled byte-lossy shell.
 
 # spawn_ready_probe_dir <root>: mktemp one probe directory under <root> and echo
 # it. Separate from the caller so the preferred root and the known-safe fallback
@@ -2258,6 +2271,12 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
     aftermath="window $T is closed by this spawn's abort cleanup, so it is not left behind for you to inspect"
   else
     aftermath="inspect window $T, which survives this refusal and is left for you to clean up"
+  fi
+  # The second gate runs after the task record is published, and a refusal does
+  # not retract it, so the fleet would keep enumerating a task whose pane never
+  # got its launch command. Name the record and the command that clears it.
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    aftermath="$aftermath; task record $STATE/$ID.meta is published and this refusal does not retract it, so clear the task with '$FM_ROOT/bin/fm-teardown.sh $ID'"
   fi
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}
@@ -2312,9 +2331,10 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
       # pays it.
       #
       # Deliberately NOT C-c, even though a bare Enter cannot escape a PS2
-      # continuation. The probe line is unquoted and metacharacter-free, so no
-      # truncation of the gate's OWN line can produce a continuation, which was
-      # C-c's only justification. Against that, C-c is a real SIGINT to whatever
+      # continuation. The probe line is unquoted and carries no character that
+      # opens one - its only metacharacter is the trailing stderr redirect, whose
+      # target is /dev/null - so no truncation of the gate's OWN line can produce
+      # a continuation, which was C-c's only justification. Against that, C-c is a real SIGINT to whatever
       # holds the pane's foreground: `treehouse get` can still be running at the
       # second gate, because the settle loop below accepts a transiently settled
       # non-project path before the shell catches up with its cd, and a relaunch
@@ -2327,7 +2347,7 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
       # bounded budget still turns it into a loud refusal, never a corrupt spawn.
       [ "$sends" -eq 0 ] || spawn_send_key "$target" Enter || true
       send_status=0
-      spawn_send_text_line "$target" "touch $marker" || send_status=$?
+      spawn_send_text_line "$target" "touch $marker 2>/dev/null" || send_status=$?
       sends=$((sends + 1))
       # A send channel that reports failure is not a pane that will not answer,
       # and burning the whole budget would report the wrong cause. Only zellij
