@@ -94,8 +94,8 @@ if supplied != "sha256:" + hashlib.sha256(canonical).hexdigest(): raise SystemEx
 if "sha256:" + hashlib.sha256(executor_path.read_bytes()).hexdigest() != request["protocol"]["executor_digest"]: raise SystemExit("guest bootstrap: executor digest mismatch")
 if request["protocol"]["guest_digest"] != sys.argv[3]: raise SystemExit("guest bootstrap: guest digest mismatch")
 repo = request["repository"]
-if repo.get("source_mode") not in ("public-github-https", "private-parent-bundle") or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
-if repo.get("source_mode") == "private-parent-bundle":
+if repo.get("source_mode") not in ("public-github-https", "private-parent-bundle", "private-exact-bundle") or not repo.get("remote", "").startswith("https://github.com/"): raise SystemExit("guest bootstrap: source mode mismatch")
+if repo.get("source_mode") in ("private-parent-bundle", "private-exact-bundle"):
     if not repo.get("input_blob") or not repo.get("snapshot_digest") or not repo.get("snapshot_bytes"): raise SystemExit("guest bootstrap: private snapshot binding is incomplete")
 else:
     if repo.get("input_blob") is not None or repo.get("snapshot_bytes") != 0: raise SystemExit("guest bootstrap: public source carries private staging")
@@ -145,7 +145,7 @@ runuser -u fmrunner -- git -C /work/repo remote add origin "$REMOTE"
 # repository as dubious (CVE-2022-24765); scope the exception through the
 # environment exactly as the validation cell guest does.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/work/repo
-if [ "$SOURCE_MODE" = private-parent-bundle ]; then
+if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ]; then
   [ "$INPUT_BLOB" = "$(read_request repository.input_blob)" ] || { echo "guest bootstrap: private snapshot blob mismatch" >&2; exit 125; }
   SNAPSHOT=$BASE/snapshot.bundle
   TOKEN_FILE=$BASE/input-token
@@ -184,10 +184,15 @@ for value in json.load(open(sys.argv[1],encoding="utf-8"))["repository"].get("so
 PY
 while IFS= read -r ancestor; do
   [ -n "$ancestor" ] || continue
-  run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$ancestor"
-  [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$ancestor" ] || { echo "guest bootstrap: source ancestor identity mismatch" >&2; exit 125; }
-  git -C /work/repo cat-file -e "$ancestor^{commit}" || { echo "guest bootstrap: source ancestor is absent" >&2; exit 125; }
+  if [ "$SOURCE_MODE" = public-github-https ]; then
+    run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$ancestor"
+    [ "$(git -C /work/repo rev-parse FETCH_HEAD)" = "$ancestor" ] || { echo "guest bootstrap: source ancestor identity mismatch" >&2; exit 125; }
+    git -C /work/repo cat-file -e "$ancestor^{commit}" || { echo "guest bootstrap: source ancestor is absent" >&2; exit 125; }
+  fi
 done <"$BASE/source-ancestors"
+if [ "$SOURCE_MODE" = private-parent-bundle ] || [ "$SOURCE_MODE" = private-exact-bundle ]; then
+  /usr/bin/python3 "$EXECUTOR" --verify-private-source-ancestors "$REQUEST" /work/repo
+fi
 [ "$(git -C /work/repo rev-parse HEAD)" = "$COMMIT" ] && [ "$(git -C /work/repo rev-parse 'HEAD^{tree}')" = "$TREE" ] || { echo "guest bootstrap: source identity mismatch" >&2; exit 125; }
 # Repository tests compare the snapshot against the default branch through
 # the refs/remotes/origin view (generation 051 ground truth: a behavior
@@ -238,13 +243,19 @@ while IFS=$'\t' read -r url file bytes digest; do
   fetch_exact "$url" "/work/home/.fm-runner-tools/wheelhouse/$file" "$bytes" "$digest"
 done <"$BASE/wheels.tsv"
 chown -R fmrunner:fmrunner /work/home/.fm-runner-tools
-[ "sha256:$(sha256sum /work/repo/tools/agent-fleet/uv.lock | awk '{print $1}')" = "$(read_request protocol.agent_fleet_python.lock_digest)" ] || { echo "guest bootstrap: lock mismatch" >&2; exit 125; }
-# The run-command handler's download directory is root-only, so the
-# unprivileged uv invocations must not inherit it as their working
-# directory (uv's config discovery reads ./uv.toml and refuses on EACCES).
-cd /work/repo
-runuser -u fmrunner -- /work/home/.fm-runner-tools/uv/uv venv --python /usr/bin/python3 /work/repo/tools/agent-fleet/.venv >/dev/null
-runuser -u fmrunner -- env UV_OFFLINE=1 UV_NO_INDEX=1 /work/home/.fm-runner-tools/uv/uv pip install --python /work/repo/tools/agent-fleet/.venv/bin/python --offline --no-index --find-links /work/home/.fm-runner-tools/wheelhouse pytest ruff >/dev/null
+LOCK_DIGEST=$(read_request protocol.agent_fleet_python.lock_digest)
+if [ "$LOCK_DIGEST" != None ]; then
+  [ "sha256:$(sha256sum /work/repo/tools/agent-fleet/uv.lock | awk '{print $1}')" = "$LOCK_DIGEST" ] || { echo "guest bootstrap: lock mismatch" >&2; exit 125; }
+  # The run-command handler's download directory is root-only, so the
+  # unprivileged uv invocations must not inherit it as their working
+  # directory (uv's config discovery reads ./uv.toml and refuses on EACCES).
+  cd /work/repo
+  runuser -u fmrunner -- /work/home/.fm-runner-tools/uv/uv venv --python /usr/bin/python3 /work/repo/tools/agent-fleet/.venv >/dev/null
+  runuser -u fmrunner -- env UV_OFFLINE=1 UV_NO_INDEX=1 /work/home/.fm-runner-tools/uv/uv pip install --python /work/repo/tools/agent-fleet/.venv/bin/python --offline --no-index --find-links /work/home/.fm-runner-tools/wheelhouse pytest ruff >/dev/null
+elif [ -s "$BASE/wheels.tsv" ]; then
+  echo "guest bootstrap: unbound Python wheels" >&2
+  exit 125
+fi
 
 python3 - "$REQUEST" /work/repo <<'PY'
 import hashlib,json,pathlib,sys

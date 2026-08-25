@@ -20,7 +20,7 @@ Remote Herdr is not required.
 One review uses at least three fresh compartments with different immutable resource, VM, and boot identities: one model compartment plus one tool/verifier pair for every accepted evidence item.
 
 - The credentialed model compartment receives exactly one independently selected reviewer account plus a bounded static packet containing the claims, ledger projection, and complete exact-base/exact-head diff.
-- A fresh private-controller `crosscheck-tool` runner fetches the exact advertised remote PR-head ref and executes one accepted reproduction with no provider credential or repository network.
+- A fresh private-controller `crosscheck-tool` runner receives a digest-bound bundle of the authenticated exact PR-head checkout and executes one accepted reproduction with no provider credential or repository network.
 - A second newly created `crosscheck-tool` runner independently replays that accepted helper with no repository network or provider credential.
 
 The model compartment never receives a repository checkout, dynamic repository tool, shell against the repository, Azure CLI, MCP server, ambient extension, skill, container client, or local control authority.

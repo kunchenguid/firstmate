@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import tempfile
 import time
 from typing import Any
 
@@ -178,33 +179,38 @@ def prepare_exact_snapshot(
     if observed_remote.returncode != 0:
         runner.git(root, "remote", "add", "origin", request["remote"])
     elif observed_remote.stdout.strip() != request["remote"]:
-        raise BridgeError("review checkout origin differs from the bound public remote")
+        raise BridgeError("review checkout origin differs from the bound GitHub remote")
     parser = runner.parser()
     task = ("cc-" + request["review_generation"][:12] + "-" + task_suffix)[:64]
-    arguments = parser.parse_args(
-        [
-            "prepare",
-            "--repo",
-            str(root),
-            "--task",
-            task,
-            "--generation",
-            request["review_generation"][:63],
-            "--public-ref",
-            request["source_ref"],
-            "--public-ancestor",
-            request["base_sha"],
-            "--resource-class",
-            "crosscheck-tool",
-            "--wall-seconds",
-            str(wall_seconds),
-            "--",
-            *command,
-        ]
-    )
-    runner.normalize_command(arguments)
-    env = runner.environment()
-    state = runner.prepare(env, arguments)
+    with tempfile.TemporaryDirectory(prefix="fm-crosscheck-bundle-") as temporary:
+        bundle = Path(temporary) / "snapshot.bundle"
+        runner.git(root, "bundle", "create", str(bundle), "HEAD")
+        arguments = parser.parse_args(
+            [
+                "prepare",
+                "--repo",
+                str(root),
+                "--task",
+                task,
+                "--generation",
+                request["review_generation"][:63],
+                "--source-ref",
+                request["source_ref"],
+                "--private-snapshot-bundle",
+                str(bundle),
+                "--public-ancestor",
+                request["base_sha"],
+                "--resource-class",
+                "crosscheck-tool",
+                "--wall-seconds",
+                str(wall_seconds),
+                "--",
+                *command,
+            ]
+        )
+        runner.normalize_command(arguments)
+        env = runner.environment()
+        state = runner.prepare(env, arguments)
     repository = state["request"]["repository"]
     for field, expected in (
         ("remote", request["remote"]),

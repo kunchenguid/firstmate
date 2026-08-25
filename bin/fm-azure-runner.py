@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Host-side controller for one-shot private Azure command runners.
 
-The script binds a clean public committed Git snapshot to a canonical command
+The script binds a clean committed Git snapshot to a canonical command
 request, creates one private controller VM with a container-scoped UAMI, drives
 an isolated networkless child through Azure Managed Run Command, verifies the
 bounded result, and removes only resources whose recorded identities match the
@@ -209,7 +209,17 @@ def git(repo, *args, check=True):
     return run(["git", "-C", str(repo)] + list(args), check=check)
 
 
+def credential_prompt_refuser():
+    executable = shutil.which("false", path="/usr/bin:/bin")
+    if not executable:
+        raise RunnerError(
+            "public Git proof requires an executable false command in /usr/bin or /bin"
+        )
+    return executable
+
+
 def public_git(repo, *args, check=True):
+    askpass = credential_prompt_refuser()
     git_env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "LANG": "C",
@@ -217,8 +227,8 @@ def public_git(repo, *args, check=True):
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "/bin/false",
-        "SSH_ASKPASS": "/bin/false",
+        "GIT_ASKPASS": askpass,
+        "SSH_ASKPASS": askpass,
     }
     command = [
         "git", "-c", "credential.helper=", "-c", "http.extraHeader=",
@@ -333,6 +343,52 @@ def public_origin_proof(
             raise RunnerError("candidate source commit tree identity is malformed")
         proof_identity["tree"] = tree
         return proof_identity
+
+
+def private_bundle_origin_proof(
+    repo, remote, candidate_commit, source_ref, source_ancestors=(), expected=None
+):
+    if not SAFE_PUBLIC_GIT_REMOTE.match(remote) or "@" in remote:
+        raise RunnerError(
+            "Azure private controller requires a credential-free GitHub HTTPS origin identity"
+        )
+    source_ref = validate_public_source_ref(source_ref)
+    ancestors = []
+    for ancestor in source_ancestors:
+        if not isinstance(ancestor, str) or not re.fullmatch(r"[0-9a-f]{40,64}", ancestor):
+            raise RunnerError("private source ancestor is not an exact commit identity")
+        if ancestor in ancestors:
+            continue
+        if git(repo, "cat-file", "-t", ancestor, check=False).stdout.strip() != "commit":
+            raise RunnerError("private source ancestor is not present in the exact checkout")
+        if git(
+            repo, "merge-base", "--is-ancestor", ancestor, candidate_commit, check=False
+        ).returncode != 0:
+            raise RunnerError("private source ancestor is not reachable from the candidate")
+        ancestors.append(ancestor)
+    if git(repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
+        raise RunnerError("private candidate source object is not an exact commit")
+    tree = git(repo, "rev-parse", "{}^{{tree}}".format(candidate_commit)).stdout.strip()
+    if (
+        not re.fullmatch(r"[0-9a-f]{40,64}", tree)
+        or git(repo, "cat-file", "-t", tree).stdout.strip() != "tree"
+    ):
+        raise RunnerError("private candidate source tree identity is malformed")
+    proof_identity = {
+        "remote": remote,
+        "default_ref": None,
+        "default_head": None,
+        "source_ref": source_ref,
+        "source_head": candidate_commit,
+        "source_ancestors": ancestors,
+        "tree": tree,
+    }
+    binding_keys = ("remote", "source_ref", "source_head", "source_ancestors")
+    if expected is not None and any(
+        expected.get(key) != proof_identity[key] for key in binding_keys
+    ):
+        raise RunnerError("private bundle source identity changed after request preparation")
+    return proof_identity
 
 
 def now_utc():
@@ -717,9 +773,13 @@ def prepare(env, args, parent_state=None):
     if dirty:
         raise RunnerError("repository must be an exact clean committed snapshot; tracked or untracked changes are present")
     branch = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if branch.returncode != 0 and args.public_ref is None:
+    if (
+        branch.returncode != 0
+        and args.public_ref is None
+        and not args.private_snapshot_bundle
+    ):
         raise RunnerError(
-            "repository must be on a named committed branch unless an exact public source ref is supplied"
+            "repository must be on a named committed branch unless an exact public ref or private snapshot is supplied"
         )
     commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     remote = git(repo, "remote", "get-url", "origin").stdout.strip()
@@ -728,24 +788,37 @@ def prepare(env, args, parent_state=None):
         private_snapshot_arg = Path(args.private_snapshot_bundle)
         private_snapshot_source = private_snapshot_arg.resolve()
         if private_snapshot_arg.is_symlink() or not private_snapshot_source.is_file():
-            raise RunnerError("private parent snapshot must be a regular non-link Git bundle")
+            raise RunnerError("private snapshot must be a regular non-link Git bundle")
         if private_snapshot_source.stat().st_size > MAX_STAGING_INPUT_BYTES:
-            raise RunnerError("private parent snapshot exceeds the one-GiB staging bound")
-        if not args.capacity_parent or not args.source_ref:
-            raise RunnerError("private parent snapshot requires exact capacity parent and source ref")
+            raise RunnerError("private snapshot exceeds the one-GiB staging bound")
+        if not args.source_ref:
+            raise RunnerError("private snapshot requires one exact source ref")
         heads = git(repo, "bundle", "list-heads", str(private_snapshot_source)).stdout.splitlines()
         expected_head = "{} {}".format(commit, args.source_ref)
-        if heads != [expected_head]:
-            raise RunnerError("private parent snapshot must contain only the exact source-ref head")
+        accepted_heads = [expected_head]
+        if not args.capacity_parent:
+            accepted_heads.append("{} HEAD".format(commit))
+        if heads not in [[value] for value in accepted_heads]:
+            raise RunnerError("private snapshot must contain only the exact source head")
         run(["git", "bundle", "verify", str(private_snapshot_source)], cwd=repo)
     if getattr(args, "public_ref", None) and args.source_ref:
         raise RunnerError("choose one exact source identity: --source-ref or --public-ref")
-    public = public_origin_proof(
-        repo, remote, commit,
-        source_ref=getattr(args, "public_ref", None) or args.source_ref,
-        source_ancestors=tuple(getattr(args, "public_ancestor", None) or ()),
-        private_source=private_snapshot_source is not None,
-    )
+    source_ancestors = tuple(getattr(args, "public_ancestor", None) or ())
+    if private_snapshot_source is not None and not args.capacity_parent:
+        public = private_bundle_origin_proof(
+            repo,
+            remote,
+            commit,
+            args.source_ref,
+            source_ancestors=source_ancestors,
+        )
+    else:
+        public = public_origin_proof(
+            repo, remote, commit,
+            source_ref=getattr(args, "public_ref", None) or args.source_ref,
+            source_ancestors=source_ancestors,
+            private_source=private_snapshot_source is not None,
+        )
     tree = public["tree"]
 
     task = require_identifier("task", args.task)
@@ -811,14 +884,21 @@ def prepare(env, args, parent_state=None):
     if any("\x00" in value for value in command["argv"]):
         raise RunnerError("command argv contains NUL")
     command_digest = "sha256:" + sha256_bytes(canonical_bytes(command))
-    lock_path, wheel_manifest = locked_python_manifest(repo)
-    locked_python = {
-        "lock_digest": "sha256:" + sha256_file(lock_path),
-        "wheels": [
-            {key: item[key] for key in ("name", "version", "file", "url", "digest", "bytes")}
-            for item in wheel_manifest
-        ],
-    }
+    lock_path = repo / "tools" / "agent-fleet" / "uv.lock"
+    if resource_class == "crosscheck-tool" and not lock_path.is_file():
+        locked_python = {"lock_digest": None, "wheels": []}
+    else:
+        lock_path, wheel_manifest = locked_python_manifest(repo)
+        locked_python = {
+            "lock_digest": "sha256:" + sha256_file(lock_path),
+            "wheels": [
+                {
+                    key: item[key]
+                    for key in ("name", "version", "file", "url", "digest", "bytes")
+                }
+                for item in wheel_manifest
+            ],
+        }
     prepared_at = now_utc()
     expires_at = prepared_at + dt.timedelta(hours=TTL_SCHEDULE_HOURS_AFTER_PREPARATION)
     request = {
@@ -848,7 +928,13 @@ def prepare(env, args, parent_state=None):
         "fence": fence,
         "repository": {
             "source_mode": (
-                "private-parent-bundle" if private_snapshot_path else "public-github-https"
+                (
+                    "private-parent-bundle"
+                    if args.capacity_parent
+                    else "private-exact-bundle"
+                )
+                if private_snapshot_path
+                else "public-github-https"
             ),
             "remote": remote,
             "default_ref": public["default_ref"],
@@ -955,25 +1041,37 @@ def prepare(env, args, parent_state=None):
 def reprove_public_request(state):
     repository = state["request"]["repository"]
     repo = Path(state["repository_root"]).resolve()
-    private_source = repository.get("source_mode") == "private-parent-bundle"
-    proof = public_origin_proof(
-        repo, repository["remote"], repository["commit"],
-        expected={
-            "remote": repository["remote"],
-            "default_ref": repository["default_ref"],
-            "default_head": repository["default_head"],
-            "source_ref": repository["source_ref"],
-            "source_head": repository["source_head"],
-            "source_ancestors": repository.get("source_ancestors", []),
-        },
-        source_ref=(
-            repository["source_ref"]
-            if repository["source_ref"] != repository["default_ref"]
-            else None
-        ),
-        source_ancestors=repository.get("source_ancestors", []),
-        private_source=private_source,
-    )
+    source_mode = repository.get("source_mode")
+    private_source = source_mode in ("private-parent-bundle", "private-exact-bundle")
+    expected = {
+        "remote": repository["remote"],
+        "default_ref": repository["default_ref"],
+        "default_head": repository["default_head"],
+        "source_ref": repository["source_ref"],
+        "source_head": repository["source_head"],
+        "source_ancestors": repository.get("source_ancestors", []),
+    }
+    if source_mode == "private-exact-bundle":
+        proof = private_bundle_origin_proof(
+            repo,
+            repository["remote"],
+            repository["commit"],
+            repository["source_ref"],
+            source_ancestors=repository.get("source_ancestors", []),
+            expected=expected,
+        )
+    else:
+        proof = public_origin_proof(
+            repo, repository["remote"], repository["commit"],
+            expected=expected,
+            source_ref=(
+                repository["source_ref"]
+                if repository["source_ref"] != repository["default_ref"]
+                else None
+            ),
+            source_ancestors=repository.get("source_ancestors", []),
+            private_source=private_source,
+        )
     if private_source:
         snapshot_path = Path(state["input_path"]).parent / "snapshot.bundle"
         if (
@@ -981,7 +1079,7 @@ def reprove_public_request(state):
             or "sha256:" + sha256_file(snapshot_path) != repository["snapshot_digest"]
             or snapshot_path.stat().st_size != repository["snapshot_bytes"]
         ):
-            raise RunnerError("private parent snapshot changed after request preparation")
+            raise RunnerError("private snapshot changed after request preparation")
     if proof["tree"] != repository["tree"]:
         raise RunnerError("public request tree changed after preparation")
 
@@ -3031,7 +3129,10 @@ def retry(env, old_state, args):
     args.capacity_reservation_vcpus = old_state["request"].get("capacity_reservation_vcpus")
     args.capacity_fence = old_state["request"].get("capacity_fence")
     repository = old_state["request"]["repository"]
-    private_source = repository.get("source_mode") == "private-parent-bundle"
+    private_source = repository.get("source_mode") in (
+        "private-parent-bundle",
+        "private-exact-bundle",
+    )
     selected_source_ref = (
         repository["source_ref"]
         if repository["source_ref"] != repository["default_ref"]
@@ -3113,7 +3214,7 @@ def add_request_arguments(parser, require_command=True):
     parser.add_argument("--wall-seconds", type=int)
     parser.add_argument(
         "--source-ref",
-        help="exact refs/heads/* identity for a public remote head or private parent snapshot",
+        help="exact branch or PR-head identity for a public remote or private snapshot",
     )
     parser.add_argument(
         "--private-snapshot-bundle",

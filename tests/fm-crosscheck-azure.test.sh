@@ -80,7 +80,6 @@ for marker in (
     "tool_identity",
     "verifier_identity",
     "vm_instance_id",
-    "--public-ref",
 ):
     assert marker in bridge_source
 guest_source = guest.read_text(encoding="utf-8")
@@ -1837,6 +1836,81 @@ PY
   pass "host bridge rejects hostile evidence and requires distinct cleaned exact-head tool/verifier attempts"
 }
 
+bridge_private_snapshot_unit() {
+  python3 - "$BRIDGE" <<'PY' || fail "Azure bridge private snapshot contract failed"
+import importlib.util
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("bridge", sys.argv[1])
+bridge = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bridge)
+runner = bridge.load_runner()
+with tempfile.TemporaryDirectory() as temporary:
+    repo = Path(temporary) / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.invalid"], check=True)
+    (repo / "value.txt").write_text("value\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/private.git"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "--detach", "-q"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    observed = {}
+    runner.environment = lambda: {"fixture": True}
+
+    def prepare(env, arguments):
+        bundle = Path(arguments.private_snapshot_bundle)
+        observed["bundle"] = bundle
+        assert env == {"fixture": True}
+        assert arguments.public_ref is None
+        assert arguments.source_ref == "refs/pull/7/head"
+        assert arguments.capacity_parent is None
+        assert runner.git(repo, "bundle", "list-heads", str(bundle)).stdout.splitlines() == [head + " HEAD"]
+        return {
+            "request": {
+                "repository": {
+                    "remote": "https://github.com/example/private.git",
+                    "source_ref": "refs/pull/7/head",
+                    "source_head": head,
+                    "source_ancestors": [head],
+                    "commit": head,
+                }
+            }
+        }
+
+    runner.prepare = prepare
+    state, arguments, env = bridge.prepare_exact_snapshot(
+        runner,
+        {
+            "repository_root": str(repo),
+            "remote": "https://github.com/example/private.git",
+            "source_ref": "refs/pull/7/head",
+            "head_sha": head,
+            "base_sha": head,
+            "review_generation": "a" * 24,
+        },
+        "tool-1",
+        ["true"],
+        300,
+    )
+    assert state["request"]["repository"]["source_head"] == head
+    assert arguments.private_snapshot_bundle
+    assert env == {"fixture": True}
+    assert not observed["bundle"].exists()
+PY
+  pass "Azure evidence bridge privately bundles an exact detached PR checkout without GitHub credentials"
+}
+
 replay_positive_and_failure_unit() {
   local tmp mutation_tmp evidence patch_evidence head
   fm_test_tmproot_into tmp fm-crosscheck-azure-replay
@@ -3046,6 +3120,7 @@ model_guest_executing_account_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit
+bridge_private_snapshot_unit
 manifest_bounds_unit
 template_expiry_render_unit
 replay_positive_and_failure_unit

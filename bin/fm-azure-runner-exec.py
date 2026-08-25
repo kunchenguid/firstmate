@@ -20,6 +20,7 @@ import time
 
 
 RESULT_SCHEMA = "fm.azure-command-result/v1"
+PRIVATE_SOURCE_MODES = ("private-parent-bundle", "private-exact-bundle")
 
 
 def fail(message):
@@ -71,6 +72,35 @@ def verify_request(request):
         if not isinstance(value, int) or value < bounds[0] or value > bounds[1]:
             raise ValueError("resource limit is invalid: " + name)
     return argv, limits
+
+
+def verify_private_source_ancestors(request_path, repo):
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        repository = request["repository"]
+        if repository.get("source_mode") not in PRIVATE_SOURCE_MODES:
+            raise ValueError("private source ancestor verification requires a private bundle")
+        commit = repository["commit"]
+        ancestors = repository.get("source_ancestors", [])
+        for ancestor in ancestors:
+            object_type = subprocess.run(
+                ["git", "-C", str(repo), "cat-file", "-t", ancestor],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+            if object_type != "commit":
+                raise ValueError("source ancestor is not a commit")
+            subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, commit],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+    except (KeyError, OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+        return fail("private source ancestor verification failed: {}".format(exc))
+    return 0
 
 
 def drop_privileges(uid, gid, pid_max, disk_bytes):
@@ -159,6 +189,8 @@ class suppress_oserror:
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "--verify-private-source-ancestors":
+        return verify_private_source_ancestors(Path(sys.argv[2]), Path(sys.argv[3]))
     if len(sys.argv) != 8:
         return fail("expected request, repo, output, uid, gid, VM id, and boot id")
     request_path = Path(sys.argv[1])

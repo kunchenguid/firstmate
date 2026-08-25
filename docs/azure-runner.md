@@ -36,22 +36,24 @@ The first live invocation remains blocked until the foundation and this code are
 
 ## Request and snapshot contract
 
-`prepare` refuses tracked changes, untracked files, and any origin other than a credential-free public GitHub HTTPS URL.
-It also refuses a detached HEAD unless the caller supplies an exact public source ref whose fetched head equals that detached commit.
+`prepare` refuses tracked changes, untracked files, and any origin identity other than a credential-free GitHub HTTPS URL.
+It also refuses a detached HEAD unless the caller supplies an exact public source ref or a digest-bound private bundle for that detached commit.
 By default the candidate must be reachable from a freshly advertised and fetched `refs/heads/main` default head.
 The explicit `--source-ref refs/heads/<branch>` seam alone requires the candidate commit to be the exact freshly advertised and fetched head of that public branch; it never accepts an ancestor, stale tracking ref, tag, or changed remote head.
 An explicit `--public-ref` may instead name only an advertised branch head or `refs/pull/<number>/head`, and the candidate must equal that ref's exact fetched head; mutable pull merge refs and unsafe ref shapes are refused, and the two source-ref seams are mutually exclusive.
-A caller may additionally bind one or more exact `--public-ancestor` commits; each must be present in the freshly fetched public history and be an ancestor of the candidate, and trusted guest bootstrap fetches and verifies each object before repository networking closes.
+A caller may additionally bind one or more exact `--public-ancestor` commits; public mode requires each commit in the freshly fetched public history, while private mode requires it in the bundle, and trusted guest bootstrap verifies each object is an ancestor of the candidate before repository networking closes.
+Crosscheck evidence for a private GitHub repository supplies `--private-snapshot-bundle` without a parent reservation: the trusted host packages its clean exact-head review checkout, binds the authenticated PR ref and base ancestor, and stages only that digest-bound Git bundle so the evidence VM receives no GitHub credential.
+When that arbitrary repository does not contain Firstmate's Agent Fleet lock, the `crosscheck-tool` class uses only the sealed base toolchain and records an empty Python-wheel closure instead of requiring Firstmate-specific files.
 An Azure validation cell additionally supplies `--private-snapshot-bundle` with its parent-cell reservation so an unpushed pipeline-fix head can execute without prematurely changing the task branch on GitHub.
-That private mode binds one exact source ref/head, a one-ref Git bundle, digest, size, parent cell, and private staging object while still freshly proving the public origin's trusted default ref/head.
-The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; all modes repeat their exact public/private source proof immediately before compute creation and retry.
+Both private modes bind one exact source ref/head, a one-ref Git bundle, digest, size, and private staging object; the validation-cell mode additionally binds its parent cell and freshly proves the public origin's trusted default ref/head.
+The public proof runs in a fresh bare repository with system/global Git configuration, credentials, prompts, extra HTTP headers, and file transport disabled; private Crosscheck proof revalidates the clean checkout and bundle identities locally immediately before compute creation and retry.
 No live worktree, primary home, provider account home, browser profile, or peer storage is mounted or copied.
 
 The canonical `fm.azure-command/v1` request binds these fields:
 
 - SHA-256 home binding derived from the canonical `FM_HOME` path, without sending that path to Azure.
 - Task, task generation, deployment generation, invocation, fenced attempt, and optional parent attempt.
-- Exact public origin, trusted default ref/head, selected source ref/head, required source ancestors, optional private bundle blob/digest/size, commit, tree, source-identity digest, command argv digest, and complete request digest.
+- Exact GitHub origin, optional trusted public default ref/head, selected source ref/head, required source ancestors, optional private bundle blob/digest/size, commit, tree, source-identity digest, command argv digest, and complete request digest.
 - Resource class, reviewed VM SKU, CPU, memory, PID, disk, per-stream log, artifact, network, and wall-time limits.
 - Declared repository-relative dependency paths and their file or tree digests.
 - Declared repository-relative result artifact paths.
@@ -59,8 +61,8 @@ The canonical `fm.azure-command/v1` request binds these fields:
 
 The bounded request and trusted executor travel only as ordinary Managed Run Command parameters.
 In public mode trusted root fetches the exact public source ref when it is the candidate head, refuses a ref that moved after admission, and otherwise fetches the exact default-reachable commit.
-Private parent mode stages only the exact credential-free Git bundle in the foundation's private `validation-shards` container, where the guest UAMI downloads and verifies it before deleting its token and starting repository code.
-Trusted root then fetches checksum-pinned ShellCheck, uv, and locked Linux wheels through the VNet NAT path and verifies every digest before repository code starts.
+Private mode stages only the exact credential-free Git bundle in the foundation's private `validation-shards` container, where the guest UAMI downloads and verifies it before deleting its token and starting repository code.
+Trusted root then fetches checksum-pinned ShellCheck, uv, and any bound locked Linux wheels through the VNet NAT path and verifies every digest before repository code starts.
 There is no SAS, shared key, Git credential, control-home payload, provider credential, or command-child data-plane authority.
 
 Declared dependency paths are rehashed after the VM clones the bundle.
@@ -68,8 +70,8 @@ Package installation performed by a repository command must remain rootless and 
 Missing toolchain capability fails the command rather than triggering a local retry or privileged repository-controlled bootstrap.
 The fixed root bootstrap installs a hard-coded Ubuntu transport and Linux test-tool package closure before repository code starts when the pinned Canonical image lacks it.
 Repository code cannot alter that privileged package list, all package and staging traffic is shaped to one megabit per second and ends before deny-all command networking starts, and invocation evidence must record the resolved package/image versions during real acceptance.
-The request records the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 releases plus the complete Linux x86_64 pytest/ruff wheel closure selected from the exact snapshot's Agent Fleet `uv.lock`.
-Trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.
+The request records the exact-size, checksum-pinned ShellCheck 0.11.0 and uv 0.9.10 releases plus, when the snapshot contains the Agent Fleet `uv.lock`, the complete Linux x86_64 pytest/ruff wheel closure selected from that lock.
+When that lock is present, trusted root verifies the lock, archive, file set, sizes, and hashes, creates the Agent Fleet environment with an empty cache and networking disabled, and forces repository `uv run --locked` commands to use that already-synchronized offline environment.
 
 ## Private control and VM boundary
 
@@ -79,7 +81,7 @@ The NIC has no public IP configuration, the subnet inherits the foundation's den
 There is no SSH key, password, inbound listener, public load balancer, or public NAT rule.
 The VM has exactly the foundation `validation-shards` UAMI, whose sole direct role is Storage Blob Data Contributor on the exact `validation-shards` container and which has no ARM/control-plane role.
 
-The guest root process fetches and verifies the exact public source and pinned dependency closure before creating the child.
+The guest root process fetches and verifies the exact public source or downloads and verifies the exact private bundle, then verifies the pinned dependency closure before creating the child.
 It remounts `/proc` with `hidepid=2` and starts repository code in a systemd private network namespace restricted to `AF_UNIX` with deny-all IP policy.
 No managed-identity token exists before or during the child command.
 The untrusted child receives a fixed allowlisted environment with no ambient host variables.
@@ -223,7 +225,7 @@ Cleanup removes resources in this exact scope and order:
 3. The exact recorded NIC, after a stable-identity detached transition is recorded.
 4. The exact recorded OS disk, after a stable-identity detached transition is recorded.
 5. The exact Azure-native TTL schedule, only after exact VM absence and detached capacity cleanup are proven.
-6. The exact private input snapshot blob, when parent-cell private mode supplied one.
+6. The exact private input snapshot blob, when either private mode supplied one.
 7. The local transient request payload, while retaining local verified result/state and the private digest-bound output archive.
 
 A VM deletion failure, timeout, unreadable response, or ambiguous absence proof retains the TTL schedule untouched so the independent deallocation deadline remains enforceable while cleanup is reconciled.
