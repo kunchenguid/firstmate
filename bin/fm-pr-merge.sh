@@ -363,6 +363,10 @@ record_pr_metadata() {
 github_report_unmerged_outcome() {
   printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
     "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
+  if [ "$FM_PR_GITHUB_STATE" != OPEN ] || [ "$FM_PR_GITHUB_MERGED" != false ] \
+    || [ "$FM_PR_GITHUB_QUEUED" != false ]; then
+    return 0
+  fi
   if github_read_queue_method; then
     case "$FM_PR_GITHUB_QUEUE_METHOD" in
       MERGE) queue_method=merge ;;
