@@ -28,6 +28,10 @@
 #   (l) an agent that EXITED behind a live endpoint: with no terminal status
 #       line -> exited (never its stale pre-exit line); with one -> its own
 #       done/failed verdict; a present or unattributable agent -> never exited.
+#   (m) the SPAWN-REGISTRATION race: a record published moments ago whose
+#       endpoint has no agent in it yet reads exactly like one whose agent
+#       left, so the exit verdict is withheld until the record is old enough
+#       for that emptiness to mean something - and is still reached after.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -177,6 +181,13 @@ new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
   printf '%s\n' "$d"
+}
+
+# An epoch far enough in the past that the record is settled under any sane
+# registration grace, for fixtures whose worker has been running a while. Cases
+# that are ABOUT the grace set their own timestamp relative to now.
+settled_spawn_ts() {
+  echo $(( $(date +%s) - 3600 ))
 }
 
 arm_idle_record() {  # <state-dir> <id>
@@ -1467,7 +1478,7 @@ test_exited_agent_without_terminal_line_is_not_working() {
   make_repo_on_branch "$d/wt" fm/feat-exited
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-exited.meta" "window=fm:fm-feat-exited" "worktree=$d/wt" \
-    "kind=ship" "harness=claude"
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
   printf 'working: reproducing the flake\n' > "$d/state/feat-exited.status"
   FM_FAKE_TMUX_WINDOWS=fm-feat-exited
   FM_FAKE_PANE_COMMAND=zsh          # the agent left; its login shell is what remains
@@ -1488,7 +1499,7 @@ test_exited_agent_with_no_status_events_still_reports_exited() {
   make_repo_on_branch "$d/wt" fm/feat-silent
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-silent.meta" "window=fm:fm-feat-silent" "worktree=$d/wt" \
-    "kind=ship" "harness=claude"
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
   FM_FAKE_TMUX_WINDOWS=fm-feat-silent
   FM_FAKE_PANE_COMMAND=zsh
   arm_idle_record "$d/state" feat-silent
@@ -1569,7 +1580,7 @@ test_exited_secondmate_does_not_ride_its_stale_log() {
   make_repo_on_branch "$d/wt" fm/mate-gone
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/mate-gone.meta" "window=fm:fm-mate-gone" "worktree=$d/wt" \
-    "kind=secondmate" "harness=claude"
+    "kind=secondmate" "harness=claude" "spawned_at=$(settled_spawn_ts)"
   printf 'working: picked up the routed task\n' > "$d/state/mate-gone.status"
   FM_FAKE_TMUX_WINDOWS=fm-mate-gone
   FM_FAKE_PANE_COMMAND=zsh
@@ -1589,7 +1600,7 @@ test_exited_agent_is_not_absorbed_as_working() {
   make_repo_on_branch "$d/wt" fm/feat-absorb
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-absorb.meta" "window=fm:fm-feat-absorb" "worktree=$d/wt" \
-    "kind=ship" "harness=claude"
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
   printf 'working: implementing\n' > "$d/state/feat-absorb.status"
   FM_FAKE_TMUX_WINDOWS=fm-feat-absorb
   FM_FAKE_PANE_COMMAND=zsh
@@ -1597,6 +1608,126 @@ test_exited_agent_is_not_absorbed_as_working() {
   PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-absorb \
     && fail "a wake about a departed worker was absorbed as still working"
   pass "an exited worker is never absorbed as provably working"
+}
+
+# ---------------------------------------------------------------------------
+# (m) THE SPAWN-REGISTRATION RACE, observed 2026-08-24: seconds after a spawn,
+#     the verdict read `exited` while the worker was alive and mid-thought. It
+#     had simply not registered yet.
+#
+#     Nothing was wrong with the endpoint evidence. A record is published the
+#     moment the endpoint exists, and the harness only becomes visible in that
+#     endpoint's foreground process group once it has actually started - so
+#     between those two moments the endpoint is shells alone, which is
+#     byte-for-byte what a departed agent leaves behind. `dead` is a true
+#     statement about the endpoint and a false one about the agent.
+#
+#     That matters more than an ordinary misread because `exited` is the ONE
+#     verdict that licenses a relaunch, and a relaunch here puts a second agent
+#     on the same worktree. So the age of the record is consulted before the
+#     emptiness of the endpoint is allowed to mean anything, and the pair of
+#     cases below pins both directions: a just-published record may not say
+#     `exited`, and a settled one still must.
+
+# The defect: a record published just now, an endpoint with no agent in it yet,
+# and no status line ever written - the exact shape a spawn passes through.
+test_fresh_spawn_is_never_reported_exited() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-fresh)
+  make_repo_on_branch "$d/wt" fm/feat-fresh
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fresh.meta" "window=fm:fm-feat-fresh" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fresh
+  FM_FAKE_PANE_COMMAND=zsh          # the harness has not replaced the shell yet
+  local out; out=$(run_crew_state "$d" feat-fresh)
+  assert_not_contains "$out" "state: exited" \
+    "a worker that has not finished starting must never be reported as gone"
+  assert_contains "$out" "state: unknown" \
+    "the honest answer during the registration window is unknown, which licenses nothing"
+  pass "a freshly spawned worker that has not registered yet is never reported exited"
+}
+
+# The same fresh record must not be over-corrected into a claim of progress
+# either: `working` would let the watcher absorb a wake about a spawn that
+# really did die on arrival.
+test_fresh_spawn_is_not_absorbed_as_working() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-absorb)
+  make_repo_on_branch "$d/wt" fm/feat-fresh-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fresh-absorb.meta" "window=fm:fm-feat-fresh-absorb" \
+    "worktree=$d/wt" "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fresh-absorb
+  FM_FAKE_PANE_COMMAND=zsh
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_is_provably_working feat-fresh-absorb \
+    && fail "a worker still inside its registration window was claimed as provably working"
+  pass "the registration window withholds the exit verdict without inventing progress"
+}
+
+# The other direction, and the one the window must not trade away: once the
+# record is old enough that an empty endpoint can only mean the agent left, the
+# exit verdict is reached exactly as before.
+test_settled_record_with_empty_endpoint_still_reports_exited() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-settled)
+  make_repo_on_branch "$d/wt" fm/feat-settled
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-settled.meta" "window=fm:fm-feat-settled" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(settled_spawn_ts)"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-settled
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" feat-settled)
+  assert_contains "$out" "state: exited" \
+    "a settled record over an empty endpoint must still report the agent gone"
+  pass "a worker past its registration window with an empty endpoint still reports exited"
+}
+
+# A record written by an older spawn carries no timestamp of its own. Its file's
+# publication time bounds the same thing, so the window still applies to it -
+# absent evidence must not silently drop the guard on the one verdict that can
+# start a duplicate agent.
+test_record_without_spawn_timestamp_uses_its_publication_time() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-legacy)
+  make_repo_on_branch "$d/wt" fm/feat-legacy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-legacy.meta" "window=fm:fm-feat-legacy" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-legacy
+  FM_FAKE_PANE_COMMAND=zsh
+  local out; out=$(run_crew_state "$d" feat-legacy)
+  assert_not_contains "$out" "state: exited" \
+    "a record with no timestamp, published just now, must not license a relaunch"
+  # Age the record itself and the same endpoint becomes proof again.
+  touch -t "$(date -r "$(( $(date +%s) - 3600 ))" +%Y%m%d%H%M.%S 2>/dev/null \
+    || date -d "@$(( $(date +%s) - 3600 ))" +%Y%m%d%H%M.%S)" "$d/state/feat-legacy.meta"
+  out=$(run_crew_state "$d" feat-legacy)
+  assert_contains "$out" "state: exited" \
+    "an old untimestamped record over an empty endpoint still reports the agent gone"
+  pass "a record with no spawn timestamp falls back to its own publication time"
+}
+
+# The window withholds only the verdict the endpoint cannot support. A worker
+# that reported and left inside the same window said what happened, and its own
+# terminal verdict must not be delayed by a guard aimed at silence.
+test_registration_window_does_not_mask_a_reported_result() {
+  reset_fakes
+  local d; d=$(new_case spawn-race-reported)
+  make_repo_on_branch "$d/wt" fm/feat-fastdone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fastdone.meta" "window=fm:fm-feat-fastdone" "worktree=$d/wt" \
+    "kind=ship" "harness=claude" "spawned_at=$(date +%s)"
+  printf 'failed: the brief named a project that is not cloned here\n' \
+    > "$d/state/feat-fastdone.status"
+  FM_FAKE_TMUX_WINDOWS=fm-feat-fastdone
+  FM_FAKE_PANE_COMMAND=zsh
+  arm_idle_record "$d/state" feat-fastdone
+  local out; out=$(run_crew_state "$d" feat-fastdone)
+  assert_contains "$out" "state: failed" \
+    "a worker that reported inside the window keeps its own verdict"
+  pass "the registration window never delays a worker's own reported result"
 }
 
 test_active_run_is_authoritative
@@ -1659,5 +1790,10 @@ test_live_agent_between_turns_is_never_reported_exited
 test_unattributable_endpoint_is_never_reported_exited
 test_exited_secondmate_does_not_ride_its_stale_log
 test_exited_agent_is_not_absorbed_as_working
+test_fresh_spawn_is_never_reported_exited
+test_fresh_spawn_is_not_absorbed_as_working
+test_settled_record_with_empty_endpoint_still_reports_exited
+test_record_without_spawn_timestamp_uses_its_publication_time
+test_registration_window_does_not_mask_a_reported_result
 
 echo "all fm-crew-state tests passed"

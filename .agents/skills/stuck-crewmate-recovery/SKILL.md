@@ -42,6 +42,7 @@ A worker reported as `exited` is the third shape, and the only one of the three 
 That verdict says the agent left, never that the work is unfinished - on 2026-08-20 the most expensive case was a complete report sitting on disk unclaimed for an hour while the record still read `working`.
 So decide from the work rather than from the last status line: read the task's deliverable and worktree first, claim a finished one through its normal completion path, and relaunch only what is genuinely incomplete.
 Nothing is lost either way, because the worktree, its commits, and any written deliverable all survive the exit and a relaunch in that same worktree resumes cleanly.
+A worker whose record was published moments ago never reaches that verdict and reports `unknown` instead, because a harness that has not finished starting leaves the same empty endpoint as one whose agent left; that read licenses nothing in either direction, so re-read it once the window named in its detail line has passed rather than relaunching on it.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.

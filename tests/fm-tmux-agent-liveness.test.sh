@@ -137,8 +137,14 @@ EOF
 # (bin/fm-crew-state.sh). The adapter cases above prove what the endpoint says;
 # these prove what firstmate is TOLD, which is where the 2026-08-20 defect lived
 # - the endpoint knew the agent had gone and nothing asked it.
-crew_state_for() {  # <window> <status-line>
-  local window=$1 line=$2 id="live-$1"
+# <spawned-at> defaults to an hour ago: every case below is about a worker that
+# has been running a while, and the verdict deliberately withholds `exited` for
+# a record published moments ago (a worker whose harness has not started yet
+# leaves the same empty endpoint as one whose agent left). The registration-race
+# section at the bottom is the case that varies it.
+crew_state_for() {  # <window> <status-line> [spawned-at-epoch]
+  local window=$1 line=$2 id="live-$1" spawned_at=${3:-}
+  [ -n "$spawned_at" ] || spawned_at=$(( $(date +%s) - 3600 ))
   mkdir -p "$LAB/state"
   cat > "$LAB/state/$id.meta" <<META
 window=$SESSION:$window
@@ -146,6 +152,7 @@ worktree=$LAB/wt
 kind=ship
 harness=claude
 backend=tmux
+spawned_at=$spawned_at
 META
   if [ -n "$line" ]; then
     printf '%s\n' "$line" > "$LAB/state/$id.status"
@@ -523,6 +530,50 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+# --- the spawn-registration race, in the order it really happens ------------
+# Observed 2026-08-24: seconds after a spawn, the composed verdict said the
+# worker had exited while it was alive and mid-thought. It had not registered
+# yet. A record is published as soon as the endpoint exists, and the harness
+# only appears in that endpoint's foreground process group once it has actually
+# started - so in between, the endpoint is shells alone, which is exactly what a
+# departed agent leaves behind. `exited` is the one verdict that licenses a
+# relaunch, and a relaunch here puts a second agent on the same worktree.
+#
+# The race is reproduced here rather than waited for: the pane blocks on a
+# builtin `read` from a fifo, so it is a real shell-only endpoint - the adapter
+# genuinely says `dead` - and the harness starts on command instead of on luck.
+# That makes the window's two ends observable in one run with no sleeps.
+
+mkfifo "$LAB/startgate" || fail "could not create the start gate"
+new_window latestart /bin/sh -c "read _ < '$LAB/startgate'; exec '$LAB/bin/claude-link' 900"
+wait_for_state "$SESSION:latestart" dead \
+  || fail "the pre-registration pane must really be shell-only, or this case proves nothing"
+
+# Mid-race: the record was published this second and the agent has not started.
+case "$(crew_state_for latestart '' "$(date +%s)")" in
+  'state: exited'*) fail "a worker that has not started yet must never be reported as gone; got: $(crew_state_for latestart '' "$(date +%s)")" ;;
+esac
+pass "crew state: a real endpoint whose harness has not started yet is never reported exited"
+
+# The agent arrives, and the same endpoint answers for itself.
+printf 'go\n' > "$LAB/startgate"
+wait_for_state "$SESSION:latestart" alive \
+  || fail "the harness never started in the late-start pane"
+case "$(crew_state_for latestart 'working: reading the brief' "$(date +%s)")" in
+  'state: exited'*) fail "a running agent must never be reported as gone" ;;
+esac
+pass "crew state: the same endpoint reports its agent once the harness has started"
+
+# The direction the window must not trade away: on a settled record, the idle
+# pane above is still proof the agent left. `idle` is the same real shell-only
+# endpoint the pre-registration pane was, so the only thing separating the two
+# verdicts is the age of the record.
+case "$(crew_state_for idle '' "$(( $(date +%s) - 3600 ))")" in
+  'state: exited'*) : ;;
+  *) fail "a settled record over a real shell-only endpoint must still report exited; got: $(crew_state_for idle '' "$(( $(date +%s) - 3600 ))")" ;;
+esac
+pass "crew state: a settled record over a real empty endpoint still reports exited"
 
 cleanup_all
 trap - EXIT
