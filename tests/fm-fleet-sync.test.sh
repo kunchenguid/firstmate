@@ -568,13 +568,17 @@ EOF
 }
 
 test_gone_upstream_task_branch_is_pruned() {
-  local home clone remote out
+  local home clone remote no_mistakes out
   home=$(new_home)
   clone=$(build_pair "$home" upsilon)
   remote="$home/remotes/upsilon.git"
+  no_mistakes="$home/remotes/upsilon-no-mistakes.git"
+  git init -q --bare "$no_mistakes"
+  git -C "$clone" remote add no-mistakes "$no_mistakes"
   git -C "$clone" checkout -q -b fm/task-gone
   commit_file "$clone" feature.txt hello "unmerged work"
   git -C "$clone" push -q -u origin fm/task-gone
+  git -C "$clone" push -q no-mistakes fm/task-gone
   git --git-dir="$remote" update-ref -d refs/heads/fm/task-gone
   git -C "$clone" checkout -q main
   git -C "$clone" fetch -q --prune origin
@@ -583,7 +587,9 @@ test_gone_upstream_task_branch_is_pruned() {
   assert_contains "$out" "pruned fm/task-gone" "an inactive [gone] upstream must be reported as pruned"
   branch_exists "$clone" fm/task-gone \
     && fail "gone-upstream-prune: fm/task-gone was retained despite its [gone] upstream"
-  pass "the gone-upstream sweep prunes an inactive fm/* branch"
+  git --git-dir="$no_mistakes" show-ref --verify --quiet refs/heads/fm/task-gone \
+    || fail "gone-upstream-prune: fleet sync deleted the unproved no-mistakes recovery ref"
+  pass "the gone-upstream sweep prunes an inactive local fm/* branch while retaining its recovery ref"
 }
 
 test_routine_prune_defaults_on_and_allows_disable() {

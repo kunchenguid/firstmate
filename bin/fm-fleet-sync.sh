@@ -219,8 +219,9 @@ prune_gone_branches() {
   # branch was deleted, which in this fleet means its PR merged - as long as
   # nothing still needs them. Never the checked-out branch, and never a branch
   # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
-  # "no worktree" already proves the work landed: teardown removes a branch's
-  # worktree only after confirming the work reached the remote. We deliberately
+  # "no worktree" is the established proof for this local cleanup only. The
+  # separate no-mistakes recovery ref is retained here: GitHub disappearance
+  # alone cannot prove that remote ref landed. We deliberately
   # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
   # this fleet are squash-merged, so a merged branch is never an ancestor and
   # such a check would prune nothing. The no-worktree guard is the real safety
@@ -235,9 +236,6 @@ prune_gone_branches() {
     [ "$track" = "[gone]" ] || continue
     [ -n "$branch" ] || continue
     tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$branch") || continue
-    if fm_branch_delete_remote_if_safely_gone "$PROJ" no-mistakes "$branch" "$tip"; then
-      echo "$label: pruned no-mistakes/$branch"
-    fi
     if fm_branch_delete_if_safely_gone "$PROJ" "$branch"; then
       echo "$label: pruned $branch"
     fi

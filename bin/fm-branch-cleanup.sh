@@ -78,9 +78,6 @@ cleanup_matching_remote_tips() {
       merged)
         fm_branch_delete_remote_if_safely_merged "$PROJ" "$remote" "$branch" "$tip" "$proof_arg"
         ;;
-      gone)
-        fm_branch_delete_remote_if_safely_gone "$PROJ" "$remote" "$branch" "$tip"
-        ;;
       landed)
         fm_branch_delete_remote_if_landed "$PROJ" "$remote" "$branch" "$tip"
         ;;

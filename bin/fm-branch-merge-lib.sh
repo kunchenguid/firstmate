@@ -248,18 +248,6 @@ fm_branch_delete_remote_if_safely_merged() {
     _fm_branch_delete_remote_if_safely_merged_locked "$remote" "$expected_tip" "$merged_into"
 }
 
-_fm_branch_delete_remote_if_safely_gone_locked() {
-  local repo=$1 branch=$2 remote=$3 expected_tip=$4
-  fm_branch_is_safely_gone "$repo" "$branch" "$expected_tip" || return 1
-  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
-}
-
-fm_branch_delete_remote_if_safely_gone() {
-  local repo=$1 remote=$2 branch=$3 expected_tip=$4
-  fm_branch_with_cleanup_lock "$repo" "$branch" \
-    _fm_branch_delete_remote_if_safely_gone_locked "$remote" "$expected_tip"
-}
-
 _fm_branch_delete_remote_if_landed_locked() {
   local repo=$1 branch=$2 remote=$3 expected_tip=$4 pr_url=$5
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
