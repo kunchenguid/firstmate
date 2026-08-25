@@ -6,9 +6,10 @@ Historical and provider-specific AIME proof remains in [`aime-cloud-worker.md`](
 
 ## Installed official surface
 
-Re-verified on 2026-08-24 with installed `bytedcli` 0.130.0.
-That version identifies this evidence only; iDA setup and execution do not pin or compare it.
-The read-only surfaces were:
+The base lifecycle was re-verified on 2026-08-24 with installed `bytedcli` 0.130.0.
+Model selection was re-verified on 2026-08-25 with installed `bytedcli` 0.131.0.
+Those versions identify this evidence only; iDA setup and execution do not pin or compare them.
+The read-only base surfaces were:
 
 ```sh
 bytedcli --json --version
@@ -19,8 +20,18 @@ bytedcli --as user mcp --allow-domains ida
 bytedcli --as user mcp --allow-domains ida --all-tools
 ```
 
+The model-selection commands were:
+
+```sh
+bytedcli ida --region sg deep-research create --help
+env -u http_proxy -u https_proxy -u all_proxy -u no_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli --json --as user ida --region sg model list
+```
+
 The MCP commands were exercised with bounded stdin JSON-RPC for `tools/list`, `list_commands`, and a read-only `run_command`; no private prompt was used in those capability checks.
-They establish the official SG selector, structured user-identity reads, domain-restricted command runner, and advertised Deep Research create, raw-list, session-get, and close commands with their required options.
+The installed help declares optional `--model <name>` as a model name returned by `ida model list`.
+The installed `IdaSendOptions`, create handler, service, and client pass that string through `model` into `llmModel`, while an omitted CLI option remains absent at the command boundary.
+The SG model-list response returned structured model names including `auto`, `usecase-frontend-doubao-seed-2.1-pro`, and `usecase-frontend-deepseek-v4-pro`; the implementation validates the current response rather than pinning this observed list.
+Together these checks establish the official SG selector, structured user-identity reads, domain-restricted command runner, and advertised Deep Research create, model-selection, raw-list, session-get, and close commands with their required options.
 
 ## Direct-dispatch failure separation
 
@@ -54,6 +65,9 @@ The focused iDA command above completed with the exact terminal assertion `# fm-
 It verifies:
 
 - explicit `remote-agent/aime` and `remote-agent/ida` dispatch metadata, with no heuristic provider selection;
+- explicit per-dispatch iDA model validation against the fake official SG list, exactly one create carrying the selected model, model-free omission, and private-state round-trip;
+- zero provider calls for empty, malformed, or duplicate model input, zero create calls for an unsupported model, and explicit refusal of the iDA-only option on AIME;
+- compatibility for legacy iDA config records with a model field and durable task records without one;
 - permanent reading of an existing `cloud-worker/aime` plus `fm-aime-task-state.v1` record without migration;
 - public iDA probe and direct dispatch with the version field absent, with a stale legacy config version, and without any bytedcli version query or comparison;
 - child-local removal of all conventional proxy variables while preserving an unrelated environment sentinel across SG probe, reconciliation, and create;

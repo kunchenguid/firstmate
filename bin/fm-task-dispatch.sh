@@ -4,7 +4,7 @@
 # Usage:
 #   fm-task-dispatch.sh local-agent <task-id> [fm-spawn arguments...]
 #   fm-task-dispatch.sh remote-agent/aime <task-id> --instructions <private-file> [--document]
-#   fm-task-dispatch.sh remote-agent/ida <task-id> --instructions <private-file> [--document]
+#   fm-task-dispatch.sh remote-agent/ida <task-id> --instructions <private-file> [--model <name>] [--document]
 #   fm-task-dispatch.sh cloud-worker/aime <task-id> --instructions <private-file> [--document]
 #
 # This is the narrow executor seam above local harness/runtime semantics.
@@ -26,6 +26,19 @@ usage() {
   exit 2
 }
 
+reject_remote_model() {
+  local executor=$1 argument
+  shift
+  for argument in "$@"; do
+    case "$argument" in
+      --model|--model=*)
+        printf 'error: --model is supported only by remote-agent/ida; omit it for %s\n' "$executor" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
 executor=${1-}
 id=${2-}
 [ -n "$executor" ] && [ -n "$id" ] || usage
@@ -36,9 +49,11 @@ case "$executor" in
     exec "$SCRIPT_DIR/fm-spawn.sh" "$id" "$@"
     ;;
   remote-agent/aime)
+    reject_remote_model "$executor" "$@"
     exec "$SCRIPT_DIR/fm-remote-agent-aime.sh" dispatch "$id" "$@"
     ;;
   cloud-worker/aime)
+    reject_remote_model "$executor" "$@"
     exec "$SCRIPT_DIR/fm-cloud-research-aime.sh" dispatch "$id" "$@"
     ;;
   remote-agent/ida)

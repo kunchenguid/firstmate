@@ -8,7 +8,7 @@
 #   region=sg
 #   identity=user
 #   agent_id=default|<numeric iDA agent id>
-#   model=default|<iDA model name>
+#   model=default|<iDA model name>  # legacy optional field; never a dispatch default
 #   bytedcli_version=<legacy informational value; optional>
 #
 # Prompt submission uses the domain-restricted bytedcli MCP `run_command` tool
@@ -59,7 +59,7 @@ fm_ida_run_bytedcli() (
 )
 
 fm_ida_config_load() {
-  local file
+  local file legacy_model
   file=$(fm_ida_config_path)
   fm_remote_private_file_safe "$file" || return 1
   IDA_CONFIG_SCHEMA_VALUE=$(fm_ida_config_field "$file" schema) || return 1
@@ -67,7 +67,7 @@ fm_ida_config_load() {
   IDA_CONFIG_REGION=$(fm_ida_config_field "$file" region) || return 1
   IDA_CONFIG_IDENTITY=$(fm_ida_config_field "$file" identity) || return 1
   IDA_CONFIG_AGENT_ID=$(fm_ida_config_field "$file" agent_id) || return 1
-  IDA_CONFIG_MODEL=$(fm_ida_config_field "$file" model) || return 1
+  legacy_model=$(fm_ida_config_optional_field "$file" model) || return 1
   # Read legacy configs without turning their recorded version into a gate.
   # New configs omit this informational field.
   fm_ida_config_optional_field "$file" bytedcli_version >/dev/null || return 1
@@ -76,7 +76,9 @@ fm_ida_config_load() {
   [ "$IDA_CONFIG_REGION" = sg ] || return 1
   [ "$IDA_CONFIG_IDENTITY" = user ] || return 1
   [ "$IDA_CONFIG_AGENT_ID" = default ] || fm_ida_numeric_id "$IDA_CONFIG_AGENT_ID" || return 1
-  [ "$IDA_CONFIG_MODEL" = default ] || fm_ida_safe_token "$IDA_CONFIG_MODEL" || return 1
+  if [ -n "$legacy_model" ]; then
+    [ "$legacy_model" = default ] || fm_ida_safe_token "$legacy_model" || return 1
+  fi
 }
 
 fm_ida_session_marker() {
