@@ -15,6 +15,7 @@
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name>,<alias> [<mode> +yolo] - <desc>           -> <mode> on (for both name and alias)
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -56,21 +57,49 @@ if [ ! -f "$REG" ]; then
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<mode> <yolo>" (one line) or "NOT_FOUND: name1 name2 ..." if the project is absent.
 parsed=$(awk -v n="$NAME" '
-  $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
-    if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
-      k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+  BEGIN { found=0; total_names=0 }
+  /^-[ \t]/ && ($3 ~ /^\[/ || $0 ~ /\(added [0-9]{4}-[0-9]{2}-[0-9]{2}\)/) {
+    num = split($2, names, ",");
+    for (i=1; i<=num; i++) {
+      all_names[++total_names] = names[i]
+      if (names[i] == n && !found) {
+        found=1;
+        mode="no-mistakes"; yolo="off";
+        if ($3 ~ /^\[/) {
+          s="";
+          for (j=3; j<=NF; j++) { s = s (s==""?"":" ") $j; if ($j ~ /\]$/) break }
+          gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
+          k = split(s, a, " ");
+          if (a[1] != "" && a[1] != "+yolo") mode = a[1];
+          for (l=1; l<=k; l++) if (a[l]=="+yolo") yolo="on";
+        }
+      }
     }
-    print mode, yolo; exit
+  }
+  END {
+    if (found) {
+      print mode, yolo;
+    } else {
+      printf "NOT_FOUND:";
+      for (i=1; i<=total_names; i++) {
+        printf " %s", all_names[i];
+      }
+      printf "\n";
+    }
   }
 ' "$REG")
+
+if [[ "$parsed" == NOT_FOUND:* ]]; then
+  registered_names="${parsed#NOT_FOUND: }"
+  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
+  if [ -n "$registered_names" ]; then
+    echo "warn: registered names are: $registered_names" >&2
+  fi
+  echo "no-mistakes off"
+  exit 0
+fi
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2

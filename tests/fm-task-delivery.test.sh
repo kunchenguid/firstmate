@@ -272,6 +272,58 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+test_project_mode_ignores_prose_bullets() {
+  local home out err
+  home="$TMP_ROOT/project-mode-prose/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- `origin` is upstream
+- fork is prajwal-395/firstmate
+- Upstream enforces in CI
+- Ten fixes have already landed
+- myproj [direct-PR] - fixture
+- oldproj - legacy style without brackets (added 2024-01-01)
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" fork 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a prose bullet was incorrectly parsed as a project (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" oldproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a genuine legacy project was not parsed correctly (got '$out')"
+
+  err=$(FM_HOME="$home" "$PROJECT_MODE" missingproj 2>&1 >/dev/null)
+  assert_contains "$err" "myproj" "missing project warning did not list the real project"
+  assert_contains "$err" "oldproj" "missing project warning did not list the legacy project"
+  assert_not_contains "$err" "fork" "missing project warning listed a prose bullet"
+  assert_not_contains "$err" "\`origin\`" "missing project warning listed a prose bullet"
+  assert_not_contains "$err" "Upstream" "missing project warning listed a prose bullet"
+  assert_not_contains "$err" "Ten" "missing project warning listed a prose bullet"
+  pass "fm-project-mode: ignores column-one prose bullets in descriptions"
+}
+
+test_project_mode_handles_comma_separated_aliases() {
+  local home out err
+  home="$TMP_ROOT/project-mode-aliases/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- video-editing-pilot,video_editing_pilot [direct-PR +yolo] - fixture (added 2026-01-01)
+- singleproj [local-only] - fixture (added 2026-01-01)
+EOF
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" video-editing-pilot 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "comma-separated alias first item not found (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" video_editing_pilot 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "comma-separated alias second item not found (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" singleproj 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "single project parsing failed (got '$out')"
+
+  err=$(FM_HOME="$home" "$PROJECT_MODE" missingproj 2>&1 >/dev/null)
+  assert_contains "$err" "video-editing-pilot video_editing_pilot singleproj" "missing project warning did not list all registered names (got '$err')"
+  
+  pass "fm-project-mode: handles comma-separated aliases and prints registered names on miss"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -279,4 +331,6 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_ignores_prose_bullets
+test_project_mode_handles_comma_separated_aliases
 echo "# all fm-task-delivery tests passed"
