@@ -4,6 +4,10 @@
     {
       "id": "same-repository-disjoint-evidence",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-a", "identifier": "ENG-1", "title": "Change the alpha handler", "description": "In repository app, change only src/alpha.ts symbol alphaHandler for the alpha-flow. Light product validation; no dependencies, shared resources, migrations, security, production, release, credential, destructive, irreversible, ambiguous, or red-validation work." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-b", "identifier": "ENG-2", "title": "Change the beta handler", "description": "In repository app, change only src/beta.ts symbol betaHandler for the beta-flow. Light product validation; no dependencies, shared resources, migrations, security, production, release, credential, destructive, irreversible, ambiguous, or red-validation work." } }
+      ],
       "disconfirming": "Same repository is not itself a collision when concrete files, symbols, semantics, resources, dependencies, and schema impact are disjoint.",
       "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -47,6 +51,10 @@
     {
       "id": "glob-overlap-serializes",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-c", "identifier": "ENG-3", "title": "Refactor authentication", "description": "In repository app, change src/auth/** including authenticate for auth-flow. Heavy product validation; no dependencies or stronger boundaries." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-d", "identifier": "ENG-4", "title": "Refresh auth tokens", "description": "In repository app, change src/auth/token.ts symbol refreshToken for token-flow. Light product validation; no dependencies or stronger boundaries." } }
+      ],
       "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
       "claims": [
@@ -89,6 +97,10 @@
     {
       "id": "cross-repository-shared-resource",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-e", "identifier": "OPS-1", "title": "Update billing queue producer", "description": "In repository service-a, change src/config.ts symbol queueName and the shared mutable resource queue:billing-events for billing-publish. Light internal validation; no dependencies or stronger boundaries." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-f", "identifier": "OPS-2", "title": "Update billing queue consumer", "description": "In repository service-b, change src/consumer.ts symbol consumeBilling and the shared mutable resource queue:billing-events for billing-consume. Light internal validation; no dependencies or stronger boundaries." } }
+      ],
       "disconfirming": "Different repositories still collide through one shared mutable external resource.",
       "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -132,6 +144,10 @@
     {
       "id": "dependency-serializes",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-g", "identifier": "ENG-7", "title": "Define the base API", "description": "In repository app, change src/base.ts symbol baseApi for base-contract. Light product validation; no blockers or stronger boundaries.", "blockedByIssueIds": [] } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-h", "identifier": "ENG-8", "title": "Build the API client", "description": "In repository app, change src/client.ts symbol clientApi for client-contract after issue-g. Light product validation; no stronger boundaries.", "blockedByIssueIds": ["issue-g"] } }
+      ],
       "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
       "claims": [
@@ -174,6 +190,10 @@
     {
       "id": "unknown-scope-escalates-and-serializes",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-i", "identifier": "ENG-9", "title": "Change the app", "description": "Repository app is named, but no file, glob, symbol, semantic boundary, dependency, shared resource, validation scope, or implementation evidence is supplied, so scope is ambiguous." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-j", "identifier": "ENG-10", "title": "Change the known handler", "description": "In repository app, change src/known.ts symbol known for known-flow. Light product validation; no dependencies or stronger boundaries." } }
+      ],
       "capacity": { "maxActiveIssues": 4, "maxParallelWorkers": 4, "maxHeavyValidations": 2 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
       "claims": [
@@ -216,6 +236,11 @@
     {
       "id": "heavy-validation-capacity",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-k", "identifier": "ENG-11", "title": "Change A", "description": "In repository a, change src/a.ts symbol a for semantic area a. Heavy product validation; no dependencies, shared resources, or stronger boundaries." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-l", "identifier": "ENG-12", "title": "Change B", "description": "In repository b, change src/b.ts symbol b for semantic area b. Heavy product validation; no dependencies, shared resources, or stronger boundaries." } },
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-m", "identifier": "ENG-13", "title": "Change C", "description": "In repository c, change src/c.ts symbol c for semantic area c. Light product validation; no dependencies, shared resources, or stronger boundaries." } }
+      ],
       "capacity": { "maxActiveIssues": 3, "maxParallelWorkers": 2, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
       "claims": [
@@ -274,6 +299,9 @@
     {
       "id": "quoted-production-is-not-an-operation",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-n", "identifier": "DOC-1", "title": "Clarify a production example", "description": "In repository docs, edit only docs/production-example.md for docs-example. The word production appears solely in a quoted documentation example; execute and release nothing. Light documentation validation with no stronger boundaries." } }
+      ],
       "disconfirming": "A documentation change that quotes the word production is not a production operation when concrete evidence proves the effect is docs-only.",
       "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -301,6 +329,9 @@
     {
       "id": "security-small-change-still-escalates",
       "routing": { "urgency": "urgent", "kind": "linear.issue.available", "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "linear.issue.available", "urgency": "urgent", "payload": { "issueId": "issue-o", "identifier": "SEC-1", "title": "Tighten authorization policy", "description": "In repository app, change src/auth/policy.ts symbol authorize for authorization-policy. The change is security-sensitive even though it is small. Heavy product validation; no other stronger boundary." } }
+      ],
       "disconfirming": "Small diff size does not remove the security-sensitive authority boundary.",
       "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -328,6 +359,9 @@
     {
       "id": "routine-context-waits-for-next-turn",
       "routing": { "urgency": "routine", "kind": "firstmate.routine-context", "expectedAction": "nextTurn" },
+      "inputs": [
+        { "kind": "firstmate.routine-context", "urgency": "routine", "payload": { "visibleText": "A worker posted a routine progress note; no main-session operation is requested." } }
+      ],
       "disconfirming": "Routine retained context uses nextTurn and must not wake an idle or working main session.",
       "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -338,6 +372,9 @@
     {
       "id": "exact-duplicate-coalesces",
       "routing": { "urgency": "routine", "kind": "journal.duplicate", "exactDuplicate": true, "expectedAction": "coalesce" },
+      "inputs": [
+        { "kind": "journal.duplicate", "urgency": "routine", "payload": { "duplicateOf": "event-previous", "samePayload": true, "requiresMainAction": false } }
+      ],
       "disconfirming": "Only exact already-accounted duplicate evidence coalesces without retained next-turn context.",
       "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },
@@ -348,6 +385,9 @@
     {
       "id": "routine-operation-still-wakes",
       "routing": { "urgency": "routine", "kind": "firstmate.operation-required", "requiresMainAction": true, "expectedAction": "wake" },
+      "inputs": [
+        { "kind": "firstmate.operation-required", "urgency": "routine", "payload": { "visibleText": "A routine PR-link operation is ready and requires the main session to act.", "requiresMainAction": true } }
+      ],
       "disconfirming": "Routine urgency does not permit nextTurn when a main-session operation is required.",
       "capacity": { "maxActiveIssues": 1, "maxParallelWorkers": 1, "maxHeavyValidations": 1 },
       "active": { "activeIssues": 0, "activeWorkers": 0, "activeHeavyValidations": 0 },

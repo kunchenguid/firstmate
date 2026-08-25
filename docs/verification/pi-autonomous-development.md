@@ -92,6 +92,9 @@ The existing credential-free real-SDK guard remains the on-demand construction c
 FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
 ```
 
+On 2026-08-25 against Pi SDK 0.84.2 that credential-free branch guard printed `ok - real Pi SDK 0.84.2 accepts the branch session construction and preserves an unpromptable wake`.
+It intentionally has no autonomy config or credential, so it proves the default path stays unchanged and inert.
+
 The active-autonomy guard uses the installed Pi SDK, configured provider authentication, a real cheaper-model `AgentSession`, and the production `fm_supervision_decide` contract. It performs one model classification against a no-claim held-out event and never constructs a Linear, Firstmate project, forge, dispatch, or merge adapter:
 
 ```sh
@@ -101,8 +104,7 @@ FM_PI_AUTONOMY_LIVE_MODEL=<model-id> \
 bin/fm-test-run.sh tests/fm-pi-autonomy-live-e2e.test.sh
 ```
 
-On 2026-08-25 against Pi SDK 0.84.2 it printed `ok - real Pi SDK 0.84.2 accepts the branch session construction and preserves an unpromptable wake`.
-That guard intentionally has no autonomy config or credential, so it proves the default path stays unchanged and inert.
+The authenticated active-autonomy guard has not been observed in this credential-free repository verification environment; activation requires an explicitly configured provider/model pair and provider authentication.
 A live Linear mutation is deliberately not part of repository validation.
 They belong to the captain's post-merge activation check.
 

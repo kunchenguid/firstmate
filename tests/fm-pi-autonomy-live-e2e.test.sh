@@ -94,14 +94,22 @@ const evaluation = await autonomy.evaluateHeldOutClassifier([testCase], {
   async classify(batch) {
     pendingBatch = batch;
     const decision = new Promise((resolve) => { resolveDecision = resolve; });
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("live autonomy classifier timed out")), 120000));
-    await created.session.prompt([
-      `AUTONOMY BATCH ${batch.id}`,
-      `Decision contract fingerprint: ${autonomy.decisionContractFingerprint()}`,
-      "Account for every event exactly once and finish with fm_supervision_decide.",
-      JSON.stringify({ batchId: batch.id, events: batch.events }),
-    ].join("\n\n"));
-    return Promise.race([decision, timeout]);
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error("live autonomy classifier timed out")), 120000);
+      timeoutId.unref?.();
+    });
+    try {
+      await created.session.prompt([
+        `AUTONOMY BATCH ${batch.id}`,
+        `Decision contract fingerprint: ${autonomy.decisionContractFingerprint()}`,
+        "Account for every event exactly once and finish with fm_supervision_decide.",
+        JSON.stringify({ batchId: batch.id, events: batch.events }),
+      ].join("\n\n"));
+      return await Promise.race([decision, timeout]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
   },
 });
 created.session.dispose();

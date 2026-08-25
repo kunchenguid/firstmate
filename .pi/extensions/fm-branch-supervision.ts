@@ -623,7 +623,6 @@ export default function (pi: ExtensionAPI) {
       if (resolvedCredential) knownLinearCredentialValues.add(resolvedCredential);
     }
     if (!configValue || !autonomyResolution.valid || !autonomyResolution.credentialPresent) {
-      restoreRetainedLinearCredentials();
       return;
     }
     const credentialName = configValue.linear.credential.env;
@@ -872,7 +871,6 @@ export default function (pi: ExtensionAPI) {
         active: false,
         diagnostics: [...autonomyResolution.diagnostics, `deferred autonomy activation failed: ${redactRuntimeCredential(error instanceof Error ? error.message : String(error))}`],
       };
-      restoreRetainedLinearCredentials();
     } finally {
       activatingAutonomy = false;
       if (shuttingDown) restoreRetainedLinearCredentials();

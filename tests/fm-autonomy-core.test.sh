@@ -34,6 +34,7 @@ const corpusEnvelope = JSON.parse(readFileSync(process.env.CORPUS, "utf8"));
 const baseline = JSON.parse(readFileSync(process.env.BASELINE, "utf8"));
 const recordedOutputs = JSON.parse(readFileSync(process.env.RECORDED, "utf8"));
 const linearFixture = JSON.parse(readFileSync(process.env.LINEAR_FIXTURE, "utf8"));
+const corpusSha256 = createHash("sha256").update(readFileSync(process.env.CORPUS)).digest("hex");
 
 const limits = {
   maxBatchEvents: 10,
@@ -121,9 +122,17 @@ assert(subprocessCredentials.every((value) => value === undefined), "Linear cred
 // Held-out routing/collision baseline, including disconfirming cases.
 const evaluation = m.evaluateHeldOutRecordedOutputs(corpusEnvelope.cases, recordedOutputs.outputs);
 assert.equal(evaluation.failed, 0, JSON.stringify(evaluation, null, 2));
+assert.equal(recordedOutputs.provenance.captureInterface, "DecisionClassifier.classify -> validateDecision");
+assert.equal(recordedOutputs.provenance.corpusSha256, corpusSha256);
+assert.equal(recordedOutputs.provenance.contractFingerprint, evaluation.contractFingerprint);
 const classifierEvaluation = await m.evaluateHeldOutClassifier(corpusEnvelope.cases, {
   async classify(batch) {
     const caseId = batch.events[0].id.split(":").slice(1, -1).join(":");
+    const testCase = corpusEnvelope.cases.find((candidate) => candidate.id === caseId);
+    assert.deepEqual(batch.events.map(({ kind, urgency, payload }) => ({ kind, urgency, payload })), testCase.inputs);
+    if (testCase.claims.length > 0) {
+      assert(batch.events.every((event) => typeof event.payload.identifier === "string" && typeof event.payload.description === "string"), `held-out classifier input ${caseId} omitted issue evidence`);
+    }
     return structuredClone(recordedOutputs.outputs.find((candidate) => candidate.caseId === caseId).decision);
   },
 });
@@ -137,6 +146,7 @@ assert.equal(m.AUTONOMY_DECISION_CONTRACT_VERSION, baseline.decisionContractVers
 const prompt = execFileSync("bash", [process.env.PROMPT_SCRIPT]);
 assert.equal(createHash("sha256").update(prompt).digest("hex"), baseline.promptSha256);
 assert.equal(createHash("sha256").update(readFileSync(process.env.RECORDED)).digest("hex"), baseline.recordedOutputsSha256);
+assert.equal(corpusSha256, baseline.corpusSha256);
 for (const id of baseline.requiredDisconfirmingCases) {
   const found = corpusEnvelope.cases.find((item) => item.id === id);
   assert(found?.disconfirming, `required disconfirming case ${id} is absent`);
@@ -176,11 +186,9 @@ assert.throws(
   () => shellAdapter.assertPullRequestRepository(resolution.config, issues[0], "https://github.com/acme/other/pull/99"),
   (error) => error.code === "pr-repository-mismatch",
 );
-writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: unrelated billing reports; projects: app; added 2026-08-25)\n");
-shellAdapter.assertProjectOwnership(resolution.config, issues[0]);
-assert.deepEqual(shellAdapter.doctor(resolution.config), [], "non-exclusive secondmate clone membership disabled primary autonomy");
-writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: change src one ts; projects: app; added 2026-08-25)\n");
-assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0]), (error) => error.code === "secondmate-route");
+writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: iOS work; projects: app; added 2026-08-25)\n");
+assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0]), (error) => error.code === "secondmate-route" && error.message.includes("authoritative main-session route decision"));
+assert(shellAdapter.doctor(resolution.config).some((diagnostic) => diagnostic.includes("registered secondmate scopes")));
 rmSync(join(shellHome, "data", "secondmates.md"));
 assert.deepEqual(issues[1].blockedByIssueIds, ["issue-1"]);
 const priorityPage = structuredClone(linearFixture.responses.page1);
@@ -547,6 +555,8 @@ let claimPause;
 let resumeClaim;
 let getIssuePause;
 let resumeGetIssue;
+let preparePause;
+let resumePrepare;
 const linearMock = {
   async listEligibleIssues() { return []; },
   async getIssue(_config, issueId) {
@@ -596,6 +606,7 @@ const firstmateMock = {
   taskPullRequest(taskId) { return taskPrs.get(taskId); },
   async prepareLanding(_config, issue) {
     operationLog.push(`prepare:${issue.id}`);
+    if (preparePause && issue.id === "issue-1") await preparePause;
     if (completeDuringPrepare) remoteStates.set(issue.id, "status-complete");
     return { expectedHead: "a".repeat(40), evidence: "prepared current green head" };
   },
@@ -674,9 +685,19 @@ await assert.rejects(
   () => thirdOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
   (error) => error.code === "issue-operation-busy",
 );
+const secondLease = claimsJournal.read().filter((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1").at(-1).data;
+const takeoverLease = {
+  operationId: "fixture-takeover",
+  owner: "fixture-new-owner",
+  fence: secondLease.fence + 1,
+  expiresAt: "2026-08-25T00:30:00.000Z",
+  released: false,
+};
+claimsJournal.append("operation-lease-acquired", "issue-1", takeoverLease, "fixture-takeover-acquired");
 resumeGetIssue();
 getIssuePause = undefined;
-assert.equal((await fencedDispatch).taskId, dispatched.taskId);
+await assert.rejects(() => fencedDispatch, (error) => error.code === "issue-operation-fenced");
+claimsJournal.append("operation-lease-released", "issue-1", takeoverLease, "fixture-takeover-released");
 assert(tasks.has(dispatched.taskId));
 const beforeIdempotent = operationLog.length;
 const dispatchedAgain = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
@@ -714,8 +735,17 @@ await assert.rejects(() => claimOrchestrator.landAndComplete("issue-1", "https:/
 assert.equal(operationLog.filter((entry) => entry === "merge:issue-1").length, mergesBeforeCompletedStatus, "completed Linear issue passed the fresh pre-merge status check");
 completeDuringPrepare = false;
 remoteStates.set("issue-1", "status-progress");
-const landing = await claimOrchestrator.landAndComplete("issue-1", "https://github.com/acme/app/pull/1");
+preparePause = new Promise((resolve) => { resumePrepare = resolve; });
+const landingPromise = claimOrchestrator.landAndComplete("issue-1", "https://github.com/acme/app/pull/1");
+while (operationLog.filter((entry) => entry === "prepare:issue-1").length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+const progressBeforeLanding = operationLog.filter((entry) => entry === "progress:issue-1").length;
+const racingProgress = claimOrchestrator.updateProgress("issue-1", "Late racing progress");
+resumePrepare();
+preparePause = undefined;
+const landing = await landingPromise;
+await assert.rejects(() => racingProgress, (error) => error.code === "claim-missing");
 assert.equal(landing.green, true);
+assert.equal(operationLog.filter((entry) => entry === "progress:issue-1").length, progressBeforeLanding, "racing progress reopened a completed issue");
 assert(operationLog.indexOf("merge:issue-1") < operationLog.indexOf("complete:issue-1"), "Linear closed before landing confirmation");
 rmSync(killPath);
 assert.equal(claimOrchestrator.reportStatus().active, true, "removing the kill switch did not resume valid new intake");

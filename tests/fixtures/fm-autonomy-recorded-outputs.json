@@ -1,6 +1,14 @@
 {
   "schema": "fm-autonomy-recorded-outputs.v1",
   "capturedAt": "2026-08-25T00:00:00.000Z",
+  "provenance": {
+    "captureInterface": "DecisionClassifier.classify -> validateDecision",
+    "captureMode": "production-decision-interface-recording",
+    "corpusSchema": "fm-autonomy-heldout.v1",
+    "corpusSha256": "94735b9821c6160bfafd00b85ebab299c75e263039de56b0c06de191d3dd62bd",
+    "contractFingerprint": "contract-d790ac73dac4fb4af15f15d0",
+    "promptSha256": "a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22"
+  },
   "outputs": [
     {
       "caseId": "same-repository-disjoint-evidence",

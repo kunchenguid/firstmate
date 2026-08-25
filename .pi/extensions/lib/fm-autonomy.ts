@@ -1873,34 +1873,26 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { raw, mode: mode as "no-mistakes" | "direct-PR" | "local-only", yolo, registered };
   }
 
-  private secondmateScopes(): string[] {
+  private secondmateRoutes(): Array<{ id: string; scope: string }> {
     const registry = join(this.data, "secondmates.md");
     if (!existsSync(registry)) return [];
-    const scopes: string[] = [];
+    const routes: Array<{ id: string; scope: string }> = [];
     for (const line of readFileSync(registry, "utf8").split(/\r?\n/)) {
-      const match = line.match(/;\s*scope:\s*(.*);\s*projects:\s*[^;)]*;\s*added\s+[0-9]{4}-[0-9]{2}-[0-9]{2}\)\s*$/);
-      const scope = match?.[1].trim();
-      if (scope) scopes.push(scope);
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const match = line.match(/^-\s+([A-Za-z0-9._-]+)\s+-.*;\s*scope:\s*(.*);\s*projects:\s*[^;)]*;\s*added\s+[0-9]{4}-[0-9]{2}-[0-9]{2}\)\s*$/);
+      const id = match?.[1].trim();
+      const scope = match?.[2].trim();
+      routes.push({ id: id || "unresolved", scope: scope || "unparseable registry scope" });
     }
-    return scopes;
-  }
-
-  private secondmateScopeMatchesIssue(scope: string, issue: LinearIssue): boolean {
-    const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const normalizedScope = normalize(scope);
-    const issueText = normalize(`${issue.identifier} ${issue.title} ${issue.description}`);
-    if (!normalizedScope || !issueText) return false;
-    if (issueText.includes(normalizedScope)) return true;
-    const ignored = new Set(["and", "the", "for", "with", "from", "into", "work", "tasks", "project", "projects", "responsibility", "responsibilities"]);
-    const terms = normalizedScope.split(" ").filter((term) => term.length >= 3 && !ignored.has(term));
-    return terms.length > 0 && terms.every((term) => new RegExp(`(?:^| )${term}(?: |$)`).test(issueText));
+    return routes;
   }
 
   assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void {
     this.mapping(config, issue);
-    const matchingScope = this.secondmateScopes().find((scope) => this.secondmateScopeMatchesIssue(scope, issue));
-    if (matchingScope) {
-      throw new AutonomyError("secondmate-route", `issue ${issue.identifier} matches registered secondmate scope ${JSON.stringify(matchingScope)}; primary Pi autonomy must not claim or dispatch it`);
+    const routes = this.secondmateRoutes();
+    if (routes.length > 0) {
+      const identities = routes.map((route) => `${route.id}: ${route.scope}`).join("; ");
+      throw new AutonomyError("secondmate-route", `issue ${issue.identifier} requires an authoritative main-session route decision because registered secondmate scopes may apply (${identities}); primary Pi autonomy refuses ambiguous routing`);
     }
   }
 
@@ -1970,6 +1962,8 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
 
   doctor(config: AutonomyConfig): string[] {
     const diagnostics: string[] = [];
+    const secondmateRoutes = this.secondmateRoutes();
+    if (secondmateRoutes.length > 0) diagnostics.push("registered secondmate scopes require an authoritative main-session route decision; autonomous primary intake is disabled while routing is ambiguous");
     for (const mapping of config.repositories) {
       try {
         const checkout = this.checkout(mapping);
@@ -2168,6 +2162,11 @@ interface IssueOperationLease {
   released: boolean;
 }
 
+interface IssueOperationGuard {
+  assertCurrent(): void;
+  release(): void;
+}
+
 function currentIssueOperationLease(records: readonly JournalRecord[], issueId: string): IssueOperationLease | undefined {
   let current: IssueOperationLease | undefined;
   for (const record of records) {
@@ -2279,16 +2278,16 @@ export class AutonomyOrchestrator {
     return this.journal.appendTranscript({ ...commit, text: redactExternalText(commit.text, this.redactedValues) });
   }
 
-  private async withIssueOperation<T>(issueId: string, operation: () => Promise<T>): Promise<T> {
-    const release = await this.acquireIssueOperation(issueId);
+  private async withIssueOperation<T>(issueId: string, operation: (guard: IssueOperationGuard) => Promise<T>): Promise<T> {
+    const guard = await this.acquireIssueOperation(issueId);
     try {
-      return await operation();
+      return await operation(guard);
     } finally {
-      release();
+      guard.release();
     }
   }
 
-  private async acquireIssueOperation(issueId: string): Promise<() => void> {
+  private async acquireIssueOperation(issueId: string): Promise<IssueOperationGuard> {
     const active = this.activeIssueOperations.get(issueId);
     if (active) {
       await active.catch(() => undefined);
@@ -2326,6 +2325,18 @@ export class AutonomyOrchestrator {
           },
         };
       });
+      let renewalFailure: unknown;
+      const assertCurrent = (): void => {
+        if (renewalFailure) throw renewalFailure;
+        this.journal.transact((records) => {
+          const current = currentIssueOperationLease(records, issueId);
+          if (!current || current.released || current.operationId !== lease.operationId || current.owner !== lease.owner || current.fence !== lease.fence || Date.parse(current.expiresAt) <= this.clock.now().getTime()) {
+            throw new AutonomyError("issue-operation-fenced", `issue ${issueId} operation lease lost fence ${lease.fence}`);
+          }
+          return { value: undefined };
+        });
+        if (renewalFailure) throw renewalFailure;
+      };
       const renew = (): void => {
         this.journal.transact((records) => {
           const current = currentIssueOperationLease(records, issueId);
@@ -2348,10 +2359,13 @@ export class AutonomyOrchestrator {
       const renewalTimer = setInterval(() => {
         try {
           renew();
-        } catch {}
+        } catch (error) {
+          renewalFailure = error;
+          clearInterval(renewalTimer);
+        }
       }, Math.max(1000, Math.min(30000, Math.floor(leaseMilliseconds / 3))));
       renewalTimer.unref?.();
-      return () => {
+      const release = (): void => {
         try {
           clearInterval(renewalTimer);
           this.journal.transact((records) => {
@@ -2372,6 +2386,7 @@ export class AutonomyOrchestrator {
           resolveGate?.();
         }
       };
+      return { assertCurrent, release };
     } catch (error) {
       if (this.activeIssueOperations.get(issueId) === gate) this.activeIssueOperations.delete(issueId);
       resolveGate?.();
@@ -2651,17 +2666,19 @@ export class AutonomyOrchestrator {
   }
 
   async dispatchIssue(decisionId: string, issueId: string, profile: DispatchProfile): Promise<DispatchResult> {
-    return this.withIssueOperation(issueId, () => this.dispatchIssueUnlocked(decisionId, issueId, profile));
+    return this.withIssueOperation(issueId, (guard) => this.dispatchIssueUnlocked(decisionId, issueId, profile, guard));
   }
 
-  private async dispatchIssueUnlocked(decisionId: string, issueId: string, profile: DispatchProfile): Promise<DispatchResult> {
+  private async dispatchIssueUnlocked(decisionId: string, issueId: string, profile: DispatchProfile, guard: IssueOperationGuard): Promise<DispatchResult> {
     this.newClaimsAllowed();
     validateDispatchProfile(profile);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate dispatch adapter is unavailable");
     const config = this.config();
     const { decision, claim, issue } = this.issueFromDecision(decisionId, issueId);
     this.firstmate.assertProjectOwnership(config, issue);
+    guard.assertCurrent();
     const currentIssue = await this.linear.getIssue(config, issue.id);
+    guard.assertCurrent();
     const scope = config.linear.scopes.find((candidate) => candidate.teamId === currentIssue.teamId && candidate.projectId === currentIssue.projectId);
     if (!scope || currentIssue.teamId !== issue.teamId || currentIssue.projectId !== issue.projectId ||
         !scope.labels.required.every((label) => currentIssue.labelIds.includes(label)) ||
@@ -2718,7 +2735,9 @@ export class AutonomyOrchestrator {
       return existing.dispatchResult;
     }
     if (existing?.state === "claimed" && existing.profile && this.firstmate.taskExists(taskId)) {
+      guard.assertCurrent();
       const recovered = await this.firstmate.dispatch(config, issue, claim, taskId, existing.profile);
+      guard.assertCurrent();
       this.journal.append("dispatch-confirmed", issue.id, { ...existing, state: "dispatched", dispatchResult: recovered, dispatchEvidence: recovered.evidence } as unknown as JsonValue, `dispatch-confirmed:${existing.claimId}`);
       return recovered;
     }
@@ -2751,28 +2770,46 @@ export class AutonomyOrchestrator {
     const claimIntent: FoldedClaim = { ...base, state: "intent" };
     this.journal.append("claim-intent", issue.id, claimIntent as unknown as JsonValue, `claim-intent:${claimId}`);
     this.newClaimsAllowed();
+    guard.assertCurrent();
     const remote = await this.linear.claimIssue(config, issue, claimId, taskId);
+    guard.assertCurrent();
     this.journal.append("claim-confirmed", issue.id, { ...base, state: "claimed", remoteEvidence: remote.evidence } as unknown as JsonValue, `claim-confirmed:${claimId}`);
     this.journal.append("dispatch-intent", issue.id, { ...base, state: "claimed", profile } as unknown as JsonValue, `dispatch-intent:${claimId}`);
+    guard.assertCurrent();
     const dispatched = await this.firstmate.dispatch(config, issue, claim, taskId, profile);
+    guard.assertCurrent();
     this.journal.append("dispatch-confirmed", issue.id, { ...base, state: "dispatched", profile, dispatchResult: dispatched, dispatchEvidence: dispatched.evidence } as unknown as JsonValue, `dispatch-confirmed:${claimId}`);
-    await this.updateProgress(issue.id, `Implementation is under way in Firstmate task \`${taskId}\`.`);
+    await this.updateProgressUnlocked(issue.id, `Implementation is under way in Firstmate task \`${taskId}\`.`, guard);
     return dispatched;
   }
 
   async updateProgress(issueId: string, summary: string): Promise<void> {
+    return this.withIssueOperation(issueId, (guard) => this.updateProgressUnlocked(issueId, summary, guard));
+  }
+
+  private async updateProgressUnlocked(issueId: string, summary: string, guard: IssueOperationGuard): Promise<void> {
     const folded = this.foldedClaims().get(issueId);
     if (!folded || !["claimed", "dispatched"].includes(folded.state)) throw new AutonomyError("claim-missing", `issue ${issueId} has no active owned claim`);
     if (!this.linear) throw new AutonomyError("linear-unavailable", "Linear adapter is unavailable");
     const normalizedSummary = summary.trim();
     if (!normalizedSummary || normalizedSummary.length > 2000 || /\u0000/.test(normalizedSummary)) throw new AutonomyError("progress-invalid", "progress summary must contain 1 through 2000 safe characters");
+    guard.assertCurrent();
+    const ownership = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "active");
+    guard.assertCurrent();
+    if (ownership !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownership} before progress; update refused`);
     const operationId = stableId("progress", { issueId, taskId: folded.taskId, summary: normalizedSummary });
     this.journal.append("progress-intent", issueId, { operationId, taskId: folded.taskId, summary: normalizedSummary }, `progress-intent:${operationId}`);
+    guard.assertCurrent();
     const evidence = await this.linear.setProgress(this.config(), folded.issue, folded.claimId, folded.taskId, normalizedSummary);
+    guard.assertCurrent();
     this.journal.append("progress-confirmed", issueId, { operationId, taskId: folded.taskId, summary: normalizedSummary, evidence: evidence.evidence }, `progress-confirmed:${operationId}`);
   }
 
   async linkPullRequest(issueId: string, prUrl: string): Promise<void> {
+    return this.withIssueOperation(issueId, (guard) => this.linkPullRequestUnlocked(issueId, prUrl, guard));
+  }
+
+  private async linkPullRequestUnlocked(issueId: string, prUrl: string, guard: IssueOperationGuard): Promise<void> {
     assertCanonicalPullRequestUrl(prUrl);
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
@@ -2782,17 +2819,23 @@ export class AutonomyOrchestrator {
     const taskPr = this.firstmate.taskPullRequest(folded.taskId);
     if (!taskPr) throw new AutonomyError("pr-missing", `task ${folded.taskId} must record its validated canonical PR before Linear linking`);
     if (taskPr !== prUrl) throw new AutonomyError("pr-mismatch", `task ${folded.taskId} records ${taskPr}, not ${prUrl}`);
+    guard.assertCurrent();
+    const ownership = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "active");
+    guard.assertCurrent();
+    if (ownership !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownership} before PR linking; update refused`);
     const operationId = stableId("pr-link", { issueId, taskId: folded.taskId, prUrl });
     this.journal.append("pr-link-intent", issueId, { operationId, taskId: folded.taskId, prUrl }, `pr-link-intent:${operationId}`);
+    guard.assertCurrent();
     const evidence = await this.linear.linkPullRequest(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl);
+    guard.assertCurrent();
     this.journal.append("pr-linked", issueId, { ...folded, operationId, prUrl, evidence: evidence.evidence } as unknown as JsonValue, `pr-link-confirmed:${operationId}`);
   }
 
   async landAndComplete(issueId: string, prUrl: string): Promise<LandingResult> {
-    return this.withIssueOperation(issueId, () => this.landAndCompleteUnlocked(issueId, prUrl));
+    return this.withIssueOperation(issueId, (guard) => this.landAndCompleteUnlocked(issueId, prUrl, guard));
   }
 
-  private async landAndCompleteUnlocked(issueId: string, prUrl: string): Promise<LandingResult> {
+  private async landAndCompleteUnlocked(issueId: string, prUrl: string, guard: IssueOperationGuard): Promise<LandingResult> {
     assertCanonicalPullRequestUrl(prUrl);
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
@@ -2804,11 +2847,17 @@ export class AutonomyOrchestrator {
     if (!taskPr) throw new AutonomyError("pr-missing", `task ${folded.taskId} must record its validated canonical PR before landing`);
     if (taskPr !== prUrl) throw new AutonomyError("pr-mismatch", `task ${folded.taskId} records ${taskPr}, not ${prUrl}`);
     if (folded.prUrl !== prUrl) throw new AutonomyError("pr-link-missing", `Linear PR link ${prUrl} must be confirmed before landing`);
+    guard.assertCurrent();
     const ownershipBeforeMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId);
+    guard.assertCurrent();
     if (ownershipBeforeMerge !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownershipBeforeMerge} before merge; landing refused`);
+    guard.assertCurrent();
     const prepared = await this.firstmate.prepareLanding(this.config(), folded.issue, folded.taskId, prUrl);
+    guard.assertCurrent();
     if (!/^[0-9a-f]{40,64}$/i.test(prepared.expectedHead)) throw new AutonomyError("pr-head-missing", "landing preparation did not produce one valid expected head");
+    guard.assertCurrent();
     const ownershipImmediatelyBeforeMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "active");
+    guard.assertCurrent();
     if (ownershipImmediatelyBeforeMerge !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownershipImmediatelyBeforeMerge} immediately before merge; landing refused`);
     const mergeIntent = stableId("merge", { issueId, taskId: folded.taskId, prUrl, expectedHead: prepared.expectedHead });
     this.journal.append("merge-intent", issueId, {
@@ -2822,10 +2871,14 @@ export class AutonomyOrchestrator {
     let landing: LandingResult;
     try {
       try {
+        guard.assertCurrent();
         landing = await this.firstmate.verifyMerged(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead);
+        guard.assertCurrent();
       } catch (error) {
         if (!(error instanceof AutonomyError) || error.code !== "landing-unconfirmed") throw error;
+        guard.assertCurrent();
         landing = await this.firstmate.mergeAndVerify(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead);
+        guard.assertCurrent();
       }
     } catch (error) {
       this.journal.append("merge-uncertain", issueId, {
@@ -2840,12 +2893,16 @@ export class AutonomyOrchestrator {
       throw new AutonomyError("landing-unconfirmed", "merge result did not prove current-head green landing; Linear remains open");
     }
     this.journal.append("merge-confirmed", issueId, { mergeIntent, taskId: folded.taskId, prUrl, claimId: folded.claimId, landing } as unknown as JsonValue, `merge-confirmed:${mergeIntent}`);
+    guard.assertCurrent();
     const ownershipAfterMerge = await this.linear.reconcileClaim(this.config(), folded.issue, folded.claimId, folded.taskId, "post-merge");
+    guard.assertCurrent();
     if (ownershipAfterMerge !== "owned") {
       this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: `claim reconciled as ${ownershipAfterMerge} after landing; Linear left open`, landing, prUrl } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
       throw new AutonomyError("claim-conflict", `work landed but Linear claim reconciled as ${ownershipAfterMerge}; issue remains open for main`);
     }
+    guard.assertCurrent();
     const completed = await this.linear.completeIssue(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl);
+    guard.assertCurrent();
     this.journal.append("claim-completed", issueId, { ...folded, state: "completed", prUrl, landing, linearEvidence: completed.evidence } as unknown as JsonValue, `claim-completed:${folded.claimId}`);
     return landing;
   }
@@ -2864,7 +2921,7 @@ export class AutonomyOrchestrator {
     if (this.linear && this.resolution.config) {
       const activeClaims = [...this.foldedClaims()].filter(([, folded]) => ["intent", "claimed", "dispatched"].includes(folded.state));
       for (const [issueId, folded] of activeClaims.slice(0, limits?.maxBatchIssues ?? 10)) {
-        const releaseIssueOperation = await this.acquireIssueOperation(issueId);
+        const issueOperation = await this.acquireIssueOperation(issueId);
         try {
         const claimRecords = this.journal.read();
         const refusedMergeIntents = new Set(claimRecords
@@ -2888,7 +2945,9 @@ export class AutonomyOrchestrator {
           const pendingMergeId = pendingMerge.mergeIntent!;
           const pendingPrUrl = pendingMerge.prUrl!;
           const pendingHead = pendingMerge.expectedHead!;
+          issueOperation.assertCurrent();
           const ownershipBeforeResume = await this.linear.reconcileClaim(this.resolution.config, folded.issue, folded.claimId, folded.taskId);
+          issueOperation.assertCurrent();
           if (ownershipBeforeResume !== "owned") {
             this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: `claim reconciled as ${ownershipBeforeResume} before resumed landing` } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
             conflicts += 1;
@@ -2897,10 +2956,14 @@ export class AutonomyOrchestrator {
           let landing: LandingResult;
           try {
             try {
+              issueOperation.assertCurrent();
               landing = await this.firstmate.verifyMerged(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead);
+              issueOperation.assertCurrent();
             } catch (error) {
               if (!(error instanceof AutonomyError) || error.code !== "landing-unconfirmed" || !this.firstmate.taskExists(folded.taskId)) throw error;
+              issueOperation.assertCurrent();
               landing = await this.firstmate.mergeAndVerify(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead);
+              issueOperation.assertCurrent();
             }
             if (!landing.merged || !landing.green || landing.currentHead !== pendingHead || landing.expectedHead !== pendingHead) {
               throw new AutonomyError("landing-unconfirmed", "restart reconciliation did not prove expected-head green landing");
@@ -2922,6 +2985,7 @@ export class AutonomyOrchestrator {
         }
         if (confirmed?.prUrl && confirmed.landing && this.firstmate) {
           const confirmedPrUrl = confirmed.prUrl;
+          issueOperation.assertCurrent();
           const verifiedLanding = await this.firstmate.verifyMerged(
             this.resolution.config,
             folded.issue,
@@ -2929,22 +2993,29 @@ export class AutonomyOrchestrator {
             confirmedPrUrl,
             confirmed.landing.expectedHead,
           );
+          issueOperation.assertCurrent();
           if (!verifiedLanding.merged || !verifiedLanding.green || verifiedLanding.currentHead !== confirmed.landing.expectedHead || verifiedLanding.expectedHead !== confirmed.landing.expectedHead) {
             throw new AutonomyError("landing-unconfirmed", "durable merge confirmation no longer matches live forge evidence");
           }
           confirmed = { ...confirmed, landing: verifiedLanding };
+          issueOperation.assertCurrent();
           const ownership = await this.linear.reconcileClaim(this.resolution.config, folded.issue, folded.claimId, folded.taskId, "post-merge");
+          issueOperation.assertCurrent();
           if (ownership !== "owned") {
             this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: `claim reconciled as ${ownership} after landing; Linear left open`, landing: confirmed.landing, prUrl: confirmed.prUrl } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
             conflicts += 1;
             continue;
           }
+          issueOperation.assertCurrent();
           const completed = await this.linear.completeIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId, confirmedPrUrl);
+          issueOperation.assertCurrent();
           this.journal.append("claim-completed", issueId, { ...folded, state: "completed", prUrl: confirmedPrUrl, landing: confirmed.landing, linearEvidence: completed.evidence } as unknown as JsonValue, `claim-completed:${folded.claimId}`);
           claims += 1;
           continue;
         }
+        issueOperation.assertCurrent();
         const verdict = await this.linear.reconcileClaim(this.resolution.config, folded.issue, folded.claimId, folded.taskId);
+        issueOperation.assertCurrent();
         if (verdict === "conflict") {
           this.journal.append("claim-conflict", issueId, { ...folded, state: "conflict", reason: "competing Linear claim evidence" } as unknown as JsonValue, `claim-conflict:${folded.claimId}`);
           conflicts += 1;
@@ -2952,19 +3023,23 @@ export class AutonomyOrchestrator {
         }
         if (verdict === "missing") {
           if (!this.claimsReady()) continue;
+          issueOperation.assertCurrent();
           await this.linear.claimIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId);
+          issueOperation.assertCurrent();
         }
         if (folded.state === "intent") {
           this.journal.append("claim-confirmed", issueId, { ...folded, state: "claimed", remoteEvidence: "restart reconciliation" } as unknown as JsonValue, `claim-confirmed:${folded.claimId}`);
         }
         if (folded.profile && this.firstmate && folded.state !== "dispatched") {
           validateDispatchProfile(folded.profile);
+          issueOperation.assertCurrent();
           const dispatched = await this.firstmate.dispatch(this.resolution.config, folded.issue, folded.claim, folded.taskId, folded.profile);
+          issueOperation.assertCurrent();
           this.journal.append("dispatch-confirmed", issueId, { ...folded, state: "dispatched", dispatchResult: dispatched, dispatchEvidence: dispatched.evidence } as unknown as JsonValue, `dispatch-confirmed:${folded.claimId}`);
         }
         claims += 1;
         } finally {
-          releaseIssueOperation();
+          issueOperation.release();
         }
       }
       if (this.claimsReady()) {
@@ -3043,6 +3118,11 @@ export interface HeldOutCase {
     requiresMainAction?: boolean;
     expectedAction: DecisionAction;
   };
+  inputs: Array<{
+    kind: string;
+    urgency: "routine" | "urgent";
+    payload: JsonValue;
+  }>;
   claims: WorkClaim[];
   active: CapacitySnapshot;
   capacity: AutonomyCapacity;
@@ -3064,23 +3144,18 @@ export interface RecordedHeldOutDecision {
 }
 
 function heldOutBatch(testCase: HeldOutCase): PendingBatch {
-  const events: LoopEvent[] = testCase.claims.length > 0
-    ? testCase.claims.map((claim, index) => ({
+  const expectedInputCount = Math.max(1, testCase.claims.length);
+  if (testCase.inputs.length !== expectedInputCount) {
+    throw new AutonomyError("heldout-input-invalid", `held-out case ${testCase.id} must contain ${expectedInputCount} complete classifier input event(s)`);
+  }
+  const events: LoopEvent[] = testCase.inputs.map((input, index) => ({
         id: `heldout:${testCase.id}:${index}`,
         source: "test",
-        kind: "linear.issue.available",
+        kind: input.kind,
         occurredAt: "2026-08-25T00:00:00.000Z",
-        urgency: testCase.routing.urgency,
-        payload: { issueId: claim.issueId },
-      }))
-    : [{
-        id: `heldout:${testCase.id}:0`,
-        source: "test",
-        kind: testCase.routing.kind,
-        occurredAt: "2026-08-25T00:00:00.000Z",
-        urgency: testCase.routing.urgency,
-        payload: {},
-      }];
+        urgency: input.urgency,
+        payload: input.payload,
+      }));
   return {
     id: stableId("batch", events.map((event) => event.id)),
     events,
