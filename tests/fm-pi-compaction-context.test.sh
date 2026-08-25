@@ -48,7 +48,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port_file, request_log = sys.argv[1:3]
 context_tokens = 65536
-hard_chars = context_tokens * 4
 lock = threading.Lock()
 
 
@@ -77,12 +76,18 @@ class Handler(BaseHTTPRequestHandler):
         messages = payload.get("messages", [])
         texts = [message_text(message) for message in messages]
         joined = "\n".join(texts)
-        chars = len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+        chars = len(serialized)
+        utf8_bytes = len(serialized.encode("utf-8"))
+        byte_model = payload.get("model") == "diag-byte-model"
         compact = "<conversation>" in joined
-        over = chars > hard_chars
+        hard_units = utf8_bytes if byte_model else math.ceil(chars / 4)
+        over = hard_units > context_tokens
         record = {
             "path": self.path,
             "chars": chars,
+            "utf8_bytes": utf8_bytes,
+            "byte_model": byte_model,
             "compact": compact,
             "over": over,
             "auto": "AUTO_TRIGGER" in joined,
@@ -99,7 +104,7 @@ class Handler(BaseHTTPRequestHandler):
                 "error": {
                     "message": (
                         "This model's maximum context length is 65536 tokens. "
-                        f"However, your messages resulted in approximately {math.ceil(chars / 4)} tokens."
+                        f"However, your messages resulted in approximately {hard_units} tokens."
                     ),
                     "type": "invalid_request_error",
                     "param": "messages",
@@ -131,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             text = "OK"
 
-        prompt_tokens = math.ceil(chars / 4)
+        prompt_tokens = hard_units
         if "AUTO_TRIGGER" in joined and not compact:
             prompt_tokens = 65500
         completion_tokens = max(1, math.ceil(len(text) / 4))
@@ -203,6 +208,15 @@ cat > "$AGENT_DIR/models.json" <<EOF
           "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
           "contextWindow": 65536,
           "maxTokens": 2048
+        },
+        {
+          "id": "diag-byte-model",
+          "name": "Adversarial UTF-8 byte compaction model",
+          "reasoning": false,
+          "input": ["text"],
+          "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+          "contextWindow": 65536,
+          "maxTokens": 2048
         }
       ]
     }
@@ -226,6 +240,7 @@ make_project() {  # <name> <digest-bytes> <auto:on|off>
   git -C "$project" config user.email fmtest@example.invalid
   git -C "$project" config user.name fmtest
   printf '%s\n' 'AGENTS_MARKER=initial' > "$project/AGENTS.md"
+  printf '%s\n' "$digest_bytes" > "$home/state/.test-digest-bytes"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$project/bin/"
@@ -235,7 +250,7 @@ printf '%s\n' "\$*" >> "\${FM_HOME:?}/state/.test-sessionstart-sources"
 printf 'CURRENT AGENTS.md - INSTRUCTION REFRESH\n'
 cat '$project/AGENTS.md'
 printf '\nFIRSTMATE_LARGE_DIGEST_PREFIX\n'
-head -c '$digest_bytes' /dev/zero | tr '\\0' D
+head -c "\$(cat "\${FM_HOME:?}/state/.test-digest-bytes")" /dev/zero | tr '\\0' D
 printf '\nFIRSTMATE_LARGE_DIGEST_SUFFIX\n'
 : > "\${FM_HOME:?}/state/.test-sessionstart-complete"
 SH
@@ -274,10 +289,10 @@ send_line() {  # <session> <text>
   tmux -L "$SOCKET" send-keys -t "$1" Enter
 }
 
-start_pi() {  # <session> <project> <home>
-  local session=$1 project=$2 home=$3
+start_pi() {  # <session> <project> <home> [model]
+  local session=$1 project=$2 home=$3 model=${4:-diag-model}
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$project" -x 220 -y 55 \
-    "env PI_CODING_AGENT_DIR='$AGENT_DIR' PI_OFFLINE=1 FM_HOME='$home' FM_ROOT_OVERRIDE='$project' FM_GATE_REFUSE_BYPASS=1 pi --approve --no-context-files --no-tools -e '$project/.pi/extensions/fm-primary-turnend-guard.ts' --model diag-mock/diag-model" \
+    "env PI_CODING_AGENT_DIR='$AGENT_DIR' PI_OFFLINE=1 FM_HOME='$home' FM_ROOT_OVERRIDE='$project' FM_GATE_REFUSE_BYPASS=1 pi --approve --no-context-files --no-tools -e '$project/.pi/extensions/fm-primary-turnend-guard.ts' --model diag-mock/$model" \
     || fail "$session: could not start isolated Pi TUI"
   i=0
   while { [ ! -s "$home/state/.pi-turnend-extension-loaded" ] || [ ! -e "$home/state/.test-sessionstart-complete" ]; } && [ "$i" -lt 240 ]; do
@@ -378,6 +393,30 @@ wait_for_text bounded BOUNDED_NEXT_OK || fail "bounded: next prompt did not succ
 [ "$(last_normal_field over)" = false ] || fail "bounded: provider rejected a small refresh"
 pass "real Pi bounded refresh control remains complete and below the provider limit"
 tmux -L "$SOCKET" kill-session -t bounded >/dev/null 2>&1 || true
+
+# Adversarial control: the existing model keeps the representative chars/4
+# path, while this selected model reports and enforces one token per UTF-8 byte.
+# Its initially bounded digest grows before compaction, so the next real prompt
+# fits only when the compact refresh itself is byte-bounded.
+: > "$REQUEST_LOG"
+mapfile -t byte_paths < <(make_project byte 50000 off)
+byte_project=${byte_paths[0]}
+byte_home=${byte_paths[1]}
+start_pi byte "$byte_project" "$byte_home" diag-byte-model
+send_line byte BOUNDED_SEED
+wait_for_text byte BOUNDED_SEED_OK || fail "byte: seed turn did not finish"
+printf '%s\n' 'AGENTS_MARKER=current' > "$byte_project/AGENTS.md"
+printf '%s\n' 250000 > "$byte_home/state/.test-digest-bytes"
+send_line byte /compact
+wait_for_text byte 'Compacted from' || fail "byte: manual compaction did not complete"
+send_line byte BOUNDED_NEXT
+wait_for_text byte BOUNDED_NEXT_OK || fail "byte: next prompt failed against UTF-8 byte hard limit"
+[ "$(last_normal_field byte_model)" = true ] || fail "byte: adversarial model was not selected"
+[ "$(last_normal_field current_instructions)" = true ] || fail "byte: current instruction refresh was absent"
+[ "$(last_normal_field truncated_refresh)" = true ] || fail "byte: large refresh was not bounded"
+[ "$(last_normal_field over)" = false ] || fail "byte: refresh exceeded the UTF-8 byte hard limit"
+pass "real Pi next prompt survives a selected model enforcing one token per UTF-8 byte"
+tmux -L "$SOCKET" kill-session -t byte >/dev/null 2>&1 || true
 
 # Over-hard-limit control: the same provider rejects an actually oversized
 # startup request, proving the successful cases are not using a permissive mock.

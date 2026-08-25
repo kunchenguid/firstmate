@@ -1014,7 +1014,7 @@ const contextCtx = {
   hasUI: false,
 };
 const contextEvent = {
-  messages: [{ role: "user", content: [{ type: "text", text: "next prompt" }], timestamp: Date.now() }],
+  messages: [{ role: "user", content: [{ type: "text", text: "next prompt 🚀" }], timestamp: Date.now() }],
 };
 const result = await first.handlers.get("context")(contextEvent, contextCtx);
 if (!result || result.messages.length !== 2) throw new Error("compact refresh did not reach model context");
@@ -1025,6 +1025,10 @@ if (!refresh.content.includes("/AGENTS.md completely")) throw new Error("omitted
 const budget = refresh.details?.budget;
 if (!budget || budget.omitted !== true) throw new Error("bounded delivery accounting was absent");
 if (budget.deliveredTokens > budget.availableTokens) throw new Error("delivery exceeded the selected model budget");
+if (budget.deliveredTokens !== Buffer.byteLength(refresh.content, "utf8")) throw new Error("delivery accounting was not UTF-8 byte bounded");
+if (budget.baseTokens < Buffer.byteLength(JSON.stringify(contextEvent.messages), "utf8") + 4000) {
+  throw new Error("fallback budget did not conservatively include retained messages and system prompt");
+}
 if (first.sent.length !== 0) throw new Error("context delivery triggered a model turn");
 
 const restored = makePi();
@@ -1046,7 +1050,7 @@ if (!restoredResult?.messages[1]?.content.includes("COMPACT_REFRESH_CURRENT_INST
 if (restored.sent.length !== 0) throw new Error("reload restoration persisted or triggered a model message");
 JS
   ) || status=$?
-  expect_code 0 "$status" "Pi compact refresh behavior"
+  [ "$status" -eq 0 ] || fail "Pi compact refresh behavior failed: $out"
   [ -z "$out" ] || fail "Pi compact refresh behavior printed output: $out"
   pass "Pi compact refresh stays non-triggering, model-bounded, model-readable, and reload-restorable"
 }

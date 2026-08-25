@@ -474,73 +474,30 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
-function contentChars(content: unknown): number {
-  if (typeof content === "string") return content.length;
-  if (!Array.isArray(content)) return 0;
-  let chars = 0;
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    const item = block as { type?: unknown; text?: unknown; source?: unknown };
-    if (item.type === "text" && typeof item.text === "string") chars += item.text.length;
-    if (item.type === "image") chars += 4800;
-  }
-  return chars;
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
-function estimateMessageTokens(message: unknown): number {
-  if (!message || typeof message !== "object") return 0;
-  const item = message as {
-    role?: unknown;
-    content?: unknown;
-    command?: unknown;
-    output?: unknown;
-    summary?: unknown;
-  };
-  let chars = 0;
-  switch (item.role) {
-    case "user":
-    case "custom":
-    case "toolResult":
-      chars = contentChars(item.content);
-      break;
-    case "assistant":
-      if (Array.isArray(item.content)) {
-        for (const block of item.content) {
-          if (!block || typeof block !== "object") continue;
-          const part = block as {
-            type?: unknown;
-            text?: unknown;
-            thinking?: unknown;
-            name?: unknown;
-            arguments?: unknown;
-          };
-          if (part.type === "text" && typeof part.text === "string") chars += part.text.length;
-          if (part.type === "thinking" && typeof part.thinking === "string") chars += part.thinking.length;
-          if (part.type === "toolCall") {
-            if (typeof part.name === "string") chars += part.name.length;
-            try {
-              chars += JSON.stringify(part.arguments).length;
-            } catch {
-            }
-          }
-        }
-      }
-      break;
-    case "bashExecution":
-      chars = String(item.command ?? "").length + String(item.output ?? "").length;
-      break;
-    case "branchSummary":
-    case "compactionSummary":
-      chars = String(item.summary ?? "").length;
-      break;
-    default:
-      try {
-        chars = JSON.stringify(item).length;
-      } catch {
-        chars = 0;
-      }
+function serializedBytes(value: unknown): number {
+  try {
+    return utf8Bytes(JSON.stringify(value));
+  } catch {
+    return 0;
   }
-  return Math.ceil(chars / 4);
+}
+
+function sliceUtf8Prefix(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (utf8Bytes(value) <= maxBytes) return value;
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of value) {
+    const codePointBytes = utf8Bytes(codePoint);
+    if (bytes + codePointBytes > maxBytes) break;
+    bytes += codePointBytes;
+    end += codePoint.length;
+  }
+  return value.slice(0, end);
 }
 
 function activeToolTokens(pi: ExtensionAPI): number {
@@ -554,7 +511,7 @@ function activeToolTokens(pi: ExtensionAPI): number {
         parameters: tool.parameters,
         promptGuidelines: tool.promptGuidelines,
       }));
-    return Math.ceil(JSON.stringify(tools).length / 4);
+    return serializedBytes(tools);
   } catch {
     return 0;
   }
@@ -598,12 +555,6 @@ function restoreCompactRefresh(ctx: SessionStartContext): void {
   };
 }
 
-function trimTrailingHighSurrogate(value: string): string {
-  if (!value) return value;
-  const code = value.charCodeAt(value.length - 1);
-  return code >= 0xd800 && code <= 0xdbff ? value.slice(0, -1) : value;
-}
-
 function compactRefreshContent(
   refresh: CompactRefreshState,
   availableTokens: number,
@@ -619,7 +570,7 @@ function compactRefreshContent(
   } catch {
     return undefined;
   }
-  const minimalTokens = Math.ceil(minimalContent.length / 4);
+  const minimalTokens = utf8Bytes(minimalContent);
   if (minimalTokens > availableTokens) return undefined;
 
   let fullContent: string;
@@ -628,26 +579,20 @@ function compactRefreshContent(
   } catch {
     return undefined;
   }
-  const fullTokens = Math.ceil(fullContent.length / 4);
+  const fullTokens = utf8Bytes(fullContent);
   if (!refresh.hardTruncated && refresh.raw && fullTokens <= availableTokens) {
     return { content: fullContent, deliveredTokens: fullTokens, omitted: false };
   }
 
-  const allowedChars = availableTokens * 4;
-  const prefixChars = encodeFirstmateOperationalInput("session-start", "x").length - 1;
   const marker =
     `\n\nPI POST-COMPACTION REFRESH TRUNCATED FOR CONTEXT SAFETY - the refresh contained ` +
     `${refresh.raw.length} available characters from ${refresh.observedBytes} observed output bytes. ` +
     `${sourceIndex}`;
-  let retained = trimTrailingHighSurrogate(
-    refresh.raw.slice(0, Math.max(0, allowedChars - prefixChars - marker.length)),
-  );
-  let content = encodeFirstmateOperationalInput("session-start", `${retained}${marker}`);
-  while (Math.ceil(content.length / 4) > availableTokens && retained.length > 0) {
-    retained = trimTrailingHighSurrogate(retained.slice(0, Math.max(0, retained.length - 16)));
-    content = encodeFirstmateOperationalInput("session-start", `${retained}${marker}`);
-  }
-  const deliveredTokens = Math.ceil(content.length / 4);
+  const wrapperBytes = utf8Bytes(encodeFirstmateOperationalInput("session-start", "x")) - 1;
+  const fixedBytes = wrapperBytes + utf8Bytes(marker);
+  const retained = sliceUtf8Prefix(refresh.raw, Math.max(0, availableTokens - fixedBytes));
+  const content = encodeFirstmateOperationalInput("session-start", `${retained}${marker}`);
+  const deliveredTokens = utf8Bytes(content);
   if (deliveredTokens > availableTokens) {
     return { content: minimalContent, deliveredTokens: minimalTokens, omitted: true };
   }
@@ -673,8 +618,8 @@ function compactRefreshBudget(
   if (usage?.tokens !== null && usage?.tokens !== undefined) {
     baseTokens = Math.max(0, usage.tokens - previousCompactRefreshTokens);
   } else {
-    const messageTokens = eventMessages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
-    const systemTokens = Math.ceil(String(ctx.getSystemPrompt?.() ?? "").length / 4);
+    const messageTokens = serializedBytes(eventMessages);
+    const systemTokens = utf8Bytes(String(ctx.getSystemPrompt?.() ?? ""));
     baseTokens = messageTokens + systemTokens + activeToolTokens(pi);
   }
   const headroomTokens = Math.max(0, Math.floor(contextWindow - reserveTokens - baseTokens));
