@@ -18,10 +18,10 @@
   /></a>
 </p>
 
-<h3 align="center">Talk to one agent. Ship with a crew.</h3>
+<h3 align="center">Talk to one agent. Ship with a team.</h3>
 
 <p align="center">
-  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
+  <img alt="firstmate - talk to one agent, ship with a team" src="assets/banner.png" width="100%" />
 </p>
 
 ## What it is
@@ -30,27 +30,27 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
-For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes on this machine or another SSH-reachable host.
+You talk to a single agent - the head of engineering - and it runs the team for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+For larger orgs, you can opt in to persistent Team Leads: leads that are still ordinary direct reports, but run from their own isolated firstmate homes on this machine or another SSH-reachable host.
 
 firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
-firstmate is an agent distro for running a crew of agents.
+firstmate is an agent distro for running a team of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
-Launching a supported harness inside it instantiates your first mate - and makes you the captain.
+Launching a supported harness inside it instantiates your head of engineering.
 
 ## Features
 
-- **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
-- **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
+- **One liaison** - you talk only to the head of engineering; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
+- **A visible team** - every Engineering Lead works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the head of engineering reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
-- **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
+- **Two task shapes** - ship tasks deliver authorized changes; spike tasks leave standalone investigation reports when the intake contract warrants separate research.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` merge-autonomy flag.
-- **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, either locally or as a whole home on an SSH-reachable host, with guarded updates and recovery that never turns an unavailable remote route into a local replacement.
-- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
+- **Optional Team Leads** - opt in to persistent leads that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, either locally or as a whole home on an SSH-reachable host, with guarded updates and recovery that never turns an unavailable remote route into a local replacement.
+- **Event-driven, zero-token supervision** - a bash watcher sleeps on the org and wakes the head of engineering only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional Relay** - opt in with one local `.env` pairing token so firstmate can answer your public mentions on X and Discord alike, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-Relay behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
-- **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
-- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
+- **Strict project boundary** - the head of engineering is read-only over your projects except for the narrow guarded and approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including org sync's guarded safe branch pruning; Engineering Leads make every other project change behind the configured merge authority.
+- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead Team Lead agents, and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
@@ -62,7 +62,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
-The first mate detects and offers to install supported missing tools after you approve.
+The head of engineering detects and offers to install supported missing tools after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
 
 ### Recommended harnesses
@@ -116,13 +116,13 @@ The preference persists for the effective Firstmate home, and toggling it off re
 ### Talk to it
 
 ```sh
-> ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
+> look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
 # clones the project under projects/ and spawns two isolated workers in the active backend.
 # Minutes later:
 
-  PR ready for review, captain: https://github.com/you/xyz/pull/42
+  PR ready for review: https://github.com/you/xyz/pull/42
   (fix flaky login test - risk: low - CI green)
 
 > alright merge it
@@ -135,7 +135,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 ## How It Works
 
 ```
-            you (the captain)
+            you
                   │  chat: requests, decisions, "merge it"
                   ▼
  ┌─────────────────────────────────────┐
@@ -147,22 +147,22 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
  │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows, herdr/zellij tabs, cmux workspaces, or Orca terminals
- │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
+ │Eng Lead│   │Eng Lead│      │Eng Lead│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
-  treehouse worktree, Orca worktree, or isolated secondmate home
+  treehouse worktree, Orca worktree, or isolated Team Lead home
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │
-     └─ scout: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
+     └─ spike: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
 ```
 
-You chat with the first mate.
-It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
-Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same fleet answer public mentions.
+You chat with the head of engineering.
+It routes each request to an Engineering Lead in its own session endpoint and git worktree, supervises the org with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+Optional Team Leads extend this to persistent local or whole-home remote leads, dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same org answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
-Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
+Full architecture - the supervision engine, worktree isolation, Team Leads, dispatch profiles, project modes, optional Relay, org sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
 ## Built-in skills
 
@@ -171,11 +171,11 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
-| `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
-| `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
-| `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
-| `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
+| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates events relevant to you and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
+| `/ahoy`            | Recap visible session events since your last message plus any decisions still awaiting your answer, then guide you through open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as your first message in the session |
+| `/bearings`        | Generate a concise four-section chat digest from bounded local org and registered-Team-Lead state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
+| `/updatefirstmate` | Self-update the running firstmate and its Team Leads to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge Team Leads |
+| `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered Team Leads, and report what is safe to reset |
 
 Bearings invocation examples:
 
@@ -198,9 +198,9 @@ Firstmate's skills live in two separate places with different audiences:
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [docs/architecture.md](docs/architecture.md) - maintainer architecture for the team, supervision, worktrees, Team Leads, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
-- [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
+- [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote Team Leads.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/voice-relay.md](docs/voice-relay.md) - the optional spoken interface: setup on both machines, measured round-trip cost, what a spoken answer may read, and what this build does not do yet.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
