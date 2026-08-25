@@ -5576,9 +5576,62 @@ with (sub / "state" / "child-1.meta").open("a") as stream:
         )
     )
 
+receipt_path = root / "child-receipts.json"
+missing_return = run(
+    "authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
+    "--assignment-generation", assignment, "--output", str(receipt_path), check=False)
+assert missing_return.returncode != 0, "Azure authority fell back to forge landing without a return"
+assert "cloud return result custody is absent" in missing_return.stderr, missing_return.stderr
+assert not receipt_path.exists(), "missing cloud return wrote release receipts"
+
+import hashlib
+bundle = b"fixture cloud return bundle\n"
+outcome_dir = sub / "state" / "child-1.cloud-outcome"
+outcome_dir.mkdir()
+(outcome_dir / "outcome.bundle").write_bytes(bundle)
+manifest = {
+    "schema": "fm.worker-return/v1",
+    "task": "child-1",
+    "task_generation": "gen-c1",
+    "assignment_generation": assignment,
+    "request_digest": "5" * 64,
+    "repository_generation": head,
+    "kind": "ship",
+    "report_required": True,
+    "report_path": "data/child-1/completion.md",
+    "status_path": "state/child-1.status",
+    "visuals_path": "data/child-1/visuals",
+    "branch": "fm/child-1",
+    "outcome_commits": 0,
+    "outcome_tip": head,
+    "uncommitted_changes": False,
+    "artifacts": {},
+}
+manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+(sub / "data" / "child-1" / "cloud-return.json").write_bytes(manifest_bytes)
+(sub / "state" / "child-1.status").write_text("done: cloud outcome returned to local custody\n")
+result = {
+    "schema": "fm.worker-execution-result/v1",
+    "task": "child-1",
+    "task_generation": "gen-c1",
+    "assignment_generation": assignment,
+    "repository_generation": head,
+    "return_present": True,
+    "request_digest": "5" * 64,
+    "outcome_bytes": len(bundle),
+    "outcome_sha256": hashlib.sha256(bundle).hexdigest(),
+    "return_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    "outcome_commits": 0,
+    "outcome_tip": head,
+    "outcome_uncommitted_changes": False,
+}
+result["result_digest"] = hashlib.sha256(json.dumps(
+    result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+(sub / "state" / "child-1.worker-result.json").write_text(json.dumps(
+    result, sort_keys=True, separators=(",", ":")) + "\n")
+
 # The ordinary exit, for real: authority-receipt runs the unmodified authority
 # tool, and it must find the child's metadata under the TASK home.
-receipt_path = root / "child-receipts.json"
 receipts = run("authority-receipt", "--task", "child-1", "--task-generation", "gen-c1",
                "--assignment-generation", assignment, "--output", str(receipt_path))
 assert "receipts written" in receipts.stdout, receipts.stdout
@@ -5593,7 +5646,6 @@ proof = json.loads(run(
 proof["authorities"] = minted["authorities"]
 unsigned = dict(proof)
 unsigned.pop("proof_digest", None)
-import hashlib
 proof["proof_digest"] = hashlib.sha256(json.dumps(
     unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 proof_path = root / "child-proof.json"

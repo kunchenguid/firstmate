@@ -1050,16 +1050,7 @@ def main():
         worktree_info, worktree = worktree_evidence(args.task, values)
         ordinary_kind = meta_kind if meta_kind in ("ship", "scout") else "ship"
         report_authority = lambda: report_evidence(home, args.task, ordinary_kind)
-        result_path = home / "state" / (args.task + ".worker-result.json")
-        has_authorized_return = False
-        if values.get("placement", []) == ["azure"] and result_path.is_file() and not result_path.is_symlink():
-            try:
-                has_authorized_return = json.loads(
-                    result_path.read_text(encoding="utf-8")
-                ).get("return_present") is True
-            except (OSError, ValueError, AttributeError):
-                has_authorized_return = False
-        if has_authorized_return:
+        if values.get("placement", []) == ["azure"]:
             landing_authority = lambda: cloud_return_evidence(
                 home, args.task, generation, args.assignment_generation,
                 ordinary_kind, worktree, worker["bindings"]["repository_generation"],

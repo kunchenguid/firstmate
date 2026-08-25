@@ -227,7 +227,7 @@ The controller downloads the blob only after the digest-bound result commits to 
 `bin/fm-cloud-result.py` independently validates the result, bundle, refs, manifest, and each artifact digest before publishing anything locally.
 For ship work it creates or fast-forwards `fm/<task>` and checks that branch out only when the leased worktree and any existing task branch have not diverged; a divergence keeps the fetched custody ref and never overwrites local work.
 For scout work it leaves the scratch worktree on its dispatched generation and stores any returned patch and untracked archive with the report.
-A missing authored report produces a substantive local failure report, never a false finding, and the local terminal status is synthesized only after the required report and branch or scratch custody exist.
+A missing or invalid authored report retains the assignment and produces no generated report or local terminal authority; collection and release resume only after the actual returned report and branch or scratch custody validate.
 Replaying the same result converges on the same refs, files, branch, and one terminal status line.
 An assigned worker whose earlier supervisor could not return its task disk uses the explicit `execute --existing-task-disk` recovery lane.
 That request carries no payload or account archive, binds the exact landed recovery-supervisor digest, and runs one bounded continuation or no-op collection command against the retained repository instead of replacing it.
