@@ -7,9 +7,9 @@ When this session owns supervision and away mode is not active:
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
    An actionable close wakes you through the hook's exit-2 rewake, delivered as a `Stop hook feedback` message.
-3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), handle the attached `fm-wake-context.v1` packet without draining or rebuilding the same context when `config/wake-context-presentation` is enabled.
+3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), handle an attached `fm-wake-context.v1` packet without draining or rebuilding the same context.
    After handling a packet, run its exact acknowledgement command.
-   When the opt-in is absent or the adapter reports that the packet was unavailable before presentation, use `bin/fm-wake-drain.sh` once.
+   When no packet is attached and the adapter reports that presentation was unavailable, use `bin/fm-wake-drain.sh` once.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; act only on a real attached packet, the manual drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.

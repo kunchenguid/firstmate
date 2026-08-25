@@ -31,7 +31,7 @@ FM_LINE_CAP_SUFFIX=' [truncated]'
 # This is the rule itself. It assigns rather than prints so a caller that needs
 # the value - the wake digest builds its section in a variable to weigh each
 # item against a global budget - never pays a command substitution per item on
-# a path that runs at the top of every wake-handling turn.
+# every newly drained wake presentation.
 fm_cap_line_var() {
   local line=$1 max=${2:-$FM_LINE_CAP_DEFAULT} keep
   if [ "${#line}" -le "$max" ]; then

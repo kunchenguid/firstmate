@@ -6,8 +6,8 @@ When this session owns supervision and away mode is not active:
    After handling the presented wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
-4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, handle its attached `fm-wake-context.v1` packet without draining or rebuilding the same context when `config/wake-context-presentation` is enabled, then run the packet's exact acknowledgement command and start the next checkpoint.
-   When the opt-in is absent or the checkpoint reports that the packet was unavailable before presentation, use `bin/fm-wake-drain.sh` once before starting the next checkpoint.
+4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, handle an attached `fm-wake-context.v1` packet without draining or rebuilding the same context, then run the packet's exact acknowledgement command and start the next checkpoint.
+   When no packet is attached and the checkpoint reports that presentation was unavailable, use `bin/fm-wake-drain.sh` once before starting the next checkpoint.
 5. If the command prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
 6. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
 7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.

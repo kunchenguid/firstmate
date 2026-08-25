@@ -39,7 +39,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 The optional local, gitignored `config/wake-context-presentation` presence flag enables enriched `fm-wake-context.v1` packets for actionable Claude, Codex, and Pi wakes.
 The effective config directory is `FM_CONFIG_OVERRIDE` when set, otherwise `$FM_HOME/config`.
 The flag must be a regular non-symlinked file, and an absent or unsafe flag keeps enriched presentation off by default.
-While disabled, adapters preserve the actionable wake and direct the primary to one ordinary `bin/fm-wake-drain.sh` presentation without creating a wake-context cache, staged cursor, fallback receipt, or acknowledgement.
+When disabled and no previously published packet remains unacknowledged, adapters preserve the actionable wake and direct the primary to one ordinary `bin/fm-wake-drain.sh` presentation without creating a wake-context cache, staged cursor, fallback receipt, or acknowledgement.
 A packet already published before the flag is removed remains replayable byte-identically until its exact acknowledgement retires it.
 This preference belongs to one Firstmate home and is not inherited into secondmate homes, so enabling one home never broadens the captain's grant implicitly.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Present one bounded machine-readable wake packet for primary harness adapters.
-# The ordinary human drain remains the fallback and owns acknowledgement.
+# Present or replay one bounded machine-readable wake packet for primary harness adapters.
+# Before presentation, the ordinary human drain remains the nonmutating fallback; after presentation, the exact acknowledgement still belongs to that drain.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

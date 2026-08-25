@@ -47,10 +47,11 @@ case "${1:-}" in
   *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
-# Defense in depth for the supervision chain: this script runs at the top of
-# every wake-handling and recovery turn, so assert supervision health here too. A
-# lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
-# only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
+# Defense in depth for the supervision chain: this script runs on every new
+# durable wake presentation path, either before adapter delivery or manually during recovery,
+# so assert supervision health here too. A lapsed supervision chain then surfaces
+# on a plain drain-and-handle turn, not only when a guarded supervision script
+# (fm-peek/fm-send/...) happens to run.
 # Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
 # its supervision verdict. Under Claude's between-turns auto-arm model, a normal
 # fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
