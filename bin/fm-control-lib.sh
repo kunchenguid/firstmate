@@ -245,15 +245,19 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ag
 # agy's task-local hooks.json lives inside a customization root the PROJECT
 # may own: spawn borrows a pre-existing hookless directory rather than always
 # creating one. The project may also have replaced the installed file while the
-# task ran, so retirement must only ever delete the firstmate-generated hook,
-# which is the one that names this task's turn-end token. Both teardown and the
-# control plane's relaunch decide through this single owner so neither ever
-# removes a project-authored hooks.json.
-fm_control_agy_task_hook_owned() {  # <hook-file> <token>
-  local hook=${1-} token=${2-}
-  [ -n "$hook" ] && [ -n "$token" ] || return 1
+# task ran, and a replacement can legitimately retain the generated task-token
+# entry, so content alone cannot prove firstmate ownership. Ownership is the
+# recorded provenance instead: spawn stores the exact bytes it installed on the
+# token file's fourth line, and only a file still byte-identical to that record
+# (and naming this task's token) is firstmate's to delete. Anything else,
+# including a missing record, is project configuration and stays. Both teardown
+# and the control plane's relaunch decide through this single owner.
+fm_control_agy_task_hook_owned() {  # <hook-file> <token> <installed-record>
+  local hook=${1-} token=${2-} record=${3-}
+  [ -n "$hook" ] && [ -n "$token" ] && [ -n "$record" ] || return 1
   [ -f "$hook" ] && [ ! -L "$hook" ] || return 1
-  grep -Fq "firstmate-task-turn-end-$token" "$hook" 2>/dev/null
+  case "$record" in *"firstmate-task-turn-end-$token"*) ;; *) return 1 ;; esac
+  [ "$(cat -- "$hook" 2>/dev/null)" = "$record" ]
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
@@ -262,8 +266,10 @@ fm_control_agy_task_hook_owned() {  # <hook-file> <token>
 # fm_control_harness_wiring_paths. agy's token file carries the chosen
 # customization root on its second line and, on its third, whether firstmate
 # created that root (created) or borrowed a pre-existing project directory
-# (preexisting); the root is handed back to fm_control_harness_wiring_paths
-# and the owner line decides whether retirement may remove the root itself.
+# (preexisting); its fourth line records the exact hooks.json content spawn
+# installed, the provenance fm_control_agy_task_hook_owned compares against.
+# The root is handed back to fm_control_harness_wiring_paths and the owner
+# line decides whether retirement may remove the root itself.
 # Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}

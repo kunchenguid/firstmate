@@ -390,6 +390,37 @@ test_agy_teardown_preserves_a_project_authored_hook_file() {
   pass "Agy teardown never deletes a project-authored hooks.json"
 }
 
+test_agy_teardown_preserves_a_replaced_hook_retaining_the_token() {
+  # A project replacement that keeps the generated task-token entry is still
+  # project property: ownership is the install record on the token file's
+  # fourth line, not the file contents, so teardown must leave any hooks.json
+  # that no longer matches the recorded bytes.
+  local id rec out rc token hook_root replaced
+  id="agy-keeptoken-z10-$$"
+  rec=$(make_spawn_case keeptoken "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "Agy spawn should succeed before teardown"
+  token=$(sed -n '1p' "$HOME_DIR/state/$id.agy-turnend-token")
+  hook_root=$(sed -n '2p' "$HOME_DIR/state/$id.agy-turnend-token")
+  [ "$(sed -n '4p' "$HOME_DIR/state/$id.agy-turnend-token")" = \
+    "$(cat "$WT_DIR/$hook_root/hooks.json")" ] \
+    || fail "spawn did not record the installed hooks.json bytes on the token file"
+  replaced=$(printf '{"project-owned":{},"firstmate-task-turn-end-%s":{}}' "$token")
+  printf '%s\n' "$replaced" > "$WT_DIR/$hook_root/hooks.json"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Agy teardown failed"
+  [ "$(cat "$WT_DIR/$hook_root/hooks.json" 2>/dev/null)" = "$replaced" ] \
+    || fail "teardown deleted a project hooks.json that retained the task token"
+  assert_absent "$WT_DIR/.fm-agy-turnend" "Agy pointer survived teardown"
+  assert_absent "$HOME_DIR/state/$id.agy-turnend-token" "Agy token state survived teardown"
+  pass "Agy teardown never deletes a project hooks.json that retained the task token"
+}
+
 test_agy_primary_guard_bounds_continuation() {
   local dir out rc
   dir="$TMP_ROOT/primary-guard"
@@ -509,6 +540,7 @@ test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_teardown_preserves_a_borrowed_project_root
 test_agy_teardown_preserves_a_project_authored_hook_file
+test_agy_teardown_preserves_a_replaced_hook_retaining_the_token
 test_agy_primary_guard_bounds_continuation
 test_agy_detection_uses_marker_and_ancestry
 test_agy_session_lock_identity

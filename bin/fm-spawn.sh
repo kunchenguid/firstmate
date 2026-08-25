@@ -813,7 +813,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4
-  local token_path token hook_root hook_root_owner auth_path paths path
+  local token_path token hook_root hook_root_owner hook_record auth_path paths path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -826,13 +826,17 @@ clear_relaunch_harness_wiring() {
   token=
   hook_root=
   hook_root_owner=
+  hook_record=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-    # agy records the customization root it chose on the second line and root
-    # ownership (created|preexisting) on the third; every other adapter's
-    # token file has only the first, so these read empty there.
+    # agy records the customization root it chose on the second line, root
+    # ownership (created|preexisting) on the third, and the exact installed
+    # hooks.json content on the fourth; every other adapter's token file has
+    # only the first, so these read empty there. The record is read here,
+    # before the loop below removes the token file itself.
     hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
     hook_root_owner=$(sed -n '3p' "$token_path" 2>/dev/null || true)
+    hook_record=$(sed -n '4p' "$token_path" 2>/dev/null || true)
   fi
   auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token" "$state") || return 1
   if [ -n "$auth_path" ]; then
@@ -846,11 +850,12 @@ clear_relaunch_harness_wiring() {
     [ -n "$path" ] || continue
     # agy's task-local hook sits inside a root the project may own and may
     # have been replaced by a project-authored hooks.json while the task ran;
-    # only the firstmate-generated file (fm-control-lib.sh owns the test) is
-    # retired, anything else is project configuration and stays.
+    # only the file still matching the recorded install (fm-control-lib.sh
+    # owns the test) is retired, anything else is project configuration and
+    # stays.
     if [ "$harness" = agy ] && [ -n "$hook_root" ] \
        && [ "$path" = "$wt/$hook_root/hooks.json" ] \
-       && ! fm_control_agy_task_hook_owned "$path" "$token"; then
+       && ! fm_control_agy_task_hook_owned "$path" "$token" "$hook_record"; then
       continue
     fi
     rm -f -- "$path" || return 1
@@ -2753,8 +2758,6 @@ EOF
       umask "$old_umask"
       token=${auth_file##*/}
       printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n%s\n%s\n' "$token" "$AGY_HOOK_ROOT" "$AGY_HOOK_ROOT_OWNER" \
-        > "$STATE/$ID.agy-turnend-token"
       printf 'token=%s\n' "$token" > "$WT/.fm-agy-turnend"
       agy_command=$(printf 'bash %s %s %s %s' \
         "$(shell_quote "$FM_ROOT/bin/fm-agy-turnend-hook.sh")" \
@@ -2762,8 +2765,15 @@ EOF
         "$(shell_quote "$token")" \
         "$(shell_quote "$WT")")
       agy_command=$(json_escape "$agy_command")
-      printf '{"firstmate-task-turn-end-%s":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}\n' \
-        "$token" "$agy_command" > "$WT/$AGY_HOOK_ROOT/hooks.json"
+      agy_hook_json=$(printf '{"firstmate-task-turn-end-%s":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}' \
+        "$token" "$agy_command")
+      printf '%s\n' "$agy_hook_json" > "$WT/$AGY_HOOK_ROOT/hooks.json"
+      # The fourth token-file line is the provenance record retirement compares
+      # against: only a hooks.json still byte-identical to what was installed
+      # here is firstmate's to delete (fm-control-lib.sh owns the test).
+      printf '%s\n%s\n%s\n%s\n' \
+        "$token" "$AGY_HOOK_ROOT" "$AGY_HOOK_ROOT_OWNER" "$agy_hook_json" \
+        > "$STATE/$ID.agy-turnend-token"
       exclude_path '.fm-agy-turnend'
       exclude_path "$AGY_HOOK_ROOT/hooks.json"
       ;;

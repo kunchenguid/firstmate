@@ -853,14 +853,15 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
 # entry. Relaunching AWAY from agy must retire all four, or the retired
 # incarnation's hook keeps firing into the worktree for the life of the task.
 arm_agy_wiring() {  # <case-dir> <id> <hook-root> <token> [root-owner]
-  local dir=$1 id=$2 root=$3 token=$4 owner=${5:-created}
+  local dir=$1 id=$2 root=$3 token=$4 owner=${5:-created} hook
   mkdir -p "$dir/home/state/agy-turn-end.d" "$dir/wt/$root"
   printf '%s\n' "$dir/home/state/$id.turn-ended" \
     > "$dir/home/state/agy-turn-end.d/$token"
-  printf '%s\n%s\n%s\n' "$token" "$root" "$owner" \
+  hook=$(printf '{"firstmate-task-turn-end-%s":{}}' "$token")
+  printf '%s\n%s\n%s\n%s\n' "$token" "$root" "$owner" "$hook" \
     > "$dir/home/state/$id.agy-turnend-token"
   printf 'token=%s\n' "$token" > "$dir/wt/.fm-agy-turnend"
-  printf '{"firstmate-task-turn-end-%s":{}}\n' "$token" > "$dir/wt/$root/hooks.json"
+  printf '%s\n' "$hook" > "$dir/wt/$root/hooks.json"
 }
 
 test_agy_wiring_is_retired_on_a_harness_switch() {
@@ -918,6 +919,26 @@ test_agy_relaunch_preserves_a_project_authored_hook_file() {
   [ ! -e "$dir/home/state/rl41.agy-turnend-token" ] \
     || fail "the retired agy incarnation's state token must still be retired"
   pass "fm-spawn --relaunch: a project-authored hooks.json is never deleted"
+}
+
+# A project replacement that RETAINS the generated task-token entry is still
+# project property: ownership is the recorded install provenance, not the file
+# contents, so retirement must leave any file that no longer matches the
+# recorded bytes.
+test_agy_relaunch_preserves_a_replaced_hook_retaining_the_token() {
+  local dir replaced
+  dir=$(new_case agykeeptoken rl42)
+  add_ship_task "$dir" rl42 agy
+  arm_agy_wiring "$dir" rl42 .agents fm.abcdefabcdef preexisting
+  replaced=$(printf '{"project-owned":{},"firstmate-task-turn-end-%s":{}}' fm.abcdefabcdef)
+  printf '%s\n' "$replaced" > "$dir/wt/.agents/hooks.json"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl42 --relaunch --harness claude >/dev/null
+  [ "$(cat "$dir/wt/.agents/hooks.json" 2>/dev/null)" = "$replaced" ] \
+    || fail "a project hooks.json retaining the task token must survive agy retirement"
+  [ ! -e "$dir/home/state/rl42.agy-turnend-token" ] \
+    || fail "the retired agy incarnation's state token must still be retired"
+  pass "fm-spawn --relaunch: a project hooks.json retaining the task token is never deleted"
 }
 
 # A recorded hook root outside agy's four customization roots cannot be
@@ -1464,6 +1485,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch
 test_agy_wiring_is_retired_on_a_harness_switch
 test_agy_relaunch_preserves_a_borrowed_project_root
 test_agy_relaunch_preserves_a_project_authored_hook_file
+test_agy_relaunch_preserves_a_replaced_hook_retaining_the_token
 test_relaunch_scopes_composer_reads_to_the_replacement_harness
 test_agy_unknown_hook_root_refuses_the_relaunch
 test_missing_worktree_refuses_before_stopping_anything

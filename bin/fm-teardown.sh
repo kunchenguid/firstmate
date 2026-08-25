@@ -933,7 +933,7 @@ remove_agy_turnend_auth() {
 # afterwards, so it is read through the same owner rather than removed with the
 # rest.
 remove_agy_task_hook() {
-  local wt=$1 state_dir=$2 id=$3 token_path token='' hook_root='' hook_root_owner=''
+  local wt=$1 state_dir=$2 id=$3 token_path token='' hook_root='' hook_root_owner='' hook_record=''
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
   token_path=$(fm_control_harness_turnend_token_path agy "$state_dir" "$id") || return 1
   [ -n "$token_path" ] || return 0
@@ -941,14 +941,16 @@ remove_agy_task_hook() {
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 0
     hook_root=$(sed -n '2p' "$token_path" 2>/dev/null || true)
     hook_root_owner=$(sed -n '3p' "$token_path" 2>/dev/null || true)
+    hook_record=$(sed -n '4p' "$token_path" 2>/dev/null || true)
   fi
   case "$token" in fm.????????????) ;; *) return 0 ;; esac
   case "$hook_root" in .agents|.agent|_agents|_agent) ;; *) return 0 ;; esac
   # The root may be a project directory spawn borrowed, and the project may
-  # have replaced the installed hook while the task ran: only the
-  # firstmate-generated hooks.json is removed, and only a firstmate-created
-  # root is pruned once emptied (fm-control-lib.sh owns the ownership test).
-  if fm_control_agy_task_hook_owned "$wt/$hook_root/hooks.json" "$token"; then
+  # have replaced the installed hook while the task ran, possibly retaining
+  # the generated token entry: only a hooks.json still byte-identical to the
+  # recorded install is removed, and only a firstmate-created root is pruned
+  # once emptied (fm-control-lib.sh owns the ownership test).
+  if fm_control_agy_task_hook_owned "$wt/$hook_root/hooks.json" "$token" "$hook_record"; then
     rm -f "$wt/$hook_root/hooks.json"
   fi
   rm -f "$wt/.fm-agy-turnend"
