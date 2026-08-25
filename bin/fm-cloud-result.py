@@ -314,31 +314,6 @@ def extract_visuals(body, destination):
         raise ReturnError("worker visual artifact archive is corrupt: {}".format(exc))
 
 
-def fallback_report(kind, result, manifest, reason):
-    commits = int(result.get("outcome_commits", 0))
-    tip = result.get("outcome_tip", "unknown")
-    outcome = "{} commit(s) ending at {}".format(commits, tip)
-    return (
-        "## Summary\n\n"
-        "The cloud task returned to local custody, but its authored report was unavailable. {}\n\n"
-        "## What changed\n\n"
-        "The returned project outcome contains {}.\n\n"
-        "## Verification\n\n"
-        "The controller-verified result and return bundle were validated locally. The worker report could not be accepted: {}.\n\n"
-        "## Visual evidence\n\n"
-        "None was returned.\n\n"
-        "## Artifacts\n\n"
-        "The digest-bound return manifest and any scratch artifacts are retained with this task.\n\n"
-        "## Follow-ups\n\n"
-        "{}\n"
-    ).format(
-        "The implementation commits are ready for local validation." if kind == "ship" and commits else "The requested outcome is not complete.",
-        outcome,
-        reason,
-        "Run the ordinary validation flow." if kind == "ship" and commits else "Repeat or recover the task before claiming its requested outcome.",
-    ).encode("utf-8")
-
-
 def branch_custody(worktree, task, result, kind):
     base = result["repository_generation"]
     tip = result["outcome_tip"]
@@ -472,7 +447,7 @@ def collect(args):
         if not report_valid:
             atomic_write(data_dir / "cloud-return-report.invalid.md", report)
     if not report_valid:
-        report = fallback_report(kind, result, manifest, report_reason)
+        raise ReturnError("required worker report was absent or invalid: {}".format(report_reason))
     report_target = data_dir / ("completion.md" if kind == "ship" else "report.md")
     if report_target.exists():
         if report_target.is_symlink() or not report_target.is_file():
@@ -499,7 +474,6 @@ def collect(args):
         and not result.get("outcome_error")
         and (kind == "scout" or not result.get("outcome_uncommitted_changes"))
         and (kind != "ship" or int(result.get("outcome_commits", 0)) > 0)
-        and (kind != "scout" or report_valid)
     )
     if succeeded:
         terminal = "done: cloud outcome returned to local custody"
@@ -513,8 +487,6 @@ def collect(args):
             reasons.append("return collection reported an error")
         if kind == "ship" and result.get("outcome_uncommitted_changes"):
             reasons.append("uncommitted scratch was retained")
-        if not report_valid:
-            reasons.append("required worker report was absent or invalid")
         if kind == "ship" and int(result.get("outcome_commits", 0)) <= 0:
             reasons.append("ship returned no commits")
         terminal = "failed: {}".format("; ".join(reasons) or "cloud outcome was incomplete")

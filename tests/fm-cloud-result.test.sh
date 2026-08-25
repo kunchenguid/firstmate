@@ -208,36 +208,42 @@ PY
   pass "scout return preserves uncommitted-only scratch and replays its report bundle exactly"
 }
 
-test_absent_report_is_truthful_failure() {
-  local record root home repo id out
+test_absent_report_blocks_collection() {
+  local record root home repo id out status
   id=cloud-return-no-report
   record=$(make_return_case absent-report "$id" scout no no no)
   IFS='|' read -r root home repo <<EOF
 $record
 EOF
-  out=$(run_collect "$home" "$id" 2>&1) || fail "absent report return should be retained as a failure: $out"
-  assert_contains "$out" "failed:" "absent scout report was reported done"
-  assert_grep 'required worker report was absent or invalid' "$home/state/$id.status" \
-    "absent report failure did not name the missing deliverable"
-  assert_grep 'requested outcome is not complete' "$home/data/$id/report.md" \
-    "absent report did not produce a truthful completion-stack artifact"
-  pass "an absent required scout report yields a substantive failure report before terminal status"
+  out=$(run_collect "$home" "$id" 2>&1)
+  status=$?
+  expect_code 2 "$status" "an absent report should block collection: $out"
+  assert_contains "$out" "required worker report was absent or invalid" \
+    "absent report refusal did not name the missing deliverable"
+  assert_absent "$home/state/$id.status" "absent report emitted a local terminal status"
+  assert_absent "$home/data/$id/report.md" "absent report fabricated an authoritative report"
+  assert_absent "$home/data/$id/cloud-return.json" "absent report published a release manifest"
+  pass "an absent required report blocks collection without authoritative local evidence"
 }
 
-test_empty_report_section_is_truthful_failure() {
-  local record root home repo id out
+test_empty_report_section_blocks_collection() {
+  local record root home repo id out status
   id=cloud-return-empty-report-section
   record=$(make_return_case empty-report-section "$id" scout empty no no)
   IFS='|' read -r root home repo <<EOF
 $record
 EOF
-  out=$(run_collect "$home" "$id" 2>&1) || fail "empty report section should be retained as a failure: $out"
-  assert_contains "$out" "failed:" "empty report section was reported done"
-  assert_grep 'required worker report was absent or invalid' "$home/state/$id.status" \
-    "empty report section did not invalidate the returned report"
-  assert_grep 'requested outcome is not complete' "$home/data/$id/report.md" \
-    "empty report section did not produce a truthful completion-stack artifact"
-  pass "a required report heading without substantive content cannot authorize release"
+  out=$(run_collect "$home" "$id" 2>&1)
+  status=$?
+  expect_code 2 "$status" "an empty report section should block collection: $out"
+  assert_contains "$out" "required worker report was absent or invalid" \
+    "empty report section refusal did not identify the invalid report"
+  assert_present "$home/data/$id/cloud-return-report.invalid.md" \
+    "invalid returned report bytes were not retained as diagnostic evidence"
+  assert_absent "$home/state/$id.status" "invalid report emitted a local terminal status"
+  assert_absent "$home/data/$id/report.md" "invalid report fabricated an authoritative report"
+  assert_absent "$home/data/$id/cloud-return.json" "invalid report published a release manifest"
+  pass "an invalid returned report is diagnostic only and cannot authorize release"
 }
 
 test_local_divergence_retains_custody() {
@@ -461,8 +467,8 @@ SH
 
 test_ship_success_and_replay
 test_scout_success_with_uncommitted_scratch
-test_absent_report_is_truthful_failure
-test_empty_report_section_is_truthful_failure
+test_absent_report_blocks_collection
+test_empty_report_section_blocks_collection
 test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
 test_cloud_custody_authority_reads_localized_return
