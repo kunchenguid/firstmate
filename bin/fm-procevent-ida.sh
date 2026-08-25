@@ -24,6 +24,9 @@
 # A recorded remote task id selects task-level terminalStatus and the matching
 # visible text or structured deep_research_content.finalAnswer; unstable session
 # aggregates and other tasks in the same session never terminalize that record.
+# When the official create stream returns a task-bound text answer before
+# session-get exposes any finalAnswer, that answer fills only the same task's
+# otherwise exact-zero terminal observation.
 # Once handling reaches a terminal phase, later captured generations are only
 # acknowledged, so they cannot rewrite the report, regress state, or notify twice.
 #
@@ -427,6 +430,7 @@ checkpoint_submission_boundary() {
 submit_observation() { # <id> <root>
   local id=$1 root=$2 arguments out err
   local class session_id task_id agent_id_arg model_arg detail_session detail_task
+  local verified submission_answer
   arguments="$root/arguments.json"; out="$root/submit.out"; err="$root/submit.err"
   fm_remote_instruction_validate "$id" "$REMOTE_STATE_INSTRUCTION_FILE" || return 1
   [ "$(fm_remote_sha256_file "$REMOTE_STATE_INSTRUCTION_FILE")" = "$REMOTE_STATE_INSTRUCTION_SHA256" ] || die "iDA instruction file changed before submission"
@@ -445,7 +449,25 @@ submit_observation() { # <id> <root>
       && [ -n "$(jq -r '.data.task_id // "" | tostring' "$out")" ]; then
     session_id=$(jq -r '.data.session_id | tostring' "$out")
     task_id=$(jq -r '.data.task_id | tostring' "$out")
-    session_observation "$id" "$session_id" submission "$task_id"
+    verified="$root/verified-submission.json"
+    submission_answer="$root/submission-answer.txt"
+    session_observation "$id" "$session_id" submission "$task_id" >"$verified"
+    jq -j 'if (.data.answer | type) == "string" and (.data.answer | length) > 0
+      then .data.answer else "" end' "$out" \
+      | fm_remote_redact_result_text "$REMOTE_STATE_INSTRUCTION_FILE" >"$submission_answer" \
+      || die "cannot normalize task-bound iDA submission answer"
+    if grep -q '[^[:space:]]' "$submission_answer" \
+        && jq -e --arg session_id "$session_id" --arg task_id "$task_id" '
+          .session_id == $session_id and .task_id_remote == $task_id
+          and .terminal == true and .ambiguous == false
+          and .result_availability == "zero" and .error_class == null
+        ' "$verified" >/dev/null 2>&1; then
+      jq --rawfile answer "$submission_answer" '
+        .result_availability="available" | .result_kind="text" | .answer=$answer
+      ' "$verified"
+    else
+      cat "$verified"
+    fi
     return 0
   fi
   detail_session=$(jq -r '.error.details.session_id // "" | tostring' "$out" 2>/dev/null)
