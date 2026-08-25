@@ -335,6 +335,7 @@ test_no_mistakes_min_version() {
 minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^empty
 newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^empty
 newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
+pre-attestation no-mistakes reports an upgrade^no-mistakes version v1.37.0 (fake)^missing
 older no-mistakes patch reports an upgrade^no-mistakes version v1.45.9 (fake)^missing
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
