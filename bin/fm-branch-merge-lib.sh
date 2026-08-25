@@ -234,6 +234,24 @@ fm_branch_delete_remote_proven_tip() {
     _fm_branch_delete_remote_proven_tip_locked "$remote" "$expected_tip"
 }
 
+# fm_branch_cleanup_remote_candidate <repo> <remote> <branch> <expected_tip>:
+# prove and delete a remote-only sweep candidate in one branch cleanup critical
+# section.  The remote listing supplies the expected tip; every subsequently
+# mutable input to the proof is inspected only after the lock is held.
+_fm_branch_cleanup_remote_candidate_locked() {
+  local repo=$1 branch=$2 remote=$3 expected_tip=$4
+  fm_branch_worktree_has_branch "$repo" "$branch" && return 1
+  fm_branch_fetch_remote_tip "$repo" "$remote" "$branch" "$expected_tip" || return 1
+  fm_branch_work_is_landed "$repo" "$branch" "" "$expected_tip" || return 1
+  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
+}
+
+fm_branch_cleanup_remote_candidate() {
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4
+  fm_branch_with_cleanup_lock "$repo" "$branch" \
+    _fm_branch_cleanup_remote_candidate_locked "$remote" "$expected_tip"
+}
+
 fm_branch_pr_number_from_branch() {
   local repo=$1 branch=$2 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1

@@ -228,7 +228,7 @@ test_remote_only_delete_serializes_a_linked_checkout() {
   done
   [ -e "$ready" ] || fail "remote-only-lock: linked-checkout holder never became ready"
 
-  bash -c '. "$1"; fm_branch_delete_remote_proven_tip "$2" no-mistakes fm/remote-only "$3"' \
+  bash -c '. "$1"; fm_branch_cleanup_remote_candidate "$2" no-mistakes fm/remote-only "$3"' \
     bash "$ROOT/bin/fm-branch-merge-lib.sh" "$repo" "$tip" &
   delete_pid=$!
   sleep 0.2

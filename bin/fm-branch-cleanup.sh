@@ -62,10 +62,7 @@ cleanup_remote_candidates() {
     [ -n "$tip" ] && [ -n "$ref" ] || continue
     branch=${ref#refs/heads/}
     case "$branch" in fm/*) ;; *) continue ;; esac
-    fm_branch_worktree_has_branch "$PROJ" "$branch" && continue
-    fm_branch_fetch_remote_tip "$PROJ" "$remote" "$branch" "$tip" || continue
-    fm_branch_work_is_landed "$PROJ" "$branch" "" "$tip" || continue
-    if fm_branch_delete_remote_proven_tip "$PROJ" "$remote" "$branch" "$tip"; then
+    if fm_branch_cleanup_remote_candidate "$PROJ" "$remote" "$branch" "$tip"; then
       echo "$label: pruned $remote/$branch"
       cleaned=$((cleaned + 1))
     fi
