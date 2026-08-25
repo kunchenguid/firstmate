@@ -316,11 +316,11 @@ The resolver opens with no-follow semantics and reads only the exact device/inod
 Each selected dispatch consumes one `max_dispatches` slot under a stable sibling lock and durably records the new count before the runner starts.
 Delete the exact run file after the run; expiry and the dispatch budget remain fail-closed backstops, not garbage collection.
 
-The no-mistakes test owner must choose between its ordinary complete local suite and the remote-non-Herdr/local-Herdr split before it has a payload to dispatch.
+The no-mistakes test owner must choose between its ordinary capability-derived local Herdr set and the remote-non-Herdr/local-Herdr split before it has a payload to dispatch.
 It asks `bin/fm-azure-runner-dispatch.sh --inspect-selection test` for that decision.
 Inspection applies the same complete routing-document, local-recovery, and dual-authority checks but never consumes a dispatch slot, and returns an exact selection binding.
 The subsequent real remote dispatch must present that binding, refuses if the route was deleted, unselected, or replaced, revalidates under the stable lock, and is the only budget consumer.
-A local inspection writes the exact local reason into the test step's own stderr before the full suite starts, while a malformed present authority refuses before either local or remote tests start.
+A local inspection writes the exact local reason into the test step's own stderr before the local host set starts, while a malformed present authority refuses before either local or remote tests start.
 
 The selected daemon step then asks the resolver to read the landed Azure host configuration from the provenance-checked regular file `~/.fm-azure/fleet.env`.
 That file must supply `FM_AZURE_TENANT_ID`, `FM_AZURE_SUBSCRIPTION_ID`, `FM_AZURE_NAMING_PREFIX`, `FM_AZURE_STORAGE_NAME`, `FM_AZURE_OWNER_TAG`, `FM_AZURE_DEPLOYMENT_GENERATION`, and `FM_AZURE_BLOB_PE_NIC_RESOURCE_GUID`.
@@ -349,7 +349,7 @@ explicit local opt-out.
 The lint payload preserves the tracked shell owner and locked Agent Fleet command unchanged inside the dispatched argv.
 For a validation-owned feature branch, the caller passes its exact current `refs/heads/<branch>` identity plus the one-ref private snapshot bundle.
 The runner binds and privately stages that unpushed commit, while a changed local bundle/head/tree or public default base refuses before compute creation.
-The ordinary test path preserves the existing complete local command.
+The ordinary test path runs the capability-derived real-Herdr host set locally and leaves complete behavior-inventory verification to required CI, as defined in [`configuration.md`](configuration.md#gate-defaults-no-mistakesyaml).
 When the `test` class is explicitly remote, `bin/fm-no-mistakes-test-command.sh` runs the sealed non-Herdr behavior inventory plus locked Agent Fleet checks on one Azure VM while every real-Herdr declaration runs through owned guarded labs on the Mac; a failed Azure shard is never replayed locally.
 Model review, document generation that requires a model, fixes, Git mutation, push, PR creation, CI monitoring, and gate decisions remain in no-mistakes' existing owner.
 A configured uncredentialed documentation command may use this runner like any other command, but this bridge never moves a model document step by implication.

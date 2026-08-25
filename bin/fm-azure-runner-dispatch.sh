@@ -299,9 +299,9 @@ if [ -n "${FM_AZURE_RUNNER_REMOTE_CLASSES:-}" ] && [ "$ROUTING_STATE" != absent 
   fi
 fi
 
-# The no-mistakes test owner needs to choose between its ordinary full-local
-# suite and its remote-non-Herdr/local-Herdr split before it has a command to
-# hand this wrapper. Inspection shares the exact routing and disagreement
+# The no-mistakes test owner needs to choose between its ordinary local Herdr
+# host set and its remote-non-Herdr/local-Herdr split before it has a command
+# to hand this wrapper. Inspection shares the exact routing and disagreement
 # checks above but never consumes the routing budget. A later real dispatch
 # is required to present the returned binding, revalidates it under the stable
 # lock, and is the only consumer.

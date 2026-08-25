@@ -992,10 +992,18 @@ exit 0
 SH
   cat >"$root/tests/run.sh" <<SH
 #!/bin/sh
-printf '%s\n' "\$@" >>"$root/local-runs"
+{
+  printf 'call'
+  for arg do printf '\t%s' "\$arg"; done
+  printf '\n'
+} >>"$root/local-runs"
 exit 0
 SH
-  printf 'fm-fixture-herdr.test.sh\therdr-lab\n' >"$root/tests/test-capabilities.tsv"
+  cat >"$root/tests/test-capabilities.tsv" <<'TSV'
+fm-fixture-hermetic.test.sh	hermetic
+fm-fixture-herdr.test.sh	herdr-lab
+fm-fixture-mixed.test.sh	herdr-mixed
+TSV
   chmod +x "$root/bin/"* "$root/tests/run.sh"
 }
 
@@ -1230,6 +1238,21 @@ print(json.load(open(sys.argv[1])).get("dispatched", 0))
 PY
   }
 
+  assert_capability_derived_local_host_set() {
+    local log=$1
+    [ -s "$log" ] || fail "the capability-derived local host set did not cross tests/run.sh"
+    [ "$(wc -l < "$log" | tr -d ' ')" -eq 1 ] \
+      || fail "the local host set did not run in one serial tests/run.sh invocation"
+    grep -q 'fm-fixture-herdr.test.sh' "$log" \
+      || fail "the local host set omitted a herdr-lab registry row"
+    grep -q 'fm-fixture-mixed.test.sh' "$log" \
+      || fail "the local host set omitted a herdr-mixed registry row"
+    ! grep -q 'fm-fixture-hermetic.test.sh' "$log" \
+      || fail "the local host set duplicated a hermetic-only registry row before CI"
+    ! grep -q -- '--skip-herdr' "$log" \
+      || fail "the local host set selected the non-Herdr path"
+  }
+
   # The daemon-owned production path has no FM_AZURE_RUNNER_REMOTE_CLASSES.
   # A valid per-run selection must still choose the split lane, and inspection
   # must not spend a second budget slot before the real dispatch consumes one.
@@ -1241,10 +1264,7 @@ PY
   [ -f "$fixture/captured" ] || fail "a per-run test selection never reached the fixture runner"
   assert_contains "$out" "selected REMOTE resource-class=behavior-heavy" \
     "the per-run test selection emitted no remote-selection proof"
-  grep -q "fm-fixture-herdr.test.sh" "$fixture/local-runs" \
-    || fail "the per-run test selection lost the local Herdr shard"
-  grep -q -- "--skip-herdr" "$fixture/local-runs" 2>/dev/null \
-    && fail "the remotely selected non-Herdr shard also ran locally"
+  assert_capability_derived_local_host_set "$fixture/local-runs"
   [ "$(routing_dispatch_count)" -eq 1 ] \
     || fail "non-consuming test inspection did not leave exactly one durable dispatch spend"
 
@@ -1324,30 +1344,30 @@ SH
   [ ! -e "$fixture/captured" ] && [ ! -e "$fixture/local-runs" ] \
     || fail "the real test owner executed after a malformed-routing refusal"
 
-  # A valid document that does not select test preserves the complete ordinary
-  # local suite and records why the test class ran locally in the step log.
+  # A valid document that does not select test preserves the ordinary
+  # capability-derived host set and records why the class ran locally.
   write_test_routing '{"classes":{"lint":"validation-standard"}}'
   rm -f "$fixture/captured" "$fixture/local-runs"
   out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
     "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
-    || fail "an unselected per-run test class did not preserve full local execution"
+    || fail "an unselected per-run test class did not preserve local host execution"
   [ ! -e "$fixture/captured" ] || fail "an unselected per-run test class reached the runner"
-  [ -e "$fixture/local-runs" ] || fail "an unselected per-run test class did not run locally"
+  assert_capability_derived_local_host_set "$fixture/local-runs"
   assert_contains "$out" "executed LOCALLY (routing=present-not-selected, env=absent)" \
     "an unselected per-run test class emitted no local-execution proof"
   [ "$(routing_dispatch_count)" -eq 0 ] \
     || fail "an unselected per-run test class spent a dispatch budget slot"
 
-  # Explicit recovery over a valid selected document runs the ordinary full
-  # suite locally, says so, and consumes no remote budget.
+  # Explicit recovery over a valid selected document runs the ordinary local
+  # host set, says so, and consumes no remote budget.
   write_test_routing '{}'
   rm -f "$fixture/captured" "$fixture/local-runs"
   out=$(cd "$gatewt" && env HOME="$anchor" PATH="$fakebin:$PATH" \
     FM_AZURE_RUNNER_LOCAL_RECOVERY_CLASSES=test \
     "$fixture/bin/fm-no-mistakes-test-command.sh" 2>&1) \
-    || fail "explicit per-run test recovery did not preserve full local execution"
+    || fail "explicit per-run test recovery did not preserve local host execution"
   [ ! -e "$fixture/captured" ] || fail "explicit per-run test recovery reached the runner"
-  [ -e "$fixture/local-runs" ] || fail "explicit per-run test recovery did not run locally"
+  assert_capability_derived_local_host_set "$fixture/local-runs"
   assert_contains "$out" "executed LOCALLY (explicit local recovery)" \
     "explicit per-run test recovery emitted no local-execution proof"
   [ "$(routing_dispatch_count)" -eq 0 ] \
@@ -1372,8 +1392,7 @@ assert value("--confirm-subscription")==sys.argv[4]
 assert value("--resource-class")=="behavior-heavy"
 assert any("tests/run.sh --skip-herdr" in item for item in argv), "the Azure shard lost the non-Herdr suite"
 PY
-  grep -q "fm-fixture-herdr.test.sh" "$fixture/local-runs" \
-    || fail "the local Herdr shard did not run its declared inventory"
+  assert_capability_derived_local_host_set "$fixture/local-runs"
 
   # An underivable subscription fails the step closed: exit 1, exact refusal,
   # no host fallback for the non-Herdr suite.

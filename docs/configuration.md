@@ -94,12 +94,15 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and preserves `bin/fm-no-mistakes-test-command.sh` as the complete ordinary local test owner.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and preserves `bin/fm-no-mistakes-test-command.sh` as the ordinary local test owner.
 Inside an admitted Azure validation cell, the trusted default-branch command string instead invokes the root-owned bridge from `docs/azure-validation.md`, which runs lint and requested behavior shards on separate credential-free Azure command VMs without exposing the cell's provider or GitHub lease.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, routes behavior tests through `tests/run.sh`, and fails if any script exits non-zero.
-It intentionally runs the complete behavior-test inventory serially while [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh); both routes cross the same sealed admission boundary instead of delegating the test step to an agent, so local-CI parity holds on what admission a test receives.
-The gate does not reproduce CI's concurrent shard fan-out because it does not select the explicit non-Herdr path: every real-Herdr declaration provisions an owned lab here, and the serial route holds those labs to one at a time.
+The ordinary local command requires `tmux` on `PATH`, prints `tmux -V`, derives every `herdr-lab` and `herdr-mixed` path directly from [`tests/test-capabilities.tsv`](../tests/test-capabilities.tsv), and sends those files in one serial invocation through [`tests/run.sh`](../tests/run.sh) before running the locked Agent Fleet pytest and compileall checks.
+It does not maintain a second file list or duplicate hermetic-only behavior files on the Mac.
+The required `Behavior tests` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) to run and verify the complete behavior inventory across eight isolated runners.
+CI selects the explicit non-Herdr path because its disposable image carries no Herdr, so it runs every hermetic body and the hermetic portion of the mixed file while the local host admits the complete `herdr-lab` and `herdr-mixed` set through owned labs.
+The exact behavioral coverage contract is the union of that capability-derived local host set and the required CI executed-manifest union, not a claim that all 123 files run serially before push.
+Both routes cross the same sealed admission boundary, and the local serial route holds real-Herdr labs to one at a time.
 
 ## Crosscheck reviewer
 
