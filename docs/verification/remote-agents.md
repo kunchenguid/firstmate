@@ -8,6 +8,7 @@ Historical and provider-specific AIME proof remains in [`aime-cloud-worker.md`](
 
 The base lifecycle was re-verified on 2026-08-24 with installed `bytedcli` 0.130.0.
 Model selection was re-verified on 2026-08-25 with installed `bytedcli` 0.131.0.
+Task-bound terminal and non-empty result readback were re-verified on 2026-08-26 with installed `bytedcli` 0.131.0.
 Those versions identify this evidence only; iDA setup and execution do not pin or compare them.
 The read-only base surfaces were:
 
@@ -46,7 +47,8 @@ The public `bin/fm-task-dispatch.sh remote-agent/ida` path was reproduced agains
 - A separate legacy config with `bytedcli_version=0.0.0` failed before state publication under the old adapter even though the installed executable and structured version response were healthy. This isolates the obsolete exact-version refusal as an independent blocker rather than conflating it with the proxy and region-placement failures.
 
 The implementation therefore keeps the enabled, executable, structured-output, identity, region, command-capability, exact-marker, and provider-state checks; sanitizes only iDA child proxy variables; puts SG region on the parent iDA command inside MCP stdin; reconciles raw sessions by an exact private first-message marker when SG renames them; preserves structured error identity; and treats legacy version fields as informational.
-A final public dispatch through `bin/fm-task-dispatch.sh remote-agent/ida`, using the stale `0.0.0` legacy config field and the caller's ambient proxy variables, reached normalized `terminal-success` under SG with bound session/task identity and exact `zero` result availability.
+A public data-free dispatch through `bin/fm-task-dispatch.sh remote-agent/ida` reached normalized `terminal-success` under SG with bound session/task identity, `result_availability=available`, and the exact first-line readiness result `FM_IDA_READINESS_V1 {"status":"ok","instruction_received":true,"business_data_accessed":false,"external_write_performed":false,"echo":"sg-ida-e2e-20260825-v1"}`.
+The same completed provider session exposed that text in the last completed task step while `deep_research_content.finalAnswer` and visible type-8 `.text` were absent.
 The validation used only harmless bounded prompts; no cancellation was issued.
 
 ## Executable behavior
@@ -58,8 +60,16 @@ bin/fm-test-run.sh tests/fm-remote-agent.test.sh
 bin/fm-test-run.sh tests/fm-aime-cloud-worker.test.sh
 ```
 
-Re-verified on 2026-08-25 against base `c51ed3d33c1ebc8eaa3e4478e263e600626a2c22` with GNU Bash 5.2.15 and the repository-pinned ShellCheck 0.11.0.
+Re-verified on 2026-08-26 against base `3a3e00dd447b2c8301a952c3a7d31390d3eeeb61` with GNU Bash 5.2.15, installed `bytedcli` 0.131.0, and the repository-pinned ShellCheck 0.11.0.
 The focused iDA command above completed with the exact terminal assertion `# fm-remote-agent.test.sh: all assertions passed` and summary fields `total=1`, `failed=0`, and `skipped_gate=0`.
+
+The data-free official SG check used the public dispatch and candidate process-event adapter, then verified its normalized state, report, acknowledgement, and one real post-terminal captured generation.
+Its exact safe summaries were:
+
+```text
+contract=pass status_count=1 report_count=1 result_count=1 handled_count=1 answer_first_line_exact=true
+duplicate_generation=pass revision_unchanged=true report_unchanged=true terminal_notifications=1 result_count=2 handled_count=2
+```
 
 `fm-remote-agent.test.sh` supplies a fake `bytedcli` executable and exercises public dispatch, state, adoption, cancellation, retirement, and process-event entry points.
 It verifies:
@@ -73,7 +83,9 @@ It verifies:
 - child-local removal of all conventional proxy variables while preserving an unrelated environment sentinel across SG probe, reconciliation, and create;
 - required-command discovery through domain-restricted MCP plus the exact parent-position `ida --region sg deep-research create` command through `run_command`, with refusal evidence if that placement drifts;
 - raw-session reconciliation after provider-driven renaming, exact private first-message marker verification, and structured empty-result identity normalization;
+- recorded-task terminal authority amid conflicting session tasks and aggregate error, including same-task running then success without accepting an unrelated task answer;
 - completed visible type-8 `deep_research_content.finalAnswer` readback with one file part and one inline-data part, normalized as an available artifact through the executable observe and process-event boundaries without creation, continuation, cancellation, or raw-content leakage;
+- completed task-bound step-only text readback when visible type-8 `.text` and `finalAnswer` are absent, preserving the exact readiness marker through public dispatch and report capture;
 - failed, cancelled, and closed sessions that still carry a visible type-8 text answer: the legacy redacted text payload stays a `text` result while availability remains `error` or `unavailable`, and readback reaches its terminal outcome without wedging;
 - explicit safe failures for malformed and unsupported structured final-answer forms, while exact-empty supported forms remain `zero`;
 - iDA running, successful, failed, cancelled, unavailable, ambiguous, exact-zero, and error outcomes;
@@ -81,6 +93,7 @@ It verifies:
 - the timeout case where a provider accepted submission but the client timed out, followed by exact session-marker reconciliation and adoption without a second create;
 - same-content idempotent re-storage of a normalized artifact at an unchanged revision after an interrupted handler;
 - idempotent process-event replay after acknowledgement, without a second state transition or status application;
+- post-terminal nonterminal and terminal generations acknowledged without state regression, report replacement, source re-arm, or a duplicate terminal notification;
 - source-local coalescing of identical nonterminal transient iDA read failures before a second captured generation, including bounded exponential retry timing, restart recovery from the state-linked observation, reset on successful or changed state, authorization, materially different error and terminal bypass, and idempotent handling of an earlier queued generation;
 - captain-authorized abandonment of a wedged ambiguous task after an authoritative complete non-truncated zero-match session list, its refusal without the authorization flag and on duplicate markers, and decision-gated retirement of the abandoned record;
 - normalized terminal result capture and a state-bound mode-`0600` report;

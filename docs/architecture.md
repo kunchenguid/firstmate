@@ -138,7 +138,7 @@ No local LLM Scout is required for monitoring, readback, or report wrapping.
 
 In document mode AIME creates the requested Feishu document itself.
 Firstmate validates and records the returned canonical URL, identity, and revision, but performs no local document creation, copying, rewriting, sharing, or permission change.
-iDA records a self-contained normalized report or its authoritative result identity, distinguishes legacy text from supported structured final-answer artifacts, and keeps `available`, exact `zero`, `unavailable`, and `error` distinct.
+iDA records a self-contained normalized report or its authoritative result identity, distinguishes visible or task-bound completed-step text from supported structured final-answer artifacts, and keeps `available`, exact `zero`, `unavailable`, and `error` distinct.
 Provider output remains evidence and input rather than implementation, publication, merge, destructive, or security authority.
 [`configuration.md`](configuration.md#remote-research-agents) owns public setup and limits, the [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns conditional operation, and [`verification/remote-agents.md`](verification/remote-agents.md) plus [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md) own current empirical evidence.
 
