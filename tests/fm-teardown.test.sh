@@ -189,6 +189,10 @@ if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
   printf '%s\n' '  --archive-body'
   exit 0
 fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'
+  exit 0
+fi
 if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
   exit 0
@@ -551,6 +555,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
@@ -1356,7 +1361,30 @@ test_local_only_force_overrides_unpushed() {
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
-  pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+  task_branch_exists "$case_dir" \
+    || fail "force-override: forced teardown deleted the only unlanded task branch"
+  pass "forced teardown discards an unpushed worktree but preserves its unlanded task branch"
+}
+
+test_scout_teardown_retains_unproven_task_branch() {
+  local case_dir rc
+  case_dir=$(make_case scout-branch-retention)
+  write_meta "$case_dir" local-only scout
+  printf '%s\n' 'decisions_reviewed=1' >> "$case_dir/state/task-x1.meta"
+  add_compatible_tasks_axi "$case_dir"
+  wt_commit "$case_dir" "unlanded scout notes"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-branch-retention: reported scout teardown should succeed"
+  task_branch_exists "$case_dir" \
+    || fail "scout-branch-retention: scout teardown deleted an unproven task branch"
+  pass "reported scout teardown preserves its unproven task branch"
 }
 
 test_teardown_missing_busy_sidecar_completes() {
@@ -2666,6 +2694,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_teardown_prunes_landed_task_from_both_remotes
 test_local_only_force_overrides_unpushed
+test_scout_teardown_retains_unproven_task_branch
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

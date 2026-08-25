@@ -56,8 +56,9 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   checks, and discards secondmate child work for kind=secondmate. It never
+#   deletes an unproven task branch. Only use it when the captain has explicitly
+#   said to discard the worktree's work.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -2297,27 +2298,28 @@ teardown_drop_task_branch() {
   [ "$branch" != HEAD ] || return 0
   tip=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 0
 
-  if [ "$FORCE" != --force ] && [ "$KIND" != scout ]; then
-    expected=${TEARDOWN_WORKTREE_TIP_FOR_SAFETY:-}
-    [ "$branch" = "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ] || return 0
-    [ -n "$expected" ] && [ "$tip" = "$expected" ] || return 0
-    for remote in origin no-mistakes; do
-      remote_tip=$(fm_branch_remote_tip "$wt" "$remote" "$branch") || continue
-      fm_branch_fetch_remote_tip "$wt" "$remote" "$branch" "$remote_tip" || continue
-      fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$remote_tip" || continue
-      case "$remote" in
-        origin) origin_tip=$remote_tip ;;
-        no-mistakes) no_mistakes_tip=$remote_tip ;;
-      esac
-    done
-  fi
+  # Force authorizes discarding the worktree, and scout authorizes retiring its
+  # scratch worktree after its report is saved. Neither is evidence that the
+  # branch landed, so retain every branch ref in those modes. The normal path
+  # below has already established the exact landedness proof required before
+  # it can delete a local or remote ref.
+  [ "$FORCE" != --force ] && [ "$KIND" != scout ] || return 0
+
+  expected=${TEARDOWN_WORKTREE_TIP_FOR_SAFETY:-}
+  [ "$branch" = "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ] || return 0
+  [ -n "$expected" ] && [ "$tip" = "$expected" ] || return 0
+  for remote in origin no-mistakes; do
+    remote_tip=$(fm_branch_remote_tip "$wt" "$remote" "$branch") || continue
+    fm_branch_fetch_remote_tip "$wt" "$remote" "$branch" "$remote_tip" || continue
+    fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$remote_tip" || continue
+    case "$remote" in
+      origin) origin_tip=$remote_tip ;;
+      no-mistakes) no_mistakes_tip=$remote_tip ;;
+    esac
+  done
 
   git -C "$wt" checkout --detach -q 2>/dev/null || return 0
-  if [ "$FORCE" = --force ] || [ "$KIND" = scout ]; then
-    git -C "$wt" branch -D -- "$branch" >/dev/null 2>&1 || true
-  else
-    fm_branch_delete_local_proven_tip "$wt" "$branch" "$tip" || true
-  fi
+  fm_branch_delete_local_proven_tip "$wt" "$branch" "$tip" || true
   if [ -n "$origin_tip" ] \
     && fm_branch_delete_remote_proven_tip "$wt" origin "$branch" "$origin_tip"; then
     echo "teardown: pruned origin/$branch"
