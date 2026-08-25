@@ -707,20 +707,23 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+# The crew's own "done: PR ... checks green" report still stands when the run
+# has no ci step to consult it against: there is no CI evidence either way, so
+# the report is the best current source.
+test_ci_ready_done_log_beats_run_without_ci_step() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
   assert_contains "$out" "state: done" "ci-ready status log -> done"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  assert_not_contains "$out" "state: working" "ci-ready is not hidden by an active run"
+  pass "ci-ready status log beats a run with no ci step"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -765,7 +768,12 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# A PR on a repo with NO workflows never gets a check result, so the ci step's
+# "no CI checks reported - still monitoring" marker means nothing verified this
+# PR. It shared a verdict with "all CI checks passed" until 2026-08, so a
+# freshly created repo's PR read as "checks green: PR ready for review" - the
+# exact condition that unlocks an autonomous merge under a yolo posture.
+test_ci_monitoring_no_checks_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -774,9 +782,55 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "a PR with no CI checks -> working"
+  assert_not_contains "$out" "state: done" "a PR with no CI checks must not read as done"
+  assert_not_contains "$out" "checks green" "a PR with no CI checks must not read as checks green"
+  assert_contains "$out" "no CI checks configured" "the detail names the real condition"
+  pass "a PR with no CI checks configured is not reported done or green"
+}
+
+# Consumer-B regression: the status-log override site tested CI_LOG_STATE
+# NEGATIVELY (anything but not-ready -> done), so splitting no-checks out of
+# green at the predicate alone still left this site reporting done. Against the
+# pre-fix code this case reads "state: done - source: status-log".
+test_ci_ready_done_log_with_no_checks_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecksready
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecksready.meta" \
+    "window=fm:fm-feat-cinochecksready" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green\n' \
+    > "$d/state/feat-cinochecksready.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksready)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cinochecksready)
+  assert_contains "$out" "state: working" "a crew-reported green with no CI checks -> working"
+  assert_not_contains "$out" "state: done" "the status-log override must not trust a no-checks PR"
+  assert_not_contains "$out" "source: status-log" "no-checks must not reach the status-log override"
+  pass "the status-log ci-ready override refuses a PR with no CI checks"
+}
+
+# The other half of the same defect class at consumer B: an unreadable ci log
+# (nm_ci_checks_state -> unknown) is an ABSENT answer, not a green one. Against
+# the pre-fix code this case reads "state: done - source: status-log" too.
+test_ci_ready_done_log_with_unknown_ci_log_stays_working() {
+  reset_fakes
+  local d; d=$(new_case ci-unknown-ready-log)
+  make_repo_on_branch "$d/wt" fm/feat-ciunknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciunknown.meta" \
+    "window=fm:fm-feat-ciunknown" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/1 checks green\n' \
+    > "$d/state/feat-ciunknown.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciunknown)"
+  # No recognized marker at all: the ci log is unreadable or says nothing known.
+  FM_FAKE_CI_LOGS="fetching check runs for head sha..."
+  local out; out=$(run_crew_state "$d" feat-ciunknown)
+  assert_contains "$out" "state: working" "an unreadable ci log -> working"
+  assert_not_contains "$out" "state: done" "an unreadable ci log must not read as done"
+  assert_not_contains "$out" "source: status-log" "unknown must not reach the status-log override"
+  pass "an unreadable ci log no longer falls through to done"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -2242,10 +2296,12 @@ test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_beats_run_without_ci_step
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_stays_working
+test_ci_ready_done_log_with_no_checks_stays_working
+test_ci_ready_done_log_with_unknown_ci_log_stays_working
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
