@@ -7,6 +7,9 @@
 # abort, see its "Fix 1" header comment). Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
+# fm_nm_run_binds_worktree is the entry point callers want for a whole `axi
+# status` run object; fm_nm_head_matches_worktree is the single-head primitive
+# it and the coarse runs-list path are both built on.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -58,6 +61,7 @@ fm_nm_field() {  # <toon-output> <key>
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject
+#   - unresolvable commit (not in this worktree's object store): cannot bind; reject
 #   - equal commits (short or full SHA): match
 #   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
 #     the same history advanced the run tip past local HEAD)
@@ -70,4 +74,32 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# 0 if the run described by `axi status` output $2 binds to worktree $1's code
+# identity. Reads TWO independent heads and lets either carry a positive verdict,
+# because the run's own top-level head alone is not a reliable binding:
+#
+#   - branch_sync.pipeline.submitted_head - the worktree commit the run was
+#     SUBMITTED from. This is the field that actually answers "is this run mine",
+#     and it does not move while the pipeline works.
+#   - the top-level head field - the PIPELINE's current head. It advances with
+#     every pipeline fix commit, and those commits live in no-mistakes' own repo,
+#     never in the crew worktree, so once a run starts fixing this head is
+#     routinely UNRESOLVABLE here and binds nothing. Kept as the fallback signal
+#     for a run object that carries no branch_sync block.
+#
+# Trying both is what stops a live run from silently failing attribution and
+# letting a caller fall back onto an older, superseded run for the same branch.
+# Verified against no-mistakes v1.46.0 - see the "Run attribution heads" section
+# of docs/verification/supervision.md for the captured output.
+fm_nm_run_binds_worktree() {  # <worktree> <axi-status-output>
+  local wt=$1 out=$2 submitted head
+  [ -n "$out" ] || return 1
+  submitted=$(fm_nm_strip_quotes "$(fm_nm_field "$out" submitted_head)")
+  if [ -n "$submitted" ] && fm_nm_head_matches_worktree "$wt" "$submitted"; then
+    return 0
+  fi
+  head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  fm_nm_head_matches_worktree "$wt" "$head"
 }

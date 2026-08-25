@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, semantic busy state, run attribution, turn-end, watcher-continuity, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -203,6 +203,55 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+```
+
+## Run attribution heads
+
+[`bin/fm-nm-run-lib.sh`](../../bin/fm-nm-run-lib.sh) binds a no-mistakes run to a worktree on two independent heads and lets either carry a positive verdict.
+This section records the no-mistakes output that makes the second head necessary, captured on 2026-08-14 against `no-mistakes version v1.46.0 (20892e6)`.
+
+A branch carrying a live run and an older superseded one reports both:
+
+```sh
+no-mistakes runs --limit 60
+```
+
+```
+  running      fm/spawn-noremote-g2 bb41ea9b  2026-08-14 12:33
+  failed       fm/spawn-noremote-g2 de91af51  2026-08-14 10:38
+```
+
+The crew worktree's HEAD was the head of the older row, and the live run's head did not exist in that worktree at all:
+
+```sh
+git rev-parse HEAD                          # de91af5179f296f12a6f99f0c082bdca9db59fb7
+git rev-parse --verify 'bb41ea9b^{commit}'  # fatal: Needed a single revision
+```
+
+A run's top-level `head` is the pipeline's own head, and it advances with every pipeline fix commit.
+Those commits live in no-mistakes' repository rather than the crew worktree, so once a run reaches its fixing steps that head is routinely unresolvable in the worktree and can bind nothing.
+`no-mistakes axi status` in the same worktree returned the live run alongside the field that does bind:
+
+```
+run:
+  id: "01M00473HD3KXXT1B3RPVVTVDC"
+  branch: fm/spawn-noremote-g2
+  status: running
+  head: bb41ea9b
+branch_sync:
+  pipeline:
+    submitted_head: de91af5179f296f12a6f99f0c082bdca9db59fb7
+    current_head: bb41ea9b
+```
+
+`branch_sync.pipeline.submitted_head` is the worktree commit the run was submitted from, and it does not move while the pipeline works, so it answers whether a run belongs to this worktree for the whole life of that run.
+Binding on the top-level head alone rejected the crew's own live run, which is what allowed a reader to walk past it to the superseded `failed` row for the same branch and report dead work as the crew's current state.
+
+Deterministic entry points:
+
+```sh
+tests/fm-crew-state.test.sh
+tests/fm-teardown.test.sh
 ```
 
 ## Turn-end guard

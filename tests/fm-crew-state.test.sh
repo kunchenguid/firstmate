@@ -170,8 +170,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_PIPELINE_HEAD=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_PIPELINE_HEAD
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -200,6 +201,42 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
+EOF
+}
+
+# A live run that has already made pipeline fix commits, in the shape no-mistakes
+# actually emits for one (captured from a live v1.46.0 run - see the "Run
+# attribution heads" section of docs/verification/supervision.md). The
+# distinguishing property, and the whole reason this fixture exists: the
+# top-level `head` is the PIPELINE's
+# head, which lives only in no-mistakes' own repo and CANNOT be resolved in the
+# crew worktree, while branch_sync.pipeline.submitted_head is the crew commit the
+# run was submitted from. Binding on head alone rejects the crew's own live run.
+run_fixing_pipeline_head_unresolvable() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  head: ${FM_FAKE_PIPELINE_HEAD:-bb41ea9b}
+  findings: "1 awaiting, 1 info"
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,4
+    rebase,completed,0,705
+    review,fixing,2,1178291
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: ${FM_FAKE_RUN_HEAD:-abc1234}
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    phase: pre_push
+    submitted_head: ${FM_FAKE_RUN_HEAD:-abc1234}
+    current_head: ${FM_FAKE_PIPELINE_HEAD:-bb41ea9b}
 EOF
 }
 
@@ -1389,6 +1426,132 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# --- superseded-vs-current run resolution (2026-08-14 false-failure defect) ---
+#
+# Observed live: branch fm/spawn-noremote-g2 had TWO runs - a live one at 12:33
+# and one abandoned at 10:38 after a push failure. The live run's head was a
+# pipeline commit absent from the crew worktree so it could not be bound, and the
+# abandoned run still sat exactly on the worktree HEAD, so the reader walked past
+# the live run and reported `state: failed` for an actively validating crew.
+# fm-inactive-reconcile.sh then reported the same failure, not independently but
+# because fm-crew-state.sh is its sole current-state source.
+#
+# (1) the live run must win over the superseded one.
+test_live_run_wins_over_superseded_failed_run() {
+  reset_fakes
+  local d head short out
+  d=$(new_case live-vs-superseded)
+  make_repo_on_branch "$d/wt" fm/spawn-noremote-g2
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/g2.meta" "window=fm:fm-g2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The pipeline head is unresolvable here, exactly as the live one was.
+  FM_FAKE_PIPELINE_HEAD=bb41ea9b
+  export FM_FAKE_PIPELINE_HEAD
+  git -C "$d/wt" rev-parse --verify "$FM_FAKE_PIPELINE_HEAD^{commit}" >/dev/null 2>&1 \
+    && fail "fixture invalid: the pipeline head must be unresolvable in the crew worktree"
+  FM_FAKE_RUN_HEAD="$head"
+  FM_FAKE_AXI_STATUS="$(run_fixing_pipeline_head_unresolvable fm/spawn-noremote-g2)"
+  # Both runs, newest-first, as `no-mistakes runs` listed them.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/spawn-noremote-g2 ${FM_FAKE_PIPELINE_HEAD}  2026-08-14 12:33
+  failed     fm/spawn-noremote-g2 ${short}  2026-08-14 10:38
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" g2
+  out=$(run_crew_state "$d" g2)
+  assert_contains "$out" "state: working" "the live run must supply the state"
+  assert_contains "$out" "source: run-step" "the live run is attributed via submitted_head"
+  assert_not_contains "$out" "state: failed" "the superseded failed run must never be reported"
+  pass "a live run whose pipeline head is unresolvable wins over a superseded failed run"
+}
+
+# (2) a branch whose ONLY run failed still reports failed. The distinction being
+# fixed is superseded versus current, never failed versus running, so the coarse
+# path must keep reporting a genuine lone failure.
+test_branch_with_only_failed_run_still_reports_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case only-failed-run)
+  make_repo_on_branch "$d/wt" fm/feat-onlyfailed
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/onlyfailed.meta" "window=fm:fm-onlyfailed" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # Repo-wide answer is another crew's run, so resolution goes through the list.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-14 12:41
+  failed     fm/feat-onlyfailed ${short}  2026-08-14 10:38
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" onlyfailed
+  out=$(run_crew_state "$d" onlyfailed)
+  assert_contains "$out" "state: failed" "a genuine lone failed run must still report failed"
+  assert_contains "$out" "source: run-step" "a genuine lone failed run stays run-step sourced"
+  pass "a branch whose only run failed still reports failed"
+}
+
+# (3) genuine ambiguity reports unknown. The branch's current run cannot be bound
+# to this code, while a superseded older run can. Reporting the older run's state
+# is the defect; falling through to the pane/log is equally a guess, because a
+# validating crew's own pane is legitimately idle and its log still carries a
+# pre-validation line. Only unknown is honest.
+test_superseded_bindable_run_reports_unknown() {
+  reset_fakes
+  local d short out
+  d=$(new_case superseded-ambiguous)
+  make_repo_on_branch "$d/wt" fm/feat-ambig
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ambig.meta" "window=fm:fm-ambig" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # A stale pre-validation terminal line, the kind a fall-through would trust.
+  printf 'done: implemented, ready to validate\n' > "$d/state/ambig.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-ambig cafed00d  2026-08-14 12:33
+  failed     fm/feat-ambig ${short}  2026-08-14 10:38
+EOF
+)"
+  git -C "$d/wt" rev-parse --verify 'cafed00d^{commit}' >/dev/null 2>&1 \
+    && fail "fixture invalid: the newer run's head must be unresolvable here"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" ambig
+  out=$(run_crew_state "$d" ambig)
+  assert_contains "$out" "state: unknown" "unbindable current run over a bindable superseded one -> unknown"
+  assert_not_contains "$out" "state: failed" "the superseded run must not supply the state"
+  assert_not_contains "$out" "state: done" "the stale status log must not stand in for the run either"
+  assert_not_contains "$out" "source: run-step" "no run step was resolved, so the source must not claim one"
+  pass "a superseded-only match reports unknown rather than guessing"
+}
+
+# The complement: a newest row that cannot be bound and NO older row that can is
+# not ambiguous, it is simply no attributable run - the existing pane/log
+# fall-through must survive, so the fix does not turn every unbound row into unknown.
+test_unbindable_newest_row_without_older_match_falls_back() {
+  reset_fakes
+  local d out
+  d=$(new_case unbindable-only)
+  make_repo_on_branch "$d/wt" fm/feat-unbound
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unbound.meta" "window=fm:fm-unbound" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/unbound.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/feat-unbound cafed00d  2026-08-14 12:33
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" unbound
+  out=$(run_crew_state "$d" unbound)
+  assert_not_contains "$out" "source: run-step" "an unbindable row must not be attributed"
+  assert_contains "$out" "source: status-log" "no bindable run at all still falls through"
+  assert_contains "$out" "state: working" "the fall-through answer is unchanged"
+  pass "an unbindable newest row with no older match still falls through to pane/log"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1461,5 +1624,9 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_live_run_wins_over_superseded_failed_run
+test_branch_with_only_failed_run_still_reports_failed
+test_superseded_bindable_run_reports_unknown
+test_unbindable_newest_row_without_older_match_falls_back
 
 echo "all fm-crew-state tests passed"

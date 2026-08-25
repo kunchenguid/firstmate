@@ -31,10 +31,16 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      A run matches when one of its heads equals the worktree HEAD, or the
+#      worktree HEAD is an ancestor of it (pipeline fix commits advanced the run
+#      on the same line of history). Local work that advanced past the run head,
+#      or diverged from it, invalidates attribution.
+#      Which heads count is owned by fm_nm_run_binds_worktree in
+#      bin/fm-nm-run-lib.sh: a run's top-level head is the PIPELINE's head and is
+#      routinely unresolvable here, so submitted_head carries the binding.
+#      When only a SUPERSEDED run for this branch binds - the branch's newest run
+#      cannot be bound while an older one can - the answer is unknown, never the
+#      superseded run's state and never a pane/log answer standing in for it.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -88,6 +94,12 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+# Reserved COARSE_STATUS value meaning "the branch's current run could not be
+# bound to this worktree's code while an older, superseded run could" - the
+# ambiguity that must report unknown rather than a guess. It contains spaces, and
+# a runs-list status is parsed as one whitespace-delimited word, so no real status
+# can ever collide with it.
+FM_COARSE_SUPERSEDED='superseded by an unmatched newer run'
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
@@ -380,11 +392,24 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now.
+#
+# The list is newest-first, so for one branch ONLY its topmost row can be the
+# current run; every older row for that branch is superseded by definition.
+# Echoes that newest row's status word (running/completed/cancelled/failed) when
+# it binds to this worktree's code, $FM_COARSE_SUPERSEDED when it does not bind
+# while an older row for the same branch does, and empty when the branch has no
+# row within FM_CREW_STATE_RUNS_LIMIT rows or no row binds at all.
+#
+# Walking PAST a non-binding newest row to an older one was the 2026-08-14
+# false-failure defect: a live run's short sha is a pipeline commit absent from
+# the crew worktree, so the newest row could not bind, and the abandoned earlier
+# run one row down still sat exactly on the worktree HEAD - so an actively
+# validating crew was reported `failed`. A superseded row must never supply the
+# state, and preferring the older row over an honest `unknown` is what turned a
+# missing answer into a confidently wrong one.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha newest_seen=0 older_binds=0
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -397,16 +422,25 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
+    [ "$br" = "$branch" ] || continue
+    if [ "$newest_seen" = 0 ]; then
+      # The branch's current run. Same code-identity rule as axi status.
+      newest_seen=1
+      if nm_coarse_head_matches_worktree "$sha"; then
+        printf '%s' "$st"
+        return 0
       fi
-      printf '%s' "$st"
-      return 0
+      continue
+    fi
+    # An older row for the same branch: only ever consulted to tell an honest
+    # ambiguity ("a bindable answer exists but it is superseded") apart from
+    # having no answer at all. Its status is deliberately never reported.
+    if nm_coarse_head_matches_worktree "$sha"; then
+      older_binds=1
+      break
     fi
   done <<< "$out"
+  [ "$older_binds" = 1 ] && printf '%s' "$FM_COARSE_SUPERSEDED"
   return 0
 }
 
@@ -414,13 +448,13 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
-  run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+# 0 if the active axi-status run binds to this worktree's code identity. Branch
+# match is a precondition (caller). Rule owned by fm_nm_run_binds_worktree in
+# bin/fm-nm-run-lib.sh, which reads the run's submitted_head as well as its
+# top-level head - a fixing run's top-level head is a pipeline commit this
+# worktree cannot resolve, so head alone would reject the crew's own live run.
+nm_run_binds_worktree() {
+  fm_nm_run_binds_worktree "$WT" "$RUN_OUT"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
@@ -443,7 +477,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_binds_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
@@ -483,6 +517,16 @@ if [ "$HAVE_RUN" = 1 ]; then
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      # Ambiguous by construction: the only run this crew's code binds to is one
+      # a newer run already superseded, and that newer run cannot be bound here.
+      # Emitted right here as unknown/none - no source established a state.
+      # Falling through to the pane/log fallback instead would be just as much a
+      # guess: the crew pane of a validating crew is legitimately idle, so the
+      # fallback would report whatever terminal line the log last happened to
+      # carry, and a confident wrong verdict is the expensive failure mode.
+      "$FM_COARSE_SUPERSEDED")
+        emit unknown none "cannot match this code to the branch's current run; not reporting a superseded one"
+        ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -565,9 +609,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
+  # An unknown run state is deliberately excluded: it establishes nothing the log
+  # could have been superseded BY, so claiming supersession there would be the
+  # same unevidenced confidence this reader exists to avoid.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_STATE" != parked ] && [ "$RUN_STATE" != unknown ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else

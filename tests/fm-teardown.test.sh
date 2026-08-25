@@ -2024,6 +2024,37 @@ gate: review
 EOF
 }
 
+# The same parked payload as above, but in the shape no-mistakes emits once a run
+# has already made pipeline fix commits: the top-level `head` is the PIPELINE's
+# head, which lives only in no-mistakes' own repo and cannot be resolved in the
+# crew worktree, while branch_sync.pipeline.submitted_head is the crew commit the
+# run was submitted from. Binding on the top-level head alone would refuse to
+# recognise the task's OWN parked run here and orphan it. See the "Run attribution
+# heads" section of docs/verification/supervision.md for the captured output.
+parked_axi_status_pipeline_head_toon() {  # <branch> <submitted-head> <pipeline-head> [run-id]
+  cat <<EOF
+run:
+  id: "${4:-01RUN}"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "$3"
+  pr: ""
+  findings: none
+gate: review
+branch_sync:
+  state: pipeline_owned
+  local:
+    branch: $1
+    head: "$2"
+    clean: true
+  pipeline:
+    run: "${4:-01RUN}"
+    submitted_head: "$2"
+    current_head: "$3"
+EOF
+}
+
 running_axi_status_toon() {  # <branch> <head> [run-id]
   cat <<EOF
 run:
@@ -2068,6 +2099,57 @@ test_parked_own_run_is_aborted_before_teardown() {
   assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
     "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
+}
+
+# The false-negative half of the 2026-08-14 attribution defect. fm-crew-state.sh
+# lost a live run and reported a superseded one; teardown loses the SAME run in the
+# other direction, silently declining to abort a parked run it does own and leaving
+# it holding a gate slot with no worker left to answer it. One rule owner
+# (fm_nm_run_binds_worktree), so both callers are constrained by both cases.
+test_parked_own_run_with_unresolvable_pipeline_head_is_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-pipeline-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  # Fixture validity: the top-level head this run reports must genuinely not
+  # resolve here, or the case would pass for the wrong reason.
+  if git -C "$case_dir/wt" rev-parse --verify 'bb41ea9b^{commit}' >/dev/null 2>&1; then
+    fail "parked-run-pipeline-head: fixture pipeline head unexpectedly resolves in the worktree"
+  fi
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_pipeline_head_toon fm/task-x1 "$head" bb41ea9b)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-pipeline-head: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-pipeline-head: teardown left its own parked run orphaned because the pipeline head did not resolve"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-pipeline-head: teardown did not target the task's own run id"
+  pass "a task's own parked run is still aborted when only its submitted head resolves here"
+}
+
+# The complement, guarding against fixing the above by binding on the branch
+# alone: a parked run on OUR branch whose neither head belongs to this worktree
+# (a rewritten or foreign tip) is still not ours to abort.
+test_parked_run_on_own_branch_with_foreign_code_is_never_aborted() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-foreign-code)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_pipeline_head_toon fm/task-x1 cafed00d bb41ea9b)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-foreign-code: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-foreign-code: teardown aborted a run whose code identity is not this worktree's"
+  pass "a same-branch parked run with no matching head is still not aborted (branch alone never binds)"
 }
 
 test_mismatched_run_after_abort_refuses_unconfirmed() {
@@ -2633,6 +2715,8 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_parked_own_run_with_unresolvable_pipeline_head_is_aborted
+test_parked_run_on_own_branch_with_foreign_code_is_never_aborted
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
