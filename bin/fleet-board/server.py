@@ -13,7 +13,6 @@ import argparse
 import copy
 import fcntl
 import hashlib
-import http.client
 import json
 import os
 import pathlib
@@ -52,6 +51,8 @@ SLUG = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 MAX_ACTION_BYTES = 8_192
 MAX_REQUEST_BYTES = MAX_ACTION_BYTES * 6 + 2_048
 MAX_HEALTH_BYTES = 4_096
+MAX_HEALTH_HEADER_BYTES = 16_384
+MAX_ACTION_STATUS_IDS = 100
 DEFAULT_SNAPSHOT_STDOUT_BYTES = 32 * 1_024 * 1_024
 DEFAULT_SNAPSHOT_STDERR_BYTES = 64 * 1_024
 MAX_CONFIGURED_SNAPSHOT_BYTES = 256 * 1_024 * 1_024
@@ -76,6 +77,15 @@ def compact(value: Any, limit: int = 240) -> str | None:
     if not text:
         return None
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def stored_request_matches(path: pathlib.Path, request_id: str) -> bool:
+    try:
+        with path.open("r", encoding="utf-8") as note:
+            header = note.read(2_048).split("\n--\n", 1)[0]
+    except (OSError, UnicodeDecodeError):
+        return False
+    return f"\nrequest_id={request_id}\n" in f"\n{header}\n"
 
 
 def configured_byte_limit(name: str, default: int) -> int:
@@ -873,7 +883,7 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if self.reject_foreign_host():
             return
-        if self.path != "/api/v1/actions":
+        if self.path not in {"/api/v1/actions", "/api/v1/action-status"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         origin = self.headers.get("Origin")
@@ -893,14 +903,46 @@ class FleetBoardHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self.rfile.read(length))
-            result = self.queue_action(payload)
+            result = (
+                self.queue_action(payload)
+                if self.path == "/api/v1/actions"
+                else self.action_status(payload)
+            )
         except (json.JSONDecodeError, UnicodeDecodeError):
             self.json_response(HTTPStatus.BAD_REQUEST, {"error": "Action body must be valid JSON"})
             return
         except BoardError as error:
             self.json_response(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
-        self.json_response(HTTPStatus.ACCEPTED, result)
+        self.json_response(
+            HTTPStatus.ACCEPTED if self.path == "/api/v1/actions" else HTTPStatus.OK,
+            result,
+        )
+
+    def action_status(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("request_ids"), list):
+            raise BoardError("Action status body must contain request_ids")
+        request_ids = payload["request_ids"]
+        if len(request_ids) > MAX_ACTION_STATUS_IDS:
+            raise BoardError("Too many action identities requested")
+        inbox = pathlib.Path(
+            os.environ.get("FM_STATE_OVERRIDE", str(self.server.home / "state"))
+        ) / "inbox"
+        statuses: dict[str, str] = {}
+        for request_id in request_ids:
+            if not isinstance(request_id, str) or not SLUG.fullmatch(request_id):
+                raise BoardError("Request id is invalid")
+            if request_id in statuses:
+                continue
+            pending = inbox / f"request-{request_id}.note"
+            handled = inbox / "handled" / f"request-{request_id}.note"
+            if stored_request_matches(handled, request_id):
+                statuses[request_id] = "handled"
+            elif stored_request_matches(pending, request_id):
+                statuses[request_id] = "pending"
+            else:
+                statuses[request_id] = "absent"
+        return {"schema": "fm-fleet-board-action-status.v1", "statuses": statuses}
 
     def queue_action(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -1085,49 +1127,66 @@ def health(runtime: dict[str, Any], timeout: float = 0.8) -> dict[str, Any] | No
     port = runtime.get("port")
     if not isinstance(port, int):
         return None
-    result: list[dict[str, Any]] = []
-    transport: list[socket.socket] = []
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    deadline = time.monotonic() + timeout
+    connection: socket.socket | None = None
 
-    def probe() -> None:
-        try:
-            connection.request("GET", "/healthz", headers={"Host": f"127.0.0.1:{port}"})
-            if connection.sock is not None:
-                transport.append(connection.sock)
-            response = connection.getresponse()
-            if response.status != HTTPStatus.OK:
-                return
-            body = response.read(MAX_HEALTH_BYTES + 1)
-            if len(body) > MAX_HEALTH_BYTES:
-                return
-            value = json.loads(body)
-        except (
-            OSError,
-            UnicodeDecodeError,
-            http.client.HTTPException,
-            json.JSONDecodeError,
+    def remaining() -> float:
+        return max(0.001, deadline - time.monotonic())
+
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=remaining())
+        connection.settimeout(remaining())
+        connection.sendall(
+            f"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n".encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            if time.monotonic() >= deadline or len(response) >= MAX_HEALTH_HEADER_BYTES:
+                return None
+            connection.settimeout(remaining())
+            chunk = connection.recv(min(4_096, MAX_HEALTH_HEADER_BYTES - len(response)))
+            if not chunk:
+                return None
+            response += chunk
+        raw_headers, body = response.split(b"\r\n\r\n", 1)
+        lines = raw_headers.split(b"\r\n")
+        status = lines[0].split(b" ", 2)
+        if (
+            len(status) < 2
+            or status[0] not in {b"HTTP/1.0", b"HTTP/1.1"}
+            or status[1] != b"200"
         ):
-            return
-        finally:
+            return None
+        headers: dict[bytes, list[bytes]] = {}
+        for line in lines[1:]:
+            name, separator, value = line.partition(b":")
+            if not separator:
+                return None
+            headers.setdefault(name.strip().lower(), []).append(value.strip())
+        lengths = headers.get(b"content-length", [])
+        if len(lengths) != 1 or b"transfer-encoding" in headers:
+            return None
+        try:
+            length = int(lengths[0])
+        except ValueError:
+            return None
+        if length < 0 or length > MAX_HEALTH_BYTES:
+            return None
+        while len(body) < length:
+            if time.monotonic() >= deadline:
+                return None
+            connection.settimeout(remaining())
+            chunk = connection.recv(min(4_096, length - len(body)))
+            if not chunk:
+                return None
+            body += chunk
+        value = json.loads(body[:length])
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if connection is not None:
             connection.close()
-        if isinstance(value, dict) and value.get("instance") == runtime.get("instance"):
-            result.append(value)
-
-    worker = threading.Thread(target=probe, daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        active_socket = transport[0] if transport else connection.sock
-        if active_socket is not None:
-            try:
-                active_socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-        # Socket timeouts reset after every byte. Shutdown enforces the total
-        # deadline, and this join proves no health reader survives the caller.
-        worker.join()
-        connection.close()
-    return result[0] if result else None
+    return value if isinstance(value, dict) and value.get("instance") == runtime.get("instance") else None
 
 
 def process_exists(pid: Any) -> bool:

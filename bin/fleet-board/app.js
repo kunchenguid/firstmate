@@ -6,6 +6,7 @@ const {
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  clearHandledActionOperations,
   dialogDraftFingerprint,
   draftIsAvailable,
   normalizeActionText,
@@ -14,6 +15,8 @@ const {
   restoreActionOperations,
   serializeActionOperations,
   shouldAnnounceLoadFailure,
+  submittedRequestIds,
+  syncStoredActionOperations,
   updateLiveStatus,
   updateValue,
 } = globalThis.FleetBoardState;
@@ -595,6 +598,26 @@ async function sendAction(card, action, text, requestId, decisionKey) {
   return payload;
 }
 
+async function clearAcknowledgedActions() {
+  const requestIds = submittedRequestIds(state.drafts);
+  if (!requestIds.length) return false;
+  try {
+    const response = await fetch("/api/v1/action-status", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Firstmate-CSRF": state.csrf,
+      },
+      body: JSON.stringify({ request_ids: requestIds }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.schema !== "fm-fleet-board-action-status.v1") return false;
+    return clearHandledActionOperations(state.pending, state.drafts, payload.statuses);
+  } catch {
+    return false;
+  }
+}
+
 function showToast(message, kind = "success") {
   document.querySelector(".toast")?.remove();
   const toast = node("div", "toast", message);
@@ -623,6 +646,7 @@ async function loadBoard(force = false) {
     configureActionStorage(payload.actions.operation_scope, payload.actions.max_text_bytes);
     state.board = payload;
     state.csrf = payload.actions.csrf_token;
+    await clearAcknowledgedActions();
     const previousSelectedKey = state.selectedKey;
     const reconciled = reconcileBoardState(
       state.pending,
@@ -673,6 +697,22 @@ elements.dialog.addEventListener("click", (event) => {
 });
 elements.needsYouSignal.addEventListener("click", () => {
   document.querySelector('[data-lane="needs_you"]')?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+});
+window.addEventListener("storage", (event) => {
+  if (!state.operationStorageKey || event.key !== state.operationStorageKey) return;
+  if (event.storageArea && event.storageArea !== localStorage) return;
+  state.drafts = syncStoredActionOperations(state.drafts, event.newValue, state.maxActionBytes);
+  state.pending.clear();
+  if (!state.board) return;
+  const reconciled = reconcileBoardState(
+    state.pending,
+    state.drafts,
+    state.selectedKey,
+    state.board.cards
+  );
+  state.selectedKey = reconciled.selectedKey;
+  renderBoard();
+  if (reconciled.selectedCard && elements.dialog.open) openCard(reconciled.selectedCard.key);
 });
 
 loadBoard();

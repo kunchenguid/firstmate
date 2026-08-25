@@ -400,6 +400,24 @@ printf '%s' "$response" | jq -e '.queued == true and .duplicate == true' >/dev/n
   || fail "deduplicated action reached the inbox more than once"
 pass "captain actions require same-origin CSRF proof and queue exactly once"
 
+mkdir -p "$HOME_ROOT/state/inbox/handled"
+printf 'id=request-status-pending\nrequest_id=status-pending\n--\npending\n' \
+  > "$HOME_ROOT/state/inbox/request-status-pending.note"
+printf 'id=request-status-handled\nrequest_id=status-handled\n--\nhandled\n' \
+  > "$HOME_ROOT/state/inbox/handled/request-status-handled.note"
+status_payload='{"request_ids":["status-pending","status-handled","status-absent"]}'
+response=$(curl -fsS -H "X-Firstmate-CSRF: $csrf" -H "Origin: ${url%/}" \
+  -H 'Content-Type: application/json' -d "$status_payload" "${url}api/v1/action-status") \
+  || fail "action acknowledgement status was unavailable"
+printf '%s' "$response" | jq -e '
+  .schema == "fm-fleet-board-action-status.v1"
+  and .statuses == {
+    "status-pending":"pending",
+    "status-handled":"handled",
+    "status-absent":"absent"
+  }' >/dev/null || fail "action acknowledgement states were not canonical"
+pass "the board reports durable inbox acknowledgement without exposing note content"
+
 kill "$SERVER_PID" 2>/dev/null || fail "could not stop the server for durable retry verification"
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=''
@@ -1036,6 +1054,7 @@ const context = vm.createContext({
     setItem() {},
   },
   window: {
+    addEventListener() {},
     setInterval() { return 0; },
     setTimeout() { return 0; },
   },
@@ -1060,6 +1079,7 @@ const {
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  clearHandledActionOperations,
   dialogDraftFingerprint,
   normalizeActionText,
   reconcileBoardState,
@@ -1068,6 +1088,8 @@ const {
   restoreActionOperations,
   serializeActionOperations,
   shouldAnnounceLoadFailure,
+  submittedRequestIds,
+  syncStoredActionOperations,
   updateLiveStatus,
   updateValue,
 } = globalThis.FleetBoardState;
@@ -1185,6 +1207,74 @@ if (recordAcceptedAction(
   true
 )) process.exit(1);
 if (handledPending.size !== 0 || handledOperations.size !== 0) process.exit(1);
+const detailKey = "primary:primary:detail-task";
+const detailCard = {
+  ...clone(card),
+  key: detailKey,
+  decisions: [],
+  actions: { answer: false, request_details: true },
+};
+const detailOperations = new Map([[detailKey, {
+  action: "request_details",
+  text: "Show the latest evidence.",
+  decisionKey: null,
+  requestId: "request-details-submitted",
+  attempted: true,
+  inFlight: false,
+}]]);
+const detailPending = new Map();
+if (!recordAcceptedAction(
+  detailOperations,
+  detailPending,
+  detailKey,
+  cardFingerprint(detailCard),
+  detailCard
+)) process.exit(1);
+if (submittedRequestIds(detailOperations).join(",") !== "request-details-submitted") process.exit(1);
+if (!clearHandledActionOperations(
+  detailPending,
+  detailOperations,
+  { "request-details-submitted": "handled" }
+)) process.exit(1);
+if (detailPending.size !== 0 || detailOperations.size !== 0) process.exit(1);
+
+const localDraftKey = "primary:primary:local-draft";
+const localTab = new Map([
+  [detailKey, {
+    action: "request_details",
+    text: "Local unsent text",
+    decisionKey: null,
+    requestId: null,
+    attempted: false,
+    inFlight: false,
+  }],
+  [localDraftKey, {
+    action: "request_details",
+    text: "Keep this independent local draft.",
+    decisionKey: null,
+    requestId: null,
+    attempted: false,
+    inFlight: false,
+  }],
+]);
+const remoteTab = new Map([[detailKey, {
+  action: "request_details",
+  text: "Submitted from another tab.",
+  decisionKey: null,
+  requestId: "request-other-tab",
+  attempted: true,
+  inFlight: false,
+  submitted: true,
+  fingerprint: cardFingerprint(detailCard),
+}]]);
+const synchronized = syncStoredActionOperations(
+  localTab,
+  serializeActionOperations(remoteTab, 8192),
+  8192
+);
+if (synchronized.get(detailKey)?.requestId !== "request-other-tab") process.exit(1);
+if (synchronized.get(localDraftKey)?.text !== "Keep this independent local draft.") process.exit(1);
+if (syncStoredActionOperations(synchronized, null, 8192).has(detailKey)) process.exit(1);
 if (restoreActionOperations("not json", 8192).size !== 0) process.exit(1);
 if (actionTextError("😀".repeat(2048), 8192) !== null) process.exit(1);
 if (!actionTextError("😀".repeat(2049), 8192)) process.exit(1);

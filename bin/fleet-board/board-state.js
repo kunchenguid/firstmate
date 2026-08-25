@@ -194,6 +194,33 @@ function restoreActionOperations(serialized, maxBytes) {
   return drafts;
 }
 
+function submittedRequestIds(drafts) {
+  return [...drafts.values()]
+    .filter((draft) => draft?.submitted === true && OPERATION_ID.test(draft.requestId || ""))
+    .map((draft) => draft.requestId);
+}
+
+function clearHandledActionOperations(pending, drafts, statuses) {
+  let changed = false;
+  for (const [cardKey, draft] of drafts) {
+    if (draft?.submitted !== true || statuses?.[draft.requestId] !== "handled") continue;
+    drafts.delete(cardKey);
+    pending.delete(cardKey);
+    changed = true;
+  }
+  return changed;
+}
+
+function syncStoredActionOperations(current, serialized, maxBytes) {
+  const stored = restoreActionOperations(serialized, maxBytes);
+  for (const [cardKey, draft] of current) {
+    if ((!draft?.attempted || draft.inFlight === true) && !stored.has(cardKey)) {
+      stored.set(cardKey, draft);
+    }
+  }
+  return stored;
+}
+
 function applyActionObservation(board, result) {
   if (!board || result?.observation !== "stale-last-good") return board;
   return {
@@ -236,6 +263,7 @@ globalThis.FleetBoardState = Object.freeze({
   applyActionObservation,
   beginAction,
   cardFingerprint,
+  clearHandledActionOperations,
   dialogDraftFingerprint,
   draftIsAvailable,
   normalizeActionText,
@@ -245,6 +273,8 @@ globalThis.FleetBoardState = Object.freeze({
   restoreActionOperations,
   serializeActionOperations,
   shouldAnnounceLoadFailure,
+  submittedRequestIds,
+  syncStoredActionOperations,
   updateLiveStatus,
   updateValue,
 });
