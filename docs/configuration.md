@@ -161,7 +161,7 @@ Shared captain preferences that apply across secondmate domains live only in the
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
-Two consumers read it mechanically so a recorded directive is applied rather than merely printed: `bin/fm-brief.sh` copies a `## Standing tooling` section into every crewmate ship and scout brief, and `bin/fm-wake-drain.sh` prints up to three matching learnings lines under a `blocked:` or `needs-decision:` wake annotation.
+Two consumers read it mechanically so a recorded directive is applied rather than merely printed: `bin/fm-brief.sh` copies a `## Standing tooling` section into every crewmate ship and scout brief, and `bin/fm-wake-drain.sh` prints up to three matching learnings lines under a wake annotation whose latest event verb is `blocked` or `needs-decision` (keyed forms included).
 Each script's header owns the exact matching and placement rules.
 There is no shared learnings file by captain decision.
 
