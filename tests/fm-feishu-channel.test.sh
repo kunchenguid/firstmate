@@ -1106,17 +1106,27 @@ BRIDGE_LIFECYCLE_LOG="$BRIDGE_FIXTURE/lifecycle.log"
 BRIDGE_RECOVERY_ATTEMPTS="$BRIDGE_FIXTURE/recovery-attempts.log"
 BRIDGE_RECOVERY_FAILURES="$BRIDGE_FIXTURE/recovery-failures"
 BRIDGE_RECOVERY_HOLD_MS="$BRIDGE_FIXTURE/recovery-hold-ms"
+BRIDGE_RECOVERY_UNCLEAN_DEATHS="$BRIDGE_FIXTURE/recovery-unclean-deaths"
 BRIDGE_RECOVERY_SENDS="$BRIDGE_FIXTURE/recovery-sends.log"
 : > "$BRIDGE_RECOVERY_ATTEMPTS"
 : > "$BRIDGE_RECOVERY_SENDS"
 printf '0\n' > "$BRIDGE_RECOVERY_FAILURES"
 printf '0\n' > "$BRIDGE_RECOVERY_HOLD_MS"
+printf '0\n' > "$BRIDGE_RECOVERY_UNCLEAN_DEATHS"
 mkdir -p "$BRIDGE_SESSION"
 printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$BRIDGE_SESSION" > "$BRIDGE_SESSION_FILE"
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" <<'JS'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { claimNextOutbound, convergeConfiguredSession, readActiveBinding, receiptOutbound } from "./fm-feishu-state.mjs";
+const readStartToken = (pid) => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
+  } catch { return ""; }
+};
 const action = process.argv[2];
 let body = "";
 process.stdin.setEncoding("utf8");
@@ -1148,14 +1158,18 @@ process.stdin.on("end", async () => {
     const currentOwnerPath = `${process.env.FM_HOME}/state/feishu/transport/owner.json`;
     if (existsSync(currentOwnerPath)) {
       const currentOwner = JSON.parse(readFileSync(currentOwnerPath, "utf8"));
-      process.stdout.write(`${JSON.stringify({
-        status: "owner-active",
-        ownerPid: currentOwner.pid,
-        ownerNonce: currentOwner.nonce,
-        ownerProcessStartToken: currentOwner.process_start_token,
-        configFileIdentity: currentOwner.config_file_identity,
-      })}\n`);
-      return;
+      const incumbentToken = readStartToken(currentOwner.pid);
+      if (/^[0-9]+$/.test(incumbentToken) && incumbentToken === currentOwner.process_start_token) {
+        process.stdout.write(`${JSON.stringify({
+          status: "owner-active",
+          ownerPid: currentOwner.pid,
+          ownerNonce: currentOwner.nonce,
+          ownerProcessStartToken: currentOwner.process_start_token,
+          configFileIdentity: currentOwner.config_file_identity,
+        })}\n`);
+        return;
+      }
+      rmSync(currentOwnerPath);
     }
   }
   const transportDir = `${process.env.FM_HOME}/state/feishu/transport`;
@@ -1168,8 +1182,53 @@ process.stdin.on("end", async () => {
     writeFileSync(owner, `${binding.binding_id}\n`);
     appendFileSync(process.env.BRIDGE_TRANSPORT_LOG, `start generation=${binding.generation}\n`);
   }
-  const parentStat = readFileSync(`/proc/${process.ppid}/stat`, "utf8");
-  const processStartToken = parentStat.slice(parentStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+  const parentStartToken = readStartToken(process.ppid);
+  const uncleanDeaths = action === "recover" ? Number(readFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, "utf8")) : 0;
+  if (uncleanDeaths > 0) {
+    writeFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, `${uncleanDeaths - 1}\n`);
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 500)"], { stdio: "ignore" });
+    let childStartToken = "";
+    for (let poll = 0; poll < 100 && !childStartToken; poll += 1) {
+      childStartToken = readStartToken(child.pid);
+      if (!childStartToken) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const uncleanNonce = createHash("sha256").update(`${action}:${Date.now()}:${process.pid}:unclean`).digest("hex").slice(0, 48);
+    writeFileSync(`${transportDir}/owner.json`, `${JSON.stringify({
+      schema: "fm-feishu-transport-owner.v1",
+      pid: child.pid,
+      nonce: uncleanNonce,
+      module_file: `${process.env.FM_ROOT_OVERRIDE}/bin/fm-feishu-transport.mjs`,
+      home_realpath: process.env.FM_HOME,
+      process_start_token: childStartToken,
+      config_file_identity: "1:2:3:4",
+      started_at: new Date().toISOString(),
+    })}\n`);
+    writeFileSync(`${transportDir}/health.json`, `${JSON.stringify({
+      schema: "fm-feishu-transport-health.v2",
+      phase: "starting",
+      healthy: false,
+      owner_pid: child.pid,
+      owner_nonce: uncleanNonce,
+      owner_process_start_token: childStartToken,
+      binding_id: binding.binding_id,
+      binding_generation: binding.generation,
+      reconnects: 0,
+      last_connected_at: null,
+      last_identity_verified_at: null,
+      last_error_type: null,
+      recovery_class: null,
+      updated_at: new Date().toISOString(),
+    })}\n`);
+    process.stdout.write(`${JSON.stringify({
+      status: "started",
+      ownerPid: child.pid,
+      ownerNonce: uncleanNonce,
+      ownerProcessStartToken: childStartToken,
+      configFileIdentity: "1:2:3:4",
+    })}\n`);
+    return;
+  }
+  const processStartToken = parentStartToken;
   const nonce = createHash("sha256").update(`${action}:${Date.now()}:${process.pid}`).digest("hex").slice(0, 48);
   writeFileSync(`${transportDir}/owner.json`, `${JSON.stringify({
     schema: "fm-feishu-transport-owner.v1",
@@ -1241,6 +1300,7 @@ BRIDGE_LIFECYCLE_LOG="$BRIDGE_LIFECYCLE_LOG" \
 BRIDGE_RECOVERY_ATTEMPTS="$BRIDGE_RECOVERY_ATTEMPTS" \
 BRIDGE_RECOVERY_FAILURES="$BRIDGE_RECOVERY_FAILURES" \
 BRIDGE_RECOVERY_HOLD_MS="$BRIDGE_RECOVERY_HOLD_MS" \
+BRIDGE_RECOVERY_UNCLEAN_DEATHS="$BRIDGE_RECOVERY_UNCLEAN_DEATHS" \
 BRIDGE_RECOVERY_SENDS="$BRIDGE_RECOVERY_SENDS" \
 BRIDGE_TRANSPORT_LOG="$BRIDGE_TRANSPORT_LOG" \
 BRIDGE_STATE="$BRIDGE_FIXTURE/bin/fm-feishu-state.mjs" \
@@ -1456,6 +1516,38 @@ assert.equal(feishuState.readActiveBinding(process.env.FM_HOME).generation, gene
 const recoverySends = readFileSync(process.env.BRIDGE_RECOVERY_SENDS, "utf8").trim().split("\n").filter(Boolean);
 assert.deepEqual(recoverySends, [pendingRecoveryOutbox.chunks[0].idempotency_key], "pending outbound was not delivered exactly once with its stable UUID after health recovery");
 assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).outbound_pending, 0, "recovered pending outbound did not publish its receipt");
+
+const ownerIncarnationAlive = (owner) => {
+  try {
+    const stat = readFileSync(`/proc/${owner.pid}/stat`, "utf8");
+    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") && suffix[19] === owner.process_start_token;
+  } catch { return false; }
+};
+writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "0\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "0\n");
+writeFileSync(process.env.BRIDGE_RECOVERY_UNCLEAN_DEATHS, "1\n");
+const uncleanAttemptsBefore = recoveryAttemptTimes().length;
+const uncleanPriorOwner = terminateFixtureTransport("sdk-long-connection-failed", "retryable");
+await waitFor(() => recoveryAttemptTimes().length === uncleanAttemptsBefore + 1, "unclean replacement death scenario did not start its first replacement");
+await waitFor(() => existsSync(`${initialPaths.transport}/owner.json`), "unclean replacement did not publish its exact owner record before first healthy state");
+const doomedReplacement = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+assert.notEqual(doomedReplacement.nonce, uncleanPriorOwner.nonce, "unclean replacement reused the exited owner incarnation");
+assert.notEqual(doomedReplacement.pid, process.pid, "unclean replacement owner was not a dedicated transport process");
+await waitFor(() => !ownerIncarnationAlive(doomedReplacement), "unclean replacement transport never terminated before first healthy state");
+assert(existsSync(`${initialPaths.transport}/owner.json`), "unclean replacement death did not leave its exact stale owner record behind");
+assert.equal(JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8")).nonce, doomedReplacement.nonce, "unclean replacement death changed the stale owner record identity");
+assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy, false, "unclean replacement death still advertised dispatchable transport");
+await waitFor(
+  () => feishuState.publicStatusSummary(process.env.FM_HOME).transport_healthy && recoveryAttemptTimes().length === uncleanAttemptsBefore + 2,
+  "lingering exact owner record from an unclean replacement death wedged automatic recovery",
+);
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert.equal(recoveryAttemptTimes().length, uncleanAttemptsBefore + 2, "recovery after an unclean replacement death spawned duplicate transports");
+const uncleanRecoveredOwner = JSON.parse(readFileSync(`${initialPaths.transport}/owner.json`, "utf8"));
+assert.notEqual(uncleanRecoveredOwner.nonce, doomedReplacement.nonce, "recovery after an unclean replacement death kept the stale owner incarnation");
+assert.equal(uncleanRecoveredOwner.config_file_identity, uncleanPriorOwner.config_file_identity, "recovery after an unclean replacement death changed configured identity");
+assert.equal(feishuState.publicStatusSummary(process.env.FM_HOME).outbound_pending, 0, "recovery after an unclean replacement death changed durable pending outbound");
 
 writeFileSync(process.env.BRIDGE_RECOVERY_FAILURES, "99\n");
 writeFileSync(process.env.BRIDGE_RECOVERY_HOLD_MS, "0\n");

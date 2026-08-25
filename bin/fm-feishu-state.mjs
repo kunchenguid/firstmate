@@ -3267,14 +3267,13 @@ export function readTransportHealth(home) {
   return health;
 }
 
-function readProcessStartToken(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-    return /^[0-9]+$/.test(suffix[19] ?? "") ? suffix[19] : "";
-  } catch {
-    return "";
-  }
+export function transportOwnerIncarnationIsLive(owner) {
+  if (!owner || !pidAlive(owner.pid)) return false;
+  let stat;
+  try { stat = readFileSync(`/proc/${owner.pid}/stat`, "utf8"); }
+  catch { return false; }
+  const suffix = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+  return suffix[0] !== "Z" && /^[0-9]+$/.test(suffix[19] ?? "") && suffix[19] === owner.process_start_token;
 }
 
 export function transportHealthAllowsDispatch(home, binding) {
@@ -3284,7 +3283,7 @@ export function transportHealthAllowsDispatch(home, binding) {
   if (!health || !owner || health.phase !== "healthy" || health.healthy !== true) return false;
   if (health.binding_id !== binding.binding_id || health.binding_generation !== binding.generation) return false;
   if (owner.home_realpath !== paths.home || owner.pid !== health.owner_pid || owner.nonce !== health.owner_nonce || owner.process_start_token !== health.owner_process_start_token) return false;
-  return pidAlive(owner.pid) && readProcessStartToken(owner.pid) === owner.process_start_token;
+  return transportOwnerIncarnationIsLive(owner);
 }
 
 export function statusSummary(home) {

@@ -72,6 +72,7 @@ The process-recovery fixture starts from the production failure shape: the initi
 It first proves that transient SDK reconnect keeps the original owner incarnation and starts no replacement.
 It then removes only the terminated owner while preserving the exact binding, live Pi owner, and pending outbound identity, injects three retryable lifecycle failures, and proves four serialized attempts with exponential delay capped at the configured test ceiling despite pump ticks running faster than each attempt.
 The successful replacement preserves the binding generation and configuration identity, publishes a different owner incarnation, becomes dispatchable only after identity-verified health, and delivers the pending chunk exactly once with its original UUID.
+A further case terminates the replacement itself before first healthy state and leaves its exact owner record behind, proving the lingering stale incarnation is deferred as retryable, retired by the next strict recovery, and replaced exactly once without duplicate transports.
 Separate cases prove session-lock loss cancels the retry loop, a terminal authentication health class starts no recovery, and the local diagnostic contains no private identity or credential.
 
 The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-check`, `bin/fm-feishu-lifecycle.mjs reconcile|recover`, the real pairing and binding state owner, verified process-owner stop, and the mocked official SDK boundary.

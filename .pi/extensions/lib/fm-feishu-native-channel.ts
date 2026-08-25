@@ -37,6 +37,7 @@ import {
   repairInboundLedgers,
   repairOutboundState,
   transportHealthAllowsDispatch,
+  transportOwnerIncarnationIsLive,
   type BindingRecord,
   type InboundEvent,
 } from "../../../bin/fm-feishu-state.mjs";
@@ -417,7 +418,7 @@ function deferProcessRecovery(runtime: ActiveRuntime): void {
   runtime.recoveryOwner = null;
   if (!runtime.recoveryWarningNotified) {
     runtime.recoveryWarningNotified = true;
-    runtime.ctx.ui.notify("Feishu transport process exited unexpectedly; durable work remains pending while bounded automatic recovery continues.", "warning");
+    runtime.ctx.ui.notify("Feishu transport is unhealthy; durable work remains pending while bounded automatic recovery continues.", "warning");
   }
   updateStatus(runtime);
 }
@@ -462,14 +463,19 @@ function observeProcessRecovery(runtime: ActiveRuntime): void {
     return;
   }
   if (runtime.recoveryOwner) {
+    let ownerRecord: Record<string, unknown> | undefined;
     let owner: TransportOwnerFence | undefined;
-    try { owner = transportOwnerFence(readTransportOwner(fmHome)); }
+    try {
+      ownerRecord = readTransportOwner(fmHome);
+      owner = transportOwnerFence(ownerRecord);
+    }
     catch {
       terminalProcessRecovery(runtime, "owner-state-corruption");
       return;
     }
-    if (sameTransportOwner(owner, runtime.recoveryOwner)) return;
-    if (owner) {
+    const expectedOwner = sameTransportOwner(owner, runtime.recoveryOwner);
+    if (expectedOwner && transportOwnerIncarnationIsLive(ownerRecord)) return;
+    if (owner && !expectedOwner) {
       terminalProcessRecovery(runtime, "ambiguous-owner-change");
       return;
     }
