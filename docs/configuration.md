@@ -133,7 +133,7 @@ An existing config may retain one legacy `model=default|<name>` field, but that 
 Select a model only for one new iDA task with `bin/fm-task-dispatch.sh remote-agent/ida <id> --instructions <private-file> --model <name>`, where `<name>` exactly matches the current SG `bytedcli --json --as user ida --region sg model list` output.
 For example, `bin/fm-task-dispatch.sh remote-agent/ida market-review --instructions data/market-review/instructions.txt --model usecase-frontend-deepseek-v4-pro` keeps the private instruction body out of argv while selecting that model for this task only.
 Omitting `--model` performs no model-catalog lookup, adds no model to the official create request, and leaves selection to the current iDA provider default.
-Empty, malformed, duplicate, unavailable-catalog, or unsupported model selections fail before task-state publication or provider creation, and the option is rejected on AIME selectors.
+Empty, malformed, duplicate, unsupported-position, unavailable-catalog, unsupported, or provider-incompatible model selections fail before task-state publication or provider creation, and the option is rejected on AIME selectors.
 The private normalized iDA task record retains the explicit selection across submission, adoption, recovery, inspection, and result readback; legacy records with no model field remain readable.
 The adapter preserves the recorded agent and explicit model identity when the official response provides no stronger identity.
 An existing config may retain one legacy `bytedcli_version` field, but it is informational only: absence, staleness, or mismatch never blocks probe, dispatch, adoption, reconciliation, process-event handling, cancellation, or retirement.
