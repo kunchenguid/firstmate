@@ -130,7 +130,8 @@ Asynchronous monitoring uses the existing process-to-event transport.
 `bin/fm-procevent-aime.sh` owns AIME event replay, session and output readback, cursor continuity, duplicate handling, provider classification, deterministic report generation, and re-arming.
 Its terminal-unavailable seam recognizes only identity-bound provider status `stopped` plus authoritative terminal replay plus unavailable bounded output readback, records that as terminal failure, and stops the canonical source.
 The same adapter owns the bounded exact-generation preflight, private quarantine-before-acknowledgement order, exact queued-wake removal, and idempotent retry boundary.
-`bin/fm-procevent-ida.sh` owns iDA's durable session-marker reconciliation, single submission boundary, official session readback, normalized terminal result, report capture, acknowledgement, and re-arming.
+`bin/fm-procevent-ida.sh` owns iDA's durable session-marker reconciliation, single submission boundary, official session readback, normalized terminal result, report capture, acknowledgement, re-arming, and source-local coalescing of repeated nonterminal transient read failures.
+That coalescing compares the state-bound prior observation before stdout reaches generic capture, uses bounded exponential polling inside one waiter, and returns every first, changed, successful, ambiguous, authorization-related, submission-uncertain, or terminal observation through the unchanged durable transport immediately.
 An ambiguous iDA submission or read times out into identity reconciliation before any retry; a missing, duplicate, or truncated match never silently creates another session.
 The generic runner remains transport only and wakes Firstmate through the existing durable check path.
 No local LLM Scout is required for monitoring, readback, or report wrapping.

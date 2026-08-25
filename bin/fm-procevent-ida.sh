@@ -21,6 +21,16 @@
 # Provider responses are reduced to fm-ida-observation.v1 before stdout reaches
 # process-event capture; raw MCP, SSE, message payloads, credentials, and prompt
 # bytes are never captured.
+#
+# After the first applied nonterminal transient read failure, `source` keeps
+# semantically identical retries inside this adapter and polls with bounded
+# exponential backoff. A changed observation returns immediately through the
+# ordinary capture, publication, automatic-application, and acknowledgement
+# path. The durable prior observation makes restart converge without rewriting
+# or discarding any captured generation or queued wake.
+# The retry delay defaults to 5000 ms, doubles to a 60000 ms cap, and is tuned
+# only through FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS and
+# FM_IDA_TRANSIENT_BACKOFF_MAX_MS.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,10 +54,18 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 IDA_PAGE_SIZE=${FM_IDA_SESSION_PAGE_SIZE:-100}
 IDA_WAIT_TIMEOUT_MS=${FM_IDA_DEEP_RESEARCH_TIMEOUT_MS:-900000}
 IDA_MARKER_SCAN_GRACE_SECONDS=300
+IDA_TRANSIENT_BACKOFF_INITIAL_MS=${FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS:-5000}
+IDA_TRANSIENT_BACKOFF_MAX_MS=${FM_IDA_TRANSIENT_BACKOFF_MAX_MS:-60000}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-case "$IDA_PAGE_SIZE:$IDA_WAIT_TIMEOUT_MS:$IDA_MARKER_SCAN_GRACE_SECONDS" in *[!0-9:]*|0:*|*:0:*|*:0|*::*) die "iDA bounds must be positive integers" ;; esac
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+for ida_bound in "$IDA_PAGE_SIZE" "$IDA_WAIT_TIMEOUT_MS" "$IDA_MARKER_SCAN_GRACE_SECONDS" \
+    "$IDA_TRANSIENT_BACKOFF_INITIAL_MS" "$IDA_TRANSIENT_BACKOFF_MAX_MS"; do
+  case "$ida_bound" in ''|*[!0-9]*|0) die "iDA bounds must be positive integers" ;; esac
+done
+[ "$IDA_TRANSIENT_BACKOFF_INITIAL_MS" -le "$IDA_TRANSIENT_BACKOFF_MAX_MS" ] \
+  || die "iDA transient backoff initial milliseconds exceed the maximum"
+[ "$IDA_TRANSIENT_BACKOFF_MAX_MS" -le 3600000 ] || die "iDA transient backoff exceeds one hour"
 
 temp_root() {
   local root
@@ -289,6 +307,78 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   fi
 )
 
+transient_observation_repeatable() { # <observation>
+  jq -e '
+    .terminal == false
+    and .ambiguous == false
+    and .result_availability == "error"
+    and .answer == null
+    and (.error_class == "provider-error"
+      or .error_class == "timeout"
+      or .error_class == "unavailable"
+      or .error_class == "rate-limited")
+  ' "$1" >/dev/null 2>&1
+}
+
+observations_semantically_equal() { # <older> <newer>
+  jq -s -e '((.[0] | del(.observed_at)) == (.[1] | del(.observed_at)))' "$1" "$2" >/dev/null 2>&1
+}
+
+state_semantic_signature() { # <state-file>
+  jq -cS '{task_id,provider,phase,outcome,error_class,provider_checkpoint,result_availability,provider_state}' "$1"
+}
+
+durable_transient_matches() { # <id> <observation>
+  local id=$1 observation=$2 task_dir previous
+  case "$REMOTE_STATE_PHASE" in result-unavailable|submission-not-started) ;; *) return 1 ;; esac
+  transient_observation_repeatable "$observation" || return 1
+  previous=$REMOTE_STATE_RESULT_PATH
+  task_dir=$(fm_remote_task_dir "$id") || return 1
+  case "$previous" in "$task_dir"/artifacts/*-observation.json) ;; *) return 1 ;; esac
+  fm_remote_private_file_safe "$previous" || return 1
+  fm_ida_observation_validate "$previous" "$id" "$IDA_STATE_MARKER" || return 1
+  transient_observation_repeatable "$previous" || return 1
+  observations_semantically_equal "$previous" "$observation"
+}
+
+sleep_milliseconds() { # <positive-ms>
+  local seconds
+  printf -v seconds '%s.%03d' "$(( $1 / 1000 ))" "$(( $1 % 1000 ))"
+  sleep "$seconds"
+}
+
+source_observe_with_backoff() ( # <id>
+  local id=$1 root current previous state_signature next_signature delay
+  root=$(temp_root); current="$root/current.json"; previous="$root/previous.json"
+  trap 'rm -rf -- "$root"' EXIT
+  observe_or_submit "$id" true >"$current"
+  fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  if ! durable_transient_matches "$id" "$current"; then cat "$current"; return; fi
+  cp "$current" "$previous" || die "cannot stage iDA transient observation"
+  state_signature=$(state_semantic_signature "$REMOTE_STATE_FILE") || die "cannot identify iDA transient state"
+  delay=$IDA_TRANSIENT_BACKOFF_INITIAL_MS
+  while :; do
+    sleep_milliseconds "$delay"
+    observe_or_submit "$id" true >"$current"
+    fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+    next_signature=$(state_semantic_signature "$REMOTE_STATE_FILE") || die "cannot identify iDA transient state"
+    if [ "$next_signature" != "$state_signature" ] \
+        || ! transient_observation_repeatable "$current" \
+        || ! observations_semantically_equal "$previous" "$current"; then
+      cat "$current"
+      return
+    fi
+    cp "$current" "$previous" || die "cannot stage iDA transient observation"
+    if [ "$delay" -lt "$IDA_TRANSIENT_BACKOFF_MAX_MS" ]; then
+      if [ "$delay" -gt "$((IDA_TRANSIENT_BACKOFF_MAX_MS / 2))" ]; then
+        delay=$IDA_TRANSIENT_BACKOFF_MAX_MS
+      else
+        delay=$((delay * 2))
+      fi
+    fi
+  done
+)
+
 write_report() { # <id> <observation> <outcome>
   local id=$1 observation=$2 outcome=$3 report answer availability class
   report=$(fm_remote_report_path "$id") || return 1
@@ -400,7 +490,7 @@ cmd_autohandle() {
 
 case "${1-}" in
   arm) shift; cmd_arm "$@" ;;
-  source) shift; [ "$#" -eq 1 ] || usage; observe_or_submit "$1" true ;;
+  source) shift; [ "$#" -eq 1 ] || usage; source_observe_with_backoff "$1" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; observe_or_submit "$1" false ;;
   handle) shift; cmd_handle "$@" ;;
   autohandle) shift; cmd_autohandle "$@" ;;

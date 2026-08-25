@@ -83,6 +83,8 @@ set -u
 log=${FM_IDA_FAKE_LOG:?}
 sessions=${FM_IDA_FAKE_SESSIONS:?}
 mode=${FM_IDA_FAKE_MODE:-success}
+[ -z "${FM_IDA_FAKE_MODE_FILE:-}" ] || [ ! -f "$FM_IDA_FAKE_MODE_FILE" ] \
+  || mode=$(sed -n '1p' "$FM_IDA_FAKE_MODE_FILE")
 session=${FM_IDA_FAKE_SESSION_ID:?}
 remote_task=${FM_IDA_FAKE_TASK_ID:?}
 printf 'argv:%s\n' "$*" >>"$log"
@@ -163,6 +165,11 @@ bytedcli ida chat completion close — Options: --session-id <id>' | jq -Rs .)
     jq -cn --argjson rows "$rows" '{status:"success",data:{sessions:{sessionList:$rows,page:1,page_size:100}},error:null}'
     ;;
   *" ida --region sg session get "*)
+    case "$mode" in
+      get-provider-error) error INTERNAL_ERROR 'temporary provider read failure'; exit 1 ;;
+      get-unavailable) error HTTP_503 'service unavailable'; exit 1 ;;
+      get-auth) error AUTH_REQUIRED 'authentication required'; exit 1 ;;
+    esac
     [ "$mode" != list-unavailable ] || { error HTTP_503 'service unavailable'; exit 1; }
     row=$(head -1 "$sessions" 2>/dev/null || true); [ -n "$row" ] || { error HTTP_404 'not found'; exit 1; }
     name=$(printf '%s' "$row" | cut -f2); status=$(printf '%s' "$row" | cut -f3); marker=$(printf '%s' "$row" | cut -f4)
@@ -203,6 +210,19 @@ dispatch_ida() {
   FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
   FM_IDA_FAKE_MODE="${FM_IDA_FAKE_MODE:-success}" PATH="$fakebin:$BASE_PATH" \
     "$DISPATCH" remote-agent/ida "$id" --instructions "$home/data/$id/instructions.txt"
+}
+
+run_ida_source() {
+  local home=$1 fakebin=$2 mode_file=$3
+  shift 3
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_IDA_FAKE_LOG="$home/bytedcli.log" FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" \
+    FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
+    FM_IDA_FAKE_MODE_FILE="$mode_file" PATH="$fakebin:$BASE_PATH" "$@"
+}
+
+ida_result_count() {
+  find "$1/state/procevent-inbox" -name "$2.*.result" | wc -l | tr -d '[:space:]'
 }
 
 test_dispatch_success_and_redaction() {
@@ -340,6 +360,162 @@ test_timeout_reconciliation_and_no_duplicate() {
   [ "$creates" -eq 1 ] || fail "timeout reconciliation created a duplicate remote session"
   run_ida "$home" "$fakebin" interrupt-wait "$id" >/dev/null || true
   pass "ambiguous timeout reconciles the durable marker and adoption never creates a duplicate session"
+}
+
+test_transient_readback_coalescing_and_backoff() {
+  local home fakebin id=ida-transient source mode_file result_one runner sleep_log sleep_release
+  local results wakes artifacts revision replay tries sha marker provider staged
+  home=$(new_home transient-readback); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  source="ida-$id"; mode_file="$home/mode"; : >"$home/bytedcli.log"
+  cat >"$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -z "${FM_IDA_FAKE_SLEEP_LOG:-}" ]; then exec /bin/sleep "$@"; fi
+printf '%s\n' "$1" >>"$FM_IDA_FAKE_SLEEP_LOG"
+count=$(wc -l <"$FM_IDA_FAKE_SLEEP_LOG" | tr -d '[:space:]')
+if [ "$count" -ge "${FM_IDA_FAKE_SLEEP_BLOCK_AFTER:-1}" ]; then
+  while [ ! -e "${FM_IDA_FAKE_SLEEP_RELEASE:?}" ]; do /bin/sleep 0.01; done
+fi
+SH
+  chmod +x "$fakebin/sleep"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  marker="firstmate:$id:${sha:0:16}"
+  printf '%s\t%s\trunning\t%s\n' "$SESSION_ID" "$marker" "$marker" >"$home/sessions.tsv"
+  provider=$(jq -cn --arg marker "$marker" '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",agent_id:"9001",agent_name:"iDA Test",model:"ida-research-test",provider_status:"running"}')
+  FM_HOME="$home" bash -c '. "$1/bin/fm-remote-agent-lib.sh"; STATE="$2/state"; DATA="$2/data"; fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5"; fm_remote_meta_write "$3" ida research' _ "$ROOT" "$home" "$id" "$sha" "$provider" \
+    || fail "transient iDA state fixture failed"
+  staged="$home/state-$id.json"
+  jq '.phase="running" | .provider_checkpoint="provider-running"' "$(state_file "$home" "$id")" >"$staged"
+  chmod 0600 "$staged"; mv "$staged" "$(state_file "$home" "$id")"
+
+  printf 'get-provider-error\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "transient source arm failed"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "initial transient observation failed"
+  wait_phase "$home" "$id" result-unavailable || fail "initial transient observation was not applied"
+  result_one=$(find "$home/state/procevent-inbox" -name "$source.1.result" -print -quit)
+  [ -n "$result_one" ] || fail "initial transient observation was not durably captured"
+  [ "$(grep -c "procevent ida $source" "$home/state/.wake-queue" || true)" -eq 1 ] \
+    || fail "initial transient threshold did not publish exactly once"
+
+  sleep_log="$home/retry-sleeps"; sleep_release="$home/retry-release"
+  : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=4 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/retry.out" 2>"$home/retry.err" &
+  runner=$!
+  tries=500
+  while [ "$(wc -l <"$sleep_log" | tr -d '[:space:]')" -lt 4 ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "transient retry source did not reach bounded backoff: sleeps=$(wc -l <"$sleep_log" | tr -d '[:space:]') results=$(ida_result_count "$home" "$source")"
+  [ "$(sed -n '1p' "$sleep_log")" = 0.020 ] \
+    && [ "$(sed -n '2p' "$sleep_log")" = 0.040 ] \
+    && [ "$(sed -n '3p' "$sleep_log")" = 0.080 ] \
+    && [ "$(sed -n '4p' "$sleep_log")" = 0.080 ] \
+    || fail "transient retries did not double to and remain at the configured bound"
+  results=$(ida_result_count "$home" "$source")
+  wakes=$(grep -c "procevent ida $source" "$home/state/.wake-queue" || true)
+  artifacts=$(find "$home/state/remote-tasks/$id/artifacts" -name '*-observation.json' | wc -l | tr -d '[:space:]')
+  [ "$results:$wakes:$artifacts" = 1:1:1 ] \
+    || fail "identical transient retries grew durable state: results=$results wakes=$wakes artifacts=$artifacts"
+
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" retire "$source" >/dev/null \
+    || fail "transient retry restart cleanup failed"
+  wait "$runner" 2>/dev/null || true
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent-ida.sh" arm "$id" >/dev/null \
+    || fail "transient source restart arm failed"
+  sleep_log="$home/restart-sleeps"; sleep_release="$home/restart-release"
+  : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/restart.out" 2>"$home/restart.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "restarted transient source did not recover durable retry state"
+  results=$(ida_result_count "$home" "$source")
+  [ "$results" -eq 1 ] || fail "restart forgot the durable transient and published a duplicate"
+
+  printf 'running\n' >"$mode_file"
+  : >"$sleep_release"
+  tries=500
+  while kill -0 "$runner" 2>/dev/null && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "eventual successful observation did not reset transient backoff"
+  wait "$runner" || fail "eventual successful observation was not captured"
+  wait_phase "$home" "$id" running || fail "successful observation did not restore running state"
+  results=$(ida_result_count "$home" "$source")
+  [ "$results" -eq 2 ] || fail "successful state change was coalesced"
+
+  printf 'get-unavailable\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "materially different transient observation failed"
+  [ "$(ida_result_count "$home" "$source")" -eq 3 ] \
+    || fail "materially different error was coalesced"
+
+  sleep_log="$home/changed-error-sleeps"; sleep_release="$home/changed-error-release"
+  : >"$sleep_log"
+  printf 'get-unavailable\n' >"$mode_file"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/changed-error.out" 2>"$home/changed-error.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "materially different error fixture did not enter transient backoff"
+  printf 'get-provider-error\n' >"$mode_file"
+  : >"$sleep_release"
+  tries=500
+  while kill -0 "$runner" 2>/dev/null && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "materially different transient error remained coalesced"
+  wait "$runner" || fail "materially different transient error was not captured"
+  [ "$(ida_result_count "$home" "$source")" -eq 4 ] \
+    || fail "materially different transient error was coalesced"
+
+  printf 'get-auth\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "authorization observation failed"
+  [ "$(ida_result_count "$home" "$source")" -eq 5 ] \
+    || fail "authorization error was coalesced"
+
+  printf 'get-provider-error\n' >"$mode_file"
+  run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "post-authorization transient observation failed"
+  [ "$(ida_result_count "$home" "$source")" -eq 6 ] \
+    || fail "post-authorization state change was coalesced"
+
+  sleep_log="$home/terminal-sleeps"; sleep_release="$home/terminal-release"
+  : >"$sleep_log"
+  FM_IDA_TRANSIENT_BACKOFF_INITIAL_MS=20 FM_IDA_TRANSIENT_BACKOFF_MAX_MS=80 \
+    FM_IDA_FAKE_SLEEP_LOG="$sleep_log" FM_IDA_FAKE_SLEEP_RELEASE="$sleep_release" \
+    FM_IDA_FAKE_SLEEP_BLOCK_AFTER=1 \
+    run_ida_source "$home" "$fakebin" "$mode_file" "$ROOT/bin/fm-procevent.sh" start "$source" \
+      >"$home/terminal.out" 2>"$home/terminal.err" &
+  runner=$!
+  tries=500
+  while [ ! -s "$sleep_log" ] && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "terminal fixture did not enter transient backoff"
+  printf 'failed\n' >"$mode_file"
+  : >"$sleep_release"
+  tries=500
+  while kill -0 "$runner" 2>/dev/null && [ "$tries" -gt 0 ]; do sleep 0.02; tries=$((tries - 1)); done
+  [ "$tries" -gt 0 ] || fail "terminal observation remained behind transient coalescing"
+  wait "$runner" || fail "terminal observation was not captured"
+  wait_phase "$home" "$id" terminal-failure || fail "terminal observation was not applied"
+  [ "$(ida_result_count "$home" "$source")" -eq 7 ] \
+    || fail "terminal observation was coalesced"
+
+  revision=$(jq -r '.revision' "$(state_file "$home" "$id")")
+  replay=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent-ida.sh" handle "$id" 1 "$result_one") || fail "stale queued generation was not safely handleable"
+  assert_contains "$replay" 'duplicate=true' "stale queued generation was not idempotent"
+  [ "$(jq -r '.revision' "$(state_file "$home" "$id")")" = "$revision" ] || fail "stale queued generation rewrote current state"
+  pass "iDA coalesces identical transient readback retries with bounded backoff while state changes, terminal results, and replay bypass safely"
 }
 
 test_pre_submission_unavailable_recovers_without_duplicate() {
@@ -526,6 +702,7 @@ test_legacy_version_and_proxy_do_not_block_readiness
 test_provider_rename_and_structured_empty_result
 test_provider_states_and_zero_result
 test_timeout_reconciliation_and_no_duplicate
+test_transient_readback_coalescing_and_backoff
 test_artifact_store_idempotency
 test_abandon_after_authoritative_zero_match
 test_pre_submission_unavailable_recovers_without_duplicate
