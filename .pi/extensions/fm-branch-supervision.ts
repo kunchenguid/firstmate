@@ -39,8 +39,8 @@
 // pin a cheaper model for the branch alone with /supervision-model, which
 // picks from Pi's own catalog and persists one line under this home's
 // config/. docs/configuration.md owns that file's operator-facing schema. No
-// pin means no change at all: the branch takes Pi's own default model, the
-// same one main takes.
+// pin means no model override at all: Pi restores a reopened branch's
+// recorded model or gives a new branch the same default model main takes.
 //
 // Threat model (captain-decided): the branch's actor identity is
 // CONFUSED-AGENT-GRADE - deterministic spawnHook env injection plus a
@@ -138,8 +138,9 @@ type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 // The supervision-branch model pin, owned operator-side by
 // docs/configuration.md: one "<provider>/<model-id>" line under this home's
 // config/. An absent, unreadable, or unparseable file means no pin, which
-// keeps today's behavior exactly - the branch takes Pi's own default model,
-// the same one main takes. Only the FIRST "/" separates the two halves, so a
+// keeps today's behavior exactly - Pi restores a reopened branch's recorded
+// model or gives a new branch the same default model main takes. Only the
+// FIRST "/" separates the two halves, so a
 // provider-qualified model id such as openrouter/anthropic/claude survives.
 function readModelPin(): { provider: string; modelId: string } | null {
   let stored: string;

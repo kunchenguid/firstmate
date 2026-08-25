@@ -69,7 +69,7 @@ Every other fleet-wide or unresolvable wake - including watcher-failure alarms, 
 
 The captain accepted the normal provider prompt-caching strategy: a byte-identical branch prefix generated once per firstmate version, the same tool set in the same order on every request, and one shared `prompt_cache_key` per home for all branch sessions (set in a `before_provider_request` hook, and only for providers whose requests already carry that field); main keeps its own per-session key.
 Budget roughly 60% cache hits on a fresh branch session's first call and 95% on later calls of the persistent session; reuse is best-effort, never guaranteed.
-The branch can also run on a cheaper model than main, pinned with the Pi `/supervision-model` command; [configuration.md](configuration.md#pi-supervision-branch-model-configsupervision-branch-model) owns that pin's operator-facing schema, and with no pin the branch takes Pi's own default model exactly as before.
+The branch can also run on a cheaper model than main, pinned with the Pi `/supervision-model` command; [configuration.md](configuration.md#pi-supervision-branch-model-configsupervision-branch-model) owns that pin's operator-facing schema and unpinned behavior.
 No caching machinery beyond this exists, deliberately: any later dynamic content in the branch prefix silently removes most of the cache benefit, which is why `bin/fm-branch-prompt.sh`'s header is the contract's single owner and `tests/fm-branch-supervision.test.sh` pins the output to byte identity.
 
 ## Away mode
@@ -80,5 +80,5 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 ## Verification
 
 Portable regressions: `tests/fm-pi-branch-extension.test.sh` (dispatch, default-on eligibility, main-only classification, eligible-row claim lifecycle, partial pre-drain recheck, fallback, filter, mirror, cache key, persistence, model pin), `tests/fm-branch-supervision.test.sh` (prompt stability, store append-only, leases, guards, non-branch-home invariance), the branch-offer and heartbeat-offer tests in `tests/fm-pi-watch-extension.test.sh`, the recovery test in `tests/fm-session-start.test.sh`, and the per-actor consume regression in `tests/fm-wake-queue.test.sh`.
-Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK with no credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
+Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK with no user credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.

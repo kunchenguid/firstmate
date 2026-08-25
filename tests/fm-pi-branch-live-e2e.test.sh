@@ -7,16 +7,19 @@
 # pointer must persist on disk, and - because the isolated agent dir carries no
 # credentials and no models - the branch's first prompt must fail fast and
 # prove the never-lose-a-wake fallback to main against the real SDK. It also
-# reads the supervision-branch model pin through the REAL ModelRegistry, so a
-# pin the vendor cannot resolve is proven to refuse the build rather than
-# silently running the branch on main's model. A second probe pins the vendor
-# contract that pin rests on: an explicit model must beat the model a reopened
-# session recorded, proven against a local, never-contacted fake provider.
+# resolves the supervision-branch model pin through the branch's REAL
+# ModelRuntime, so a pin the vendor cannot resolve is proven to refuse the
+# build rather than silently running the branch on main's model. A second
+# probe pins the vendor contract that pin rests on: an explicit model must beat
+# the model a reopened session recorded, proven against a local,
+# never-contacted fake provider.
 #
-# No credentials are read and no provider call leaves the machine: the guard
-# points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
-# empty by construction. Run after every Pi upgrade and before trusting
-# refreshed per-harness evidence (docs/verification/runtime-backends.md).
+# No provider call leaves the machine. The branch probe points
+# PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
+# model resolution stays empty by construction. The precedence probe reads
+# only a local placeholder key for its never-contacted fake provider. Run after
+# every Pi upgrade and before trusting refreshed per-harness evidence
+# (docs/verification/runtime-backends.md).
 set -u
 
 if [ "${FM_PI_BRANCH_LIVE_E2E:-0}" != 1 ]; then
@@ -105,7 +108,7 @@ const modelRegistry = new ModelRegistry(
   }),
 );
 if (typeof modelRegistry.getAvailable !== "function" || typeof modelRegistry.hasConfiguredAuth !== "function") {
-  throw new Error("the real ModelRegistry no longer exposes the model surface the supervision pin reads");
+  throw new Error("the real ModelRegistry no longer exposes the model surface the supervision picker reads");
 }
 const sessionCtx = {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
@@ -158,8 +161,8 @@ if (!existsSync(`${home}/state/branch-session`)) {
   throw new Error("branch session store directory was not created");
 }
 
-// A model pin the REAL registry cannot resolve must refuse the build and
-// return the wake to main naming the pin, rather than silently running the
+// A model pin the branch's REAL runtime cannot resolve must refuse the build
+// and return the wake to main naming the pin, rather than silently running the
 // branch on whatever model main would have used.
 writeFileSync(`${home}/config/supervision-branch-model`, "openai/no-such-live-model\n");
 for (const handler of piHandlers.get("session_shutdown") ?? []) await handler({}, sessionCtx);
@@ -198,8 +201,8 @@ pass "real Pi SDK $PI_VERSION accepts the branch session construction and preser
 # Second probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin
 # would silently stop applying the first time the branch reopens. Proven with
-# a local, never-contacted fake provider so no credential is read and no
-# request leaves the machine.
+# a local, never-contacted fake provider with a placeholder key, so no request
+# leaves the machine and no user credential is read.
 modeldir="$TMP_ROOT/model-agent-dir"
 mkdir -p "$modeldir" "$TMP_ROOT/model-sessions"
 cat > "$modeldir/models.json" <<'JSON'
@@ -230,7 +233,7 @@ const runtime = await ModelRuntime.create({
 const registry = new ModelRegistry(runtime);
 await registry.refresh();
 
-// The pin resolves through the same registry calls the extension makes.
+// The candidates resolve through the same registry calls the picker makes.
 const first = registry.find("fm-live-fake", "fm-live-a");
 const second = registry.find("fm-live-fake", "fm-live-b");
 if (!first || !second) throw new Error("the real registry did not resolve the locally declared models");
