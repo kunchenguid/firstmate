@@ -30,6 +30,7 @@
 #   (u) a queue-required refusal names the exact compatible retry flags
 #   (v) a failed poll setup cannot be reported as a verified GitHub merge
 #   (w) a zero-exit queue-required refusal keeps merge semantics unchanged
+#   (x) a forge failure reaches gh-axi without a separate gh preflight
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -284,6 +285,29 @@ run_pr_merge() {
   return "$rc"
 }
 
+# A GitHub forge failure must reach gh-axi even when the separate gh executable
+# is absent, so the abstraction owns the original error and recording can retain
+# the metadata and poll state.
+run_pr_merge_without_gh() {
+  local case_dir=$1 rc no_gh_path
+  shift
+  no_gh_path="$case_dir/no-gh"
+  mirror_path_without "$no_gh_path" gh "$case_dir/fakebin"
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_GLAB_LOG="$case_dir/glab.log" \
+  FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  PATH="$no_gh_path" \
+    "$PR_MERGE" "$@"
+  rc=$?
+  return "$rc"
+}
+
 write_github_outcome() {
   local case_dir=$1 state=$2 merged=$3 queued=$4 base=$5
   printf '%s\n' \
@@ -324,7 +348,7 @@ test_merge_failure_propagates_after_recording() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
+  run_pr_merge_without_gh "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -332,6 +356,10 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "merge-fails: the failed merge should leave the poll armed"
+  grep -qxF 'pr merge 13 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "merge-fails: gh-axi was not given the first chance to report the forge failure"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 

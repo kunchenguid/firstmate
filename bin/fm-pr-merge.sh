@@ -11,14 +11,14 @@
 # After gh-axi returns success, GitHub's live state is read back and accepted
 # only when the pull request is merged or in the merge queue. gh-axi's view
 # surface does not expose isInMergeQueue, so this verification uses gh's
-# GraphQL API and requires gh on PATH. The gh-axi success output is withheld
-# until this read proves the real outcome. If the pull request remains open and
-# the base branch has an effective merge_queue rule, the refusal names the
-# queue's configured merge method and the exact -- --auto --<method> retry
-# flags. No method is selected for the caller. A gh-axi command failure keeps
-# the prior behavior of recording the PR for a later merge poll; a gh-axi
-# success records metadata only after outcome verification succeeds, so a
-# false-success response cannot make teardown treat unlanded work as landed.
+# GraphQL API after the forge command returns success.
+# The gh-axi success output is withheld until this read proves the real outcome.
+# A gh preflight is not performed.
+# gh-axi must get the first chance to report and preserve a forge failure.
+# If the pull request remains open and the base branch has an effective merge_queue rule, the refusal names the queue's configured merge method and the exact -- --auto --<method> retry flags.
+# No method is selected for the caller.
+# A gh-axi command failure keeps the prior behavior of recording the PR for a later merge poll.
+# A successful gh-axi result records metadata only after outcome verification succeeds, so a false-success response cannot make teardown treat unlanded work as landed.
 # GitLab adds no method flag at all: its merge method is the project's own
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
@@ -140,9 +140,6 @@ if [ "$PROVIDER" = gitlab ]; then
     echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
     exit 1
   fi
-elif ! command -v gh >/dev/null 2>&1; then
-  echo "error: verifying a GitHub pull request merge requires gh on PATH" >&2
-  exit 1
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
@@ -351,9 +348,7 @@ METHODS
 }
 
 record_pr_metadata() {
-  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
-    return 1
-  fi
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" || return $?
   grep -qxF "pr=$URL" "$META" || {
     echo "error: PR metadata recording failed" >&2
     return 1
@@ -391,7 +386,10 @@ case "$PROVIDER" in
     else
       merge_status=$?
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
-      record_pr_metadata || exit "$merge_status"
+      record_pr_metadata || {
+        record_status=$?
+        exit "$record_status"
+      }
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
           github_report_unmerged_outcome
@@ -401,11 +399,17 @@ case "$PROVIDER" in
     fi
     github_read_outcome || exit 1
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
-      record_pr_metadata || exit 1
+      record_pr_metadata || {
+        record_status=$?
+        exit "$record_status"
+      }
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
-      record_pr_metadata || exit 1
+      record_pr_metadata || {
+        record_status=$?
+        exit "$record_status"
+      }
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
     else
