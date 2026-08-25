@@ -15,7 +15,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install Herdr Windows preview and jq
         shell: pwsh
@@ -427,7 +427,7 @@ jobs:
 
       - name: Upload measurement and diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-herdr-spike-${{ github.run_id }}
           path: |
