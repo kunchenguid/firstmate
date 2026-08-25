@@ -50,26 +50,13 @@ export class UserMessageComponent {}
 export class ModelRuntime {
   constructor() {
     this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
-    this.authenticated = new Set(this.models.filter((model) => model.auth !== false).map((model) => model.provider));
+    this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
   }
   static async create() {
+    if (globalThis.__fmModelRuntimeError) throw new Error(globalThis.__fmModelRuntimeError);
     const runtime = new ModelRuntime();
     (globalThis.__fmModelRuntimes ??= []).push(runtime);
     return runtime;
-  }
-  registerNativeProvider(provider) {
-    this.models = this.models.filter((model) => model.provider !== provider.id);
-    this.models.push(...provider.getModels().map((model) => ({ ...model })));
-    this.authenticated.add(provider.id);
-  }
-  registerProvider(provider, config) {
-    if (config.failRegistration) throw new Error(`synthetic provider registration failure: ${provider}`);
-    this.models = this.models.filter((model) => model.provider !== provider);
-    this.models.push(...(config.models ?? []).map((model) => ({ ...model, provider })));
-    if (config.apiKey || config.authenticated) this.authenticated.add(provider);
-  }
-  async setRuntimeApiKey(provider) {
-    this.authenticated.add(provider);
   }
   getModel(provider, id) {
     return this.models.find((model) => model.provider === provider && model.id === id);
@@ -260,17 +247,13 @@ const uiPrompts = [];
 const notices = [];
 const commands = new Map();
 let mainModel = { provider: "anthropic", id: "main-model" };
-globalThis.__fmBranchStaticModels = () => registryModels.filter((model) => !model.registered).map((model) => ({ ...model }));
+globalThis.__fmBranchStaticModels = () => registryModels
+  .filter((model) => model.branchAvailable !== false)
+  .map((model) => ({ ...model }));
 const modelRegistry = {
-  getAvailable: () => registryModels.slice(),
+  getAvailable: () => registryModels.filter((model) => model.mainAvailable !== false).slice(),
   find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
-  hasConfiguredAuth: (model) => model.auth !== false,
-  getRegisteredProviderConfig: (provider) => registryModels.find((model) => model.provider === provider)?.registeredConfig,
-  getRegisteredNativeProvider: (provider) => registryModels.find((model) => model.provider === provider)?.registeredNative,
-  getProviderAuth: async (provider) => {
-    const model = registryModels.find((candidate) => candidate.provider === provider);
-    return model?.auth === false ? undefined : { auth: { apiKey: model?.runtimeApiKey ?? "stub-key" } };
-  },
+  hasConfiguredAuth: (model) => model.mainAvailable !== false,
 };
 function makeCtx(extra) {
   return {
@@ -1194,12 +1177,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 
 registryModels.push(
   { provider: "anthropic", id: "main-model" },
-  {
-    provider: "openai",
-    id: "cheap-1",
-    registered: true,
-    registeredConfig: { authenticated: true, models: [{ id: "cheap-1" }] },
-  },
+  { provider: "openai-codex", id: "cheap-oauth", authKind: "oauth" },
+  { provider: "dynamic", id: "extension-only", branchAvailable: false },
 );
 const command = commands.get("supervision-model");
 if (!command) throw new Error("the supervision-model command was not registered");
@@ -1210,23 +1189,26 @@ await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pre-pick branc
 const firstSession = globalThis.__fmSessions[0];
 if ("model" in firstSession.options) throw new Error("the branch started pinned before any pick");
 
-// The picker offers Pi's own catalog plus following main, and the captain's
-// pick is persisted as the one-line config value.
-uiSelections.push("openai/cheap-1");
+// The picker offers Pi's branch-runnable catalog plus following main, and the
+// captain's pick is persisted as the one-line config value.
+uiSelections.push("openai-codex/cheap-oauth");
 await command.handler("", makeCtx());
 const offered = uiPrompts[0];
 if (offered.options[0] !== "Follow main (anthropic/main-model)") {
   throw new Error(`the picker must offer following main first: ${JSON.stringify(offered.options)}`);
 }
-if (!offered.options.includes("openai/cheap-1") || !offered.options.includes("anthropic/main-model")) {
-  throw new Error(`the picker must offer Pi's own available models: ${JSON.stringify(offered.options)}`);
+if (!offered.options.includes("openai-codex/cheap-oauth") || !offered.options.includes("anthropic/main-model")) {
+  throw new Error(`the picker omitted a model available to the isolated branch: ${JSON.stringify(offered.options)}`);
+}
+if (offered.options.includes("dynamic/extension-only")) {
+  throw new Error(`the picker offered a main-session-only provider: ${JSON.stringify(offered.options)}`);
 }
 const pinFile = `${home}/config/supervision-branch-model`;
-if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") {
+if (readFileSync(pinFile, "utf8") !== "openai-codex/cheap-oauth\n") {
   throw new Error(`unexpected persisted pin: ${JSON.stringify(readFileSync(pinFile, "utf8"))}`);
 }
 if ((statSync(pinFile).mode & 0o777) !== 0o600) throw new Error("the pin must be written private to the operator");
-if (!notices.some((notice) => notice.message.includes("openai/cheap-1"))) {
+if (!notices.some((notice) => notice.message.includes("openai-codex/cheap-oauth"))) {
   throw new Error(`the captain was not told which model the branch now uses: ${JSON.stringify(notices)}`);
 }
 
@@ -1237,11 +1219,11 @@ await settle(() => firstSession.disposed, "live branch release after the pick");
 dispatch("signal: after the pick");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "post-pick branch build");
 const repinned = globalThis.__fmSessions[1];
-if (!repinned.options.model || repinned.options.model.id !== "cheap-1") {
+if (!repinned.options.model || repinned.options.model.id !== "cheap-oauth") {
   throw new Error(`the pick did not bind the next branch build: ${JSON.stringify(repinned.options.model)}`);
 }
-if (!repinned.options.modelRuntime?.getModel("openai", "cheap-1")) {
-  throw new Error("the branch runtime did not receive the dynamically registered chosen provider");
+if (repinned.options.model.authKind !== "oauth") {
+  throw new Error(`the branch runtime changed the stored OAuth credential semantics: ${JSON.stringify(repinned.options.model)}`);
 }
 if (!repinned.options.sessionManager.opened) throw new Error("the pick must keep the branch conversation, not start a new one");
 
@@ -1265,7 +1247,7 @@ globalThis.__fmCreateGate = new Promise((resolve) => { releaseCreate = resolve; 
 const createsBeforeRace = globalThis.__fmCreateStarted;
 dispatch("signal: model race");
 await settle(() => globalThis.__fmCreateStarted === createsBeforeRace + 1, "in-flight old-model build");
-uiSelections.push("openai/cheap-1");
+uiSelections.push("openai-codex/cheap-oauth");
 await command.handler("", makeCtx());
 releaseCreate();
 await settle(() => (globalThis.__fmSessions ?? []).length === 5, "replacement build after in-flight pick");
@@ -1274,7 +1256,7 @@ const winningBuild = globalThis.__fmSessions[4];
 if (!staleBuild.disposed || "model" in staleBuild.options) {
   throw new Error("the in-flight old-model build was adopted after the pick");
 }
-if (winningBuild.options.model?.id !== "cheap-1") {
+if (winningBuild.options.model?.id !== "cheap-oauth") {
   throw new Error(`the newest pin did not win the in-flight build race: ${JSON.stringify(winningBuild.options.model)}`);
 }
 await settle(() => (globalThis.__fmPrompts ?? []).some((prompt) => prompt.includes("signal: model race")), "raced wake prompt");
@@ -1282,20 +1264,15 @@ await settle(() => (globalThis.__fmPrompts ?? []).some((prompt) => prompt.includ
 // A cancelled picker changes nothing.
 uiSelections.push(undefined);
 await command.handler("", makeCtx());
-if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("a cancelled picker must not change the pin");
+if (readFileSync(pinFile, "utf8") !== "openai-codex/cheap-oauth\n") throw new Error("a cancelled picker must not change the pin");
 
-// If the chosen provider cannot be installed into the isolated runtime, the
-// old pin remains and no success notification is emitted.
-registryModels.push({
-  provider: "broken",
-  id: "dynamic-model",
-  registered: true,
-  registeredConfig: { failRegistration: true, models: [{ id: "dynamic-model" }] },
-});
+// If the isolated runtime cannot load, the old pin remains and no success
+// notification is emitted.
 const noticeCount = notices.length;
-uiSelections.push("broken/dynamic-model");
+globalThis.__fmModelRuntimeError = "synthetic stored-credential load failure";
 await command.handler("", makeCtx());
-if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("an unapplied model replaced the working pin");
+delete globalThis.__fmModelRuntimeError;
+if (readFileSync(pinFile, "utf8") !== "openai-codex/cheap-oauth\n") throw new Error("an unapplied model replaced the working pin");
 const newNotices = notices.slice(noticeCount);
 if (newNotices.length !== 1 || newNotices[0].type !== "error") {
   throw new Error(`an unapplied model emitted a success notification: ${JSON.stringify(newNotices)}`);
@@ -1321,17 +1298,19 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle
 const { fire, dispatch, settle, makeCtx, registryModels, mainUserMessages, home } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
-registryModels.push({ provider: "anthropic", id: "main-model" });
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  { provider: "dynamic", id: "extension-only", branchAvailable: false },
+);
 
-// A pin Pi cannot hand back is never a silent downgrade onto main's model:
-// it degrades exactly like any other unreachable branch, delivering the wake
-// to main with the reason.
-writeFileSync(`${home}/config/supervision-branch-model`, "openai/retired-model\n");
+// A pin the isolated branch runtime cannot hand back is never a silent
+// downgrade onto main's model, even when main's session knows that model.
+writeFileSync(`${home}/config/supervision-branch-model`, "dynamic/extension-only\n");
 fire("session_start", {}, makeCtx());
 dispatch("signal: unusable pin probe");
 await settle(() => mainUserMessages.length === 1, "fallback to main");
 const delivered = mainUserMessages[0].content;
-if (!delivered.includes("openai/retired-model") || !delivered.includes("supervision model pin")) {
+if (!delivered.includes("dynamic/extension-only") || !delivered.includes("supervision model pin")) {
   throw new Error(`the fallback did not name the unusable pin: ${delivered}`);
 }
 if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("an unusable pin must not build a branch session");

@@ -61,8 +61,6 @@ import {
   SessionManager,
   type AgentSession,
   type ExtensionAPI,
-  type ExtensionContext,
-  type ModelRegistry,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
@@ -133,10 +131,8 @@ function afkActive(): boolean {
   return existsSync(afkFlag);
 }
 
-// One model the registry can hand back, without importing pi-ai directly:
-// the extension only ever passes a registry-resolved model straight back to
-// createAgentSession.
-type BranchModel = NonNullable<ReturnType<ModelRegistry["find"]>>;
+// One model the runtime can hand back, without importing pi-ai directly.
+type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 
 // The supervision-branch model pin, owned operator-side by
@@ -319,46 +315,17 @@ export default function (pi: ExtensionAPI) {
   let branchChain: Promise<void> = Promise.resolve();
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
-  // Pi hands the model registry to extension handlers, not to the extension
-  // body, so the last context to arrive is kept for the wake-time branch
-  // build. session_start always fires before any wake, so a pinned home
-  // always has a registry to resolve against.
-  let modelRegistry: ModelRegistry | null = null;
   let modelSelectionRevision = 0;
 
-  function rememberModelRegistry(ctx: Pick<ExtensionContext, "modelRegistry">): void {
-    if (ctx?.modelRegistry) modelRegistry = ctx.modelRegistry;
-  }
-
-  // Resolves the pin against Pi's own catalog. A pinned model Pi cannot hand
-  // back is a refusal, not a silent downgrade: the caller turns it into the
-  // extension's ordinary fall back to main, which tells the captain what is
-  // wrong instead of quietly spending main's model in the branch.
   async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
     const label = `${pin.provider}/${pin.modelId}`;
-    if (!modelRegistry) {
-      throw new Error(`supervision model pin ${label} could not be resolved: no model registry available yet`);
-    }
-    const selected = modelRegistry.find(pin.provider, pin.modelId);
-    if (!selected) {
-      throw new Error(`supervision model pin ${label} names no model Pi knows (config/supervision-branch-model)`);
-    }
-    if (!modelRegistry.hasConfiguredAuth(selected)) {
-      throw new Error(`supervision model pin ${label} has no configured credentials (config/supervision-branch-model)`);
-    }
-
     const modelRuntime = await ModelRuntime.create();
-    const nativeProvider = modelRegistry.getRegisteredNativeProvider(pin.provider);
-    if (nativeProvider) modelRuntime.registerNativeProvider(nativeProvider);
-    const providerConfig = modelRegistry.getRegisteredProviderConfig(pin.provider);
-    if (providerConfig) modelRuntime.registerProvider(pin.provider, providerConfig);
-    const auth = await modelRegistry.getProviderAuth(pin.provider);
-    if (auth?.auth.apiKey) {
-      await modelRuntime.setRuntimeApiKey(pin.provider, auth.auth.apiKey, { allowNetwork: false });
-    }
     const model = modelRuntime.getModel(pin.provider, pin.modelId) as BranchModel | undefined;
-    if (!model || !modelRuntime.hasConfiguredAuth(pin.provider)) {
+    if (!model) {
       throw new Error(`supervision model pin ${label} is unavailable to the isolated branch runtime`);
+    }
+    if (!modelRuntime.hasConfiguredAuth(pin.provider)) {
+      throw new Error(`supervision model pin ${label} has no configured credentials in the isolated branch runtime`);
     }
     return { model, modelRuntime };
   }
@@ -837,7 +804,6 @@ ${context.command}
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
-    rememberModelRegistry(ctx);
     if (!actingAsOwner()) return;
     try {
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
@@ -854,8 +820,7 @@ ${context.command}
   // cursor, and releases the branch session; a replacement session_start
   // re-arms, and the next wake reopens the persistent branch from its
   // recorded pointer. Terminal quit simply never fires another session_start.
-  pi.on?.("session_start", (_event, ctx) => {
-    rememberModelRegistry(ctx);
+  pi.on?.("session_start", () => {
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
@@ -881,17 +846,29 @@ ${context.command}
 
   // Pi keeps /model for the captain's own conversation and exposes no hook an
   // extension can use to open that picker, so this is the smallest supported
-  // equivalent: Pi's own catalog (ctx.modelRegistry), Pi's own selector
-  // dialog, no parallel Firstmate model list.
+  // equivalent: Pi's own catalog intersected with the isolated branch
+  // runtime, Pi's own selector dialog, and no parallel Firstmate model list.
   pi.registerCommand?.("supervision-model", {
     description: "Pick the model Firstmate's Pi supervision branch uses, or follow main's.",
     handler: async (_args, ctx) => {
-      rememberModelRegistry(ctx);
       const pin = readModelPin();
       const current = pin ? `${pin.provider}/${pin.modelId}` : "follows main";
       const followMain = `Follow main${ctx.model ? ` (${modelLabel(ctx.model)})` : ""}`;
-      const choices = [followMain, ...ctx.modelRegistry.getAvailable().map(modelLabel)];
-      const picked = await ctx.ui.select(`Supervision branch model (now: ${current})`, choices);
+      let available: string[];
+      try {
+        const modelRuntime = await ModelRuntime.create();
+        available = ctx.modelRegistry
+          .getAvailable()
+          .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
+          .map(modelLabel);
+      } catch (error) {
+        ctx.ui.notify(
+          `Could not read the supervision branch models: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+        return;
+      }
+      const picked = await ctx.ui.select(`Supervision branch model (now: ${current})`, [followMain, ...available]);
       if (picked === undefined) return; // cancelled: the current choice stands
       try {
         if (picked === followMain) {
