@@ -256,7 +256,8 @@ fm_harness_windows_pid_alive() {
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   if fm_harness_platform_is_windows; then
-    fm_harness_windows_ancestry_pids
+    fm_harness_windows_ancestry_pids && return 0
+    fm_harness_env_session_pid
     return
   fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -273,7 +274,12 @@ fm_harness_ancestry_pids() {
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
-  [ "$printed" -eq 1 ]
+  [ "$printed" -eq 1 ] && return 0
+  # A walk that resolved nothing is the severed-chain case: fall back to the
+  # pid the harness published for this session rather than reporting no
+  # ancestry at all, which is what left fm-lock.sh unable to reclaim a dead
+  # owner from inside a hook.
+  fm_harness_env_session_pid
 }
 
 # Print the one pid that identifies this session when the session lock is being
@@ -307,20 +313,57 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print the session pid the harness itself published to this process, or
+# return 1.
+#
+# Claude Code exports CLAUDE_PID into the environment of every hook command and
+# tool call it runs, naming the session process. That is the harness stating its
+# own identity, so it answers the ownership question without walking the process
+# tree at all - and the walk is exactly what a severed parent chain defeats.
+#
+# On Windows the chain is severed by an ordinary registration: a hook command
+# that is anything other than a single simple command makes MSYS bash replace
+# itself for the final command, so the surviving shell is parented to an
+# already-exited fork stub and the native parent chain dead-ends at its first
+# hop. The Stop-owned auto-arm then failed its identity gate and exited inert on
+# every turn end. See docs/verification/claude-stop-autoarm-windows.md.
+#
+# Keyed on the variable being published AND naming a live verified harness
+# process, never on uname: a harness or host that does not publish it leaves
+# every caller's walk behavior exactly as it was.
+fm_harness_env_session_pid() {
+  local pid=${CLAUDE_PID:-}
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
 # lock owner sits at an unknown depth in a contiguous Claude run - it is the
 # outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# and an inner pid when a harness-named daemon parents the session.
+# A harness that publishes its own session pid answers the question directly,
+# so that pid is accepted when it is the lock holder and is a live verified
+# harness; see fm_harness_env_session_pid. A missing lock, a malformed lock, a
+# lock held by a harness outside this ancestry, or an ancestry that cannot be
+# resolved all fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  # Fast path: when the harness published this session's pid and that pid is the
+  # lock holder, ownership is settled without walking the process tree - which
+  # also spares this predicate a PowerShell CIM spawn on every Claude turn end
+  # on Windows. Anything else falls through to the unchanged walk.
+  if [ "${CLAUDE_PID:-}" = "$lock_pid" ] && fm_harness_env_session_pid >/dev/null; then
+    return 0
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

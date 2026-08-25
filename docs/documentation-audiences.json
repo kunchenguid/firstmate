@@ -361,6 +361,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/claude-stop-autoarm-windows.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
     },

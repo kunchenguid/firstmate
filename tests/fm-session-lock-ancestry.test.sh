@@ -21,6 +21,19 @@ fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
 
+# The unit layer states both platforms' reporting semantics through its fake ps,
+# so it has to reach the library's ps-based walk from any host. uname is shimmed
+# to that end: under the real uname a Windows host routes these cases into the
+# native CIM walk instead, which reads the REAL process tree and cannot see a
+# fixture at all. The end-to-end layer below deliberately keeps the real uname.
+POSIX_SHIM="$TMP_ROOT/posix-shim"
+mkdir -p "$POSIX_SHIM"
+cat > "$POSIX_SHIM/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+SH
+chmod +x "$POSIX_SHIM/uname"
+
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
 CLAUDE_VERSION_DIR="$TMP_ROOT/claude-install/share/claude/versions"
@@ -35,10 +48,13 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
-# liveness questions are decided by the process table alone.
+# liveness questions are decided by the process table alone, and the
+# harness-published session pid is pinned to FM_TEST_CLAUDE_PID - empty unless a
+# case sets it - so an ambient CLAUDE_PID from whatever harness happens to run
+# this suite can never reach the library under test.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  PATH="$fakebin:$POSIX_SHIM:$PATH" CLAUDE_PID="${FM_TEST_CLAUDE_PID:-}" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -288,11 +304,14 @@ SH
 # code.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
+  # CLAUDE_PID is cleared for the same reason lib_eval pins it: the fixture must
+  # decide identity from its own process tree, never from the harness running
+  # this suite.
   if [ -n "$daemon_bin" ]; then
-    FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 \
+    FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 CLAUDE_PID='' \
       bash -c '"$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
   else
-    FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 \
+    FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 CLAUDE_PID='' \
       bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0
@@ -354,8 +373,136 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# --- harness-published session identity --------------------------------------
+# A hook whose process-tree walk resolves nothing still has to answer "is this
+# my session's lock?". Claude Code publishes the answer as CLAUDE_PID, and that
+# is the only thing standing between a severed chain and a supervision hook that
+# exits inert on every turn end. The walk is severed for real on Windows: a hook
+# command that is not a single simple command makes MSYS bash replace itself for
+# the final command, leaving the surviving shell parented to an exited fork stub
+# (docs/verification/claude-stop-autoarm-windows.md).
+#
+# These cases run on the unit layer's shimmed-uname POSIX branch, so the contract
+# is driven identically from any host, and each case states which signal it
+# removed rather than assuming the fixture is doing anything.
+
+# A fakebin whose ps reports a walk with NO harness anywhere in it, plus three
+# fixed pids the walk never reaches: 700 and 703 are live harnesses, 701 is dead,
+# 702 is live but not a harness. FM_TEST_WALK_PPID=700 re-attaches the walk to a
+# harness for the cases that must prove the walk still wins.
+severed_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid" in
+  701) exit 1 ;;
+  700|703)
+    case "$field" in
+      comm=) printf '%s\n' claude ;;
+      args=) printf '%s\n' 'claude --resume' ;;
+      ppid=) printf '%s\n' 1 ;;
+    esac ;;
+  702)
+    case "$field" in
+      comm=) printf '%s\n' bash ;;
+      args=) printf '%s\n' 'bash -lc sleep' ;;
+      ppid=) printf '%s\n' 1 ;;
+    esac ;;
+  *)
+    case "$field" in
+      comm=) printf '%s\n' bash ;;
+      args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+      ppid=) printf '%s\n' "${FM_TEST_WALK_PPID:-1}" ;;
+    esac ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+test_published_session_pid_owns_the_lock_when_the_walk_is_severed() {
+  local dir fakebin got
+  dir="$TMP_ROOT/published-severed"
+  fakebin=$(severed_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf '700\n' > "$dir/state/.lock"
+
+  # Divergence guard: with the published pid removed, this fixture must resolve
+  # nothing at all. Without it a pass below could come from the walk and the
+  # case would be silently vacuous.
+  ! lib_eval "$fakebin" 'fm_harness_ancestry_pids' \
+    || fail "fixture is vacuous: the ancestry walk resolved a harness in the severed-chain shape"
+  ! lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "fixture is vacuous: ownership resolved with no walk and no published pid"
+
+  FM_TEST_CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a session whose walk is severed did not recognize the lock its own harness published"
+  got=$(FM_TEST_CLAUDE_PID=700 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a severed walk left no session pid for fm-lock.sh to reclaim a dead owner with"
+  [ "$got" = 700 ] || fail "severed-walk fallback resolved '$got', expected the published session pid 700"
+  pass "session-lock: a severed process-tree walk still resolves identity from the pid the harness published"
+}
+
+test_published_session_pid_is_never_taken_on_trust() {
+  local dir fakebin
+  dir="$TMP_ROOT/published-untrusted"
+  fakebin=$(severed_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  printf '701\n' > "$dir/state/.lock"
+  ! FM_TEST_CLAUDE_PID=701 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a published pid that is no longer running was accepted as the session"
+  printf '702\n' > "$dir/state/.lock"
+  ! FM_TEST_CLAUDE_PID=702 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a published pid that is live but not a harness was accepted as the session"
+  printf '703\n' > "$dir/state/.lock"
+  ! FM_TEST_CLAUDE_PID=700 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a published pid was accepted as the owner of a lock held by a different harness"
+  printf '700\n' > "$dir/state/.lock"
+  ! FM_TEST_CLAUDE_PID=abc lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a malformed published pid was not rejected"
+  pass "session-lock: a published session pid is rejected unless it is live, a verified harness, and the lock holder"
+}
+
+test_a_resolvable_walk_still_decides_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/published-walk-wins"
+  fakebin=$(severed_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf '700\n' > "$dir/state/.lock"
+
+  # The walk resolves 700 on its own here. A published pid naming a DIFFERENT
+  # live harness must not displace it, or every POSIX host would start writing a
+  # session lock the ancestry never agreed to.
+  got=$(FM_TEST_WALK_PPID=700 FM_TEST_CLAUDE_PID=703 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the resolvable walk stopped resolving once a session pid was published"
+  [ "$got" = 700 ] || fail "a published pid displaced the walk's answer: got '$got', expected 700"
+  FM_TEST_WALK_PPID=700 FM_TEST_CLAUDE_PID=703 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the walk's own harness ancestor stopped owning its lock once a session pid was published"
+
+  # The deliberate gap stays closed: a harness the walk refuses to cross to is
+  # still not this session, published pid or not.
+  printf '703\n' > "$dir/state/.lock"
+  ! FM_TEST_WALK_PPID=700 FM_TEST_CLAUDE_PID='' lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a harness outside the resolved ancestry was accepted as this session"
+  pass "session-lock: a walk that resolves on its own keeps deciding identity, gap protection included"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_published_session_pid_owns_the_lock_when_the_walk_is_severed
+test_published_session_pid_is_never_taken_on_trust
+test_a_resolvable_walk_still_decides_identity
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

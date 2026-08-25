@@ -5,8 +5,10 @@
 # registration: a fresh session with in-flight work, no watcher, and a stale
 # session lock can run fm-session-start.sh first; session start reclaims the
 # dead owner; at least two tokenless auto-arm and rewake cycles then complete
-# with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# with zero model-issued arm commands; the cooperative guard consumes no
+# forced continuation while the hook's launch is healthy; and the hook also arms
+# and reclaims a stale owner when Claude BACKGROUNDS it, which is the branch a
+# real interactive fleet session takes.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -139,6 +141,42 @@ fi
   || fail "auto-arm epoch ledger must record the rewake outcome"
 [ ! -e "$HOME_DIR/state/.claude-autoarm.lock" ] || fail "auto-arm owner lock was left behind"
 
+# Async-branch coverage. Claude Code only backgrounds an asyncRewake hook when
+# the session is interactive or reading streaming input; a plain --print session
+# runs the same hook inline instead. Production is interactive, so the phase
+# above proves the inline path and leaves the backgrounded one - the one that
+# actually fires in a fleet - untested. A --print session with stream-json input
+# reaches the backgrounded path without needing a terminal.
+# Arming is what the hook's identity gate gates, so arming is what this asserts:
+# on a severed process-tree walk the hook resolves no ancestry, treats the live
+# lock holder as a competing session, and exits 0 having armed nothing
+# (docs/verification/claude-stop-autoarm-windows.md). Rewake delivery is already
+# covered above and is not re-asserted here.
+ASYNC_HOME="$LAB/async-fmhome"
+mkdir -p "$ASYNC_HOME/state" "$ASYNC_HOME/config" "$ASYNC_HOME/data"
+printf 'project=fixture\nwindow=fixture\nbackend=tmux\n' > "$ASYNC_HOME/state/task.meta"
+printf '9999999\n' > "$ASYNC_HOME/state/.lock"
+ASYNC_PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its digest, reply with exactly CYCLE0 and stop. If a Stop hook feedback message wakes you, reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command.'
+(
+  cd "$PROJECT" || exit 1
+  printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"%s"}]}}\n' "$ASYNC_PROMPT" \
+    | FM_HOME="$ASYNC_HOME" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+      claude -p --input-format stream-json --output-format stream-json --verbose \
+        --dangerously-skip-permissions --effort low
+) > "$LAB/async.jsonl" 2>&1 || fail "Claude async-branch auto-arm session failed: $(tail -20 "$LAB/async.jsonl")"
+# The hook is backgrounded, so it can outlive the session that fired it.
+i=0
+while [ "$i" -lt 150 ] && [ ! -s "$ASYNC_HOME/state/arm-ran" ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -s "$ASYNC_HOME/state/arm-ran" ] \
+  || fail "the backgrounded asyncRewake Stop hook never armed; epoch: $(cat "$ASYNC_HOME/state/.claude-autoarm-epoch" 2>/dev/null || echo none)"
+[ -s "$ASYNC_HOME/state/.claude-autoarm-epoch" ] \
+  || fail "the backgrounded asyncRewake Stop hook armed without recording an epoch"
+[ "$(cat "$ASYNC_HOME/state/.lock" 2>/dev/null)" != 9999999 ] \
+  || fail "the backgrounded Stop hook never reclaimed the stale dead-owner lock"
+
 # Live-owner negative control: a separate supported-harness process owns a
 # second isolated home while another Stop hook fires from the same primary
 # project. The competing hook must not replace the session lock, arm, write an
@@ -161,4 +199,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, armed and reclaimed on the backgrounded asyncRewake branch, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
