@@ -803,15 +803,29 @@ FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-10}
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason permanent_marker
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <hash>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker
   # LOCAL PATCH (2026-08-19): if this hash was already capped as permanently
   # wedged, stop firing wakes for it. Pane recovery (rm-on-reset sites below)
   # clears the marker so a wedge that genuinely resolves can re-escalate if it
-  # wedges again.
-  permanent_marker="${escalation_file/.wedge-escalations-/.wedge-permanent-}"
-  if [ -e "$permanent_marker" ]; then
-    return 0
+  # wedges again. Marker is keyed on (window, hash) so a fresh stale hash in the
+  # same window can still escalate - only this exact stale hash is silenced.
+  if [ -z "$hash" ]; then
+    # Defensive fallback: without a hash, fall back to the v1 window-scoped
+    # marker name so the cap still suppresses retries for this window even if
+    # a future caller forgets to thread the hash. Trade-off: a fresh stale hash
+    # in the same window will also be suppressed (the v1 behavior). Logged so
+    # the missing-hash regression is visible.
+    triage_log "wedge_timer_check: missing hash parameter, falling back to window-scoped marker for $win"
+    permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")"
+    if [ -e "$permanent_marker" ]; then
+      return 0
+    fi
+  else
+    permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")-${hash:0:12}"
+    if [ -e "$permanent_marker" ]; then
+      return 0
+    fi
   fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
@@ -836,16 +850,26 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         # LOCAL PATCH (2026-08-19): cap reached - emit ONE terminal wake and
-        # stop. Durable STATE/.wedge-permanent-<key> marker so subsequent polls
-        # for the same hash short-circuit (see return at top of function).
+        # stop. Durable STATE/.wedge-permanent-<key>-<hash12> marker so subsequent
+        # polls for the SAME stale hash short-circuit (see return at top of
+        # function) without silencing fresh stale hashes in the same window.
+        # ORDERING INVARIANT: write the marker AFTER `wake` succeeds. If we
+        # wrote it before the wake and the script were killed (or `wake` failed
+        # non-fatally) between marker-write and wake-publish, the pane would be
+        # silently wedged forever - the marker would suppress retries for a
+        # terminal escalation that never actually surfaced. Writing last means
+        # a crash mid-flow leaves no marker, and the next poll re-enters the
+        # cap-reached branch and tries again.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
-          date +%s > "$permanent_marker"
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this hash until pane recovers; local patch 2026-08-19)"
           fm_wake_append stale "$win" "$reason" || exit 1
           rm -f "$since_file"
           clear_write_tracking "$(window_key "$win")"
-          triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS)"
+          triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
           wake "$reason"
+          if [ -n "$permanent_marker" ]; then
+            date +%s > "$permanent_marker"
+          fi
           return 0
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
@@ -891,7 +915,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-permanent-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE"/.wedge-permanent-"$key"-* "$STATE/.wedge-permanent-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -962,7 +986,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
   return 1
 }
 
@@ -985,8 +1009,11 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
-  # LOCAL PATCH (2026-08-19): clear permanent-wedge marker on full pause tracking reset.
-  rm -f "$STATE/.wedge-permanent-$key"*
+  # LOCAL PATCH (2026-08-19): clear per-hash permanent-wedge markers on full
+  # pause tracking reset. Each stale hash in this window has its own
+  # .wedge-permanent-<key>-<hash12> marker; the glob clears them all so a
+  # genuinely-resolved pane can re-escalate if it wedges again.
+  rm -f "$STATE"/.wedge-permanent-"$key"-* "$STATE/.wedge-permanent-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1992,7 +2019,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -2035,12 +2062,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi
           fi
         fi
