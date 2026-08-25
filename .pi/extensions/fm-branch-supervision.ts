@@ -361,15 +361,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Append-only merge into main. The store row is already durable when this
-  // runs; the note is a cache of it at main's tail. Only ever called while
-  // main is idle, so an append can never steer the captain's running turn:
-  // routine appends with no turn, captain-relevant triggers exactly one turn -
-  // that turn is itself the captain-visible outcome, so the captain-facing
-  // note is delivered silently (display: false) rather than printed or
-  // rendered a second time; routine notes stay rendered except an explicitly
-  // silent no-change heartbeat. The read cursor advances once the note is
-  // handed to Pi; a crash inside Pi's own delivery window leaves the outcome
-  // durable in the store, where main's fm_branch_outcomes tool still reads it.
+  // runs; the note is a cache of it at main's tail. A routine append explicitly
+  // disables turn triggering, so it never steers or opens a turn. A captain-
+  // relevant append uses a follow-up to open exactly one turn without steering;
+  // that turn is itself the captain-visible outcome, so the captain-facing note
+  // is delivered silently (display: false) rather than printed or rendered a
+  // second time. Routine notes stay rendered except an explicitly silent
+  // no-change heartbeat. The read cursor advances once the note is handed to
+  // Pi; a crash inside Pi's own delivery window leaves the outcome durable in
+  // the store, where main's fm_branch_outcomes tool still reads it.
   function sendNote(
     expectedGeneration: number,
     seq: string,
@@ -383,7 +383,7 @@ export default function (pi: ExtensionAPI) {
     if (verdict === "captain") {
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else {
-      pi.sendMessage(message, {});
+      pi.sendMessage(message, { triggerTurn: false });
     }
     return markRead(expectedGeneration, seq);
   }
@@ -404,14 +404,14 @@ export default function (pi: ExtensionAPI) {
     pendingNotes.push({ generation: expectedGeneration, seq, task, verdict, summary, silent, anchor });
   }
 
-  // Main's idle boundary: deliver queued notes, re-checking each claim against
+  // Delivery boundary: deliver queued notes, re-checking each claim against
   // the task's durable record first. A stale routine note is dropped (the
   // durable row keeps it, and fm_branch_outcomes still reads it) and a stale
   // captain-relevant one is refreshed, so a queued summary is never rendered
   // as if its claim were still true.
-  function releasePendingNotes(idleConfirmed: boolean): "released" | "blocked" | "refused" {
+  function releasePendingNotes(releaseAllowed: boolean): "released" | "blocked" | "refused" {
     while (pendingNotes.length > 0) {
-      if (!idleConfirmed || mainStreaming) return "blocked";
+      if (!releaseAllowed || mainStreaming) return "blocked";
       const note = pendingNotes[0];
       if (!actingAsOwner(note.generation)) {
         // Ownership is gone; the rows are still unread and replay at session start.

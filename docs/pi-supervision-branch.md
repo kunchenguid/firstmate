@@ -44,7 +44,8 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
-A note is only ever handed to Pi while the captain's conversation is idle; one reported mid-run is held by the extension and delivered only at `agent_settled` after `isIdle()` confirms that retries, compaction, and queued continuations are finished, so it never steers a running turn and its claim can still be re-checked first.
+A note reported after the extension observes `agent_start` is held and delivered only at `agent_settled` after `isIdle()` confirms that retries, compaction, and queued continuations are finished, so its claim can still be re-checked after that work.
+A `routine` note explicitly disables turn triggering, so it never steers and never opens a turn, while a `captain` note uses follow-up delivery to open exactly one turn without steering.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
@@ -70,7 +71,7 @@ A merged PR and a torn-down task both move the anchor; ordinary progress on the 
 A fleet-wide outcome carries no task-local claim and is never treated as stale.
 
 Both delivery paths apply it.
-The extension queues every note through one delivery boundary and re-checks it immediately before handoff, either synchronously while main remains idle or at an idle-confirmed `agent_settled` event after a running turn: a `routine` note found stale is dropped, because it is noise by definition and the durable row still holds it for `fm_branch_outcomes`, while a `captain` note found stale still opens its one turn - suppressing it could bury a real terminal result - carrying an explicit supersession marker that sends main back to the task's current state instead of the recorded claim.
+The extension queues every note through one delivery boundary and re-checks it immediately before handoff, either synchronously on the immediate path or at an idle-confirmed `agent_settled` event after an observed running turn: a `routine` note found stale is dropped, because it is noise by definition and the durable row still holds it for `fm_branch_outcomes`, while a `captain` note found stale still opens its one turn - suppressing it could bury a real terminal result - carrying an explicit supersession marker that sends main back to the task's current state instead of the recorded claim.
 The anchor read and the handoff are not atomic, so an anchor-mutating transition in that instant can still let one already-checked note through.
 This accepted residual follows the same confused-agent-grade boundary as the producer/drain residual above rather than claiming adversarial isolation, and it bounds the exposure to that instant instead of the whole captain turn that produced the reported failure.
 The locked session-start replay applies the same check to rows that never reached a handoff at all, emitting a stale row with `"superseded":true` added rather than relaying it as current; the stored line is never rewritten.
