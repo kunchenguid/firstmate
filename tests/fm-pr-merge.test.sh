@@ -36,7 +36,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-PR_MERGE="${FM_PR_MERGE_OVERRIDE:-$ROOT/bin/fm-pr-merge.sh}"
+PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 BASE_PATH=$PATH
 
@@ -472,44 +472,6 @@ test_github_closed_unqueued_outcome_omits_retry_flags() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "github-closed-unqueued: failed verification armed the merged-PR poll"
   pass "fm-pr-merge omits merge-queue retry guidance for a closed GitHub PR"
-}
-
-test_github_zero_exit_queue_required_fails_against_submitted_parent() {
-  local parent_commit parent_root parent_script parent_result parent_rc
-  if ! parent_commit=$(git rev-parse --verify HEAD^ 2>/dev/null); then
-    printf 'SKIP - submitted-parent regression: could not resolve HEAD^\n' >&2
-    return 0
-  fi
-  parent_root=$(mktemp -d "$TMP_ROOT/submitted-parent.XXXXXX") || {
-    printf 'SKIP - submitted-parent regression: could not create an extraction directory\n' >&2
-    return 0
-  }
-  if ! git archive "$parent_commit" -- bin | tar -x -C "$parent_root"; then
-    printf 'SKIP - submitted-parent regression: could not extract commit %s\n' \
-      "$parent_commit" >&2
-    return 0
-  fi
-  parent_script="$parent_root/bin/fm-pr-merge.sh"
-  if [ ! -x "$parent_script" ]; then
-    printf 'SKIP - submitted-parent regression: production script is unavailable at %s\n' \
-      "$parent_script" >&2
-    return 0
-  fi
-
-  set +e
-  parent_result=$(FM_PR_MERGE_OVERRIDE="$parent_script" \
-    FM_PR_MERGE_TEST_ONLY=github-zero-exit-queue-required \
-    "$0" 2>&1)
-  parent_rc=$?
-  set -e
-  printf '%s\n' "$parent_result" > "$parent_root/result"
-  expect_code 1 "$parent_rc" \
-    "submitted-parent regression: the old production path unexpectedly passed"
-  assert_grep 'github-zero-exit-queue-required: queue rules were not read with pagination and encoded branch path' \
-    "$parent_root/result" \
-    "submitted-parent regression: the expected pre-fix failure was not recorded"
-  printf 'expected failure - submitted-parent zero-exit regression: exit=%s\n' "$parent_rc"
-  pass "fixed zero-exit queue regression passes after submitted-parent failure"
 }
 
 test_github_queued_outcome_is_verified() {
@@ -1106,39 +1068,34 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
 
-if [ "${FM_PR_MERGE_TEST_ONLY:-}" = github-zero-exit-queue-required ]; then
-  test_github_zero_exit_queue_required_refuses_with_exact_retry
-else
-  test_github_zero_exit_queue_required_refuses_with_exact_retry
-  test_github_zero_exit_queue_required_fails_against_submitted_parent
-  test_github_closed_unqueued_outcome_omits_retry_flags
-  test_verified_merge_records_pr_and_head
-  test_merge_failure_propagates_after_recording
-  test_github_open_unqueued_outcome_refuses
-  test_github_merged_outcome_is_verified
-  test_github_verified_merge_requires_poll_recording
-  test_github_queued_outcome_is_verified
-  test_github_queue_required_refusal_names_retry_flags
-  test_extra_merge_args_forwarded
-  test_missing_meta_refuses_before_merge
-  test_malformed_url_refuses_before_merge
-  test_rejects_unsafe_url_segments_before_recording
-  test_repo_override_args_refuse_before_recording
-  test_bundled_repo_override_args_refuse_before_recording
-  test_explicit_merge_method_not_overridden
-  test_method_equals_merge_method_not_overridden
-  test_parses_pr_url_for_gh_axi
-  test_github_still_forwards_sha_arg
-  test_gitlab_url_resolves_and_merges
-  test_gitlab_host_comes_from_the_url
-  test_gitlab_imposes_no_merge_method
-  test_gitlab_extra_args_forwarded
-  test_gitlab_merge_failure_propagates
-  test_gitlab_each_condition_refuses_independently
-  test_gitlab_reports_every_failing_condition
-  test_gitlab_stale_recorded_head_is_reported
-  test_gitlab_unreadable_state_refuses
-  test_gitlab_invalid_head_refuses
-  test_gitlab_missing_tool_refuses_before_recording
-  test_gitlab_head_override_args_refuse_before_recording
-fi
+test_github_zero_exit_queue_required_refuses_with_exact_retry
+test_github_closed_unqueued_outcome_omits_retry_flags
+test_verified_merge_records_pr_and_head
+test_merge_failure_propagates_after_recording
+test_github_open_unqueued_outcome_refuses
+test_github_merged_outcome_is_verified
+test_github_verified_merge_requires_poll_recording
+test_github_queued_outcome_is_verified
+test_github_queue_required_refusal_names_retry_flags
+test_extra_merge_args_forwarded
+test_missing_meta_refuses_before_merge
+test_malformed_url_refuses_before_merge
+test_rejects_unsafe_url_segments_before_recording
+test_repo_override_args_refuse_before_recording
+test_bundled_repo_override_args_refuse_before_recording
+test_explicit_merge_method_not_overridden
+test_method_equals_merge_method_not_overridden
+test_parses_pr_url_for_gh_axi
+test_github_still_forwards_sha_arg
+test_gitlab_url_resolves_and_merges
+test_gitlab_host_comes_from_the_url
+test_gitlab_imposes_no_merge_method
+test_gitlab_extra_args_forwarded
+test_gitlab_merge_failure_propagates
+test_gitlab_each_condition_refuses_independently
+test_gitlab_reports_every_failing_condition
+test_gitlab_stale_recorded_head_is_reported
+test_gitlab_unreadable_state_refuses
+test_gitlab_invalid_head_refuses
+test_gitlab_missing_tool_refuses_before_recording
+test_gitlab_head_override_args_refuse_before_recording
