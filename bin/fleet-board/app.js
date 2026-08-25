@@ -10,7 +10,7 @@ const {
   draftIsAvailable,
   normalizeActionText,
   reconcileBoardState,
-  recordPendingAction,
+  recordAcceptedAction,
   restoreActionOperations,
   serializeActionOperations,
   shouldAnnounceLoadFailure,
@@ -41,7 +41,7 @@ const state = {
 };
 
 function persistActionOperations() {
-  if (!state.operationStorageKey) return;
+  if (!state.operationStorageKey) return false;
   try {
     const serialized = serializeActionOperations(state.drafts, state.maxActionBytes);
     if (JSON.parse(serialized).operations.length) {
@@ -49,8 +49,9 @@ function persistActionOperations() {
     } else {
       localStorage.removeItem(state.operationStorageKey);
     }
+    return true;
   } catch {
-    // Storage can be disabled or full. The durable inbox still owns server-side idempotency.
+    return false;
   }
 }
 
@@ -376,7 +377,9 @@ function openCard(key) {
   );
   renderDialogActions(card);
   const draft = state.drafts.get(card.key);
-  if (draft && draftIsAvailable(draft, card)) renderComposer(card, draft, false);
+  if (draft && !draft.submitted && draftIsAvailable(draft, card)) {
+    renderComposer(card, draft, false);
+  }
   elements.dialog.dataset.renderFingerprint = renderFingerprint;
   if (!wasOpen) {
     elements.dialog.showModal();
@@ -513,7 +516,14 @@ function renderComposer(card, draft, focus) {
     }
     const submissionFingerprint = cardFingerprint(card);
     const operation = beginAction(state.drafts, card.key, () => crypto.randomUUID());
-    persistActionOperations();
+    if (!persistActionOperations()) {
+      operation.requestId = null;
+      operation.attempted = false;
+      operation.inFlight = false;
+      renderComposer(card, operation, false);
+      showToast("Browser storage is unavailable, so the instruction was not sent.", "error");
+      return;
+    }
     renderComposer(card, operation, false);
     try {
       const result = await sendAction(
@@ -536,16 +546,16 @@ function renderComposer(card, draft, focus) {
         showToast("Instruction saved, but Firstmate was not woken. Retry is safe.", "error");
         return;
       }
-      state.drafts.delete(card.key);
-      persistActionOperations();
       const currentCard = state.board.cards.find((item) => item.key === card.key);
-      recordPendingAction(
+      recordAcceptedAction(
+        state.drafts,
         state.pending,
         card.key,
-        action,
         submissionFingerprint,
-        currentCard
+        currentCard,
+        result.wake === "handled"
       );
+      persistActionOperations();
       showToast(action === "answer" ? "Answer sent to Firstmate." : "Detail request sent to Firstmate.");
       renderBoard();
       if (state.selectedKey === card.key && elements.dialog.open) openCard(card.key);

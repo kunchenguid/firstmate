@@ -1060,6 +1060,7 @@ const {
   dialogDraftFingerprint,
   normalizeActionText,
   reconcileBoardState,
+  recordAcceptedAction,
   recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
@@ -1125,6 +1126,50 @@ if (
   || !restoredOperation.attempted
   || restoredOperation.inFlight
 ) process.exit(1);
+const submittedOperations = new Map([[card.key, {
+  action: "answer",
+  text: "Keep the reversible route.",
+  decisionKey: "migration",
+  requestId: "request-submitted",
+  attempted: true,
+  inFlight: false,
+}]]);
+const submittedPending = new Map();
+if (!recordAcceptedAction(
+  submittedOperations,
+  submittedPending,
+  card.key,
+  cardFingerprint(card),
+  clone(card)
+)) process.exit(1);
+if (submittedPending.size !== 1) process.exit(1);
+const reloadedOperations = restoreActionOperations(
+  serializeActionOperations(submittedOperations, 8192),
+  8192
+);
+const reloadedPending = new Map();
+reconcileBoardState(reloadedPending, reloadedOperations, card.key, [clone(card)]);
+if (
+  reloadedPending.get(card.key)?.fingerprint !== cardFingerprint(card)
+  || reloadedOperations.get(card.key)?.requestId !== "request-submitted"
+  || reloadedOperations.get(card.key)?.submitted !== true
+) process.exit(1);
+reconcileBoardState(reloadedPending, reloadedOperations, card.key, [moved]);
+if (reloadedPending.size !== 0 || reloadedOperations.size !== 0) process.exit(1);
+const handledOperations = restoreActionOperations(
+  serializeActionOperations(submittedOperations, 8192),
+  8192
+);
+const handledPending = new Map();
+if (recordAcceptedAction(
+  handledOperations,
+  handledPending,
+  card.key,
+  cardFingerprint(card),
+  clone(card),
+  true
+)) process.exit(1);
+if (handledPending.size !== 0 || handledOperations.size !== 0) process.exit(1);
 if (restoreActionOperations("not json", 8192).size !== 0) process.exit(1);
 if (actionTextError("😀".repeat(2048), 8192) !== null) process.exit(1);
 if (!actionTextError("😀".repeat(2049), 8192)) process.exit(1);

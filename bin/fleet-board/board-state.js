@@ -67,6 +67,37 @@ function recordPendingAction(pending, cardKey, action, submissionFingerprint, cu
   return true;
 }
 
+function recordAcceptedAction(
+  drafts,
+  pending,
+  cardKey,
+  submissionFingerprint,
+  currentCard,
+  handled = false
+) {
+  const operation = drafts.get(cardKey);
+  if (
+    handled
+    || !operation
+    || !recordPendingAction(
+      pending,
+      cardKey,
+      operation.action,
+      submissionFingerprint,
+      currentCard
+    )
+  ) {
+    drafts.delete(cardKey);
+    pending.delete(cardKey);
+    return false;
+  }
+  operation.inFlight = false;
+  operation.submitted = true;
+  operation.fingerprint = submissionFingerprint;
+  drafts.set(cardKey, operation);
+  return true;
+}
+
 function updateValue(target, key, value) {
   if (target[key] === value) return false;
   target[key] = value;
@@ -94,6 +125,7 @@ function dialogDraftFingerprint(draft) {
     attempted: draft.attempted === true,
     inFlight: draft.inFlight === true,
     saved: draft.saved === true,
+    submitted: draft.submitted === true,
   };
 }
 
@@ -101,12 +133,14 @@ function serializeActionOperations(drafts, maxBytes) {
   const operations = [];
   for (const [cardKey, draft] of drafts) {
     const text = normalizeActionText(draft?.text);
+    const submitted = draft?.submitted === true;
     if (
       operations.length >= MAX_ACTION_OPERATIONS
       || typeof cardKey !== "string"
       || !draft?.attempted
       || actionTextError(text, maxBytes) !== null
       || !OPERATION_ID.test(draft.requestId || "")
+      || (submitted && (typeof draft.fingerprint !== "string" || !draft.fingerprint))
     ) continue;
     operations.push({
       cardKey,
@@ -115,6 +149,8 @@ function serializeActionOperations(drafts, maxBytes) {
       decisionKey: draft.decisionKey ?? null,
       requestId: draft.requestId,
       saved: draft.saved === true,
+      submitted,
+      fingerprint: submitted ? draft.fingerprint : null,
     });
   }
   return JSON.stringify({ schema: ACTION_OPERATIONS_SCHEMA, operations });
@@ -140,6 +176,8 @@ function restoreActionOperations(serialized, maxBytes) {
       || actionTextError(operation.text, maxBytes) !== null
       || !OPERATION_ID.test(operation.requestId || "")
       || (operation.decisionKey !== null && !OPERATION_ID.test(operation.decisionKey || ""))
+      || (operation.submitted === true
+        && (typeof operation.fingerprint !== "string" || !operation.fingerprint))
     ) continue;
     drafts.set(operation.cardKey, {
       action: operation.action,
@@ -149,6 +187,8 @@ function restoreActionOperations(serialized, maxBytes) {
       attempted: true,
       inFlight: false,
       saved: operation.saved === true,
+      submitted: operation.submitted === true,
+      fingerprint: operation.submitted === true ? operation.fingerprint : null,
     });
   }
   return drafts;
@@ -173,7 +213,17 @@ function reconcileBoardState(pending, drafts, selectedKey, cards) {
     if (!card || instruction.fingerprint !== cardFingerprint(card)) pending.delete(key);
   }
   for (const [key, draft] of drafts) {
-    if (!draftIsAvailable(draft, cardsByKey.get(key))) drafts.delete(key);
+    const card = cardsByKey.get(key);
+    if (draft.submitted === true) {
+      if (!card || draft.fingerprint !== cardFingerprint(card)) {
+        drafts.delete(key);
+        pending.delete(key);
+      } else {
+        pending.set(key, { action: draft.action, fingerprint: draft.fingerprint });
+      }
+    } else if (!draftIsAvailable(draft, card)) {
+      drafts.delete(key);
+    }
   }
   const selectedCard = selectedKey ? cardsByKey.get(selectedKey) || null : null;
   return { selectedKey: selectedCard ? selectedKey : null, selectedCard };
@@ -189,6 +239,7 @@ globalThis.FleetBoardState = Object.freeze({
   draftIsAvailable,
   normalizeActionText,
   reconcileBoardState,
+  recordAcceptedAction,
   recordPendingAction,
   restoreActionOperations,
   serializeActionOperations,
