@@ -16,6 +16,12 @@
 
 set -u
 
+fm_forge_normalize_host() {
+  printf '%s' "${1:-}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.$//'
+}
+
 # fm_forge_detect_provider <path-to-checkout>
 # Resolves a project checkout's `origin` remote to a provider. Does not
 # guess: unknown/missing remotes are reported as "unknown", never silently
@@ -28,7 +34,7 @@ fm_forge_github_hosts() {
   printf '%s\n' "${FM_GITHUB_HOSTS:-github.com}" \
     | tr ',' '\n' \
     | while IFS= read -r host; do
-        host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        host=$(fm_forge_normalize_host "$host")
         [ -n "$host" ] && printf '%s\n' "$host"
       done
 }
@@ -44,7 +50,7 @@ fm_forge_gitlab_hosts() {
   printf '%s\n' "${FM_GITLAB_HOSTS:-gitlab.com}" \
     | tr ',' '\n' \
     | while IFS= read -r host; do
-        host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        host=$(fm_forge_normalize_host "$host")
         [ -n "$host" ] && printf '%s\n' "$host"
       done
 }
@@ -143,7 +149,7 @@ fm_forge_resolve_host() {
   # A fully-qualified DNS name may carry its optional root label (for
   # example, github.com.).  Forge host policy stores canonical names without
   # that label, so normalize it before provider classification and auth.
-  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//'
+  fm_forge_normalize_host "$host"
 }
 
 
