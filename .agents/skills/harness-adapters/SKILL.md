@@ -154,7 +154,10 @@ Use the discovery surface in the current authenticated environment because suppo
 | cursor | Run `cursor-agent --list-models` (or the legacy `agent --list-models`), which lists the ids available to the current Cursor account. `cursor` is not the CLI name. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
-A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
+A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported for auto-dispatch: block that candidate and quote the result.
+Pi's configured custom providers are the documented exception for an explicit captain `--model provider/id`: `--list-models` can omit an id the provider still serves, and Pi still launches that id.
+Auto-dispatch continues to treat that omission as unsupported.
+[`docs/verification/pi-custom-providers.md`](../../../docs/verification/pi-custom-providers.md) owns the 2026-08-25 evidence.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
@@ -294,6 +297,13 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
+
+A custom provider in the operator's `~/.pi/agent/models.json` is a model axis on this same adapter, not a new harness.
+`fm-spawn` already passes `--model provider/id` on that same Pi launch template.
+An id the custom provider's base URL serves but that file does not list still launches; `--list-models` omits it until the file lists it.
+Auto-dispatch therefore treats the id as unsupported unless the captain names it explicitly.
+Do not treat that lane as a new verified harness, and do not add fleet routing from this evidence alone.
+[`docs/verification/pi-custom-providers.md`](../../../docs/verification/pi-custom-providers.md) owns the isolated-edit evidence.
 
 **Primary-session guard fact (verified 2026-07-09, Pi 0.80.5).**
 The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_settled`, not per-tool-loop `turn_end`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `bin/fm-turnend-guard.sh` returns 2.
