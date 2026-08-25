@@ -21,6 +21,11 @@
 # Provider responses are reduced to fm-ida-observation.v1 before stdout reaches
 # process-event capture; raw MCP, SSE, message payloads, credentials, and prompt
 # bytes are never captured.
+# A recorded remote task id selects task-level terminalStatus and the matching
+# visible text or structured deep_research_content.finalAnswer; unstable session
+# aggregates and other tasks in the same session never terminalize that record.
+# Once handling reaches a terminal phase, later captured generations are only
+# acknowledged, so they cannot rewrite the report, regress state, or notify twice.
 #
 # After the first applied nonterminal transient read failure, `source` keeps
 # semantically identical retries inside this adapter and polls with bounded
@@ -89,11 +94,12 @@ error_observation() { # <id> <kind> <class>
        artifact_reference:null,error_class:$class,observed_at:(now|todateiso8601)}'
 }
 
-ambiguous_observation() { # <id> <kind> <class> [count]
+ambiguous_observation() { # <id> <kind> <class> [count] [session-id]
   jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$1" --arg marker "$IDA_STATE_MARKER" \
-    --arg kind "$2" --arg class "$3" --arg count "${4:-0}" '
+    --arg kind "$2" --arg class "$3" --arg count "${4:-0}" --arg session_id "${5:-}" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
-       session_id:null,task_id_remote:null,agent_id:null,agent_name:null,model:null,provider_status:null,
+       session_id:(if $session_id=="" then null else $session_id end),task_id_remote:null,
+       agent_id:null,agent_name:null,model:null,provider_status:null,
        terminal:false,ambiguous:true,result_availability:"unavailable",result_kind:null,answer:null,
        artifact_reference:null,error_class:$class,
        match_count:($count|tonumber),observed_at:(now|todateiso8601)}'
@@ -175,9 +181,11 @@ session_payload_has_marker() { # <structured session get>
   ' "$file" >/dev/null 2>&1
 }
 
-session_observation() { # <id> <session-id> <kind>
-  local id=$1 session_id=$2 kind=$3 root out err normalized status status_kind answer availability terminal ambiguous=false class=""
-  local agent_id agent_name result_kind="" artifact_reference=null structured structured_state=empty
+session_observation() { # <id> <session-id> <kind> [recorded-task-id]
+  local id=$1 session_id=$2 kind=$3 expected_task_id=${4:-$IDA_STATE_TASK_ID}
+  local root out err normalized task_summary task_id task_count task_found task_status status_kind allow_untagged
+  local answer answer_file availability terminal ambiguous=false class="" agent_id agent_name
+  local result_kind="" artifact_reference=null structured structured_state=empty
   root=$(temp_root); out="$root/get.out"; err="$root/get.err"; normalized="$root/error.json"
   run_ida_json "$out" "$err" session get --session-id "$session_id"
   if [ "$IDA_RC" -ne 0 ] || ! fm_ida_structured_success "$out" \
@@ -193,14 +201,94 @@ session_observation() { # <id> <session-id> <kind>
     ambiguous_observation "$id" "$kind" session-marker-mismatch 1
     return 0
   fi
-  status=$(jq -r '.data.session.latest_task_status // ""' "$out")
-  status_kind=$(fm_ida_status_kind "$status")
-  answer=$(jq -r '[.data.messages[]? | select(.visible == true and .type == 8 and (.text | type == "string" and length > 0)) | .text] | last // ""' "$out" \
-    | fm_remote_redact_result_text "$REMOTE_STATE_INSTRUCTION_FILE") || die "cannot normalize iDA final answer"
+  task_summary=$(jq -c --arg expected "$expected_task_id" '
+    def remote_task_id:
+      .deep_research_content?
+      | select(type == "object")
+      | .taskId?
+      | select(. != null)
+      | tostring
+      | select(length > 0);
+    . as $root
+    | [$root.data.messages[]? | remote_task_id] | unique as $ids
+    | (if $expected != "" then $expected elif ($ids | length) == 1 then $ids[0] else "" end) as $selected
+    | {task_ids:$ids,task_count:($ids | length),selected:$selected,
+       found:($selected != "" and any($ids[]; . == $selected)),
+       status:([$root.data.messages[]?
+         | select((remote_task_id // "") == $selected)
+         | .deep_research_content.terminalStatus?
+         | select(type == "string" and length > 0)] | last // "")}
+  ' "$out") || die "cannot reconcile recorded iDA task"
+  task_count=$(printf '%s' "$task_summary" | jq -r '.task_count')
+  if [ -z "$expected_task_id" ] && [ "$task_count" -gt 1 ]; then
+    rm -rf -- "$root"
+    ambiguous_observation "$id" "$kind" duplicate-remote-task-identity "$task_count" "$session_id"
+    return 0
+  fi
+  task_id=$(printf '%s' "$task_summary" | jq -r '.selected')
+  task_found=$(printf '%s' "$task_summary" | jq -r '.found')
+  task_status=$(printf '%s' "$task_summary" | jq -r '.status')
+  if [ "$task_count" -eq 1 ] && [ "$task_found" = true ]; then allow_untagged=true; else allow_untagged=false; fi
+  status_kind=$(fm_ida_status_kind "$task_status")
+  answer_file="$root/answer.txt"
+  jq -j --arg task "$task_id" --argjson allow_untagged "$allow_untagged" '
+    def remote_task_id:
+      .deep_research_content?
+      | select(type == "object")
+      | .taskId?
+      | select(. != null)
+      | tostring
+      | select(length > 0);
+    def owns_task:
+      ((remote_task_id // "") == $task)
+      or ($allow_untagged and ((remote_task_id // "") == ""));
+    def final_text:
+      if type == "string" then select(length > 0)
+      elif type == "array" then ([.[] | final_text] | join("")) | select(length > 0)
+      elif type == "object" then
+        . as $value
+        | (["answer","chat_msg","content","text","markdown","summary","final_answer","finalAnswer"] as $keys
+          | [$keys[] as $key
+            | select($value | has($key))
+            | ($value[$key] | final_text)]
+          | if length > 0 then .[0]
+            else (["data","v","message","result","payload","deepResearchContent"] as $nested
+              | [$nested[] as $key
+                | select($value | has($key))
+                | ($value[$key] | final_text)]
+              | .[0] // empty)
+            end)
+      else empty
+      end;
+    [.data.messages[]?
+      | select(.visible == true and .type == 8 and owns_task)
+      | .text?
+      | select(type == "string" and length > 0)] as $visible_text
+    | if ($visible_text | length) > 0 then $visible_text[-1]
+      else ([.data.messages[]?
+        | select(.visible == true and .type == 8 and owns_task)
+        | .deep_research_content?
+        | select(type == "object" and has("finalAnswer"))
+        | .finalAnswer
+        | final_text] | last // "")
+      end
+  ' "$out" | fm_remote_redact_result_text "$REMOTE_STATE_INSTRUCTION_FILE" >"$answer_file" \
+    || die "cannot normalize iDA final answer"
+  answer=$(<"$answer_file")
   if [ -n "$answer" ]; then
     result_kind=text
   else
-    structured=$(jq -c '
+    structured=$(jq -c --arg task "$task_id" --argjson allow_untagged "$allow_untagged" '
+      def remote_task_id:
+        .deep_research_content?
+        | select(type == "object")
+        | .taskId?
+        | select(. != null)
+        | tostring
+        | select(length > 0);
+      def owns_task:
+        ((remote_task_id // "") == $task)
+        or ($allow_untagged and ((remote_task_id // "") == ""));
       def meaningful:
         if type == "null" then false
         elif type == "string" then length > 0
@@ -248,6 +336,8 @@ session_observation() { # <id> <session-id> <kind>
         end;
       def final_answer_summary:
         if . == null then {state:"empty"}
+        elif type == "string" then
+          if length == 0 then {state:"empty"} else {state:"unsupported"} end
         elif type != "array" then {state:"malformed"}
         elif length == 0 then {state:"empty"}
         else [.[] | artifact_summary] as $artifacts
@@ -261,7 +351,7 @@ session_observation() { # <id> <session-id> <kind>
             end
         end;
       [.data.messages[]?
-        | select(.visible == true and .type == 8 and has("deep_research_content"))
+        | select(.visible == true and .type == 8 and owns_task and has("deep_research_content"))
         | if .deep_research_content == null then {state:"empty"}
           elif (.deep_research_content | type) != "object" then {state:"malformed"}
           elif (.deep_research_content | has("finalAnswer") | not) then {state:"empty"}
@@ -285,7 +375,11 @@ session_observation() { # <id> <session-id> <kind>
   fi
   agent_id=$(jq -r '.data.session.agent_id // "" | tostring' "$out")
   agent_name=$(jq -r '.data.session.agent_name // ""' "$out")
-  case "$status_kind" in
+  if [ -z "$task_id" ] || [ "$task_found" != true ]; then
+    terminal=false; availability=unavailable; class='recorded-task-unavailable'
+  elif [ -z "$task_status" ]; then
+    terminal=false; availability=unavailable; class='recorded-task-status-unavailable'
+  else case "$status_kind" in
     success)
       terminal=true
       if [ -n "$answer" ] || [ "$structured_state" = available ]; then availability=available
@@ -298,14 +392,16 @@ session_observation() { # <id> <session-id> <kind>
     cancelled) terminal=true; availability=unavailable; class='provider-cancelled' ;;
     running) terminal=false; availability=unavailable ;;
     ambiguous) terminal=false; ambiguous=true; availability=unavailable; class='provider-status-ambiguous' ;;
-  esac
+  esac; fi
   jq -cn --arg schema "$IDA_OBSERVATION_SCHEMA" --arg id "$id" --arg marker "$IDA_STATE_MARKER" \
     --arg kind "$kind" --arg session_id "$session_id" --arg agent_id "$agent_id" \
-    --arg agent_name "$agent_name" --arg model "$IDA_STATE_MODEL" --arg status "$status" \
-    --arg answer "$answer" --arg result_kind "$result_kind" --arg availability "$availability" --arg class "$class" \
+    --arg agent_name "$agent_name" --arg model "$IDA_STATE_MODEL" --arg status "$task_status" \
+    --arg task_id_remote "$task_id" --rawfile answer "$answer_file" \
+    --arg result_kind "$result_kind" --arg availability "$availability" --arg class "$class" \
     --argjson artifact_reference "$artifact_reference" --argjson terminal "$terminal" --argjson ambiguous "$ambiguous" '
       {schema:$schema,task_id:$id,provider:"ida",region:"sg",kind:$kind,session_marker:$marker,
-       session_id:$session_id,task_id_remote:null,agent_id:(if $agent_id=="" then null else $agent_id end),
+       session_id:$session_id,task_id_remote:(if $task_id_remote=="" then null else $task_id_remote end),
+       agent_id:(if $agent_id=="" then null else $agent_id end),
        agent_name:(if $agent_name=="" then null else $agent_name end),model:(if $model=="" then null else $model end),
        provider_status:(if $status=="" then null else $status end),terminal:$terminal,ambiguous:$ambiguous,
        result_availability:$availability,result_kind:(if $result_kind=="" then null else $result_kind end),
@@ -330,7 +426,7 @@ checkpoint_submission_boundary() {
 
 submit_observation() { # <id> <root>
   local id=$1 root=$2 arguments out err
-  local class session_id task_id agent_id_arg model_arg detail_session detail_task verified
+  local class session_id task_id agent_id_arg model_arg detail_session detail_task
   arguments="$root/arguments.json"; out="$root/submit.out"; err="$root/submit.err"
   fm_remote_instruction_validate "$id" "$REMOTE_STATE_INSTRUCTION_FILE" || return 1
   [ "$(fm_remote_sha256_file "$REMOTE_STATE_INSTRUCTION_FILE")" = "$REMOTE_STATE_INSTRUCTION_SHA256" ] || die "iDA instruction file changed before submission"
@@ -349,17 +445,13 @@ submit_observation() { # <id> <root>
       && [ -n "$(jq -r '.data.task_id // "" | tostring' "$out")" ]; then
     session_id=$(jq -r '.data.session_id | tostring' "$out")
     task_id=$(jq -r '.data.task_id | tostring' "$out")
-    verified="$root/verified-submission.json"
-    session_observation "$id" "$session_id" submission >"$verified"
-    jq --arg task_id "$task_id" '.task_id_remote=$task_id' "$verified"
+    session_observation "$id" "$session_id" submission "$task_id"
     return 0
   fi
   detail_session=$(jq -r '.error.details.session_id // "" | tostring' "$out" 2>/dev/null)
   detail_task=$(jq -r '.error.details.task_id // "" | tostring' "$out" 2>/dev/null)
   if fm_ida_numeric_id "$detail_session" && [ -n "$detail_task" ]; then
-    verified="$root/verified-submission.json"
-    session_observation "$id" "$detail_session" submission >"$verified"
-    jq --arg task_id "$detail_task" '.task_id_remote=$task_id' "$verified"
+    session_observation "$id" "$detail_session" submission "$detail_task"
     return 0
   fi
   fm_ida_normalize_error "$out" "$err" "$root/error.json"
@@ -513,12 +605,27 @@ write_report() { # <id> <observation> <outcome>
 }
 
 cmd_handle_locked() {
-  local id=$1 seq=$2 result=$3 source artifact patch report outcome availability class status_kind session_id
+  local id=$1 seq=$2 result=$3 source artifact patch report outcome availability class status_kind session_id next_phase
   source=$(fm_remote_source_id ida "$id") || die "invalid iDA task id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be nonnegative" ;; esac
   fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
   fm_ida_observation_validate "$result" "$id" "$IDA_STATE_MARKER" || die "iDA observation is malformed"
   if fm_procevent_is_handled "$STATE" "$source" "$seq"; then printf 'handled: %s duplicate=true\n' "$id"; return 0; fi
+  case "$REMOTE_STATE_PHASE" in
+    terminal-success|terminal-failure|terminal-cancelled)
+      "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null \
+        || die "cannot acknowledge stale post-terminal iDA observation"
+      printf 'handled: %s terminal-preserved=true\n' "$id"
+      return 0
+      ;;
+  esac
+  if [ "$REMOTE_STATE_OUTCOME" = cancellation-requested ] \
+      && jq -e '.terminal == false' "$result" >/dev/null 2>&1; then
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null \
+      || die "cannot acknowledge stale iDA observation after cancellation request"
+    printf 'handled: %s cancellation-preserved=true\n' "$id"
+    return 0
+  fi
   artifact=$(fm_remote_artifact_store "$id" observation "$result") || die "cannot store normalized iDA observation"
   session_id=$(jq -r '.session_id // ""' "$result")
   patch=$(jq -c '{session_id:.session_id,task_id:.task_id_remote,agent_id:.agent_id,agent_name:.agent_name,model:.model,provider_status:.provider_status,result_kind:.result_kind} | with_entries(select(.value != null))' "$result")
