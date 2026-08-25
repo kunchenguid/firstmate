@@ -363,6 +363,8 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+Never take a green claim on trust: confirm it with `bin/fm-pr-ci-verify.sh <PR url>`, because an all-green check list proves nothing when the repository's own suites never ran, which is exactly what a third-party bot's pass on a held fork run looks like.
+That command accepts a commit our own fork validated while the upstream run is still held, so a held upstream run is a contribution question and never a validation one.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.

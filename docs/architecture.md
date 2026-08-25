@@ -342,6 +342,8 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 ## Self-updates stay safe
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+`origin` is whatever remote that home points at, not a fixed repository, so a fleet that carries its own changes points each home's `origin` at the fork it pushes to and updates from the code its own runs validated, rather than from a repository it is waiting on.
+That is the same split [`CONTRIBUTING.md`](../CONTRIBUTING.md) draws for a contributor: the fork answers whether the change is sound, and the upstream pull request answers only whether it gets taken.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.

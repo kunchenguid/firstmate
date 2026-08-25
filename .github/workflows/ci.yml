@@ -1,8 +1,24 @@
 name: CI
 
+# Every branch pushed to this repository is validated here, not only main. A
+# contributor works on a fork, so a fork-branch push is the only event that
+# repository can raise for itself: with main-only push triggers a fork records
+# zero workflow runs and its owner has no validation surface at all, because the
+# pull_request event belongs to the upstream repository and GitHub holds a first-
+# time contributor's upstream run until a maintainer approves it. Validating on
+# push makes a fork self-sufficient, and leaves the upstream pull request free to
+# be a contribution rather than the only place the suites can run.
+# The pull_request trigger stays so upstream keeps validating incoming forks; a
+# same-repository pull request therefore runs the suites twice, which is the
+# accepted cost of a fork never being left without them.
+# branches-ignore rather than a branch list, so a new branch is validated by
+# default and only a namespace deliberately named here escapes. The one
+# exclusion is no-mistakes/**, where the gate publishes each run's test evidence
+# (.no-mistakes.yaml): those are orphan branches carrying evidence and no source
+# tree, so running a source-tree suite against one could only ever fail.
 on:
   push:
-    branches: [main]
+    branches-ignore: ['no-mistakes/**']
   pull_request:
     branches: [main]
 
@@ -385,8 +401,8 @@ jobs:
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 42 ] || {
-            echo "::error::expected 42 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 43 ] || {
+            echo "::error::expected 43 Bearings tests, got $bearings_count"
             exit 1
           }
 

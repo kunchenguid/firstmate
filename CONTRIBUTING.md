@@ -28,8 +28,37 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
    Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
 7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
+   That push is what runs the suites on your fork; see "Where your changes are validated" below for reading the result and for why the PR's own checks are a different question.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
+
+## Where your changes are validated
+
+Your fork validates your work; the pull request here is a contribution.
+These are two separate things, and treating them as one is what leaves a branch waiting on a maintainer who never has to act for you to know your change is sound.
+
+Every branch pushed to your fork runs the full suite there, because [`.github/workflows/ci.yml`](.github/workflows/ci.yml) triggers on a push to any branch.
+Step 7 above already pushes your branch to your fork, so that run happens on its own and needs nobody's approval.
+Read it with `gh run list -R <you>/firstmate`, but do not stop at the run's conclusion.
+A run concludes `success` whenever no job in it failed, and a job that never ran because it was skipped does not fail, so a run that lost most of its jobs still reports success.
+The answer about your change is the suite roster inside that run, which `bin/fm-pr-ci-verify.sh` below reads for you.
+
+The pull request this repo receives is a separate question, and it is about whether the change gets taken, not whether it works.
+GitHub holds a first-time fork contributor's workflow runs on that pull request until a maintainer approves them, so it can sit with no repository check on it for as long as that takes.
+That is a wait for a decision, not a wait for a result you already have.
+
+**An all-green check list is not evidence that anything ran.**
+A pull request can carry third-party App checks - review bots, coverage services - that report on every commit whether or not a single workflow of this repository ever started.
+Read as a total, that is "1 passed, 0 failed, 1 total", which is indistinguishable from success to anything that only counts passes and failures.
+
+Ask the question directly instead of counting:
+
+```sh
+bin/fm-pr-ci-verify.sh <pr-url>   # did repository suites actually run and pass on this commit?
+```
+
+It reports which suites ran and where, accepts a commit your fork validated while the upstream run is still held, and refuses every outcome that only looks green.
+[`bin/fm-ci-checks-lib.sh`](bin/fm-ci-checks-lib.sh) owns that rule, and everything in this repo that turns checks into a verdict classifies through it.
 
 ## Repo conventions
 
