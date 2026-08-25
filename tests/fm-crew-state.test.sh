@@ -13,13 +13,14 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (f) no run + semantic busy                                    -> pane
-#   (g) no run + semantic idle falls to the status-log verb       -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
-#   (i) kind=scout skips the run lookup                           -> pane/status-log
-#   (j) torn-down worktree / missing meta                         -> unknown/none
-#   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
+#   (e) superseded terminal run + newer live retry                -> run-step
+#   (f) cross-branch attribution: this branch's own run found via list lookup
+#   (g) no run + semantic busy                                    -> pane
+#   (h) no run + semantic idle falls to the status-log verb       -> status-log
+#   (i) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
+#   (j) kind=scout skips the run lookup                           -> pane/status-log
+#   (k) torn-down worktree / missing meta                         -> unknown/none
+#   (l) crew_is_provably_working end-to-end over the REAL helper (not a canned
 #       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
 #       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
@@ -288,6 +289,18 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_failed_status_only() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
 EOF
 }
 
@@ -684,7 +697,45 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
+# (e) A live retry can own pipeline commits that the crew worktree has not
+# synchronized yet. Rejecting that detailed `axi status` object on ancestry
+# alone makes the runs-list fallback skip the live row, then select an older
+# failed attempt whose head is still local. This reproduces the 2026-08-03
+# foliade-m4-t0-queryset incident and its false recovery signal.
+test_live_retry_supersedes_failed_run() {
+  reset_fakes
+  local d local_short pipeline_head out
+  d=$(new_case live-retry-after-failure)
+  make_repo_on_branch "$d/wt" fm/feat-retry
+  local_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  pipeline_head=ca7ad9633d2e5493adde8188bf4a513697611dbd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-retry.meta" "window=fm:fm-feat-retry" "worktree=$d/wt" "kind=ship"
+  # The detail lookup correctly reports the live retry, but its pipeline-owned
+  # head is not in the unsynchronized worktree object database yet.
+  FM_FAKE_RUN_HEAD=$pipeline_head
+  # `state` is deliberately NOT the first key of the block: the block carries
+  # `next_action`/`code` siblings in no guaranteed order.
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-retry)
+branch_sync:
+  next_action: none
+  code: in_sync
+  state: pipeline_owned"
+  # The newest row is that live retry. The older failed attempt still matches
+  # local HEAD, which is why the old fallback incorrectly selected it.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-retry ${pipeline_head:0:7}  2026-08-03 16:42
+  failed     fm/feat-retry ${local_short}  2026-08-02 21:47
+EOF
+)"
+  out=$(run_crew_state "$d" feat-retry)
+  assert_contains "$out" "state: working" "newer live retry supersedes the failed attempt"
+  assert_contains "$out" "source: run-step" "live retry remains run-step sourced"
+  assert_not_contains "$out" "state: failed" "superseded failed attempt must not trigger recovery"
+  pass "a live retry supersedes an earlier failed run on the same branch and code"
+}
+
+# (f) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
 # falls back to the real top-level `no-mistakes runs` listing to learn whether
@@ -736,6 +787,34 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+# The newest same-branch row is the only candidate. When its head is not in
+# this worktree yet (a pipeline-owned tip the crew has not synchronized), the
+# lookup must yield nothing rather than attributing an older, still-local
+# failed attempt - the coarse sibling of the 2026-08-03 false-failure incident.
+test_coarse_unresolvable_newest_row_does_not_select_older_attempt() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-newest-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-fr
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fr.meta" "window=fm:fm-feat-fr" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: retry pushed, validating\n' > "$d/state/feat-fr.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-fr ca7ad96  2026-08-03 16:42
+  failed     fm/feat-fr ${short}  2026-08-02 21:47
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-fr
+  out=$(run_crew_state "$d" feat-fr)
+  assert_not_contains "$out" "state: failed" "older failed attempt must not be attributed"
+  assert_not_contains "$out" "source: run-step" "an unresolvable newest row yields no coarse attribution"
+  assert_contains "$out" "source: status-log" "falls back to status-log instead of an older attempt"
+  pass "coarse lookup never falls back to an older same-branch attempt"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1345,6 +1424,37 @@ test_historical_same_branch_rewritten_head_not_current() {
   pass "historical same-branch rewritten head is not attributed as current"
 }
 
+# Head-binding, negative direction: `pipeline_owned` is the ONLY branch-sync
+# state that may relax the diverged-head rejection. Any other value leaves the
+# rewritten-tip guard fully intact.
+test_non_pipeline_owned_branch_sync_keeps_head_binding() {
+  reset_fakes
+  local d old_head out
+  d=$(new_case rewritten-head-branch-sync)
+  make_repo_on_branch "$d/wt" fm/todo-flag
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --orphan tmp-rewrite
+  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
+  git -C "$d/wt" branch -q -M fm/todo-flag
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/wishlist.meta" "window=fm:fm-wishlist" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
+  FM_FAKE_RUN_HEAD="$old_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: crew_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" wishlist
+  out=$(run_crew_state "$d" wishlist)
+  assert_not_contains "$out" "source: run-step" "non-pipeline_owned branch sync must not relax head binding"
+  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a non-pipeline_owned branch-sync state keeps the diverged-head rejection"
+}
+
 # Head-binding: an active pipeline whose run head is a descendant of the local
 # tip (fix commits on the same history) remains current.
 test_active_run_descendant_fix_head_remains_current() {
@@ -1389,6 +1499,93 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# Head-binding, terminal direction: `pipeline_owned` persists after a terminal
+# run while the pipeline retains custody of preserved commits, so it proves
+# nothing about liveness. A failed run must not re-attach through the
+# branch-sync escape once the crew has committed past the run head.
+test_terminal_pipeline_owned_run_does_not_reattach() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case terminal-pipeline-owned)
+  make_repo_on_branch "$d/wt" fm/feat-term
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix after failed run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/term.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-term)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" term
+  out=$(run_crew_state "$d" term)
+  assert_not_contains "$out" "source: run-step" "terminal pipeline_owned run must not relax head binding"
+  assert_not_contains "$out" "state: failed" "dead run must not resurface as a recovery signal"
+  assert_contains "$out" "source: status-log" "falls back to status-log after the crew moved on"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a terminal pipeline_owned run does not re-attach past the run head"
+}
+
+# Terminal direction, CLI shape variant: a dead run can also surface as
+# `status: failed|cancelled|completed` with no `outcome:` field at all. The
+# empty outcome must not read as liveness for the branch-sync escape.
+test_terminal_status_without_outcome_does_not_reattach() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case terminal-status-no-outcome)
+  make_repo_on_branch "$d/wt" fm/feat-tstat
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix after failed run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/tstat.meta" "window=fm:fm-tstat" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/tstat.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_failed_status_only fm/feat-tstat)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" tstat
+  out=$(run_crew_state "$d" tstat)
+  assert_not_contains "$out" "source: run-step" "terminal status without outcome must not relax head binding"
+  assert_not_contains "$out" "state: failed" "dead run must not resurface as a recovery signal"
+  assert_contains "$out" "source: status-log" "falls back to status-log after the crew moved on"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a terminal status with no outcome field does not re-attach past the run head"
+}
+
+# Nested-form parse edge: the sed block range's terminating line is itself in
+# the range, so a branch_sync block with no nested state key followed by a
+# top-level `state:` key must not read that value as the branch-sync state.
+test_branch_sync_range_end_not_captured_as_state() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case branch-sync-range-end)
+  make_repo_on_branch "$d/wt" fm/feat-redge
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix past run head'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/redge.meta" "window=fm:fm-redge" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/redge.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-redge)
+branch_sync:
+  next_action: none
+  code: in_sync
+state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" redge
+  out=$(run_crew_state "$d" redge)
+  assert_not_contains "$out" "source: run-step" "top-level state key must not relax head binding"
+  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "the block range terminator is not captured as branch-sync state"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1428,8 +1625,10 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_live_retry_supersedes_failed_run
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_unresolvable_newest_row_does_not_select_older_attempt
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
@@ -1458,8 +1657,12 @@ test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
+test_non_pipeline_owned_branch_sync_keeps_head_binding
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_terminal_pipeline_owned_run_does_not_reattach
+test_terminal_status_without_outcome_does_not_reattach
+test_branch_sync_range_end_not_captured_as_state
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

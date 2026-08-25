@@ -31,10 +31,12 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      A run matches when its head equals the worktree HEAD, the worktree HEAD
+#      is an ancestor of the run head, or the run is still live (no terminal
+#      outcome yet) and its detailed branch-sync state says the pipeline owns
+#      commits not synchronized into the worktree yet. Local work that advanced
+#      past the run head, or diverged from it without that explicit live
+#      pipeline ownership, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -356,10 +358,9 @@ nm_ci_checks_state() {
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
-# display (verified empirically: querying a worktree with its own active run
-# reliably returns that run, even under concurrent load from several other
-# validating crews on the same underlying repo). A crew whose branch genuinely
-# has no run yet therefore sees another branch's answer here.
+# display. A crew whose branch genuinely has no run yet therefore sees another
+# branch's answer here. The explicit pipeline-owned continuity state is
+# accepted before this fallback because its run head may not exist locally yet.
 #
 # This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
 # expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
@@ -382,7 +383,8 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows or that
+# newest row's head does not bind to this worktree.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -398,11 +400,13 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # The newest same-branch row is the ONLY candidate: it is this branch's
+      # current attempt, and an older attempt can never supersede it. Same
+      # code-identity rule as axi status - when that row's short sha does not
+      # match this worktree (rewritten tip, or a pipeline-owned tip not
+      # synchronized here yet) the branch lookup yields nothing rather than
+      # attributing a stale earlier attempt whose head is still local.
+      nm_coarse_head_matches_worktree "$sha" || return 0
       printf '%s' "$st"
       return 0
     fi
@@ -410,12 +414,45 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
+# `axi status` exposes this explicit continuity state while the pipeline owns
+# commits that the crew worktree has not synchronized yet. In that state the
+# run head may be absent from the worktree object database, so git ancestry is
+# unavailable even though the detailed run is authoritative for this branch.
+# The block carries sibling keys (`next_action`, `code`) in no guaranteed
+# order, so the nested form is read across the whole block, not the line after
+# the header.
+nm_branch_sync_state() {
+  local state
+  state=$(printf '%s\n' "$RUN_OUT" \
+    | sed -n 's/^[[:space:]]*branch_sync\.state:[[:space:]]*\(.*\)/\1/p' \
+    | head -1)
+  if [ -z "$state" ]; then
+    state=$(printf '%s\n' "$RUN_OUT" \
+      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]\{1,\}state:[[:space:]]*\(.*\)/\1/p' \
+      | head -1)
+  fi
+  strip_quotes "$state"
+}
+
+# The head-binding escape above only applies while the run is live: after a
+# terminal outcome the pipeline still owns preserved unpublished commits until
+# `no-mistakes axi sync --recover` returns custody, so `pipeline_owned` alone
+# cannot distinguish a retry in flight from custody parked on a dead run.
+nm_pipeline_owned_live_run() {
+  case "$(strip_quotes "$(nm_field status)")" in
+    completed|failed|cancelled) return 1 ;;
+  esac
+  [ -z "$(strip_quotes "$(nm_field outcome)")" ] \
+    && [ "$(nm_branch_sync_state)" = pipeline_owned ]
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
+# identity. Branch match is a precondition (caller), which separately accepts
+# the explicit pipeline-owned continuity state. Rule owned by
 # fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
 nm_run_head_matches_worktree() {
   local run_head
@@ -443,7 +480,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+       && { nm_run_head_matches_worktree || nm_pipeline_owned_live_run; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
