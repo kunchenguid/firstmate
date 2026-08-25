@@ -220,7 +220,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion without --yolo should exit non-zero"
-  assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing approval posture"
+  assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing merge posture"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
   status=$?
@@ -232,7 +232,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
-  assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
+  assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"

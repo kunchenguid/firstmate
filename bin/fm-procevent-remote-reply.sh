@@ -7,6 +7,7 @@
 #   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
+#   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
@@ -21,8 +22,18 @@
 # canonical source id instead of the secondmate id and is called by the runner
 # right after capture, so applying a reply never depends on a handler
 # remembering to run it. Ingesting a delta carries no judgement, so it belongs
-# in code. The published wake still reaches firstmate, and running `handle`
-# again on that wake is idempotent.
+# in code.
+#
+# `self-announcing` declares this adapter's one-announcement contract to the
+# runner: every byte autohandle applies lands in the parent's state/<id>.status
+# stream, whose ordinary signal-scan announcement is durable, so a fully
+# autohandled capture needs - and gets - no `check` wake of its own. One remote
+# note therefore produces exactly one firstmate wake, through the same signal
+# classification a local secondmate's own status append gets, and a replayed
+# capture whose every line is already mirrored (the at-most-once append) adds
+# no bytes and stays completely quiet. Only a capture autohandle could NOT
+# fully apply is published as a `check` wake for the manual handler, and
+# running `handle` on that wake is idempotent.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -45,6 +56,10 @@
 #   - at-most-once append, because a captured generation can be replayed
 #   - control-byte normalization, so content-bearing bytes from another machine
 #     cannot make the parent's status file unsafe to read
+#   - the caught-up watermark this channel publishes for
+#     bin/fm-pending-reply-lib.sh, because a report that exists remotely but has
+#     not been mirrored yet must not be mistaken for a report the mate never
+#     wrote (see WINDOW_CLOSED_EMPTY below)
 # Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
 # delivers only whole lines and breaks continuity on an over-long one.
 set -u
@@ -72,7 +87,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -224,12 +239,26 @@ cmd_arm() {
   )
 }
 
+# The reader's exit when its wait window closed with no complete new line. That
+# is the one moment this channel can prove it is not behind: the window opened
+# with the remote log matching the committed cursor exactly (any pending bytes
+# would have returned a delta at once), so the parent had read that log through
+# its end at window START. The window start, not its close, is therefore the
+# honest watermark, and bin/fm-pending-reply-lib.sh consumes it so a missing
+# correlated report is judged only against a channel known to have caught up.
+WINDOW_CLOSED_EMPTY=75
+
 cmd_source() {
-  local id=${1:-}
+  local id=${1:-} started rc=0
   validate_id "$id"
   read_cursor "$id"
-  exec "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null
+  started=$(fm_pending_reply_now)
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+  if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+  fi
+  return "$rc"
 }
 
 safe_doc_path() {
@@ -501,6 +530,7 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
+  rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 
 cmd_retire() {
@@ -537,6 +567,7 @@ case "${1:-}" in
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
+  self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
