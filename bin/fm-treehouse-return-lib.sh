@@ -65,7 +65,7 @@ fm_treehouse_return_git() {  # <worktree> <git args...>
 # a HEAD that is not a symbolic refs/heads ref, stays a refusal so damaged
 # worktrees keep failing closed.
 fm_treehouse_return_head_is_unborn() {  # <worktree-path>
-  local worktree_path=$1 head_ref head_log
+  local worktree_path=$1 head_ref head_log log_updates
 
   fm_treehouse_return_git "$worktree_path" symbolic-ref -q HEAD || return 1
   head_ref=$FM_TREEHOUSE_RETURN_GIT_OUT
@@ -88,7 +88,17 @@ fm_treehouse_return_head_is_unborn() {  # <worktree-path>
     /*) ;;
     *) head_log="$worktree_path/$head_log" ;;
   esac
-  [ ! -s "$head_log" ]
+  [ ! -s "$head_log" ] || return 1
+
+  # An absent reflog only proves nothing was committed here while this worktree
+  # actually keeps one. A repository that has turned reflogs off can produce the
+  # same emptiness with commits present, so that configuration refuses instead.
+  fm_treehouse_return_git "$worktree_path" config --get core.logAllRefUpdates \
+    && log_updates=$FM_TREEHOUSE_RETURN_GIT_OUT || log_updates=
+  case $(printf '%s' "$log_updates" | tr '[:upper:]' '[:lower:]') in
+    ''|true|yes|on|always|1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_treehouse_return_guard() {

@@ -2541,6 +2541,7 @@ cleanup_firstmate_home_children() {
           && child_orca_resolve_rc=0 || child_orca_resolve_rc=$?
         if [ "$child_orca_resolve_rc" -ne 0 ]; then
           echo "REFUSED: cannot resolve Orca worktree id $child_orca_worktree_id recorded for child $child_id, so the worktree Orca would remove cannot be certified; preserving that child's worktree and records" >&2
+          echo "  If Orca has already removed that worktree, clear orca_worktree_id= (or delete the record) in $child_meta and rerun teardown." >&2
           return "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
         fi
         if [ -n "$child_orca_resolved" ] && [ -d "$child_orca_resolved" ]; then
@@ -2758,15 +2759,15 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
-# Orca removes its worktree rather than returning it to a pool, so it may drop its
-# task branch here. Treehouse returns preserve an attached local branch as a durable
-# ref; removing it before the return would recreate the detached-HEAD loss this
-# teardown guard prevents.
+# Both destructive legs below may drop the task branch so a shared repo does not
+# accumulate one dead ref per task, and both do it only after the committed-work
+# guard has run: removing the branch before the guard would recreate the
+# detached-HEAD loss this teardown prevents.
 #
 # True when some durable local ref other than the task branch already names this
 # worktree's HEAD, so dropping that branch cannot orphan committed work. A failed
 # probe answers "not droppable": the branch is then kept, which is always safe.
-orca_task_branch_is_droppable() {  # <worktree> <branch>
+task_branch_is_droppable() {  # <worktree> <branch>
   local wt=$1 branch=$2 head ref
   fm_treehouse_return_git "$wt" rev-parse --verify 'HEAD^{commit}' || return 1
   head=$FM_TREEHOUSE_RETURN_GIT_OUT
@@ -2804,7 +2805,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
 
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ] && orca_task_branch_is_droppable "$WT" "$branch"; then
+    if [ "$branch" != "HEAD" ] && task_branch_is_droppable "$WT" "$branch"; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
@@ -2826,6 +2827,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     [ -z "$POOL_GUARD_OUT" ] || printf '%s\n' "$POOL_GUARD_OUT" >&2
     echo "REFUSED: committed work in worktree $WT for $ID could not be certified or rescued; preserving that worktree - inspect it and recover its commits before retrying teardown" >&2
     exit "$TEARDOWN_TREEHOUSE_GUARD_REFUSED"
+  fi
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if [ "$branch" != "HEAD" ] && task_branch_is_droppable "$WT" "$branch"; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \

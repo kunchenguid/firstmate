@@ -370,6 +370,89 @@ test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head() {
   pass "an unreadable branch ref still refuses instead of passing as unborn"
 }
 
+test_disabled_reflog_cannot_prove_an_unborn_head() {
+  local case_dir repo wt head out rc
+  case_dir="$TMP_ROOT/disabled-reflog"
+  repo="$case_dir/repo"
+  wt="$case_dir/worktree"
+  mkdir -p "$case_dir"
+  git init -q "$repo"
+  # With reflogs off, a worktree that does hold commits leaves the same empty
+  # HEAD reflog an unborn one does, so emptiness alone proves nothing here.
+  git -C "$repo" config core.logAllRefUpdates false
+  git -C "$repo" commit -q --allow-empty -m baseline
+  git -C "$repo" worktree add -q "$wt" -b fm/no-reflog
+  git -C "$wt" commit -q --allow-empty -m committed-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  git -C "$repo" update-ref -d refs/heads/fm/no-reflog
+  [ "$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{commit}' || true)" != "$head" ] \
+    || fail "fixture did not reproduce a HEAD that no longer resolves"
+
+  errexit_off
+  out=$(fm_treehouse_return_guard disabled-reflog "$wt" 2>&1)
+  rc=$?
+  errexit_restore
+  [ "$rc" -ne 0 ] \
+    || fail "an empty reflog from a disabled reflog config passed as an unborn HEAD: $out"
+  assert_contains "$out" 'REFUSED: cannot determine committed-work reachability' \
+    "a disabled reflog config did not refuse with a concrete reason"
+  pass "an empty reflog cannot prove an unborn HEAD when reflogs are disabled"
+}
+
+test_pooled_teardown_drops_a_redundant_task_branch() {
+  local case_dir repo wt marker out rescue_refs
+  case_dir="$TMP_ROOT/pooled-branch-drop"
+  repo="$case_dir/repo"
+  wt="$case_dir/pool-worktree"
+  marker="$case_dir/treehouse-return-called"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
+    "$case_dir/fakebin" "$case_dir/pool"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+  # No commits of its own, so the project's own branch already contains this
+  # HEAD and the task branch names nothing that could be lost with it.
+  fm_git_worktree "$repo" "$wt" fm/pooled-droppable
+  write_teardown_meta "$case_dir" pooled-droppable "$wt"
+
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" pooled-droppable 2>&1) \
+    || fail "pooled teardown over contained branch work failed: $out"
+  assert_present "$marker" "pooled teardown never returned the worktree"
+  git -C "$repo" rev-parse --verify --quiet refs/heads/fm/pooled-droppable >/dev/null \
+    && fail "pooled teardown left a redundant task branch in the shared repo: $out"
+  rescue_refs=$(git -C "$repo" for-each-ref --format='%(refname)' refs/firstmate/rescue)
+  [ -z "$rescue_refs" ] \
+    || fail "pooled teardown minted a rescue ref while dropping a redundant branch: $rescue_refs"
+  pass "pooled teardown drops a task branch whose commits another ref already holds"
+}
+
+test_pooled_teardown_keeps_a_task_branch_that_is_the_only_durable_ref() {
+  local case_dir repo wt head marker out rescue_refs
+  case_dir="$TMP_ROOT/pooled-branch-keep"
+  repo="$case_dir/repo"
+  wt="$case_dir/pool-worktree"
+  marker="$case_dir/treehouse-return-called"
+  mkdir -p "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/config" \
+    "$case_dir/fakebin" "$case_dir/pool"
+  fm_fake_exit0 "$case_dir/fakebin" tmux no-mistakes gh gh-axi
+  fake_treehouse_bin "$case_dir/fakebin"
+  fm_git_worktree "$repo" "$wt" fm/pooled-only-ref
+  # Committed on the task branch and never merged locally: that branch is the
+  # one durable local ref naming this work, so the return must not drop it.
+  git -C "$wt" commit -q --allow-empty -m branch-pool-work
+  head=$(git -C "$wt" rev-parse HEAD)
+  write_teardown_meta "$case_dir" pooled-only-ref "$wt"
+
+  out=$(FM_TREEHOUSE_RETURN_MARKER="$marker" run_teardown "$case_dir" pooled-only-ref 2>&1) \
+    || fail "pooled teardown over branch work failed: $out"
+  assert_present "$marker" "pooled teardown never returned the worktree"
+  [ "$(git -C "$repo" rev-parse --verify --quiet refs/heads/fm/pooled-only-ref)" = "$head" ] \
+    || fail "pooled teardown dropped the only durable ref naming its committed work: $out"
+  rescue_refs=$(git -C "$repo" for-each-ref --format='%(refname)' refs/firstmate/rescue)
+  [ -z "$rescue_refs" ] \
+    || fail "pooled teardown minted a rescue ref for already-durable branch work: $rescue_refs"
+  pass "pooled teardown keeps a task branch that is the only durable ref"
+}
+
 test_pooled_guard_refusal_keeps_hooks_and_reserved_status() {
   local case_dir repo wt head marker out rc
   case_dir="$TMP_ROOT/pooled-guard-refusal"
@@ -635,6 +718,8 @@ test_child_orca_unresolvable_id_refuses_instead_of_removing() {
     "an unresolvable child Orca id removed the child task record"
   assert_contains "$out" 'REFUSED: cannot resolve Orca worktree id' \
     "an unresolvable child Orca id did not report why removal could not be certified"
+  assert_contains "$out" 'clear orca_worktree_id=' \
+    "an unresolvable child Orca id did not name a recovery step for an already-removed worktree"
   pass "an unresolvable child Orca worktree id refuses instead of removing uncertified work"
 }
 
@@ -1052,6 +1137,9 @@ test_unborn_head_passes_through_without_refusing
 test_unreadable_branch_ref_is_not_mistaken_for_an_unborn_head
 test_deleted_branch_ref_is_not_mistaken_for_an_unborn_head
 test_pooled_guard_refusal_keeps_hooks_and_reserved_status
+test_disabled_reflog_cannot_prove_an_unborn_head
+test_pooled_teardown_drops_a_redundant_task_branch
+test_pooled_teardown_keeps_a_task_branch_that_is_the_only_durable_ref
 test_non_repository_path_passes_through_without_borrowing_an_enclosing_repo
 test_ambient_git_dir_cannot_turn_a_non_repository_path_into_a_worktree
 test_guard_refusal_preserves_child_worktree_commits
