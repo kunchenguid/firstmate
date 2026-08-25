@@ -12,9 +12,26 @@
 #   4. arm hash-binds the inventory: after an edit the check refuses and runs
 #      no probe (asserted via a probe marker); re-arm probes again.
 #   5. clear drops the owed entries by hand.
+#   6. A missing inventory is loudly unpruefbar (never an all-clear), on
+#      report AND check, on EVERY poll; owe refuses loudly there.
+#   7. An inventory without active service lines is treated the same; arm
+#      refuses empty inventories and malformed lines at write time; restoring
+#      a valid line returns the guard to normal service.
+#   8. The per-service path filter: a docs/frontend-only window between the
+#      deployed commit and the repo tip stays in sync, a service-relevant
+#      change drifts, lines WITHOUT the filter keep the every-commit meaning,
+#      and the `relevant` subcommand classifies one window directly.
+#   9. Freshness: the probe fetches before comparing, so a remote ahead of a
+#      stale local checkout measures against the FETCHED tip (never the
+#      backwards "runs X, repo is at Y" alarm); a failing fetch is a FAILED
+#      verdict, never in sync.
+#  10. Owed-rollout ledger entries written by an older version survive the
+#      upgrade untouched: report shows them, clear drops them.
 #
-# Isolation: throwaway FM_HOME, a real throwaway git repo as the service repo,
-# cmd probes steered by a verdict file. No ssh, no network.
+# Isolation: throwaway FM_HOMEs, real throwaway git repos (including a bare
+# origin) as the service repos, cmd probes steered by a verdict file, and the
+# documented FM_GEX_DRIFT_TEST_IMAGE hook instead of ssh/docker. No ssh, no
+# network.
 # shellcheck disable=SC2015 # ok/fail are echo-only, so `A && ok || fail` cannot misfire.
 set -u
 
@@ -110,6 +127,182 @@ run check >/dev/null
 run owe swippipp/DienstA t-9 https://example.invalid/pr/9 >/dev/null
 run clear swippipp/DienstA >/dev/null
 [ ! -s "$HOME_A/state/.rollout-owed" ] && ok "clear drops the owed entries" || fail "clear must drop owed entries"
+
+# --- helpers for the fixture-based cases ------------------------------------
+# mk_commit <dir> <file> <content> <msg>: commit one file, print the short sha.
+mk_commit() {
+  local dir=$1 file=$2 content=$3 msg=$4
+  mkdir -p "$dir/$(dirname "$file")"
+  printf '%s\n' "$content" > "$dir/$file"
+  git -C "$dir" add -A
+  git -C "$dir" -c user.name=t -c user.email=t@invalid commit -q -m "$msg"
+  git -C "$dir" rev-parse --short=7 HEAD
+}
+
+fresh_home() { # <name>: a throwaway FM_HOME under $TMP
+  local h="$TMP/$1"
+  mkdir -p "$h/state" "$h/config"
+  printf '%s' "$h"
+}
+
+run_in() { # <home> <args...>
+  local h=$1
+  shift
+  FM_HOME="$h" "$DRIFT" "$@"
+}
+
+run_img() { # <home> <image-string> <args...>: image-tag probes read the given string
+  local h=$1 img=$2
+  shift 2
+  FM_HOME="$h" FM_GEX_DRIFT_TEST_IMAGE="$img" "$DRIFT" "$@"
+}
+
+# --- 6. a missing inventory is loudly unpruefbar, never an all-clear --------
+HOME_B="$(fresh_home home-b)"
+out=$(run_in "$HOME_B" report)
+printf '%s' "$out" | grep -q 'kein Inventar' \
+  && ok "report says unpruefbar without an inventory" \
+  || fail "a missing inventory must be reported loudly (got: $out)"
+printf '%s' "$out" | grep -q 'all services in sync' \
+  && fail "a missing inventory must never yield the all-clear line" \
+  || ok "no false all-clear without an inventory"
+out1=$(run_in "$HOME_B" check)
+out2=$(run_in "$HOME_B" check)
+printf '%s\n%s' "$out1" "$out2" | grep -qc 'kein Inventar' \
+  && [ "$(printf '%s\n%s' "$out1" "$out2" | grep -c 'kein Inventar')" -ge 2 ] \
+  && ok "check reports unpruefbar on EVERY poll" \
+  || fail "the unpruefbar line must not be deduped away (got: $out1 | $out2)"
+if run_in "$HOME_B" owe swippipp/DienstA t-x https://example.invalid/pr/x >/dev/null 2>"$TMP/owe-err"; then
+  fail "owe against a missing inventory must fail, not stay silent"
+else
+  grep -q 'kein Inventar' "$TMP/owe-err" \
+    && ok "owe refuses loudly without an inventory" \
+    || fail "owe's refusal must name the missing inventory (got: $(cat "$TMP/owe-err"))"
+fi
+[ ! -f "$HOME_B/state/.rollout-owed" ] \
+  && ok "owe deposits nothing when the inventory is gone" \
+  || fail "a refused owe must not write the ledger"
+
+# --- 7. empty inventories and write-time validation --------------------------
+HOME_C="$(fresh_home home-c)"
+printf '# nur kommentare\n\n' > "$HOME_C/config/gex-drift.services"
+out=$(run_in "$HOME_C" report)
+printf '%s' "$out" | grep -q 'kein Inventar' \
+  && ok "a comments-only inventory is unpruefbar too" \
+  || fail "an empty-of-lines inventory must be unpruefbar (got: $out)"
+run_in "$HOME_C" arm >/dev/null 2>&1 \
+  && fail "arm must refuse an inventory with no active lines" \
+  || ok "arm refuses an empty inventory at write time"
+run_in "$HOME_C" owe swippipp/DienstA t-y https://example.invalid/pr/y >/dev/null 2>&1 \
+  && fail "owe must refuse against an empty inventory" \
+  || ok "owe refuses loudly against an empty inventory"
+printf 'dienst-c\tswippipp/DienstC\t%s\tcmd true\n' "$TMP/svc-repo" >> "$HOME_C/config/gex-drift.services"
+out=$(run_in "$HOME_C" report 2>&1)
+printf '%s' "$out" | grep -q 'dienst-c (' \
+  && ! printf '%s' "$out" | grep -q 'kein Inventar' \
+  && ok "restoring a valid line returns normal service" \
+  || fail "a restored inventory must probe normally (got: $out)"
+printf 'kaputt\n' > "$HOME_C/config/gex-drift.services.bad"
+mv "$HOME_C/config/gex-drift.services" "$HOME_C/config/gex-drift.services.ok"
+cp "$HOME_C/config/gex-drift.services.ok" "$HOME_C/config/gex-drift.services"
+printf 'x\tswippipp/X\t/nonexistent-dir-xyz\tcmd true\n' >> "$HOME_C/config/gex-drift.services"
+run_in "$HOME_C" arm >/dev/null 2>&1 \
+  && fail "arm must reject a missing repo dir" \
+  || ok "arm rejects a missing repo directory"
+mv -f "$HOME_C/config/gex-drift.services.ok" "$HOME_C/config/gex-drift.services"
+printf 'x\tswippipp/X\t%s\twarp true\n' "$TMP/svc-repo" >> "$HOME_C/config/gex-drift.services"
+run_in "$HOME_C" arm >/dev/null 2>&1 \
+  && fail "arm must reject an unknown art" \
+  || ok "arm rejects an unknown probe art"
+mv -f "$HOME_C/config/gex-drift.services.ok" "$HOME_C/config/gex-drift.services"
+
+# --- 8. per-service path filter ----------------------------------------------
+FILT="$TMP/filt-repo"
+mkdir -p "$FILT"
+git -C "$FILT" init -q -b main
+git -C "$FILT" -c user.name=t -c user.email=t@invalid commit -q --allow-empty -m base
+C1=$(mk_commit "$FILT" backend/api.txt v1 "backend change")
+C2=$(mk_commit "$FILT" frontend/app.js ui "frontend change")
+HOME_D="$(fresh_home home-d)"
+{
+  printf 'dienst-p\tswippipp/P\t%s\timage-tag host container\tbackend/* shared/* contracts/*\n' "$FILT"
+  printf 'dienst-legacy\tswippipp/L\t%s\timage-tag host container\n' "$FILT"
+} > "$HOME_D/config/gex-drift.services"
+out=$(run_img "$HOME_D" "registry.example/lens:$C1" report 2>&1)
+printf '%s' "$out" | grep -q 'dienst-p .*: insync' \
+  && printf '%s' "$out" | grep -q 'only non-service paths changed' \
+  && ok "a docs/frontend-only window stays in sync under the filter" \
+  || fail "frontend-only drift window must be filtered green (got: $out)"
+printf '%s' "$out" | grep 'dienst-legacy' | grep -q ': drift' \
+  && ok "a line WITHOUT the filter keeps the every-commit meaning" \
+  || fail "the legacy service line must still drift (got: $out)"
+C3=$(mk_commit "$FILT" backend/rollout.sh x "synthetic backend delta")
+out=$(run_img "$HOME_D" "registry.example/lens:$C1" report 2>&1)
+printf '%s' "$out" | grep 'dienst-p' | grep -q ': drift' \
+  && printf '%s' "$out" | grep -q 'service-relevant change: backend/rollout.sh' \
+  && ok "a synthetic backend delta is DRIFT under the filter" \
+  || fail "backend delta must be reported as drift (got: $out)"
+out=$(run_in "$HOME_D" relevant "$FILT" "$C1" "$C3" 'backend/*')
+printf '%s' "$out" | grep -q "^relevant $C1..$C3:" \
+  && printf '%s' "$out" | grep -q 'backend/rollout.sh' \
+  && ok "relevant lists the matching path and exits 0" \
+  || fail "relevant must list backend/rollout.sh (got: $out)"
+run_in "$HOME_D" relevant "$FILT" "$C1" "$C2" 'backend/*' >/dev/null; RC=$?
+[ "$RC" -eq 1 ] && ok "an irrelevant window answers irrelevant with rc 1" \
+  || fail "irrelevant windows must exit 1 (got rc=$RC)"
+
+# --- 9. freshness: fetch before compare, failed fetch stays failed ------------
+ORIGIN="$TMP/origin.git"
+SEED="$TMP/seed"
+git init -q --bare -b main "$ORIGIN"
+mkdir -p "$SEED"
+git -C "$SEED" init -q -b main
+S1=$(mk_commit "$SEED" backend/api.txt v1 "seed")
+git -C "$SEED" remote add origin "$ORIGIN"
+git -C "$SEED" push -q -u origin main
+WC="$TMP/wc"
+git clone -q "$ORIGIN" "$WC"
+HOME_E="$(fresh_home home-e)"
+printf 'dienst-f\tswippipp/F\t%s\timage-tag host container\n' "$WC" > "$HOME_E/config/gex-drift.services"
+out=$(run_img "$HOME_E" "reg/f:$S1" report 2>&1)
+printf '%s' "$out" | grep 'dienst-f' | grep -q ': insync' \
+  && ok "a synced clone measures in sync" \
+  || fail "baseline sync expected (got: $out)"
+PUSHER="$TMP/pusher"
+git clone -q "$ORIGIN" "$PUSHER"
+S2=$(mk_commit "$PUSHER" frontend/ui.txt new "remote advance")
+git -C "$PUSHER" push -q origin main
+# WC has NOT fetched: its checkout stands at S1 while the remote tip is S2.
+out=$(run_img "$HOME_E" "reg/f:$S2" report 2>&1)
+printf '%s' "$out" | grep 'dienst-f' | grep -q ': insync' \
+  && ! printf '%s' "$out" | grep -qE 'runs .*, repo is at' \
+  && ok "the probe fetches first: remote-ahead is in sync, no backwards alarm" \
+  || fail "stale-checkout basis must fetch before comparing (got: $out)"
+[ "$(git -C "$WC" rev-parse --short=7 origin/main)" = "$S2" ] \
+  && ok "the probe really fetched (origin/main advanced)" \
+  || fail "the probe must have fetched the remote tip into the clone"
+git -C "$WC" remote set-url origin "$TMP/gone.git"
+out=$(run_img "$HOME_E" "reg/f:$S2" report 2>&1)
+printf '%s' "$out" | grep -q 'probe FAILED' \
+  && printf '%s' "$out" | grep -q 'fetch failed' \
+  && ! printf '%s' "$out" | grep -q ': insync' \
+  && ok "a failing fetch is a FAILED verdict, never in sync" \
+  || fail "fetch failure must be loud and failed (got: $out)"
+
+# --- 10. old owed-ledger entries survive untouched ----------------------------
+HOME_F="$(fresh_home home-f)"
+printf 'dienst-g\tswippipp/G\t%s\tcmd true\n' "$TMP/svc-repo" > "$HOME_F/config/gex-drift.services"
+mkdir -p "$HOME_F/state"
+printf '%s\t%s\t%s\t%s\n' "2026-08-24T22:10:00Z" "swippipp/OldRepo" "t-alt" "https://example.invalid/pr/alt" \
+  > "$HOME_F/state/.rollout-owed"
+out=$(run_in "$HOME_F" report)
+printf '%s' "$out" | grep -q 'rollout owed for swippipp/OldRepo since 2026-08-24T22:10:00Z (task t-alt, https://example.invalid/pr/alt)' \
+  && ok "pre-existing owed entries are shown unchanged" \
+  || fail "old ledger entries must survive verbatim (got: $out)"
+run_in "$HOME_F" clear swippipp/OldRepo >/dev/null
+[ ! -s "$HOME_F/state/.rollout-owed" ] \
+  && ok "clear still drops a pre-existing entry" \
+  || fail "clear must work on pre-existing entries"
 
 echo
 if [ "$FAILS" -eq 0 ]; then
