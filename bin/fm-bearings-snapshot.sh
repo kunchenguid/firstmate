@@ -167,6 +167,9 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
+# JSON documents that grow with the fleet are bound with --slurpfile and unwrapped
+# by `doc(...)`, never with --argjson; bin/fm-fleet-snapshot.sh owns the reason.
+
 # The deterministic return-catch-up owner must clear before this or any other
 # ordinary captain request proceeds. Bearings does not reproduce that policy;
 # it only consults the shared read-only gate.
@@ -258,7 +261,11 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$(jq -n \
+        --slurpfile a_doc <(printf '%s' "$rows") \
+        --slurpfile b_doc <(printf '%s' "$repo_rows") '
+        def doc($v): ($v[0] // error("fm-bearings-snapshot: empty jq payload"));
+        doc($a_doc) + doc($b_doc)')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -310,7 +317,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --slurpfile candidate_prs_doc <(printf '%s' "$CANDIDATE_PRS") '
+  def doc($v): ($v[0] // error("fm-bearings-snapshot: empty jq payload"));
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
@@ -319,7 +327,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  doc($candidate_prs_doc) as $candidate_prs
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions

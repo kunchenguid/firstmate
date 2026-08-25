@@ -1940,6 +1940,66 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# Write a Done-heavy backlog whose parsed JSON is comfortably past the 131072-byte
+# per-argument execve ceiling, so a payload passed through argv cannot survive.
+write_oversized_backlog() {  # <home>
+  local i=1
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$i" -le 200 ]; do
+      printf -- '- [x] landed-%04d - Landed change number %04d in the oversized fixture backlog https://github.com/kunchenguid/firstmate/pull/%d (repo: firstmate) (kind: ship) (merged 2026-07-10)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$1/data/backlog.md"
+}
+
+# A home whose backlog JSON is larger than a single argv string may be.
+# Linux caps ONE argv element at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# independently of the much larger total ARG_MAX, so any jq payload handed over
+# as --argjson makes execve fail with E2BIG once the fleet's backlog gets real.
+# Every snapshot mode must keep working, and the projection must stay complete.
+test_oversized_backlog_survives_the_per_argument_execve_limit() {
+  local home mate fakebin json backlog_bytes toon summary
+  home=$(make_home oversized-backlog)
+  mate=$(fixture_mate_home "$home")
+  write_fixture "$home"
+  write_oversized_backlog "$home"
+  write_oversized_backlog "$mate"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  json=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "canonical snapshot failed on an oversized backlog"
+
+  # Guard the fixture itself: if the parsed backlog ever shrinks back under the
+  # ceiling this test stops proving anything, so it must fail rather than pass.
+  backlog_bytes=$(printf '%s' "$json" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt 131072 ] \
+    || fail "fixture backlog JSON is only $backlog_bytes bytes; it no longer exceeds the 131072-byte per-argument limit"
+
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and (.backlog.present == true)
+    and ([.backlog.records[] | select(.state == "done")] | length) >= 200
+    and (.main_inventory.valid | type) == "boolean"
+    and (.secondmate_current.records | type) == "array"
+    and (.secondmate_landed.records | type) == "array"
+  ' >/dev/null || fail "oversized-backlog snapshot lost projection completeness: $json"
+
+  summary=$(FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "secondmate home summary failed on an oversized backlog"
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "oversized-backlog secondmate home summary is malformed: $summary"
+
+  toon=$(run "$home" "$fakebin") || fail "bearings failed on an oversized backlog"
+  assert_contains "$toon" 'schema: fm-bearings.v1' "bearings output is not a bearings projection"
+  assert_contains "$toon" 'landed-' "bearings lost the oversized backlog's landed work"
+  pass "oversized backlog survives the per-argument execve limit in every snapshot mode"
+}
+
+test_oversized_backlog_survives_the_per_argument_execve_limit
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
