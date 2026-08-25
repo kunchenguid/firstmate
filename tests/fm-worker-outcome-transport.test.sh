@@ -306,6 +306,37 @@ landed = root / "outcome" / "outcome.bundle"
 assert landed.is_file(), "mutate_execute never collected the outcome bundle"
 assert landed.read_bytes() == body, "the collected bundle is not the blob"
 
+# A scout can return only report/status/scratch artifacts with zero project
+# commits. return_present, not outcome_present, must still drive the same
+# digest-bound provider collection lane.
+landed.unlink()
+return_only = dict(execution)
+return_only.update({
+    "outcome_present": False, "outcome_commits": 0, "return_present": True,
+    "return_ref": "refs/fm-return/" + request["request_digest"][:32],
+    "return_commit": "2" * 40, "return_manifest_sha256": "3" * 64,
+    "outcome_tip": "4" * 40,
+})
+return_only.pop("result_digest")
+return_only["result_digest"] = hashlib.sha256(
+    json.dumps(return_only, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+provider.run_command_instance_view = lambda controller, vm, name: {
+    "executionState": "Succeeded",
+    "output": "FM-WORKER-RESULT:" + json.dumps(return_only, sort_keys=True, separators=(",", ":")),
+    "error": "",
+}
+_worker, returned = provider.mutate_execute(controller, action)
+assert returned["return_present"] is True and returned["outcome_present"] is False, returned
+assert landed.read_bytes() == body, "the return-only scout bundle was not collected"
+
+# Restore the committed-outcome result for the refusal cases below.
+provider.run_command_instance_view = lambda controller, vm, name: {
+    "executionState": "Succeeded",
+    "output": "FM-WORKER-RESULT:" + json.dumps(execution, sort_keys=True, separators=(",", ":")),
+    "error": "",
+}
+
 # The blocking call must be bounded by the whole guest run, not the bare wall:
 # staging happens before the wall starts and collection after it ends.
 assert captured.get("timeout") is not None, "the run-command update carried no explicit bound"

@@ -5,8 +5,9 @@
 # local endpoint that keeps it visible and reapable in the same Herdr
 # workspace as local crewmates. It renders the durable lifecycle state
 # (queue/assignment from the worker controller, then the bounded execute log)
-# and exits when the digest-bound result lands, so the pane's lifetime tracks
-# the crewmate's remote lifetime instead of ending at spawn time.
+# and exits only after the digest-bound result is in local custody and its
+# assignment has released, so endpoint loss can never strand account or
+# capacity ownership behind an otherwise successful worker exit.
 #
 # Convergence duty: when the spawn-time reconcile left the request queued
 # (transient admission evidence), a LATER reconcile assigns the worker after
@@ -20,6 +21,8 @@
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-cloud-state-lib.sh
+. "$SCRIPT_DIR/fm-cloud-state-lib.sh"
 ID=${1:?task id}
 GENERATION=${2:?task generation id}
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -175,6 +178,9 @@ dispatch_converged_execute() {
       # outcome_expected exists to prevent; create the directory instead.
       install -d -m 0700 "$STATE/$ID.cloud-outcome" 2>/dev/null || true
       payload_args+=(--outcome-dir "$STATE/$ID.cloud-outcome")
+      case "${FM_SPAWN_CLOUD_RETURN_KIND:-}" in
+        ship|scout) payload_args+=(--return-kind "$FM_SPAWN_CLOUD_RETURN_KIND") ;;
+      esac
     fi
     nohup env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-worker-lifecycle.sh" execute \
@@ -204,6 +210,63 @@ if isinstance(value, bool):
 elif value is not None:
     print(value)
 PY
+}
+
+finalize_authorized_return() {
+  local assignment status proof lifecycle
+  assignment=$(result_field assignment_generation)
+  [ -n "$assignment" ] || {
+    echo "cloud-crewmate $ID: authorized return has no assignment generation"
+    return 1
+  }
+  if ! python3 "$SCRIPT_DIR/fm-cloud-result.py" collect \
+    --state "$STATE" --task "$ID" --task-generation "$GENERATION" \
+    --assignment-generation "$assignment"; then
+    echo "cloud-crewmate $ID: authorized return is not in local custody yet; retaining the assignment for retry"
+    return 1
+  fi
+  lifecycle=${FM_CLOUD_RETURN_LIFECYCLE_COMMAND:-$SCRIPT_DIR/fm-worker-lifecycle.sh}
+  status=$(queue_status)
+  proof=$STATE/$ID.worker-release.json
+  case "$status" in
+    assigned)
+      if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" authority-receipt \
+        --task "$ID" --task-generation "$GENERATION" \
+        --assignment-generation "$assignment" --output "$proof"; then
+        echo "cloud-crewmate $ID: local custody is established but release authority is not ready; retrying"
+        return 1
+      fi
+      if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" release \
+        --task "$ID" --task-generation "$GENERATION" --proof-file "$proof"; then
+        echo "cloud-crewmate $ID: local custody is established but release recording failed; retrying"
+        return 1
+      fi
+      status=releasing
+      ;;
+    releasing) : ;;
+    complete)
+      fm_cloud_state_remove "$STATE" "$ID"
+      echo "cloud-crewmate $ID: return is local and the worker assignment is released"
+      return 0
+      ;;
+    *)
+      echo "cloud-crewmate $ID: return is local but controller status is '$status'; retaining artifacts for retry"
+      return 1
+      ;;
+  esac
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$lifecycle" reconcile --apply \
+    --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" >/dev/null; then
+    echo "cloud-crewmate $ID: worker release convergence failed; retrying without replaying the task"
+    return 1
+  fi
+  status=$(queue_status)
+  if [ "$status" != complete ]; then
+    echo "cloud-crewmate $ID: worker release is '$status'; retrying until account and capacity are free"
+    return 1
+  fi
+  fm_cloud_state_remove "$STATE" "$ID"
+  echo "cloud-crewmate $ID: return is local and the worker assignment is released"
+  return 0
 }
 
 land_outcome_bundle() {
@@ -288,6 +351,13 @@ while :; do
   if [ -s "$RESULT" ]; then
     echo "cloud-crewmate $ID: worker result landed"
     python3 -m json.tool "$RESULT" 2>/dev/null | head -40 || cat "$RESULT"
+    if [ -n "$(result_field return_present)" ]; then
+      if finalize_authorized_return; then
+        exit 0
+      fi
+      sleep "$INTERVAL"
+      continue
+    fi
     land_outcome_bundle
     exit 0
   fi
