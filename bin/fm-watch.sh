@@ -2084,9 +2084,21 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
+                # v6 (2026-08-25): capture the OLD hash before clear_pause_tracking
+                # wipes .stale-$key, then lift the cap marker for it. This is the
+                # unambiguous recovery signal - an active pipeline exists for this
+                # window, so any prior PERMANENTLY-WEDGED for the old hash is no
+                # longer authoritative. Without this lift, a later recurrence of
+                # the old hash (different wedge episode on the same content) would
+                # be silently suppressed by v5's permanent marker.
+                old_h=$(cat "$sf" 2>/dev/null || true)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
+                if [ -n "$old_h" ]; then
+                  rm -f "$STATE/.wedge-permanent-$key-${old_h:0:12}"
+                  triage_log "lifted cap marker for recovered hash: old=$old_h new=$h window=$w"
+                fi
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -2101,10 +2113,15 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                # v6 (2026-08-25): worker recovered on the SAME hash during a
+                # declared pause (an actively-running pipeline now exists).
+                # Lift the cap marker for this hash - the wedge that fired
+                # PERMANENTLY-WEDGED earlier is no longer authoritative.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
+                         rm -f "$STATE/.wedge-permanent-$key-${h:0:12}"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h"
-                         triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                         triage_log "absorbed non-terminal stale (provably working, lifted cap for hash $h): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
