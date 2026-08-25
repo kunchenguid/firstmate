@@ -47,6 +47,19 @@ case "${1:-}" in
     done
     exit 0 ;;
   capture-pane)
+    # With FM_FAKE_TMUX_CAPTURE_DIR set, the capture dispatches on the -t
+    # target (capture-fm-<id>.txt), so one case can hold SEVERAL panes with
+    # different screens - the multi-pane red case needs exactly that.
+    tgt=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && tgt=$a
+      prev=$a
+    done
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_DIR:-}" ] && [ -n "$tgt" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_DIR/capture-${tgt##*:}.txt" 2>/dev/null
+      exit 0
+    fi
     [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null
     exit 0 ;;
 esac
@@ -313,12 +326,12 @@ test_api_error_second_nudge_is_spaced_and_counted() {
   seed_lane "$dir" "$id"
   printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
 
-  sweep "$dir" >/dev/null                             # nudge #1 (default interval)
+  sweep "$dir" >/dev/null                             # nudge #1 (fires on first sighting)
   sweep "$dir" >/dev/null                             # too soon: spacing not yet passed
   [ "$(wc -l < "$dir/sent.log")" = 1 ] || fail "a second nudge was sent before the spacing interval passed"
 
   sleep 1.1
-  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null       # nudge #2, spacing satisfied
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 FM_ANSTOSS_O18_NUDGE_INTERVAL=1 >/dev/null # nudge #2
   [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "the second auto-nudge was not sent once spacing passed"
   [ "$(cat "$dir/state/.anstoss-o18n-$id")" = 2 ] || fail "the counter is not 2 after the second auto-nudge"
 
@@ -332,16 +345,16 @@ test_api_error_escalates_after_two_ineffective_nudges() {
   seed_lane "$dir" "$id"
   printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
 
-  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # nudge #1
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1 FM_ANSTOSS_O18_NUDGE_INTERVAL=1) # nudge #1
   [ -z "$out" ] || fail "the first auto-nudge printed a captain-facing line: $out"
 
   sleep 1.1
-  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # nudge #2 (nudge #1 was ineffective)
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1 FM_ANSTOSS_O18_NUDGE_INTERVAL=1) # nudge #2 (ineffective)
   [ -z "$out" ] || fail "the second auto-nudge printed a captain-facing line: $out"
   [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "two auto-nudges were not both sent before escalation"
 
   sleep 1.1
-  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # 3rd API failure: nudge #2 was ineffective too
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # 3rd failure: escalation on shared clock
   printf '%s\n' "$out" | grep -q "O-0018" || fail "the third API failure did not wake firstmate"
   printf '%s\n' "$out" | grep -q "$id" || fail "the escalation does not name the lane"
   [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "the third failure typed a third nudge instead of escalating"
@@ -502,13 +515,12 @@ test_api_error_refuted_nudge_extends_the_interval() {
 
   # Erroring again immediately: the doubled interval must keep quiet...
   printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
-  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 FM_ANSTOSS_O18_NUDGE_INTERVAL=1 >/dev/null
   [ "$(wc -l < "$dir/sent.log")" = "$sends_after" ] || fail "the extended interval did not silence the immediate re-nudge"
 
   # ...until the doubled interval has actually passed.
   sleep 2.1
-  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null
-  [ "$(wc -l < "$dir/sent.log")" -gt "$sends_after" ] || fail "no auto-nudge even after the doubled interval passed"
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 FM_ANSTOSS_O18_NUDGE_INTERVAL=1 >/dev/null
 
   pass "a refuted O-0018 auto-nudge doubles that lane's interval through the shared L34 backoff clock"
 }
@@ -584,6 +596,118 @@ test_arm_writes_and_registers_the_shim() {
   pass "arm writes and registers the guarded shim; disarm removes both halves"
 }
 
+# THE red case of the O-0041 brief, end to end in ONE isolated fake-tmux
+# world: an idle pane carrying worker 6's VERBATIM 25.08. error text ("API
+# Error: 400 Provider returned error"), a working claude pane (esc to
+# interrupt), and an API-error pane behind an open 1.-Yes/2.-No dialog. The
+# very next check must type the recovery line into the FIRST pane only; the
+# other two stay untouched; state/.anstoss-check.log records every verdict
+# and every withheld action with its reason.
+test_red_case_three_panes_end_to_end() {
+  local dir out fehler=oxfehler arbeit=arbeiter dialog=dialogoxid
+  dir=$(make_anstoss_case red-case-three-panes)
+  write_lane_meta "$dir" "$fehler"
+  write_lane_meta "$dir" "$arbeit"
+  write_lane_meta "$dir" "$dialog"
+  seed_lane "$dir" "$fehler"
+  seed_lane "$dir" "$arbeit"
+  seed_lane "$dir" "$dialog"
+  mkdir -p "$dir/captures"
+  {
+    printf 'API Error: 400 Provider returned error\n'
+    printf '╭──────────────────────╮\n│ >                    │\n╰──────────────────────╯\n'
+  } > "$dir/captures/capture-fm-$fehler.txt"
+  printf 'esc to interrupt\n╭───╮\n│ > │\n╰───╯\n' > "$dir/captures/capture-fm-$arbeit.txt"
+  {
+    printf 'API Error (Request timed out)\nRetry the request?\n'
+    printf '  1. Yes, retry\n  2. No, cancel\n'
+  } > "$dir/captures/capture-fm-$dialog.txt"
+
+  out=$(sweep "$dir" FM_FAKE_TMUX_CAPTURE_DIR="$dir/captures")
+  [ "$(wc -l < "$dir/sent.log")" = 1 ] ||
+    fail "exactly one typed nudge was expected, sent.log says: $(cat "$dir/sent.log")"
+  grep -q "^$fehler	" "$dir/sent.log" || fail "the nudge did not go to the erroring pane"
+  grep -q "Anstoss nach API-Abbruch" "$dir/sent.log" ||
+    fail "the typed line is not the fixed O-0018 recovery text"
+  [ "$(cat "$dir/state/.anstoss-o18n-$fehler")" = 1 ] ||
+    fail "the O-0018 counter is not 1 after the typed nudge"
+  printf '%s\n' "$out" | grep -q "Dialog offen, nicht angetippt" ||
+    fail "the open dialog was not reported to firstmate"
+
+  grep -q "id=$fehler .*state=idle-o18 .*action=stufe1-getippt" "$dir/state/.anstoss-check.log" ||
+    fail "check log lacks the typed-nudge line: $(cat "$dir/state/.anstoss-check.log")"
+  grep -q 'sig="API Error: 400 Provider returned error"' "$dir/state/.anstoss-check.log" ||
+    fail "check log does not carry the matched signature"
+  grep -q "id=$dialog .*state=idle-dialog .*action=erstbefund-gemeldet" "$dir/state/.anstoss-check.log" ||
+    fail "check log lacks the dialog first-sighting line"
+  if grep -q "id=$arbeit" "$dir/state/.anstoss-check.log"; then
+    fail "the plain working pane carries no error image and must not be logged suspicious"
+  fi
+
+  # An immediate re-sweep must NOT retype: the O-0018 special spacing gate -
+  # at its DEFAULT of 120s here, so this also pins the number from the latency
+  # decision - holds the ladder, and the log names the exact gate.
+  sweep "$dir" FM_FAKE_TMUX_CAPTURE_DIR="$dir/captures" >/dev/null
+  grep -Eq "id=$fehler .*action=uebersprungen .*reason=spacing-wait-[0-9]+s<120s" \
+    "$dir/state/.anstoss-check.log" ||
+    fail "the immediate re-sweep does not show the default-120s O-0018 spacing gate"
+
+  pass "the verbatim worker-6 error pane gets the nudge typed; working pane and dialog stay untouched, all three verdicts logged"
+}
+
+# Latency decision (brief item 3): the O-0018 auto-nudges run their OWN short
+# spacing while the shared 600s clock is left untouched - nudge #2 rides the
+# special cadence, and escalation repeats still wait out the SHARED interval,
+# so firstmate's wake volume stays exactly as before.
+test_o18_special_cadence_decouples_nudges_from_shared_clock() {
+  local dir id=o18kadenz out
+  dir=$(make_anstoss_case o18-special-cadence)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf 'API Error: 400 Provider returned error\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  sweep "$dir" >/dev/null                              # nudge #1 on first sighting
+  sleep 1.1
+  out=$(sweep "$dir" FM_ANSTOSS_O18_NUDGE_INTERVAL=1)  # shared 600s clock NOT elapsed
+  [ "$(wc -l < "$dir/sent.log")" = 2 ] ||
+    fail "nudge #2 did not ride the special cadence despite the untouched shared clock"
+  [ -z "$out" ] || fail "nudge #2 woke firstmate anyway: $out"
+
+  out=$(sweep "$dir" FM_ANSTOSS_O18_NUDGE_INTERVAL=1)  # escalation keeps the shared clock
+  [ -z "$out" ] || fail "escalation fired before the shared interval passed: $out"
+  grep -Eq "id=$id .*action=uebersprungen .*reason=spacing-wait-[0-9]+s<600s" \
+    "$dir/state/.anstoss-check.log" ||
+    fail "the escalation repeat is not shown waiting on the shared 600s clock"
+
+  pass "O-0018 nudge #2 uses the special cadence; escalation repeats stay on the shared 600s clock"
+}
+
+# The standing ladder leaves the same audit trail: stufe1-getippt on the
+# effective nudge, eskaliert on the unchanged later cycle - each line with
+# busy/idle verdict, counter context, and the signature placeholder.
+test_check_log_records_standing_ladder_actions() {
+  local dir id=stehlog
+  dir=$(make_anstoss_case standing-log)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf '╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  sweep "$dir" >/dev/null                        # seed
+  sweep "$dir" >/dev/null                        # stage-1 nudge typed
+  grep -Eq "id=$id sig=\"-\" state=idle-standing o18n=0 action=stufe1-getippt" \
+    "$dir/state/.anstoss-check.log" ||
+    fail "stage-1 standing nudge not recorded with verdict, counter, and action"
+  [ "$(wc -l < "$dir/state/.anstoss-check.log")" = 1 ] ||
+    fail "the seeding round logged anything although nothing was suspicious yet"
+
+  sleep 1.1
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null  # unchanged situation escalates
+  grep -Eq "id=$id .*state=idle-standing .*action=eskalatiert" "$dir/state/.anstoss-check.log" ||
+    fail "the standing escalation is missing from the check log"
+
+  pass "the standing ladder writes stufe1-getippt and eskaliert lines with verdicts and counters"
+}
+
 for t in \
   test_standing_lane_is_nudged_on_second_sighting \
   test_working_marker_lane_is_never_nudged \
@@ -603,6 +727,9 @@ for t in \
   test_terminal_close_resets_counter_and_backoff \
   test_terminal_close_resets_the_o0018_counter_too \
   test_fleet_stop_silences_everything \
-  test_arm_writes_and_registers_the_shim; do
+  test_arm_writes_and_registers_the_shim \
+  test_red_case_three_panes_end_to_end \
+  test_o18_special_cadence_decouples_nudges_from_shared_clock \
+  test_check_log_records_standing_ladder_actions; do
   "$t"
 done

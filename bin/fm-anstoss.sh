@@ -76,10 +76,48 @@
 #   Refuted nudge and terminal close: identical L34/reset handling to the
 #     standing ladder, through the same shared note_liveness_recovery() path.
 #
-# Every sweep prints NOTHING unless firstmate must act: exactly one line for a
-# standing-lane stage-2 escalation, an O-0018 escalation, or a dialog-blocked
-# O-0018 first sighting. Fleet stop (state/.fleet-stop) silences all nudges
-# and reports (U0.1).
+# Every sweep prints NOTHING to STDOUT unless firstmate must act: exactly one
+# line for a standing-lane stage-2 escalation, an O-0018 escalation, or a
+# dialog-blocked O-0018 first sighting. Fleet stop (state/.fleet-stop) silences
+# all nudges and reports (U0.1).
+#
+# Check observability (O-0041 root cause, captain's word 25.08.: he nudged
+# worker 6 past an API error BY HAND because it was undecidable whether past
+# sweeps had even seen the pane - green selftests prove nothing against the
+# live case without a record of it, L03): every sweep APPENDS one line per
+# suspicious pane to its own log, state/.anstoss-check.log - NOT the
+# revival-era .fm-anstoss.log, which belongs to a different function. A pane
+# is suspicious when its capture carries an API-error signature (whatever the
+# outcome: nudge typed, spaced out with reason, escalated, dialog reported,
+# or silenced by the harness working marker) or when it classifies as a
+# standing lane. Each line carries: timestamp, lane id, matched signature,
+# busy/idle verdict, O-0018 counter as of AFTER the action, and the action
+# (stufe1-getippt / stufe2-getippt / eskaliert / erstbefund-gemeldet /
+# uebersprungen with reason). Healthy panes log nothing, so volume is bounded
+# by stuck lanes x sweep rounds and shrinks with every recovery; an ignored
+# stuck lane keeps waking firstmate long before unbounded history could
+# accumulate, so this log needs no rotation.
+#
+# Latency decision (brief item 3; numbers measured 25.08., sources in bin/):
+# detection is bound by fm-watch's shared check cadence - CHECK_INTERVAL=300s
+# default plus at most POLL=15s loop jitter - because nudge-on-detect already
+# fires on the FIRST sighting of an error pane. Anything below that cadence is
+# unreachable from this script alone; lowering CHECK_INTERVAL would speed up
+# all dozen registered checks at once and stays firstmate's call. The binding
+# gap was the SHARED nudge spacing instead: FM_ANSTOSS_INTERVAL=600s gated the
+# O-0018 ladder too, putting worst-case onset-to-escalation at roughly 25-35
+# minutes (derived: ~315s detect + two sweep-gated spacings of 600..900s each).
+# The O-0018 auto-nudges therefore run their OWN spacing,
+# FM_ANSTOSS_O18_NUDGE_INTERVAL=120s (still L34-doubled): below the 300s sweep
+# floor the sweep itself is the clock, so nudge #2 lands on the very next
+# round; any value in (0,300] behaves identically at live cadence and 120
+# keeps a real floor for manual or faster sweeps. Escalation repeats stay on
+# the shared 600s/L34 clock, so firstmate's wake volume is unchanged and the
+# only added machine work is one earlier send-keys per stuck lane.
+#
+# FM_ANSTOSS_DEBUG=1 prints a stderr decision trace (counter, clock, gate) for
+# every ladder pass - forensics for exactly the undecidable cases the check
+# log exists to prevent; it stays off by default and writes nowhere else.
 #
 # Commands:
 #   fm-anstoss.sh check            one detection-and-ladder sweep (default)
@@ -107,6 +145,8 @@ SEND_BIN="${FM_ANSTOSS_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 CAPTURE_LINES=${FM_ANSTOSS_CAPTURE_LINES:-400}
 INTERVAL=${FM_ANSTOSS_INTERVAL:-600}
 BACKOFF_MAX=${FM_ANSTOSS_BACKOFF_MAX:-4}
+CHECK_LOG="$STATE/.anstoss-check.log"
+O18_NUDGE_INTERVAL=${FM_ANSTOSS_O18_NUDGE_INTERVAL:-120}
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -125,7 +165,9 @@ Usage:
   fm-anstoss.sh check        one state-based sweep: detect silently exited
                              lanes, run the two-step nudge ladder, run the
                              O-0018 API-error ladder (two auto-nudges, then
-                             escalate; open dialogs are reported, never typed)
+                             escalate; open dialogs are reported, never typed);
+                             appends one audit line per suspicious pane to
+                             state/.anstoss-check.log
   fm-anstoss.sh arm          write and register state/anstoss.check.sh
   fm-anstoss.sh disarm       remove the check shim and its trust binding
   fm-anstoss.sh --selftest   verify the sources this check needs
@@ -184,6 +226,30 @@ backoff_doublings() {  # <id> -> current doubling exponent
 
 effective_interval() {  # <id> -> minimum seconds between this lane's nudges
   echo $(( INTERVAL * (1 << $(backoff_doublings "$1")) ))
+}
+
+# The O-0018 ladder's own nudge spacing (header, latency decision): the shared
+# INTERVAL clock keeps gating escalation repeats, this faster floor gates
+# auto-nudges 1 and 2 only. L34 doublings apply identically.
+o18_nudge_interval() {  # <id> -> seconds between O-0018 auto-nudges
+  echo $(( O18_NUDGE_INTERVAL * (1 << $(backoff_doublings "$1")) ))
+}
+
+# Check-round audit line (header owns the contract). Best effort: a logging
+# failure must never kill the sweep mid-ladder, but it is visible in the log's
+# absence - the file stops growing, which the next hand-audit reads as a gap,
+# never as an all-clear (L33).
+anstoss_trace() {  # <context...> ; stderr decision trace, only when asked
+  [ "${FM_ANSTOSS_DEBUG:-}" = 1 ] || return 0
+  printf 'anstoss-trace: %s\n' "$*" >&2
+}
+
+anstoss_log() {  # <id> <sig> <state> <action> <reason>
+  local sig=${2:0:80}
+  printf '[%s] id=%s sig="%s" state=%s o18n=%s action=%s reason=%s\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S%z)" "$1" "${sig:--}" \
+    "$3" "$(cat "$STATE/.anstoss-o18n-$1" 2>/dev/null || echo 0)" \
+    "$4" "${5:--}" >> "$CHECK_LOG" 2>/dev/null || true
 }
 
 # Ladder bookkeeping clears. <last> (contact epoch) and <backoff> (L34
@@ -261,11 +327,15 @@ note_liveness_recovery() {  # <id> <terminal-seen(0/1)>
   return 0
 }
 
-classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTURE_TEXT
+classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL
+                   # CAPTURE_TEXT SIG_HIT LANE_STATE (LADDER_ACTION/LADDER_REASON
+                   # are filled by the ladder functions)
   local id=$1 meta=$2 backend target harness kind marker capture status_line
   local agent reason_detail='' err_line
   LANE_VERDICT=''
   LANE_DETAIL=''
+  SIG_HIT=''
+  LANE_STATE=''
 
   kind=$(fm_meta_get "$meta" kind)
   case "$kind" in
@@ -300,10 +370,24 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTUR
   capture=$(fm_backend_capture "$backend" "$target" "$CAPTURE_LINES" 2>/dev/null || true)
   CAPTURE_TEXT=$capture
 
+  # The error signature is read BEFORE the working-marker gate: a pure read,
+  # so ordering cannot change behavior, but it lets the busy-with-error-image
+  # case below be logged instead of vanishing (O-0041 observability).
+  err_line=$(api_error_matches "$capture" || true)
+
   # Condition 3: known harness working marker anywhere in the full capture.
   marker=$(working_marker_regex "$harness")
   if [ -n "$marker" ] && printf '%s\n' "$capture" | grep -qE "$marker"; then
     note_liveness_recovery "$id" 0
+    if [ -n "$err_line" ]; then
+      # Error image UNDER a working marker is the ambiguous recovery shape:
+      # logged as busy so a later hand-audit can tell "seen, considered
+      # working" apart from "never seen".
+      SIG_HIT=$err_line
+      LANE_STATE=busy-marker
+      LADDER_ACTION=uebersprungen
+      LADDER_REASON=arbeitszeichen-des-harness-sichtbar
+    fi
     return 0
   fi
 
@@ -314,7 +398,6 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTUR
   # work-evidence gates below - retries burning CPU behind a dead stream must
   # not reclassify the stall as work. An open interactive choice is the one
   # exception: reported once per distinct image, never typed into.
-  err_line=$(api_error_matches "$capture" || true)
   if [ -n "$err_line" ]; then
     if dialog_choice_pending "$capture"; then
       # An open interactive choice is never typed into (item 4): reported
@@ -322,16 +405,25 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTUR
       local fp_err
       fp_err=$(printf '%s' "$err_line" | _anstoss_hash)
       rm -f "$STATE/.anstoss-o18n-$id"
+      SIG_HIT=$err_line
+      LANE_STATE=idle-dialog
       if [ "$(cat "$STATE/.anstoss-o0018-$id" 2>/dev/null || true)" != "$fp_err" ]; then
         printf '%s\n' "$fp_err" > "$STATE/.anstoss-o0018-$id" || return 0
         LANE_VERDICT=o0018
         LANE_DETAIL="O-0018-API-Fehlerbild an $id (Dialog offen, nicht angetippt): $(printf '%s' "$err_line" | cut -c1-100) - Erstbefund bei Firstmate"
+        LADDER_ACTION=erstbefund-gemeldet
+        LADDER_REASON=''
+      else
+        LADDER_ACTION=uebersprungen
+        LADDER_REASON=dialog-bild-unveraendert-bereits-gemeldet
       fi
       return 0
     fi
     rm -f "$STATE/.anstoss-o0018-$id"
     LANE_VERDICT=o0018auto
     LANE_DETAIL=$err_line
+    SIG_HIT=$err_line
+    LANE_STATE=idle-o18
     return 0
   fi
   rm -f "$STATE/.anstoss-o0018-$id" "$STATE/.anstoss-o18n-$id"
@@ -370,11 +462,13 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTUR
 
   LANE_VERDICT=standing
   LANE_DETAIL="$reason_detail"
+  LANE_STATE=idle-standing
   return 0
 }
 
-run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane
-  local id=$1 detail=$2 now count last fp stored_fp min_spaced
+run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane;
+  # sets LADDER_ACTION/LADDER_REASON for the check log
+  local id=$1 detail=$2 now count last fp stored_fp min_spaced gate
   now=$(date +%s)
   count=$(cat "$STATE/.anstoss-count-$id" 2>/dev/null || echo 0)
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
@@ -385,11 +479,21 @@ run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane
   if [ "$count" -eq 0 ]; then
     # Spacing guard after a refutation (L34): stay quiet until the doubled
     # interval has passed since the last contact with this lane.
-    [ "$((now - last))" -ge "$(effective_interval "$id")" ] || return 0
+    gate=$(effective_interval "$id")
+    if [ "$((now - last))" -lt "$gate" ]; then
+      LADDER_ACTION=uebersprungen
+      LADDER_REASON="spacing-wait-$((now - last))s<${gate}s"
+      return 0
+    fi
     if FM_HOME="$FM_HOME" "$SEND_BIN" "$id" "$(stage1_nudge_message "$id" 1 "$detail")" >/dev/null 2>&1; then
       printf '1\n' > "$STATE/.anstoss-count-$id"
       printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
       printf '%s\n' "$fp" > "$STATE/.anstoss-fp-$id"
+      LADDER_ACTION=stufe1-getippt
+      LADDER_REASON=''
+    else
+      LADDER_ACTION=uebersprungen
+      LADDER_REASON=send-fehlgeschlagen
     fi
     return 0
   fi
@@ -399,21 +503,30 @@ run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane
   # spacing interval has passed.
   stored_fp=$(cat "$STATE/.anstoss-fp-$id" 2>/dev/null || true)
   min_spaced=$((now - last))
-  if [ "$fp" = "$stored_fp" ] && [ "$min_spaced" -ge "$(effective_interval "$id")" ]; then
+  gate=$(effective_interval "$id")
+  if [ "$fp" = "$stored_fp" ] && [ "$min_spaced" -ge "$gate" ]; then
     count=$((count + 1))
     printf '%s\n' "$count" > "$STATE/.anstoss-count-$id"
     printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
     printf 'anstoss: Bahn %s steht unveraendert still (%d. Anstoss wirkungslos, Zustand seit %d min unveraendert) - Weckruf an Firstmate: Neustart-Entscheid faellen\n' \
       "$id" "$count" "$((min_spaced / 60))"
+    LADDER_ACTION=eskalatiert
+    LADDER_REASON="zustand-$((min_spaced / 60))min-unveraendert"
     return 0
   fi
 
   # Situation changed since the last nudge: record the new fingerprint so the
   # next unchanged cycle can escalate against the CURRENT state, and let the
-  # spacing clock restart from now.
+  # spacing clock restart from now. Otherwise the spacing clock simply has not
+  # run out yet against an unchanged situation.
   if [ "$fp" != "$stored_fp" ]; then
     printf '%s\n' "$fp" > "$STATE/.anstoss-fp-$id"
     printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
+    LADDER_ACTION=uebersprungen
+    LADDER_REASON=situation-veraendert-fp-neu-gesetzt
+  else
+    LADDER_ACTION=uebersprungen
+    LADDER_REASON="spacing-wait-${min_spaced}s<${gate}s"
   fi
   return 0
 }
@@ -428,20 +541,39 @@ run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane
 # .anstoss-last-<id>/.anstoss-backoff-<id> clock the standing ladder uses, so
 # a refutation elsewhere on this lane (note_liveness_recovery) quiets this
 # ladder too.
-run_o18_ladder() {  # <id> <err-line> ; the standing ladder's counterpart
-  local id=$1 err_line=$2 now count last next
+run_o18_ladder() {  # <id> <err-line> ; the standing ladder's counterpart;
+  # sets LADDER_ACTION/LADDER_REASON for the check log
+  local id=$1 err_line=$2 now count last next gate
   now=$(date +%s)
   count=$(cat "$STATE/.anstoss-o18n-$id" 2>/dev/null || echo 0)
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
   last=$(cat "$STATE/.anstoss-last-$id" 2>/dev/null || echo 0)
   case "$last" in '' | *[!0-9]*) last=0 ;; esac
-  [ "$((now - last))" -ge "$(effective_interval "$id")" ] || return 0
+  # Nudges 1 and 2 run on the faster O-0018 spacing (header, latency
+  # decision); escalation repeats keep the shared INTERVAL/L34 clock, so the
+  # wake volume to firstmate is unchanged.
+  if [ "$count" -lt 2 ]; then
+    gate=$(o18_nudge_interval "$id")
+  else
+    gate=$(effective_interval "$id")
+  fi
+  anstoss_trace "o18 id=$id count=$count now=$now last=$last gate=$gate elapsed=$((now - last))"
+  if [ "$((now - last))" -lt "$gate" ]; then
+    LADDER_ACTION=uebersprungen
+    LADDER_REASON="spacing-wait-$((now - last))s<${gate}s"
+    return 0
+  fi
   next=$((count + 1))
 
   if [ "$count" -lt 2 ]; then
     if FM_HOME="$FM_HOME" "$SEND_BIN" "$id" "$(o18_nudge_message "$id" "$next")" >/dev/null 2>&1; then
       printf '%s\n' "$next" > "$STATE/.anstoss-o18n-$id"
       printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
+      LADDER_ACTION="stufe${next}-getippt"
+      LADDER_REASON=''
+    else
+      LADDER_ACTION=uebersprungen
+      LADDER_REASON=send-fehlgeschlagen
     fi
     return 0
   fi
@@ -450,6 +582,8 @@ run_o18_ladder() {  # <id> <err-line> ; the standing ladder's counterpart
   printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
   printf 'anstoss: Bahn %s bleibt nach API-Abbruch still (%d. Anstoss wirkungslos, O-0018) - Weckruf an Firstmate: Neustart-Entscheid faellen. Letzter Fehlerbefund: %s\n' \
     "$id" "$next" "$(printf '%s' "$err_line" | cut -c1-100)"
+  LADDER_ACTION=eskalatiert
+  LADDER_REASON="zwei-nudges-wirkungslos-o18n-$next"
   return 0
 }
 
@@ -468,6 +602,10 @@ action_check() {
     fm_pr_task_id_valid "$id" || continue
     LANE_VERDICT=''
     LANE_DETAIL=''
+    SIG_HIT=''
+    LANE_STATE=''
+    LADDER_ACTION=''
+    LADDER_REASON=''
     classify_lane "$id" "$meta" || true
     case "$LANE_VERDICT" in
       standing)
@@ -481,6 +619,11 @@ action_check() {
         run_o18_ladder "$id" "$LANE_DETAIL"
         ;;
     esac
+    # Check-round audit line (header owns the scope); stdout stays untouched.
+    if [ -n "$SIG_HIT" ] || [ "$LANE_VERDICT" = standing ]; then
+      anstoss_log "$id" "$SIG_HIT" "${LANE_STATE:-idle}" \
+        "${LADDER_ACTION:-keine}" "$LADDER_REASON"
+    fi
   done
 
   # Prune ladder state for lanes whose metadata is gone (teardown cleanup
