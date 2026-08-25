@@ -16,9 +16,13 @@
 # `response_tone` is free text describing the desired vibe, interpreted the
 # same way as data/captain.md's own "Address and tone" narrative.
 # Both fields must be non-empty (after trimming leading/trailing whitespace)
-# when set; `set` with neither flag is a usage error. The write is atomic:
-# a temp file in the same directory is renamed into place, so a failed write
-# never leaves a partial config/captain-style.json behind.
+# when set; `set` with neither flag is a usage error. An existing file must
+# be a JSON object whose "language"/"response_tone" keys, if present, are
+# strings; a non-object root or a structured (non-string) field value is
+# refused by both `show` and `set` even though it is syntactically valid
+# JSON. The write is atomic: a temp file in the same directory is renamed
+# into place, so a failed write never leaves a partial
+# config/captain-style.json behind.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +32,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STYLE_FILE="$CONFIG/captain-style.json"
 
 usage() {
-  sed -n '2,21{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,25{s/^# \{0,1\}//;p;}' "$0"
 }
 
 print_error() {
@@ -49,6 +53,19 @@ trim() {
   printf '%s' "$s"
 }
 
+# validate_shape <file>: true only when the file is a JSON object and any
+# present "language"/"response_tone" keys are strings. Rejects a non-object
+# root (array, number, string, null) and structured (non-string) field
+# values, both of which are syntactically valid JSON that `jq -e .` alone
+# would accept.
+validate_shape() {
+  jq -e '
+    type == "object"
+    and ((has("language") | not) or (.language | type) == "string")
+    and ((has("response_tone") | not) or (.response_tone | type) == "string")
+  ' "$1" >/dev/null 2>&1
+}
+
 show() {
   if [ ! -f "$STYLE_FILE" ]; then
     printf 'ABSENT: config/captain-style.json not set - firstmate defaults apply\n'
@@ -57,6 +74,10 @@ show() {
   require_jq
   if ! jq -e . "$STYLE_FILE" >/dev/null 2>&1; then
     print_error "config/captain-style.json is not valid JSON"
+    return 1
+  fi
+  if ! validate_shape "$STYLE_FILE"; then
+    print_error "config/captain-style.json must be a JSON object with string \"language\"/\"response_tone\" fields"
     return 1
   fi
   local language response_tone
@@ -107,6 +128,10 @@ set_fields() {
   if [ -f "$STYLE_FILE" ]; then
     if ! jq -e . "$STYLE_FILE" >/dev/null 2>&1; then
       print_error "config/captain-style.json is not valid JSON - refusing to merge over it"
+      return 1
+    fi
+    if ! validate_shape "$STYLE_FILE"; then
+      print_error "config/captain-style.json must be a JSON object with string \"language\"/\"response_tone\" fields - refusing to merge over it"
       return 1
     fi
     current=$(cat "$STYLE_FILE")

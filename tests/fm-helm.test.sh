@@ -101,8 +101,47 @@ test_malformed_existing_file_is_refused() {
   pass "malformed existing JSON is refused by both show and set rather than silently replaced"
 }
 
+test_non_object_root_is_refused() {
+  local home
+  home=$(new_home)
+  mkdir -p "$home/config"
+  printf '["vi", "blunt"]' > "$home/config/captain-style.json"
+  if FM_HOME="$home" "$HELM" show >/dev/null 2>&1; then
+    fail "show accepted a non-object JSON root (an array)"
+  fi
+  if FM_HOME="$home" "$HELM" set --language vi >/dev/null 2>&1; then
+    fail "set merged over a non-object JSON root instead of refusing"
+  fi
+  pass "valid JSON with a non-object root is refused by both show and set"
+}
+
+test_non_string_field_is_refused() {
+  local home
+  home=$(new_home)
+  mkdir -p "$home/config"
+  printf '{"language": ["vi", "en"]}' > "$home/config/captain-style.json"
+  if FM_HOME="$home" "$HELM" show >/dev/null 2>&1; then
+    fail "show accepted a structured (non-string) language field"
+  fi
+  if FM_HOME="$home" "$HELM" set --response-tone 'blunt' >/dev/null 2>&1; then
+    fail "set merged over a structured (non-string) field instead of refusing"
+  fi
+  pass "a structured (non-string) field value is refused by both show and set"
+}
+
+test_help_prints_full_text_not_truncated() {
+  local out
+  out=$("$HELM" --help) || fail "--help exited non-zero"
+  printf '%s' "$out" | grep -qx 'config/captain-style.json behind.' \
+    || fail "--help output was truncated before its last line: $out"
+  pass "--help prints its full usage text, not truncated"
+}
+
+test_help_prints_full_text_not_truncated
 test_show_absent
 test_malformed_existing_file_is_refused
+test_non_object_root_is_refused
+test_non_string_field_is_refused
 test_set_both_then_show
 test_set_one_field_preserves_other
 test_set_requires_a_field
