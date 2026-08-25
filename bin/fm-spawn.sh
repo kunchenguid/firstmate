@@ -1667,8 +1667,8 @@ launch_template() {
     # automatically injected tools. The isolated settings also disable AST edit,
     # while --no-lsp disables its subprocess surface. Widening this empty tool
     # boundary is a captain decision. The portable suite pins the emitted
-    # manifest; tests/fm-omp-tools-live-e2e.test.sh owns the opt-in check against
-    # the installed pinned binary's no-session consumer.
+    # manifest; tests/fm-omp-tools-live-e2e.test.sh fails closed until an exact
+    # importable session-free consumer can prove the effective boundary.
     # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
     # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
     # --add-dir. __OMPMODEL__ appears exactly once and always renders because

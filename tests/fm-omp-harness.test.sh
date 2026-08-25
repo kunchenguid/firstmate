@@ -387,6 +387,29 @@ NODE
   pass "OMP candidate renderer emits one contained argv with no tool surface"
 }
 
+test_omp_consumer_proof_gate_fails_closed_without_launch() {
+  local dir fakebin log out status
+  dir="$TMP_ROOT/omp-consumer-proof"
+  fakebin="$dir/fakebin"
+  log="$dir/omp-invocations"
+  mkdir -p "$fakebin"
+  : > "$log"
+  cat > "$fakebin/omp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_OMP_PROOF_STUB_LOG"
+exit 97
+SH
+  chmod +x "$fakebin/omp"
+  out=$(PATH="$fakebin:$PATH" FM_OMP_PROOF_STUB_LOG="$log" FM_OMP_TOOLS_LIVE_E2E=1 \
+    "$ROOT/tests/fm-omp-tools-live-e2e.test.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the unavailable exact-version consumer proof must fail closed"
+  assert_contains "$out" "no available importable session-free configuration and tool consumer" \
+    "the consumer proof gate did not name its unresolved prerequisite"
+  [ ! -s "$log" ] || fail "the unresolved consumer proof gate launched OMP: $(cat "$log")"
+  pass "OMP consumer proof gate fails closed without launching OMP"
+}
+
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
   local state id gen agent_dir isolated_cwd ambient_agent ambient_project ambient_overlay manifest ext record turnend
   state="$TMP_ROOT/candidate-artifacts/state"
@@ -1142,6 +1165,7 @@ test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_version_probe_is_hard_bounded
 test_omp_launch_argv_is_contained
+test_omp_consumer_proof_gate_fails_closed_without_launch
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix

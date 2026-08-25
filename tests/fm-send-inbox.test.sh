@@ -14,13 +14,14 @@
 #      with a notice, and the steer is still durably sent (exit 0).
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
 #      watcher's re-ring ladder owns delivery from the record on.
-#   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
+#   6. Carve-outs keep the typed plane: a leading "/" (non-OMP harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
-#   7. A marked secondmate steer carries its marker + corr token in the record
+#   7. OMP slash and bang commands fail closed before either submission plane.
+#   8. A marked secondmate steer carries its marker + corr token in the record
 #      body, and the pending-reply expectation is marked delivered at enqueue.
-#   8. Pending-reply bookkeeping failure after enqueue never reports a
+#   9. Pending-reply bookkeeping failure after enqueue never reports a
 #      retryable send failure that could duplicate the durable instruction.
-#   9. An unwritable inbox is a real local failure: nonzero exit, nothing
+#  10. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
@@ -210,6 +211,24 @@ test_harness_invocations_stay_typed() {
   pass "fm-send planes: slash and codex \$skill invocations stay typed; plain \$-text rides the inbox"
 }
 
+test_omp_commands_fail_closed_before_submission() {
+  local dir err rc input
+  dir=$(setup_case omp-command-refusal omp); err="$dir/send.err"
+  for input in "/share" $' \t/collab' $'\n/export session.md' '!printf unsafe' '   !command'; do
+    run_send "$dir" "$err" -- t1 "$input"; rc=$?
+    [ "$rc" -ne 0 ] || fail "an OMP slash or bang command must be refused"
+    assert_contains "$(cat "$err")" "OMP candidate refuses slash and bang command input" \
+      "the OMP command refusal did not name the fail-closed boundary"
+    [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused OMP command reached the inbox"
+    [ ! -s "$dir/send.log" ] || fail "a refused OMP command reached the terminal"
+  done
+  run_send "$dir" "$err" -- t1 "summarize the current review" \
+    || fail "ordinary OMP candidate text should remain on the supervised inbox plane"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "ordinary OMP candidate text was not durably enqueued"
+  pass "fm-send OMP boundary: slash and bang commands fail before submission"
+}
+
 test_explicit_target_stays_typed() {
   local dir err
   dir=$(setup_case explicit); err="$dir/send.err"
@@ -344,6 +363,7 @@ test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
+test_omp_commands_fail_closed_before_submission
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery

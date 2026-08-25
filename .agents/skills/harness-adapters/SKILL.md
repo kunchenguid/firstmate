@@ -545,8 +545,8 @@ The candidate is designed to preserve Orca as the only execution backend and Fir
 Its capability boundary requires an explicit qualified provider/model, disables model and usage-aware fallback and clears fallback chains, forces trace propagation off, and excludes command execution, delegation, network, MCP, browser, and desktop tools.
 It is never a secondmate, coordinator, backend, implicit default, or live pilot.
 
-`bin/fm-spawn.sh --help` owns selection, ordering, exact launch flags, model/backend validation, version pinning, environment handling, and state paths.
-`bin/fm-omp-candidate-artifacts.sh` owns the per-launch fallback overlay and candidate lifecycle extension.
+`bin/fm-spawn.sh --help` owns selection, ordering, model/backend validation, version pinning, dormancy, and state paths.
+`bin/fm-omp-candidate-artifacts.sh` owns the exact launch flags, environment boundary, per-launch fallback overlay, candidate input policy, and lifecycle extension.
 `bin/fm-busy-lib.sh` owns the untrusted operational verdict.
 `bin/fm-teardown.sh` owns artifact cleanup.
-The deterministic behavior contract lives in `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh`; the no-session installed-binary argument guard lives in `tests/fm-omp-tools-live-e2e.test.sh`.
+The deterministic behavior contract lives in `tests/fm-omp-harness.test.sh`, `tests/fm-send-inbox.test.sh`, and `tests/fm-busy-adapter-wiring.test.sh`; the unresolved session-free consumer proof gate lives in `tests/fm-omp-tools-live-e2e.test.sh`.

@@ -4,11 +4,14 @@
 #   fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd>
 #   fm-omp-candidate-artifacts.sh manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension>
 #   fm-omp-candidate-artifacts.sh launch-template
+#   fm-omp-candidate-artifacts.sh validate-submission <text>
 #   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
 # `prepare` creates a new agent directory containing config.yml and a new,
 # empty launch cwd. `manifest` emits the environment boundary and argv as JSON,
 # with every built-in tool and LSP disabled;
 # `launch-template` emits the same boundary with spawn-time placeholders.
+# `validate-submission` rejects text whose first non-whitespace character would
+# enter OMP's slash-command or bang-command parser.
 # `extension` writes the First Mate busy-state adapter to <output>. Persistent
 # config and extension files are rendered beside their destinations and renamed
 # atomically. No mode starts OMP, opens a session, or calls a provider.
@@ -18,7 +21,7 @@ OMP_RETRY_JSON='{"modelFallback":false,"usageAwareFallback":false,"fallbackChain
 OMP_AST_EDIT_JSON='{"enabled":false}'
 
 usage() {
-  echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension> | launch-template | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
+  echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension> | launch-template | validate-submission <text> | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
   exit 2
 }
 
@@ -102,6 +105,17 @@ process.stdout.write(words.join(" ") + " \"$(__OPINPUT__ encode launch-brief < _
 '
 }
 
+validate_submission() {
+  OMP_SUBMISSION=$1 node <<'NODE'
+const input = process.env.OMP_SUBMISSION || "";
+const command = input.trimStart();
+if (command.startsWith("/") || command.startsWith("!")) {
+  process.stderr.write("error: OMP candidate refuses slash and bang command input; use First Mate control for lifecycle actions\n");
+  process.exit(1);
+}
+NODE
+}
+
 render_extension() {
   local destination=$1 busy_event=$2 state=$3 task_id=$4 generation=$5 turn_ended=$6
   local temporary busy_event_js state_js task_id_js generation_js turn_ended_js
@@ -155,6 +169,10 @@ case "${1:-}" in
   launch-template)
     [ "$#" -eq 1 ] || usage
     render_launch_template
+    ;;
+  validate-submission)
+    [ "$#" -eq 2 ] || usage
+    validate_submission "$2"
     ;;
   extension)
     [ "$#" -eq 7 ] || usage
