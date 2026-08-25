@@ -318,19 +318,9 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
-# Row age alone cannot separate an abandoned foreign queue from one the mate is
-# actively serving. Under the auto-arm model the mate's watcher appends at a turn
-# boundary and those rows clear only once that turn's handling acknowledges them,
-# so the oldest row's age is the length of the mate's current turn, which is
-# unbounded - a threshold on it alerts on every turn that outlives the threshold.
-# The signal outside the queue is the mate's own liveness beacon, which its
-# watcher touches on every poll. Both legs below hold the SAME aged row at the
-# same threshold and differ only in that beacon, and the abandoned leg asserts the
-# alert still fires, so a fixture that stopped scanning this mate at all fails
-# loudly instead of letting the served leg pass vacuously.
-test_secondmate_stall_reads_the_mate_beacon_not_the_row_age() {
-  local dir state sub fakebin aged appender oldest
-  dir=$(make_case secondmate-stall-beacon)
+test_secondmate_stall_follows_actionable_handoff_progress() {
+  local dir state sub fakebin transitionbin now aged handoff oldest i
+  dir=$(make_case secondmate-stall-handoff)
   state="$dir/state"
   sub="$dir/secondmate"
   mkdir -p "$sub/state" "$sub/data" "$sub/bin"
@@ -338,10 +328,9 @@ test_secondmate_stall_reads_the_mate_beacon_not_the_row_age() {
   printf 'mate\n' > "$sub/.fm-secondmate-home"
   printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
-  # Ten minutes is far past any stall threshold, so only the beacon can keep the
-  # served leg quiet. The sequence file continues past this row, so the sustained
-  # appends below stay NEWER and this row remains the one the detector reads.
-  aged=$(( $(date +%s) - 600 ))
+  now=$(date +%s)
+  aged=$((now - 700))
+  handoff=$((now - 600))
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$aged" > "$sub/state/.wake-queue"
   printf '7\n' > "$sub/state/.wake-queue.seq"
   fakebin="$dir/fakebin"
@@ -355,32 +344,40 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/tmux"
+  transitionbin="$dir/transitionbin"
+  mkdir -p "$transitionbin"
+  cat > "$transitionbin/date" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = '+%s' ] || exit 1
+printf '%s\n' "$FM_FAKE_NOW"
+SH
+  chmod +x "$transitionbin/date"
 
-  # Served leg: a mate under sustained child traffic, its watcher polling and
-  # appending exactly as a live home does.
-  touch "$sub/state/.last-watcher-beat"
-  (
-    i=1
-    while [ "$i" -le 3 ]; do
-      touch "$sub/state/.last-watcher-beat"
-      append_wake "$sub/state" check "traffic-$i" "check: sustained row $i" || exit 1
-      sleep 1
-      i=$((i + 1))
-    done
-  ) &
-  appender=$!
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$handoff" \
+    bash -c '. "$1"; FM_WATCH_DELIVERY_PID=$$; FM_WATCH_DELIVERY_IDENTITY=fixture; wake "check: sustained handoff"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/handoff.out" \
+    || fail "the actionable handoff boundary failed"
+  grep -Fx 'check: sustained handoff' "$dir/handoff.out" >/dev/null \
+    || fail "the actionable handoff was not delivered"
+  touch -t 202001010000 "$sub/state/.last-watcher-beat"
+  i=1
+  while [ "$i" -le 3 ]; do
+    append_wake "$sub/state" check "traffic-$i" "check: sustained row $i" \
+      || fail "sustained traffic append $i failed"
+    i=$((i + 1))
+  done
+
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/served.out" 2> "$dir/served.err" || true
-  wait "$appender" || fail "the sustained-traffic appender failed"
   ! grep -F 'secondmate wake-loop stalled' "$dir/served.out" >/dev/null \
-    || fail "a served foreign queue alerted on turn-boundary latency: $(cat "$dir/served.out")"
+    || fail "a handed-off foreign queue alerted during a long handling turn: $(cat "$dir/served.out")"
   if [ -s "$state/.wake-queue" ]; then
     ! grep -F 'secondmate-wake-loop-mate-' "$state/.wake-queue" >/dev/null \
-      || fail "a served foreign queue published a durable stall notification"
+      || fail "a handed-off foreign queue published a durable stall notification"
   fi
   [ ! -e "$state/.secondmate-wake-stall-mate" ] \
     || fail "a suppressed row wrote its notification marker, which would silence a later genuine lapse"
@@ -389,8 +386,7 @@ SH
   [ "$oldest" -eq 7 ] \
     || fail "the sustained appends displaced the aged row, so the served leg proved nothing (oldest=$oldest)"
 
-  # Abandoned leg: the same aged row, nothing polling that home any more.
-  touch -t 202001010000 "$sub/state/.last-watcher-beat"
+  printf 'malformed\n' > "$sub/state/.watch-delivery-progress"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
@@ -399,7 +395,7 @@ SH
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/abandoned.out" 2> "$dir/abandoned.err" || true
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/abandoned.out" >/dev/null \
     || fail "an abandoned foreign queue lost its stall notification: $(cat "$dir/abandoned.out"); err=$(cat "$dir/abandoned.err")"
-  pass "foreign queue stalls follow the mate's liveness beacon, not the age of its oldest row"
+  pass "foreign queue stalls distinguish actionable handoff from no progress"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1284,7 +1280,7 @@ test_historical_annotation_skips_announced_status() {
 
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
-test_secondmate_stall_reads_the_mate_beacon_not_the_row_age
+test_secondmate_stall_follows_actionable_handoff_progress
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

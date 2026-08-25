@@ -78,10 +78,10 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS while that home's own
-#                          liveness beacon was stale past FM_GUARD_GRACE, so
-#                          nothing is serving the queue; a mate still polling its
-#                          own home is mid-turn and stays quiet at any row age.
+#                          FM_SECONDMATE_WAKE_STALL_SECS without a later durable
+#                          actionable-wake handoff in that home, so no handling
+#                          turn has picked up the row; a handoff at or after the
+#                          row keeps the current turn quiet at any row age.
 #                          Observation is read-only and one parent receipt
 #                          suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
@@ -196,13 +196,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
-# bounded age, and only while that mate's own supervision beacon is stale past
-# SECONDMATE_WAKE_BEACON_GRACE, can it produce a parent notification.
+# bounded age, and only without a later actionable-wake handoff in that home, can
+# it produce a parent notification.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
-# The supervision-lapse grace applied to a mate's own liveness beacon. It is the
-# same grace every other supervision verdict in this repo uses, because the
-# question is the same one: has that home's watcher stopped polling.
-SECONDMATE_WAKE_BEACON_GRACE=${FM_GUARD_GRACE:-300}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -411,7 +407,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age beat_age reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress reason
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -446,21 +442,18 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
-    # Row age alone cannot tell an abandoned queue from a served one. Under the
-    # auto-arm model the mate's watcher appends at a turn boundary and the rows
-    # clear only once that turn's handling acknowledges them, so every
-    # queue-derived age is bounded by the mate's current turn, whose length is
-    # unbounded. The mate's own liveness beacon is the progress signal outside
-    # the queue: its watcher touches it on every poll, and once that chain lapses
-    # it goes stale past grace under every supervision model, so reading it only
-    # to SUPPRESS can never blind a genuinely unserved queue. Suppress before any
-    # marker or receipt write, so a row held while the loop was alive still
-    # notifies if that loop later lapses.
-    beat_age=$(fm_path_age "$home/state/.last-watcher-beat")
-    case "$beat_age" in
-      ''|*[!0-9]*) beat_age=999999 ;;
+    progress=
+    if [ -f "$home/state/.watch-delivery-progress" ] && [ ! -L "$home/state/.watch-delivery-progress" ]; then
+      progress=$(cat "$home/state/.watch-delivery-progress" 2>/dev/null || true)
+    fi
+    case "$progress" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$progress" -ge "$epoch" ] && [ "$progress" -le "$now" ]; then
+          continue
+        fi
+        ;;
     esac
-    [ "$beat_age" -ge "$SECONDMATE_WAKE_BEACON_GRACE" ] || continue
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then

@@ -27,6 +27,7 @@ FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
+WATCH_DELIVERY_PROGRESS="$STATE/.watch-delivery-progress"
 WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
 WATCH_DELIVERY_KEEP_LINES=${FM_WATCH_DELIVERY_KEEP_LINES:-64}
 case "$WATCH_DELIVERY_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_DELIVERY_MAX_BYTES=65536 ;; esac
@@ -40,6 +41,23 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+watch_delivery_progress_publish() {
+  local transition previous tmp
+  transition=$(date +%s 2>/dev/null) || return 0
+  case "$transition" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -f "$WATCH_DELIVERY_PROGRESS" ] && [ ! -L "$WATCH_DELIVERY_PROGRESS" ]; then
+    previous=$(cat "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
+    case "$previous" in
+      ''|*[!0-9]*) ;;
+      *) [ "$previous" -le "$transition" ] || transition=$previous ;;
+    esac
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || return 0
+  if ! printf '%s\n' "$transition" > "$tmp" || ! mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null; then
+    rm -f -- "$tmp" 2>/dev/null || true
+  fi
+}
+
 watch_delivery_publish() {
   local reason=$1 i size tmp raw
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
@@ -50,6 +68,7 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
+  watch_delivery_progress_publish
   printf '%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
     "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
