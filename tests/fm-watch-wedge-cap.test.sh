@@ -196,10 +196,15 @@ test_wedge_cap_suppresses_subsequent_polls_for_same_hash() {
   # Cap marker must exist after the cap fired.
   [ -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker missing before the suppression check"
 
-  # Now run a fresh watcher poll: pane is still wedged (same content), so the
-  # wedge_timer_check early-return path should fire. No wake should be queued.
+  # Now run a fresh watcher poll: pane is still wedged (same content, worker
+  # still NOT genuinely recovered - FM_FAKE_CREW_STATE=paused, so v7 site 3 does
+  # NOT lift the marker). The wedge_timer_check early-return path should fire.
+  # No wake should be queued.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
+  # Worker is genuinely still wedged (paused state, not working) - this is an
+  # operator wait or stuck wedge, not a recovery. The cap must hold.
+  FM_FAKE_CREW_STATE='state: paused · source: run-step · waiting on external release' \
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
@@ -486,9 +491,79 @@ test_wedge_cap_validates_invalid_override() {
   pass "FM_WEDGE_MAX_ESCALATIONS rejects 0 and non-integer values, falling back to default 10"
 }
 
+test_wedge_cap_lifts_on_same_hash_worker_active_without_pause() {
+  local dir state fakebin out capture_file window key pane_hash sig pid max
+  dir=$(make_case wedge-cap-lift-no-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-lift-no-pause"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-lift-no-pause.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-lift-no-pause.status"
+  sig=$(seen_sig "$state/wedge-cap-lift-no-pause.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-lift-no-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Drive to cap.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "priming watch failed"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "round $n watch failed"; }
+    ack_stopped_cycle "$state" || fail "round $n ack failed"
+    n=$((n + 1))
+  done
+  [ -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker missing before same-hash-worker-active test"
+
+  # Greptile R6 case. The pane hash is unchanged AND status is "working:" (no
+  # declared pause) AND FM_FAKE_CREW_STATE says working - this is the v7 site 3
+  # lift: same-hash recovery WITHOUT a declared pause. The wedge was a
+  # misdetection or has been resolved; the marker MUST lift.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  # Site 3 fires on a wedge_timer_check call (same hash, count>=2, busy_now=1)
+  # - wait for the marker to be lifted (counter-reset not required, the cap
+  # will re-fire on next wedge_timer_check call after the lift).
+  i=0
+  while [ "$i" -lt 150 ]; do
+    if [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ]; then
+      break
+    fi
+    is_live_non_zombie "$pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  ack_stopped_cycle "$state" || true
+  [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker was NOT lifted on same-hash worker-active recovery without a declared pause (v7 site 3 failed)"
+  unset FM_FAKE_CREW_STATE
+  pass "the cap marker is lifted when the same hash resumes with an active pipeline outside a declared pause (v7 site 3)"
+}
+
 test_wedge_cap_fires_permanently_wedged_after_max_escalations
 test_wedge_cap_suppresses_subsequent_polls_for_same_hash
 test_wedge_cap_persists_across_pause_class_transitions
 test_wedge_cap_lifts_on_unambiguous_recovery
 test_wedge_cap_lifts_on_same_hash_recovery
+test_wedge_cap_lifts_on_same_hash_worker_active_without_pause
 test_wedge_cap_validates_invalid_override
