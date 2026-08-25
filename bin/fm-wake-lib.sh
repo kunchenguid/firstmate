@@ -336,6 +336,20 @@ fm_lock_prepare_owner() {
   [ "$back" = "$mypid" ]
 }
 
+fm_lock_publish_owner_link() {
+  local ownerdir=$1 lockdir=$2
+  case "$_FM_UNAME" in
+    MSYS*|MINGW*|CYGWIN*)
+      # Git Bash defaults directory symlinks to deep copies, which cannot
+      # provide the identity-preserving publication this lock requires.
+      MSYS=winsymlinks:sys ln -s "$ownerdir" "$lockdir"
+      ;;
+    *)
+      ln -s "$ownerdir" "$lockdir"
+      ;;
+  esac
+}
+
 fm_lock_link_owner() {
   local lockdir=$1 owner
   owner=$(readlink "$lockdir" 2>/dev/null) || return 1
@@ -415,7 +429,8 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_lock_publish_owner_link "$ownerdir" "$lockdir" 2>/dev/null \
+    && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0

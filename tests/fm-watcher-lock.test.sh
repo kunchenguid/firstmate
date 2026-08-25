@@ -190,6 +190,44 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
+test_lock_msys_publication_preserves_owner_identity() {
+  local dir state lockdir fakebin real_ln out
+  dir=$(make_case lock-msys-publication)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/msys-fakebin"
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MSYS_NT-10.0
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${MSYS:-}" = winsymlinks:sys ]; then
+  exec "$FM_TEST_REAL_LN" "$@"
+fi
+[ "${1:-}" = -s ] && [ "$#" -eq 3 ] || exit 90
+cp -R -- "$2" "$3"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    [ -L "$2" ] || exit 8
+    [ "$(readlink "$2")" = "$FM_LOCK_OWNER_DIR" ] || exit 9
+    [ -s "$2/pid" ] || exit 10
+    printf "owner=%s pid=%s\n" "$FM_LOCK_OWNER_DIR" "$(cat "$2/pid")"
+  ' _ "$LIB" "$lockdir") || fail "MSYS lock publication did not preserve owner identity"
+  case "$out" in
+    owner=*" pid="*) ;;
+    *) fail "MSYS lock publication returned incomplete ownership evidence: $out" ;;
+  esac
+  pass "MSYS lock publication forces symlink semantics instead of directory deep-copy"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -367,7 +405,7 @@ test_lock_late_claim_loses_after_recreate() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner1=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner1" "$2" || exit 21
+    fm_lock_publish_owner_link "$owner1" "$2" || exit 21
     touch -h -t 200001010000 "$2" 2>/dev/null || sleep 2
     if ! fm_lock_try_acquire "$2"; then exit 22; fi
     before=$(cat "$2/pid" 2>/dev/null || true)
@@ -399,7 +437,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner" "$2" || exit 21
+    fm_lock_publish_owner_link "$owner" "$2" || exit 21
     fm_lock_try_acquire "$2.steal" || exit 22
     steal_owner=${FM_LOCK_OWNER_DIR:-}
     if fm_lock_claim "$2" "$owner"; then late=won; else late=lost; fi
@@ -1106,6 +1144,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_lock_msys_publication_preserves_owner_identity
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
