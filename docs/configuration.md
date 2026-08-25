@@ -101,7 +101,7 @@ The ordinary local command requires `tmux` on `PATH`, prints `tmux -V`, derives 
 It does not maintain a second file list or duplicate hermetic-only behavior files on the Mac.
 The required `Behavior tests` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) uses the duration-balanced sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) to run and verify the complete behavior inventory across eight isolated runners.
 CI selects the explicit non-Herdr path because its disposable image carries no Herdr, so it runs every hermetic body and the hermetic portion of the mixed file while the local host admits the complete `herdr-lab` and `herdr-mixed` set through owned labs.
-The exact behavioral coverage contract is the union of that capability-derived local host set and the required CI executed-manifest union, not a claim that all 123 files run serially before push.
+The exact behavioral coverage contract is the union of that capability-derived local host set and the required CI executed-manifest union, not a claim that all behavior files run serially before push.
 Both routes cross the same sealed admission boundary, and the local serial route holds real-Herdr labs to one at a time.
 
 ## Crosscheck reviewer

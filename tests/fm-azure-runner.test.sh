@@ -452,7 +452,8 @@ agent_fleet_offline_install_contract() {
   mkdir -p "$project/src"
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" "$project/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$project/src/"
-  python=$(command -v python3)
+  python=$(uv python find '>=3.11') \
+    || fail "could not resolve Python 3.11+ for the hermetic Agent Fleet installer"
   "$python" -m venv --without-pip "$project/.venv" \
     || fail "could not create the hermetic Agent Fleet installer venv"
   "$project/.venv/bin/python" "$AGENT_FLEET_INSTALLER" "$project" "$project/.venv" >/dev/null \
@@ -1371,7 +1372,8 @@ PY
   cp "$ROOT/tools/agent-fleet/pyproject.toml" "$ROOT/tools/agent-fleet/uv.lock" \
     "$fixture/tools/agent-fleet/"
   cp -R "$ROOT/tools/agent-fleet/src/agent_fleet" "$fixture/tools/agent-fleet/src/"
-  python=$(command -v python3)
+  python=$(uv python find '>=3.11') \
+    || fail "could not resolve Python 3.11+ for the remote-command fixture"
   "$python" -m venv --without-pip "$fixture/tools/agent-fleet/.venv" >/dev/null \
     || fail "the remote-command fixture could not create its Agent Fleet venv"
   "$fixture/tools/agent-fleet/.venv/bin/python" "$AGENT_FLEET_INSTALLER" \

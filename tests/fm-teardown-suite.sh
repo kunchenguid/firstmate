@@ -6933,6 +6933,11 @@ test_secondmate_registry_updates_are_locked_and_literal() {
   pass "secondmate registry updates are serialized and compare ids literally"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = network-authority ]; then
+  test_secondmate_network_fetches_pin_validated_addresses
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
   test_teardown_removes_safe_tasktmp_and_accepts_absence
   test_teardown_refuses_unsafe_tasktmp_metadata
