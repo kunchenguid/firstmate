@@ -68,6 +68,12 @@ The alarm cannot repeat during that failure episode, and a later unhealthy stop 
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
+Before that cooperative wait begins, Claude mode checks who owns `state/.lock` with the same identity predicate the Stop-owned auto-arm uses (`fm_session_lock_owned_by_self` and `fm_harness_pid_alive` from `bin/fm-session-lock-lib.sh`).
+When the lock names a live harness outside this session's ancestry, the auto-arm exits 0 without claiming the home, so this session cannot arm a watcher for it; blocking would demand a repair it cannot perform and would spend its bounded block budget on a home it does not own.
+The guard instead emits one `systemMessage` advisory naming the owning pid and allows the stop, because the supervision gap is real and stays visible to the operator rather than failing silently.
+A missing, malformed, or dead-owner lock is uncertainty rather than evidence of another live owner and leaves the unchanged blocking behavior in place.
+Only Claude reads this advisory and only Claude's `stop_hook_active` cap turns a futile re-block into a forced override, so Codex, Grok, OpenCode, and Pi keep the unchanged `block_stop` path for the same condition.
+
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
@@ -103,7 +109,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, exactly-one-path safety, the foreign-live-owner advisory bypass with its non-`--claude`-mode block equivalent, and the fail-closed handling of a dead, malformed, or missing `state/.lock`.
 `tests/fm-guard-stale-banner.test.sh` covers the matching pull-guard predicate, including the fresh-leftover-beacon negative control.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.

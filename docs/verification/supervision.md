@@ -195,6 +195,20 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+The foreign-live-owner identity gate and its fail-closed handling of a dead, malformed, or missing `state/.lock` were verified on 2026-08-25.
+
+```sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh
+```
+
+Observed output:
+
+```text
+FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=3294
+```
+
+The single failure, `Pi guard must inject once for no-tool and multi-tool logical runs`, reproduces identically on unmodified `main` and is unrelated to this change.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.

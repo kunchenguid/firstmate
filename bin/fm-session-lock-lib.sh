@@ -5,7 +5,9 @@
 # lock, and does the current process descend from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
+# lock-owning primary session before it may arm or rewake;
+# bin/fm-turnend-guard.sh uses it in --claude mode to tell a live foreign
+# owner from uncertainty before advising instead of blocking.
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
