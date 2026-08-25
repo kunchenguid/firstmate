@@ -4,7 +4,15 @@
   "contractFingerprint": "contract-d790ac73dac4fb4af15f15d0",
   "decisionContractVersion": "2026-08-25.10",
   "promptSha256": "a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22",
-  "recordedOutputsSha256": "b7a9b8158c099cc2c07ec2aad26f458eac51864a95768d39388054c9f9b5aaa0",
+  "recordedOutputsSha256": "450f17d289f3acbb9ad46938b32e7b892ce0b26b7db519757c97318aff03ad96",
+  "captureProvenance": {
+    "interface": "DecisionClassifier.classify -> fm_supervision_decide -> validateDecision",
+    "mode": "pi-agent-session",
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5",
+    "runtime": "pi-coding-agent@0.84.2",
+    "runId": "capture-20260825-claude-haiku-4-5"
+  },
   "modelPolicy": "runtime-authenticated-no-linear-credential-collision-context-fitting-distinct-strictly-cheaper-at-configured-uncached-ceiling-and-main-model-change; preflight-bounded-turn-cost; preserve-main-reasoning-policy-for-workers",
   "corpus": "tests/fixtures/fm-autonomy-heldout.json",
   "corpusSha256": "94735b9821c6160bfafd00b85ebab299c75e263039de56b0c06de191d3dd62bd",

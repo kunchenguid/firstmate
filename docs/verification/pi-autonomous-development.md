@@ -18,11 +18,12 @@ Accepted on 2026-08-25.
 - Decision contract version: `2026-08-25.10`.
 - Contract fingerprint: `contract-d790ac73dac4fb4af15f15d0`.
 - Stable prompt SHA-256: `a74e3e79ea2690c90fb4109ce2f4457fc57668e9f5c3a20950b6a93644c26c22`.
-- Recorded classifier outputs SHA-256: `664a96544e7d9416851d0a84e033d2f1ea3c5c70b11a617a6b3109078d30236c`.
+- Recorded classifier outputs SHA-256: `450f17d289f3acbb9ad46938b32e7b892ce0b26b7db519757c97318aff03ad96`.
 - Model policy: the selected supervision model must be runtime-authenticated without any Linear-credential collision, fit the configured context ceiling, remain distinct and strictly cheaper across main-model changes, and preflight each bounded turn against the cost window, while worker dispatch preserves Firstmate's existing reasoning policy.
 - Cases: 11 passed, 0 failed.
 - Corpus: `tests/fixtures/fm-autonomy-heldout.json`.
 - Production-interface recordings: `tests/fixtures/fm-autonomy-recorded-outputs.json`.
+- Capture provenance: `anthropic/claude-haiku-4-5` through `pi-coding-agent@0.84.2`, run `capture-20260825-claude-haiku-4-5`; all fields are bound by the accepted baseline.
 - Baseline: `tests/fixtures/fm-autonomy-baseline.json`.
 
 The retained disconfirming cases prove seven easy-to-miss directions.
@@ -104,6 +105,8 @@ FM_PI_AUTONOMY_LIVE_MODEL=<model-id> \
 bin/fm-test-run.sh tests/fm-pi-autonomy-live-e2e.test.sh
 ```
 
+To refresh the deterministic recording through that same authenticated production decision interface, set `FM_PI_AUTONOMY_CAPTURE_OUTPUT=tests/fixtures/fm-autonomy-recorded-outputs.json`. The capture writes provider, model, Pi runtime, run ID, corpus, prompt, contract, and per-case input/output digests; `bin/fm-autonomy.sh eval` rejects any recording or baseline whose bindings do not match.
+
 The authenticated active-autonomy guard has not been observed in this credential-free repository verification environment; activation requires an explicitly configured provider/model pair and provider authentication.
 A live Linear mutation is deliberately not part of repository validation.
 They belong to the captain's post-merge activation check.
@@ -114,7 +117,7 @@ Pi and pi-signed share the tracked Pi extension surface, so a valid home-local c
 The configured intelligence does not alter which primary executable launches.
 Claude, Codex, OpenCode, Grok, Kimi, Cursor, and Muse do not load `.pi/extensions/fm-branch-supervision.ts`, so the config and state paths are inert for those primaries.
 All worker harnesses remain selected through the existing dispatch-profile and `fm-spawn` contracts.
-Main must still resolve registered secondmate scopes before claim; cross-home claim handoff is not an autonomous v1 path and therefore routes to main instead of being guessed locally.
+Main must durably bind every dispatch to an explicit `primary`, `secondmate`, or `ambiguous` route before claim. Only `primary` proceeds locally; absent, ambiguous, and secondmate assignments fail closed, while non-exclusive secondmate clone lists never infer ownership.
 The autonomy module introduces no worker-harness launch flags.
 
 The Firstmate adapter delegates endpoint isolation to `fm-spawn`, so tmux, Herdr, Zellij, Orca, and cmux retain their existing capability checks, worktree ownership, and cleanup rules.

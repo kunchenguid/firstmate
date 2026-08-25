@@ -31,7 +31,7 @@ The deterministic conflict graph and current capacity check inside `fm_autonomy 
 1. Resolve the project and registered secondmate scopes under `AGENTS.md` before any local dispatch; if a secondmate scope fits, do not claim or dispatch through this home because cross-home claim handoff is not an autonomous v1 path.
 2. Resolve the worker profile under `AGENTS.md` section 4 before dispatch, including `harness-adapters` and `quota-array-dispatch` when its trigger applies.
 3. Never pass an explicit runtime backend unless current authority for this exact issue selected it.
-4. Call `fm_autonomy` with `action=dispatch`, the decision ID, issue ID, and the resolved harness plus any deliberately selected model, effort, or backend.
+4. Call `fm_autonomy` with `action=dispatch`, the decision ID, issue ID, the explicit main-session route (`primary`, `secondmate`, or `ambiguous`), and the resolved harness plus any deliberately selected model, effort, or backend. Only `primary` may proceed; the other values durably refuse local claim and dispatch.
 5. Let the tool atomically reuse or establish the durable issue claim, scaffold the ordinary Firstmate instructions, record the task, and dispatch through `bin/fm-spawn.sh` in an isolated copy.
 6. If the tool serializes the issue for a dependency, collision, missing evidence, shared mutable resource, machine capacity, or heavy-validation capacity, leave it unclaimed and let a later intake or reconciliation reconsider it.
 7. If dispatch fails after the claim became durable, do not create a replacement task ID or manually reset Linear.

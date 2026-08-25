@@ -84,7 +84,7 @@ The adapter follows Linear's current [GraphQL](https://linear.app/developers/gra
 The adapter uses Linear's official GraphQL endpoint at `https://api.linear.app/graphql`.
 A personal API key is sent as the raw `Authorization` value, while an OAuth access token uses `Authorization: Bearer <token>`.
 The credential is read only from the configured runtime environment variable and is never tracked, journaled, rendered, included in an error, or propagated into Firstmate script and worker subprocess environments.
-Activation removes the Linear variable from the Pi process's ambient provider and worker environment, independently resolves main and supervision request authentication, and refuses any value collision before a model turn can run.
+Activation removes every Linear variable observed during the Pi session from the ambient provider and worker environment, independently resolves main and supervision request authentication, and refuses any value collision before a model turn can run. Observed credentials remain retained only for restoration at session shutdown, including when a later configuration is otherwise invalid.
 The implementation inspects GraphQL `errors` even on HTTP 200 responses.
 It follows Relay pagination through `first`, `after`, `pageInfo.hasNextPage`, and `pageInfo.endCursor` under the configured page and issue ceilings.
 It treats `RATELIMITED` as retryable and bounds delay with Linear's returned reset headers rather than hard-coding an account limit.

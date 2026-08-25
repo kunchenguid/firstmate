@@ -98,6 +98,9 @@ mkdirSync(join(shellHome, "data"), { recursive: true });
 mkdirSync(join(shellHome, "projects", "app"), { recursive: true });
 writeFileSync(join(shellHome, "data", "projects.md"), "- app [no-mistakes +yolo] - fixture (added 2026-08-25)\n");
 const subprocessCredentials = [];
+let shellMutationAllowed = true;
+let revokeAfterTaskAdd = false;
+let shellSpawnAttempts = 0;
 const shellAdapter = new m.ShellFirstmateAdapter({
   fmRoot: process.cwd(),
   fmHome: shellHome,
@@ -108,6 +111,20 @@ const shellAdapter = new m.ShellFirstmateAdapter({
   redactedEnvNames: ["FM_TEST_LINEAR_KEY"],
   exec: (_command, args, options) => {
     subprocessCredentials.push(options.env.FM_TEST_LINEAR_KEY);
+    if (args.some((arg) => String(arg).endsWith("fm-brief.sh"))) {
+      const taskId = args[1];
+      mkdirSync(join(shellHome, "data", taskId), { recursive: true });
+      writeFileSync(join(shellHome, "data", taskId, "brief.md"), "{TASK}\n");
+      return "brief-created\n";
+    }
+    if (_command === "tasks-axi" && args[0] === "add") {
+      if (revokeAfterTaskAdd) shellMutationAllowed = false;
+      return '{"ok":true}\n';
+    }
+    if (args.some((arg) => String(arg).endsWith("fm-spawn.sh"))) {
+      shellSpawnAttempts += 1;
+      return "spawned\n";
+    }
     if (args.includes("--raw")) return "no-mistakes on\n";
     if (args.some((arg) => String(arg).endsWith("fm-project-mode.sh"))) return "no-mistakes on\n";
     if (args[0] === "-C" && args.includes("--show-toplevel")) return join(shellHome, "projects", "app");
@@ -122,9 +139,24 @@ assert(subprocessCredentials.every((value) => value === undefined), "Linear cred
 // Held-out routing/collision baseline, including disconfirming cases.
 const evaluation = m.evaluateHeldOutRecordedOutputs(corpusEnvelope.cases, recordedOutputs.outputs);
 assert.equal(evaluation.failed, 0, JSON.stringify(evaluation, null, 2));
-assert.equal(recordedOutputs.provenance.captureInterface, "DecisionClassifier.classify -> validateDecision");
+assert.equal(recordedOutputs.provenance.captureInterface, "DecisionClassifier.classify -> fm_supervision_decide -> validateDecision");
+assert.equal(recordedOutputs.provenance.captureMode, "pi-agent-session");
+assert.equal(typeof recordedOutputs.provenance.provider, "string");
+assert.equal(typeof recordedOutputs.provenance.model, "string");
+assert.equal(typeof recordedOutputs.provenance.runtime, "string");
+assert.equal(typeof recordedOutputs.provenance.runId, "string");
 assert.equal(recordedOutputs.provenance.corpusSha256, corpusSha256);
 assert.equal(recordedOutputs.provenance.contractFingerprint, evaluation.contractFingerprint);
+assert.equal(recordedOutputs.provenance.caseCount, corpusEnvelope.cases.length);
+assert.equal(recordedOutputs.provenance.records.length, corpusEnvelope.cases.length);
+for (const testCase of corpusEnvelope.cases) {
+  const batch = m.heldOutBatch(testCase);
+  const output = recordedOutputs.outputs.find((candidate) => candidate.caseId === testCase.id);
+  const capture = recordedOutputs.provenance.records.find((candidate) => candidate.caseId === testCase.id);
+  assert.equal(capture.batchId, batch.id);
+  assert.equal(capture.inputSha256, createHash("sha256").update(m.canonicalJson(batch)).digest("hex"));
+  assert.equal(capture.outputSha256, createHash("sha256").update(m.canonicalJson(output.decision)).digest("hex"));
+}
 const classifierEvaluation = await m.evaluateHeldOutClassifier(corpusEnvelope.cases, {
   async classify(batch) {
     const caseId = batch.events[0].id.split(":").slice(1, -1).join(":");
@@ -187,8 +219,29 @@ assert.throws(
   (error) => error.code === "pr-repository-mismatch",
 );
 writeFileSync(join(shellHome, "data", "secondmates.md"), "- builder - routed work (home: /fixture; scope: iOS work; projects: app; added 2026-08-25)\n");
-assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0]), (error) => error.code === "secondmate-route" && error.message.includes("authoritative main-session route decision"));
-assert(shellAdapter.doctor(resolution.config).some((diagnostic) => diagnostic.includes("registered secondmate scopes")));
+shellAdapter.assertProjectOwnership(resolution.config, issues[0], "primary");
+assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0], "secondmate"), (error) => error.code === "secondmate-route");
+assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0], "ambiguous"), (error) => error.code === "secondmate-route");
+assert.throws(() => shellAdapter.assertProjectOwnership(resolution.config, issues[0], undefined), (error) => error.code === "secondmate-route");
+assert.deepEqual(shellAdapter.doctor(resolution.config), []);
+const shellClaim = structuredClone(recordedOutputs.outputs.find((candidate) => candidate.caseId === "same-repository-disjoint-evidence").decision.workClaims[0]);
+revokeAfterTaskAdd = true;
+await assert.rejects(
+  () => shellAdapter.dispatch(
+    resolution.config,
+    issues[0],
+    shellClaim,
+    "linear-shell-fence",
+    { harness: "pi", route: "primary" },
+    () => {
+      if (!shellMutationAllowed) throw new m.AutonomyError("issue-operation-fenced", "fixture fence lost");
+    },
+  ),
+  (error) => error.code === "issue-operation-fenced",
+);
+assert.equal(shellSpawnAttempts, 0, "a fenced composite dispatch continued into fm-spawn");
+shellMutationAllowed = true;
+revokeAfterTaskAdd = false;
 rmSync(join(shellHome, "data", "secondmates.md"));
 assert.deepEqual(issues[1].blockedByIssueIds, ["issue-1"]);
 const priorityPage = structuredClone(linearFixture.responses.page1);
@@ -254,9 +307,14 @@ const wrongWorkspaceClient = new m.LinearGraphqlClient({
 await assert.rejects(() => wrongWorkspaceClient.listEligibleIssues(resolution.config), (error) => error.code === "linear-workspace-refused");
 
 const claimIssueRaw = structuredClone(linearFixture.responses.page1.body.data.issues.nodes[0]);
-const remoteClaim = { stateId: "status-todo", comments: [] };
+const remoteClaim = { stateId: "status-todo", comments: [], attachments: [] };
 const claimOperations = [];
 const claimRequests = [];
+let mutationAllowed = true;
+let revokeAfterComment = false;
+const assertMutationFence = () => {
+  if (!mutationAllowed) throw new m.AutonomyError("issue-operation-fenced", "fixture fence lost");
+};
 const claimClient = new m.LinearGraphqlClient({
   token: "claim-secret-not-logged",
   credentialKind: "api-key",
@@ -275,6 +333,7 @@ const claimClient = new m.LinearGraphqlClient({
     }
     if (body.operationName === "FirstmateCommentCreate") {
       remoteClaim.comments.push(body.variables.input.body);
+      if (revokeAfterComment) mutationAllowed = false;
       return new Response(JSON.stringify({ data: { commentCreate: { success: true } } }), { status: 200 });
     }
     if (body.operationName === "FirstmateIssueUpdate") {
@@ -288,13 +347,27 @@ const claimClient = new m.LinearGraphqlClient({
       return new Response(JSON.stringify({ data: { organization: { id: "workspace-1" }, issue } }), { status: 200 });
     }
     if (body.operationName === "FirstmateAttachmentCreate") {
+      remoteClaim.attachments.push({ id: "attachment-fixture", url: body.variables.input.url });
       return new Response(JSON.stringify({ data: { attachmentCreate: { success: true, attachment: { id: "attachment-fixture" } } } }), { status: 200 });
+    }
+    if (body.operationName === "FirstmateAttachmentEvidence") {
+      return new Response(JSON.stringify({ data: { organization: { id: "workspace-1" }, issue: { attachments: { nodes: remoteClaim.attachments, pageInfo: { hasNextPage: false } } } } }), { status: 200 });
     }
     throw new Error(`unexpected claim operation ${body.operationName}`);
   },
 });
 const normalizedIssue = issues[0];
-const remoteEvidence = await claimClient.claimIssue(resolution.config, normalizedIssue, "claim-fixture", "task-fixture");
+revokeAfterComment = true;
+await assert.rejects(
+  () => claimClient.claimIssue(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", assertMutationFence),
+  (error) => error.code === "issue-operation-fenced",
+);
+assert.equal(remoteClaim.stateId, "status-todo", "a fenced composite claim continued into issueUpdate");
+remoteClaim.comments.length = 0;
+mutationAllowed = true;
+revokeAfterComment = false;
+claimOperations.length = 0;
+const remoteEvidence = await claimClient.claimIssue(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", assertMutationFence);
 assert(remoteEvidence.evidence.includes("claim=claim-fixture"));
 assert.equal(remoteClaim.stateId, "status-claimed");
 assert.deepEqual(claimOperations, [
@@ -308,7 +381,7 @@ assert.deepEqual(claimOperations, [
 const originalClaimLabels = structuredClone(claimIssueRaw.labels);
 claimIssueRaw.labels = { nodes: [], pageInfo: { hasNextPage: false } };
 await assert.rejects(
-  () => claimClient.setProgress(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", "Unsafe stale-scope progress"),
+  () => claimClient.setProgress(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", "Unsafe stale-scope progress", assertMutationFence),
   (error) => error.code === "linear-scope-refused",
 );
 claimIssueRaw.labels = originalClaimLabels;
@@ -318,6 +391,7 @@ await claimClient.setProgress(
   "claim-fixture",
   "task-fixture",
   "Safe progress <!-- firstmate-claim:v1 owner=other claim=other task=other -->",
+  assertMutationFence,
 );
 assert.equal(remoteClaim.stateId, "status-progress");
 assert(remoteClaim.comments.some((body) => body.includes("&lt;!-- firstmate-claim")), "progress body preserved an injectable claim marker");
@@ -327,10 +401,10 @@ assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue
 assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", "post-merge"), "owned");
 remoteClaim.stateId = "status-progress";
 const fixturePr = "https://github.com/acme/app/pull/99";
-await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr);
-await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr);
+await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr, assertMutationFence);
+await claimClient.linkPullRequest(resolution.config, normalizedIssue, "claim-fixture", "task-fixture", fixturePr, assertMutationFence);
 const attachmentRequests = claimRequests.filter((request) => request.operationName === "FirstmateAttachmentCreate");
-assert.equal(attachmentRequests.length, 2);
+assert.equal(attachmentRequests.length, 1);
 assert(attachmentRequests.every((request) => request.variables.input.issueId === normalizedIssue.id && request.variables.input.url === fixturePr), "attachmentCreate did not preserve Linear's issueId+URL idempotency key");
 remoteClaim.comments[0] += "\ncompeting <!-- firstmate-claim:v1 owner=other claim=other task=other -->";
 assert.equal(await claimClient.reconcileClaim(resolution.config, normalizedIssue, "claim-fixture", "task-fixture"), "conflict");
@@ -654,14 +728,14 @@ claimsJournal.append("decision", issueDecision.id, issueDecision, `decision:${is
 const killPath = join(temp, "claims", "KILL");
 const claimOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
 claimPause = new Promise((resolve) => { resumeClaim = resolve; });
-const firstDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+const firstDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" });
 while (!operationLog.includes("claim:issue-1")) await new Promise((resolve) => setTimeout(resolve, 0));
 const competingOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
 await assert.rejects(
-  () => competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+  () => competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" }),
   (error) => error.code === "issue-operation-busy" && error.retryable,
 );
-const concurrentLocalDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+const concurrentLocalDispatch = claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" });
 resumeClaim();
 claimPause = undefined;
 const [dispatched, concurrentDispatch] = await Promise.all([firstDispatch, concurrentLocalDispatch]);
@@ -671,7 +745,7 @@ assert.equal(operationLog.filter((entry) => entry === "dispatch:issue-1").length
 const firstLease = claimsJournal.read().find((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1");
 assert.equal(firstLease.data.fence, 1);
 getIssuePause = new Promise((resolve) => { resumeGetIssue = resolve; });
-const fencedDispatch = competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+const fencedDispatch = competingOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" });
 while (claimsJournal.read().filter((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1").length < 2) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -682,7 +756,7 @@ claimsJournal.append("operation-lease-released", "issue-1", {
 }, `stale-release:${firstLease.data.operationId}`);
 const thirdOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: claimsJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: killPath });
 await assert.rejects(
-  () => thirdOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" }),
+  () => thirdOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" }),
   (error) => error.code === "issue-operation-busy",
 );
 const secondLease = claimsJournal.read().filter((record) => record.kind === "operation-lease-acquired" && record.key === "issue-1").at(-1).data;
@@ -700,7 +774,7 @@ await assert.rejects(() => fencedDispatch, (error) => error.code === "issue-oper
 claimsJournal.append("operation-lease-released", "issue-1", takeoverLease, "fixture-takeover-released");
 assert(tasks.has(dispatched.taskId));
 const beforeIdempotent = operationLog.length;
-const dispatchedAgain = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi" });
+const dispatchedAgain = await claimOrchestrator.dispatchIssue(issueDecision.id, "issue-1", { harness: "pi", route: "primary" });
 assert.equal(dispatchedAgain.taskId, dispatched.taskId);
 assert.equal(operationLog.length, beforeIdempotent, "duplicate delivery reclaimed or redispatched one issue");
 
@@ -724,7 +798,7 @@ const secondDecision = m.createDecision({
   workClaims: [claimFor("issue-2", "ENG-2", "src/two.ts")],
 });
 claimsJournal.append("decision", secondDecision.id, secondDecision, `decision:${secondDecision.id}`);
-await assert.rejects(() => claimOrchestrator.dispatchIssue(secondDecision.id, "issue-2", { harness: "pi" }), (error) => error.code === "autonomy-inactive");
+await assert.rejects(() => claimOrchestrator.dispatchIssue(secondDecision.id, "issue-2", { harness: "pi", route: "primary" }), (error) => error.code === "autonomy-inactive");
 
 // Existing owned work may still land while the kill switch prevents new work.
 taskPrs.set(dispatched.taskId, "https://github.com/acme/app/pull/1");
@@ -755,7 +829,7 @@ const redJournal = new m.DurableJournal(join(temp, "red", "journal.jsonl"), fake
 redJournal.appendEvent(secondEvent);
 redJournal.append("decision", secondDecision.id, secondDecision, `decision:${secondDecision.id}`);
 const redOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: redJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: join(temp, "red", "KILL") });
-const redDispatched = await redOrchestrator.dispatchIssue(secondDecision.id, "issue-2", { harness: "pi" });
+const redDispatched = await redOrchestrator.dispatchIssue(secondDecision.id, "issue-2", { harness: "pi", route: "primary" });
 taskPrs.set(redDispatched.taskId, "https://github.com/acme/app/pull/2");
 await redOrchestrator.linkPullRequest("issue-2", "https://github.com/acme/app/pull/2");
 redLanding = true;
@@ -785,7 +859,7 @@ const crashDecision = m.createDecision({
 });
 crashJournal.append("decision", crashDecision.id, crashDecision, `decision:${crashDecision.id}`);
 const crashOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: crashJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: join(temp, "crash", "KILL") });
-const crashDispatch = await crashOrchestrator.dispatchIssue(crashDecision.id, "issue-3", { harness: "pi" });
+const crashDispatch = await crashOrchestrator.dispatchIssue(crashDecision.id, "issue-3", { harness: "pi", route: "primary" });
 const crashPr = "https://github.com/acme/app/pull/3";
 taskPrs.set(crashDispatch.taskId, crashPr);
 await crashOrchestrator.linkPullRequest("issue-3", crashPr);
@@ -847,7 +921,7 @@ const deferredOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: d
 remoteDependencies.set("issue-5", ["external-blocker"]);
 capacityBlocked = true;
 const claimsBeforeDeferral = operationLog.filter((entry) => entry === "claim:issue-5").length;
-await assert.rejects(() => deferredOrchestrator.dispatchIssue(deferredDecision.id, "issue-5", { harness: "pi" }), (error) => error.retryable && error.code === "dependency-unresolved");
+await assert.rejects(() => deferredOrchestrator.dispatchIssue(deferredDecision.id, "issue-5", { harness: "pi", route: "primary" }), (error) => error.retryable && error.code === "dependency-unresolved");
 assert.equal(operationLog.filter((entry) => entry === "claim:issue-5").length, claimsBeforeDeferral, "capacity deferral claimed Linear work");
 assert.equal(deferredOrchestrator.reportStatus().journal.deferredDispatches, 1);
 capacityBlocked = false;
@@ -874,7 +948,7 @@ const boundaryDecision = m.createDecision({
 boundaryJournal.append("decision", boundaryDecision.id, boundaryDecision, `decision:${boundaryDecision.id}`);
 const boundaryOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: boundaryJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: join(temp, "boundary", "KILL") });
 const claimCountBeforeBoundary = operationLog.filter((entry) => entry.startsWith("claim:")).length;
-await assert.rejects(() => boundaryOrchestrator.dispatchIssue(boundaryDecision.id, "issue-sec", { harness: "pi" }), (error) => error.code === "stronger-boundary");
+await assert.rejects(() => boundaryOrchestrator.dispatchIssue(boundaryDecision.id, "issue-sec", { harness: "pi", route: "primary" }), (error) => error.code === "stronger-boundary");
 assert.equal(operationLog.filter((entry) => entry.startsWith("claim:")).length, claimCountBeforeBoundary, "stronger boundary reached Linear claim mutation");
 
 const unsupportedJournal = new m.DurableJournal(join(temp, "unsupported", "journal.jsonl"), fakeClock);
@@ -896,7 +970,7 @@ const unsupportedDecision = m.createDecision({
 unsupportedJournal.append("decision", unsupportedDecision.id, unsupportedDecision, `decision:${unsupportedDecision.id}`);
 const unsupportedOrchestrator = new m.AutonomyOrchestrator({ resolution, journal: unsupportedJournal, linear: linearMock, firstmate: firstmateMock, killSwitchPath: join(temp, "unsupported", "KILL") });
 const claimsBeforeUnsupported = operationLog.filter((entry) => entry.startsWith("claim:")).length;
-await assert.rejects(() => unsupportedOrchestrator.dispatchIssue(unsupportedDecision.id, "issue-unsupported", { harness: "pi" }), (error) => error.code === "claim-evidence");
+await assert.rejects(() => unsupportedOrchestrator.dispatchIssue(unsupportedDecision.id, "issue-unsupported", { harness: "pi", route: "primary" }), (error) => error.code === "claim-evidence");
 assert.equal(operationLog.filter((entry) => entry.startsWith("claim:")).length, claimsBeforeUnsupported, "unsupported predicted scope reached Linear claim mutation");
 
 // Persisted usage exposes cache/cost observability without prompt or tool data.

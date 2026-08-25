@@ -619,17 +619,16 @@ export default function (pi: ExtensionAPI) {
     const resolvedCredentialName = configValue?.linear.credential.env;
     if (resolvedCredentialName) {
       knownLinearCredentialNames.add(resolvedCredentialName);
-      const resolvedCredential = configEnvironment[resolvedCredentialName];
-      if (resolvedCredential) knownLinearCredentialValues.add(resolvedCredential);
+      const resolvedCredential = configEnvironment[resolvedCredentialName] || process.env[resolvedCredentialName];
+      if (resolvedCredential && resolvedCredential.length >= 16 && resolvedCredential.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(resolvedCredential)) {
+        knownLinearCredentialValues.add(resolvedCredential);
+        retainedLinearCredentials.set(resolvedCredentialName, resolvedCredential);
+        delete process.env[resolvedCredentialName];
+        delete configEnvironment[resolvedCredentialName];
+      }
     }
     if (!configValue || !autonomyResolution.valid || !autonomyResolution.credentialPresent) {
       return;
-    }
-    const credentialName = configValue.linear.credential.env;
-    const credential = configEnvironment[credentialName];
-    if (credential) {
-      retainedLinearCredentials.set(credentialName, credential);
-      if (process.env[credentialName] === credential) delete process.env[credentialName];
     }
     if (lockOwnership() !== "owned") {
       pendingAutonomyActivation = {
@@ -740,9 +739,9 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return result;
       },
-      async claimIssue(config, issue, claimId, taskId) {
+      async claimIssue(config, issue, claimId, taskId, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawLinear.claimIssue(config, issue, claimId, taskId);
+        const result = await rawLinear.claimIssue(config, issue, claimId, taskId, () => { assertCurrent(); assertRuntimeOwner(); });
         assertRuntimeOwner();
         return result;
       },
@@ -752,21 +751,21 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return result;
       },
-      async setProgress(config, issue, claimId, taskId, summary) {
+      async setProgress(config, issue, claimId, taskId, summary, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawLinear.setProgress(config, issue, claimId, taskId, summary);
-        assertRuntimeOwner();
-        return result;
-      },
-      async linkPullRequest(config, issue, claimId, taskId, prUrl) {
-        assertRuntimeOwner();
-        const result = await rawLinear.linkPullRequest(config, issue, claimId, taskId, prUrl);
+        const result = await rawLinear.setProgress(config, issue, claimId, taskId, summary, () => { assertCurrent(); assertRuntimeOwner(); });
         assertRuntimeOwner();
         return result;
       },
-      async completeIssue(config, issue, claimId, taskId, prUrl) {
+      async linkPullRequest(config, issue, claimId, taskId, prUrl, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawLinear.completeIssue(config, issue, claimId, taskId, prUrl);
+        const result = await rawLinear.linkPullRequest(config, issue, claimId, taskId, prUrl, () => { assertCurrent(); assertRuntimeOwner(); });
+        assertRuntimeOwner();
+        return result;
+      },
+      async completeIssue(config, issue, claimId, taskId, prUrl, assertCurrent) {
+        assertRuntimeOwner();
+        const result = await rawLinear.completeIssue(config, issue, claimId, taskId, prUrl, () => { assertCurrent(); assertRuntimeOwner(); });
         assertRuntimeOwner();
         return result;
       },
@@ -782,17 +781,17 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return rawFirstmate.capacity(config);
       },
-      assertProjectOwnership(config, issue) {
+      assertProjectOwnership(config, issue, route) {
         assertRuntimeOwner();
-        rawFirstmate.assertProjectOwnership(config, issue);
+        rawFirstmate.assertProjectOwnership(config, issue, route);
       },
       assertPullRequestRepository(config, issue, prUrl) {
         assertRuntimeOwner();
         rawFirstmate.assertPullRequestRepository(config, issue, prUrl);
       },
-      async dispatch(config, issue, claim, taskId, profile) {
+      async dispatch(config, issue, claim, taskId, profile, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawFirstmate.dispatch(config, issue, claim, taskId, profile);
+        const result = await rawFirstmate.dispatch(config, issue, claim, taskId, profile, () => { assertCurrent(); assertRuntimeOwner(); });
         assertRuntimeOwner();
         return result;
       },
@@ -804,21 +803,21 @@ export default function (pi: ExtensionAPI) {
         assertRuntimeOwner();
         return rawFirstmate.taskPullRequest(taskId);
       },
-      async prepareLanding(config, issue, taskId, prUrl) {
+      async prepareLanding(config, issue, taskId, prUrl, route, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawFirstmate.prepareLanding(config, issue, taskId, prUrl);
-        assertRuntimeOwner();
-        return result;
-      },
-      async mergeAndVerify(config, issue, taskId, prUrl, expectedHead) {
-        assertRuntimeOwner();
-        const result = await rawFirstmate.mergeAndVerify(config, issue, taskId, prUrl, expectedHead);
+        const result = await rawFirstmate.prepareLanding(config, issue, taskId, prUrl, route, () => { assertCurrent(); assertRuntimeOwner(); });
         assertRuntimeOwner();
         return result;
       },
-      async verifyMerged(config, issue, taskId, prUrl, expectedHead) {
+      async mergeAndVerify(config, issue, taskId, prUrl, expectedHead, route, assertCurrent) {
         assertRuntimeOwner();
-        const result = await rawFirstmate.verifyMerged(config, issue, taskId, prUrl, expectedHead);
+        const result = await rawFirstmate.mergeAndVerify(config, issue, taskId, prUrl, expectedHead, route, () => { assertCurrent(); assertRuntimeOwner(); });
+        assertRuntimeOwner();
+        return result;
+      },
+      async verifyMerged(config, issue, taskId, prUrl, expectedHead, route) {
+        assertRuntimeOwner();
+        const result = await rawFirstmate.verifyMerged(config, issue, taskId, prUrl, expectedHead, route);
         assertRuntimeOwner();
         return result;
       },
@@ -1763,6 +1762,7 @@ ${context.command}
     summary: Type.Optional(Type.String({ maxLength: 2000 })),
     prUrl: Type.Optional(Type.String({ maxLength: 1000 })),
     harness: Type.Optional(StringEnum(["claude", "codex", "opencode", "pi", "pi-signed", "grok", "kimi", "cursor", "muse"] as const)),
+    route: Type.Optional(StringEnum(["primary", "secondmate", "ambiguous"] as const)),
     model: Type.Optional(Type.String({ maxLength: 200 })),
     effort: Type.Optional(StringEnum(["low", "medium", "high", "xhigh", "max"] as const)),
     backend: Type.Optional(StringEnum(["tmux", "herdr", "zellij", "orca", "cmux"] as const)),
@@ -1789,7 +1789,7 @@ ${context.command}
     promptSnippet: "Inspect or advance explicitly allowlisted Linear work through Firstmate's existing guarded lifecycle.",
     promptGuidelines: [
       "Load the linear-autonomy skill before calling fm_autonomy for an autonomy decision or Linear-linked task.",
-      "Use fm_autonomy action dispatch only after resolving the worker profile under Firstmate's normal dispatch policy.",
+      "Use fm_autonomy action dispatch only after resolving both the authoritative main-session project route and the worker profile under Firstmate's normal dispatch policy.",
       "Use fm_autonomy action land only for a current-head passing PR; the tool refuses every unproven or red result and closes Linear only after landing is confirmed.",
     ],
     parameters: autonomyToolParameters,
@@ -1801,6 +1801,7 @@ ${context.command}
         summary?: string;
         prUrl?: string;
         harness?: DispatchProfile["harness"];
+        route?: DispatchProfile["route"];
         model?: string;
         effort?: DispatchProfile["effort"];
         backend?: DispatchProfile["backend"];
@@ -1823,9 +1824,10 @@ ${context.command}
         }
         if (!input.issueId) throw new AutonomyError("issue-required", `${input.action} requires issueId`);
         if (input.action === "dispatch") {
-          if (!input.decisionId || !input.harness) throw new AutonomyError("dispatch-required", "dispatch requires decisionId, issueId, and an explicitly resolved harness");
+          if (!input.decisionId || !input.harness || !input.route) throw new AutonomyError("dispatch-required", "dispatch requires decisionId, issueId, an explicitly resolved harness, and a main-session route");
           const result = await autonomy.dispatchIssue(input.decisionId, input.issueId, {
             harness: input.harness,
+            route: input.route,
             model: input.model,
             effort: input.effort,
             backend: input.backend,

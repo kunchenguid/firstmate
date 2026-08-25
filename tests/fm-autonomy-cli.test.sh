@@ -45,4 +45,25 @@ out=$(FM_HOME="$home" "$ROOT/bin/fm-autonomy.sh" eval) || fail "held-out eval re
 printf '%s' "$out" | jq -e '.accepted == true and .failed == 0 and .passed == 11' >/dev/null \
   || fail "held-out eval did not report the accepted baseline: $out"
 
+jq '.cases[0].inputs[0].payload.title = "tampered classifier input"' "$ROOT/tests/fixtures/fm-autonomy-heldout.json" > "$TMP_ROOT/tampered-corpus.json"
+if out=$(FM_HOME="$home" FM_AUTONOMY_EVAL_CORPUS="$TMP_ROOT/tampered-corpus.json" "$ROOT/bin/fm-autonomy.sh" eval); then
+  fail "held-out eval accepted a corpus whose classifier inputs changed: $out"
+fi
+printf '%s' "$out" | jq -e '.accepted == false and .corpusSha256 != ""' >/dev/null \
+  || fail "held-out eval did not expose corpus-binding refusal: $out"
+
+jq '.provenance.captureMode = "self-declared"' "$ROOT/tests/fixtures/fm-autonomy-recorded-outputs.json" > "$TMP_ROOT/tampered-recording.json"
+if out=$(FM_HOME="$home" FM_AUTONOMY_EVAL_RECORDED="$TMP_ROOT/tampered-recording.json" "$ROOT/bin/fm-autonomy.sh" eval); then
+  fail "held-out eval accepted unaudited classifier provenance: $out"
+fi
+printf '%s' "$out" | jq -e '.accepted == false' >/dev/null \
+  || fail "held-out eval did not refuse unaudited classifier provenance: $out"
+
+jq '.captureProvenance.provider = "different-provider"' "$ROOT/tests/fixtures/fm-autonomy-baseline.json" > "$TMP_ROOT/tampered-baseline.json"
+if out=$(FM_HOME="$home" FM_AUTONOMY_EVAL_BASELINE="$TMP_ROOT/tampered-baseline.json" "$ROOT/bin/fm-autonomy.sh" eval); then
+  fail "held-out eval accepted a classifier capture outside its provenance baseline: $out"
+fi
+printf '%s' "$out" | jq -e '.accepted == false' >/dev/null \
+  || fail "held-out eval did not refuse classifier provenance drift: $out"
+
 pass "Pi autonomy CLI is inert by default, reports exact config failures, preserves work under kill, and enforces the held-out baseline"

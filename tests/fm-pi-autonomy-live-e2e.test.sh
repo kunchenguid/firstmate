@@ -16,23 +16,30 @@ PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-ag
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-autonomy-live)
 PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+ROOT="$ROOT" \
 MODULE="$ROOT/.pi/extensions/lib/fm-autonomy.ts" \
 CORPUS="$ROOT/tests/fixtures/fm-autonomy-heldout.json" \
 PROMPT_SCRIPT="$ROOT/bin/fm-autonomy-prompt.sh" \
 SESSION_DIR="$TMP_ROOT/sessions" \
 FM_PI_AUTONOMY_LIVE_PROVIDER="$FM_PI_AUTONOMY_LIVE_PROVIDER" \
 FM_PI_AUTONOMY_LIVE_MODEL="$FM_PI_AUTONOMY_LIVE_MODEL" \
+FM_PI_AUTONOMY_CAPTURE_OUTPUT="${FM_PI_AUTONOMY_CAPTURE_OUTPUT:-}" \
 node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
 const autonomy = await import(pathToFileURL(process.env.MODULE).href);
-const corpus = JSON.parse(readFileSync(process.env.CORPUS, "utf8"));
+const corpusBytes = readFileSync(process.env.CORPUS);
+const corpus = JSON.parse(corpusBytes);
 const testCase = corpus.cases.find((candidate) => candidate.id === "routine-operation-still-wakes");
 assert(testCase, "live guard case is missing");
+const captureOutput = process.env.FM_PI_AUTONOMY_CAPTURE_OUTPUT;
+const selectedCases = captureOutput ? corpus.cases : [testCase];
 
 const signal = AbortSignal.timeout(15000);
 const runtime = await sdk.ModelRuntime.create({ allowModelNetwork: false, signal });
@@ -90,7 +97,9 @@ const created = await sdk.createAgentSession({
   thinkingLevel: "low",
 });
 assert(created.session.model, "real autonomy AgentSession has no model");
-const evaluation = await autonomy.evaluateHeldOutClassifier([testCase], {
+const capturedOutputs = [];
+const captureRecords = [];
+const evaluation = await autonomy.evaluateHeldOutClassifier(selectedCases, {
   async classify(batch) {
     pendingBatch = batch;
     const decision = new Promise((resolve) => { resolveDecision = resolve; });
@@ -106,7 +115,16 @@ const evaluation = await autonomy.evaluateHeldOutClassifier([testCase], {
         "Account for every event exactly once and finish with fm_supervision_decide.",
         JSON.stringify({ batchId: batch.id, events: batch.events }),
       ].join("\n\n"));
-      return await Promise.race([decision, timeout]);
+      const output = await Promise.race([decision, timeout]);
+      const caseId = batch.events[0].id.split(":").slice(1, -1).join(":");
+      capturedOutputs.push({ caseId, decision: output });
+      captureRecords.push({
+        caseId,
+        batchId: batch.id,
+        inputSha256: createHash("sha256").update(autonomy.canonicalJson(batch)).digest("hex"),
+        outputSha256: createHash("sha256").update(autonomy.canonicalJson(output)).digest("hex"),
+      });
+      return output;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -114,6 +132,36 @@ const evaluation = await autonomy.evaluateHeldOutClassifier([testCase], {
 });
 created.session.dispose();
 assert.equal(evaluation.failed, 0, JSON.stringify(evaluation));
+if (captureOutput) {
+  const outputPath = resolve(captureOutput);
+  const root = resolve(process.env.ROOT);
+  if (outputPath !== root && !outputPath.startsWith(`${root}${sep}`)) throw new Error("capture output must stay inside the worktree");
+  const promptSha256 = createHash("sha256").update(execFileSync("bash", [process.env.PROMPT_SCRIPT])).digest("hex");
+  const runtimePackage = JSON.parse(readFileSync(`${process.env.PI_PACKAGE_DIR}/package.json`, "utf8"));
+  const artifact = {
+    schema: "fm-autonomy-recorded-outputs.v1",
+    capturedAt: new Date().toISOString(),
+    provenance: {
+      captureInterface: "DecisionClassifier.classify -> fm_supervision_decide -> validateDecision",
+      captureMode: "pi-agent-session",
+      provider: process.env.FM_PI_AUTONOMY_LIVE_PROVIDER,
+      model: process.env.FM_PI_AUTONOMY_LIVE_MODEL,
+      runtime: `pi-coding-agent@${runtimePackage.version}`,
+      runId: randomUUID(),
+      corpusSchema: corpus.schema,
+      corpusSha256: createHash("sha256").update(corpusBytes).digest("hex"),
+      contractFingerprint: autonomy.decisionContractFingerprint(),
+      promptSha256,
+      caseCount: selectedCases.length,
+      records: captureRecords,
+    },
+    outputs: capturedOutputs,
+  };
+  mkdirSync(dirname(outputPath), { recursive: true });
+  const temporary = `${outputPath}.tmp-${process.pid}`;
+  writeFileSync(temporary, `${JSON.stringify(artifact, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, outputPath);
+}
 console.log("ok - real configured Pi autonomy session classified through the production decision tool");
 JS
 

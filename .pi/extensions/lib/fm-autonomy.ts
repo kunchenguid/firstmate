@@ -299,18 +299,22 @@ export interface DecisionClassifier {
   classify(batch: PendingBatch): Promise<SupervisionDecision>;
 }
 
+export type MutationFence = () => void;
+export type ProjectRoute = "primary" | "secondmate" | "ambiguous";
+
 export interface LinearAdapter {
   listEligibleIssues(config: AutonomyConfig): Promise<LinearIssue[]>;
   getIssue(config: AutonomyConfig, issueId: string): Promise<LinearIssue>;
-  claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<{ evidence: string }>;
-  setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string): Promise<{ evidence: string }>;
-  linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }>;
-  completeIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }>;
+  claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, assertCurrent: MutationFence): Promise<{ evidence: string }>;
+  setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string, assertCurrent: MutationFence): Promise<{ evidence: string }>;
+  linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string, assertCurrent: MutationFence): Promise<{ evidence: string }>;
+  completeIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string, assertCurrent: MutationFence): Promise<{ evidence: string }>;
   reconcileClaim(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, phase?: "active" | "post-merge"): Promise<"owned" | "missing" | "conflict">;
 }
 
 export interface DispatchProfile {
   harness: string;
+  route: ProjectRoute;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   backend?: "tmux" | "herdr" | "zellij" | "orca" | "cmux";
@@ -332,6 +336,7 @@ function validateDispatchProfile(profile: DispatchProfile): void {
   }
   if (profile.effort !== undefined && !efforts.includes(profile.effort)) throw new AutonomyError("dispatch-profile", `unsupported worker effort ${profile.effort}`);
   if (profile.backend !== undefined && !backends.includes(profile.backend)) throw new AutonomyError("dispatch-profile", `unsupported runtime backend ${profile.backend}`);
+  if (!["primary", "secondmate", "ambiguous"].includes(profile.route)) throw new AutonomyError("dispatch-profile", "an explicit main-session project route is required");
 }
 
 export interface PreparedLanding {
@@ -349,14 +354,14 @@ export interface LandingResult {
 
 export interface FirstmateAdapter {
   capacity(config: AutonomyConfig): CapacitySnapshot;
-  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void;
+  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue, route: ProjectRoute): void;
   assertPullRequestRepository(config: AutonomyConfig, issue: LinearIssue, prUrl: string): void;
-  dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile): Promise<DispatchResult>;
+  dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile, assertCurrent: MutationFence): Promise<DispatchResult>;
   taskExists(taskId: string): boolean;
   taskPullRequest(taskId: string): string | undefined;
-  prepareLanding(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string): Promise<PreparedLanding>;
-  mergeAndVerify(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult>;
-  verifyMerged(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult>;
+  prepareLanding(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, route: ProjectRoute, assertCurrent: MutationFence): Promise<PreparedLanding>;
+  mergeAndVerify(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string, route: ProjectRoute, assertCurrent: MutationFence): Promise<LandingResult>;
+  verifyMerged(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string, route: ProjectRoute): Promise<LandingResult>;
   doctor(config: AutonomyConfig): string[];
 }
 
@@ -1450,13 +1455,14 @@ export class LinearGraphqlClient implements LinearAdapter {
     return resets.length > 0 ? Math.max(...resets) : this.limits.maxLinearRetryMilliseconds;
   }
 
-  private async request<T>(operationName: string, query: string, variables: Record<string, JsonValue>): Promise<T> {
+  private async request<T>(operationName: string, query: string, variables: Record<string, JsonValue>, assertMutation?: MutationFence): Promise<T> {
     let attempt = 0;
     for (;;) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.limits.maxTurnMilliseconds);
       timeout.unref?.();
       let response: Response;
+      assertMutation?.();
       try {
         response = await this.fetchImpl(this.endpoint, {
           method: "POST",
@@ -1648,27 +1654,29 @@ export class LinearGraphqlClient implements LinearAdapter {
     }
   }
 
-  private async updateState(issueId: string, stateId: string): Promise<void> {
+  private async updateState(issueId: string, stateId: string, assertCurrent: MutationFence): Promise<void> {
     const data = await this.request<{ issueUpdate: { success: boolean } }>(
       "FirstmateIssueUpdate",
       `mutation FirstmateIssueUpdate($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`,
       { id: issueId, input: { stateId } },
+      assertCurrent,
     );
     if (data.issueUpdate?.success !== true) throw new AutonomyError("linear-mutation", "Linear issueUpdate did not report success");
   }
 
-  private async ensureComment(config: AutonomyConfig, issueId: string, marker: string, body: string): Promise<void> {
+  private async ensureComment(config: AutonomyConfig, issueId: string, marker: string, body: string, assertCurrent: MutationFence): Promise<void> {
     const existing = await this.issueComments(config, issueId);
     if (existing.some((comment) => comment.includes(marker))) return;
     const data = await this.request<{ commentCreate: { success: boolean } }>(
       "FirstmateCommentCreate",
       `mutation FirstmateCommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
       { input: { issueId, body: `${body}\n\n${marker}` } },
+      assertCurrent,
     );
     if (data.commentCreate?.success !== true) throw new AutonomyError("linear-mutation", "Linear commentCreate did not report success");
   }
 
-  async claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string): Promise<{ evidence: string }> {
+  async claimIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, assertCurrent: MutationFence): Promise<{ evidence: string }> {
     const current = await this.getIssue(config, issue.id);
     const scope = this.scope(config, current);
     if (current.teamId !== issue.teamId || current.projectId !== issue.projectId || !scope.statuses.intake.includes(current.stateId)) {
@@ -1678,9 +1686,9 @@ export class LinearGraphqlClient implements LinearAdapter {
       throw new AutonomyError("linear-claim-stale", `issue ${issue.identifier} no longer satisfies the complete local label policy`);
     }
     const marker = this.claimMarker(config, claimId, taskId);
-    await this.ensureComment(config, issue.id, marker, `Firstmate claimed this issue as \`${taskId}\`.`);
+    await this.ensureComment(config, issue.id, marker, `Firstmate claimed this issue as \`${taskId}\`.`, assertCurrent);
     await this.assertTaskOwnership(config, issue, claimId, taskId, scope.statuses.intake);
-    await this.updateState(issue.id, scope.statuses.claimed);
+    await this.updateState(issue.id, scope.statuses.claimed, assertCurrent);
     const verdict = await this.reconcileClaim(config, issue, claimId, taskId);
     if (verdict !== "owned") throw new AutonomyError("linear-claim-conflict", `Linear claim for ${issue.identifier} reconciled as ${verdict}`);
     return { evidence: marker };
@@ -1702,39 +1710,50 @@ export class LinearGraphqlClient implements LinearAdapter {
     return markers.includes(ours) && ownedState ? "owned" : "missing";
   }
 
-  async setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string): Promise<{ evidence: string }> {
+  async setProgress(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, summary: string, assertCurrent: MutationFence): Promise<{ evidence: string }> {
     const scope = this.scope(config, issue);
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress]);
-    await this.updateState(issue.id, scope.statuses.inProgress);
+    await this.updateState(issue.id, scope.statuses.inProgress, assertCurrent);
     const boundedSummary = summary.slice(0, 1500);
     const progressId = stableId("progress", { taskId, summary: boundedSummary });
     const marker = `<!-- firstmate-progress:v1 task=${taskId} progress=${progressId} -->`;
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.inProgress]);
-    await this.ensureComment(config, issue.id, marker, boundedSummary.replaceAll("<!--", "&lt;!--"));
+    await this.ensureComment(config, issue.id, marker, boundedSummary.replaceAll("<!--", "&lt;!--"), assertCurrent);
     return { evidence: marker };
   }
 
-  async linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }> {
+  async linkPullRequest(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string, assertCurrent: MutationFence): Promise<{ evidence: string }> {
     const scope = this.scope(config, issue);
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress]);
     assertCanonicalPullRequestUrl(prUrl);
+    const attachmentData = await this.request<{ organization: { id?: string } | null; issue: { attachments: { nodes: Array<{ id?: string; url?: string }>; pageInfo: { hasNextPage?: boolean } } } | null }>(
+      "FirstmateAttachmentEvidence",
+      `query FirstmateAttachmentEvidence($id: String!) { organization { id } issue(id: $id) { attachments(first: 100) { nodes { id url } pageInfo { hasNextPage } } } }`,
+      { id: issue.id },
+    );
+    if (attachmentData.organization?.id !== config.linear.workspaceId) throw new AutonomyError("linear-workspace-refused", "Linear workspace changed while reading PR attachments");
+    if (!attachmentData.issue) throw new AutonomyError("linear-issue-missing", `Linear issue ${issue.id} is unavailable while reading PR attachments`);
+    if (attachmentData.issue.attachments.pageInfo.hasNextPage) throw new AutonomyError("linear-attachment-pagination", `Linear issue ${issue.id} has more than 100 attachments; PR evidence is incomplete`);
+    const existing = attachmentData.issue.attachments.nodes.find((attachment) => attachment.url === prUrl);
+    if (existing) return { evidence: String(existing.id ?? prUrl) };
     const data = await this.request<{ attachmentCreate: { success: boolean; attachment?: { id?: string } } }>(
       "FirstmateAttachmentCreate",
       `mutation FirstmateAttachmentCreate($input: AttachmentCreateInput!) { attachmentCreate(input: $input) { success attachment { id } } }`,
       { input: { issueId: issue.id, title: `Firstmate PR for ${taskId}`, subtitle: "Validation and landing", url: prUrl, metadata: { taskId } } },
+      assertCurrent,
     );
     if (data.attachmentCreate?.success !== true) throw new AutonomyError("linear-mutation", "Linear attachmentCreate did not report success");
     return { evidence: String(data.attachmentCreate.attachment?.id ?? prUrl) };
   }
 
-  async completeIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string): Promise<{ evidence: string }> {
+  async completeIssue(config: AutonomyConfig, issue: LinearIssue, claimId: string, taskId: string, prUrl: string, assertCurrent: MutationFence): Promise<{ evidence: string }> {
     const scope = this.scope(config, issue);
     assertCanonicalPullRequestUrl(prUrl);
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed]);
     const marker = `<!-- firstmate-complete:v1 task=${taskId} -->`;
-    await this.ensureComment(config, issue.id, marker, `Landed through ${prUrl}. Closing only after merge confirmation.`);
+    await this.ensureComment(config, issue.id, marker, `Landed through ${prUrl}. Closing only after merge confirmation.`, assertCurrent);
     await this.assertTaskOwnership(config, issue, claimId, taskId, [scope.statuses.claimed, scope.statuses.inProgress, scope.statuses.completed]);
-    await this.updateState(issue.id, scope.statuses.completed);
+    await this.updateState(issue.id, scope.statuses.completed, assertCurrent);
     return { evidence: marker };
   }
 }
@@ -1826,8 +1845,9 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     this.exec = options.exec ?? execFileSync;
   }
 
-  private run(command: string, args: string[], options: { cwd?: string; timeout?: number } = {}): string {
+  private run(command: string, args: string[], options: { cwd?: string; timeout?: number; assertMutation?: MutationFence } = {}): string {
     try {
+      options.assertMutation?.();
       return String(this.exec(command, args, {
         cwd: options.cwd ?? this.fmRoot,
         env: this.env,
@@ -1836,6 +1856,7 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
         stdio: ["ignore", "pipe", "pipe"],
       })).trim();
     } catch (error) {
+      if (error instanceof AutonomyError) throw error;
       const shape = error as { status?: unknown; stderr?: unknown; message?: unknown };
       const detail = typeof shape.stderr === "string" ? shape.stderr.trim() : String(shape.message ?? error);
       throw new AutonomyError("firstmate-command", `${command} ${args[0] ?? ""} failed: ${detail.slice(0, 1000)}`);
@@ -1873,26 +1894,11 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { raw, mode: mode as "no-mistakes" | "direct-PR" | "local-only", yolo, registered };
   }
 
-  private secondmateRoutes(): Array<{ id: string; scope: string }> {
-    const registry = join(this.data, "secondmates.md");
-    if (!existsSync(registry)) return [];
-    const routes: Array<{ id: string; scope: string }> = [];
-    for (const line of readFileSync(registry, "utf8").split(/\r?\n/)) {
-      if (!line.trim() || line.trim().startsWith("#")) continue;
-      const match = line.match(/^-\s+([A-Za-z0-9._-]+)\s+-.*;\s*scope:\s*(.*);\s*projects:\s*[^;)]*;\s*added\s+[0-9]{4}-[0-9]{2}-[0-9]{2}\)\s*$/);
-      const id = match?.[1].trim();
-      const scope = match?.[2].trim();
-      routes.push({ id: id || "unresolved", scope: scope || "unparseable registry scope" });
-    }
-    return routes;
-  }
-
-  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue): void {
+  assertProjectOwnership(config: AutonomyConfig, issue: LinearIssue, route: ProjectRoute): void {
     this.mapping(config, issue);
-    const routes = this.secondmateRoutes();
-    if (routes.length > 0) {
-      const identities = routes.map((route) => `${route.id}: ${route.scope}`).join("; ");
-      throw new AutonomyError("secondmate-route", `issue ${issue.identifier} requires an authoritative main-session route decision because registered secondmate scopes may apply (${identities}); primary Pi autonomy refuses ambiguous routing`);
+    if (route !== "primary") throw new AutonomyError("secondmate-route", `issue ${issue.identifier} has authoritative main-session route ${route}; primary Pi autonomy refuses the assignment`);
+    if (!config.linear.scopes.some((s) => s.teamId === issue.teamId && s.projectId === issue.projectId)) {
+      throw new AutonomyError("linear-scope-refused", `issue ${issue.identifier} is not covered by an authoritative main-session route binding`);
     }
   }
 
@@ -1962,8 +1968,6 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
 
   doctor(config: AutonomyConfig): string[] {
     const diagnostics: string[] = [];
-    const secondmateRoutes = this.secondmateRoutes();
-    if (secondmateRoutes.length > 0) diagnostics.push("registered secondmate scopes require an authoritative main-session route decision; autonomous primary intake is disabled while routing is ambiguous");
     for (const mapping of config.repositories) {
       try {
         const checkout = this.checkout(mapping);
@@ -1991,9 +1995,9 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return [...new Set(diagnostics)];
   }
 
-  async dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile): Promise<DispatchResult> {
+  async dispatch(config: AutonomyConfig, issue: LinearIssue, claim: WorkClaim, taskId: string, profile: DispatchProfile, assertCurrent: MutationFence): Promise<DispatchResult> {
     validateDispatchProfile(profile);
-    this.assertProjectOwnership(config, issue);
+    this.assertProjectOwnership(config, issue, profile.route);
     const mapping = this.mapping(config, issue);
     if (claim.repository !== mapping.firstmateProject) throw new AutonomyError("repository-claim", `work claim repository ${claim.repository} does not match allowlisted mapping ${mapping.firstmateProject}`);
     const policy = this.projectPolicy(mapping.firstmateProject);
@@ -2017,7 +2021,7 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
       return { taskId, mode, evidence: metaPath };
     }
 
-    if (!existsSync(briefPath)) this.run("bash", [join(this.fmRoot, "bin", "fm-brief.sh"), taskId, mapping.firstmateProject, "--mode", mode]);
+    if (!existsSync(briefPath)) this.run("bash", [join(this.fmRoot, "bin", "fm-brief.sh"), taskId, mapping.firstmateProject, "--mode", mode], { assertMutation: assertCurrent });
     const brief = readFileSync(briefPath, "utf8");
     if (brief.includes("{TASK}")) {
       const firstmateGuideline = join(checkout, ".agents", "skills", "firstmate-coding-guidelines", "SKILL.md");
@@ -2035,7 +2039,9 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
           : "",
       ].join("\n");
       const temp = `${briefPath}.tmp-${process.pid}`;
+      assertCurrent();
       writeFileSync(temp, brief.replace("{TASK}", taskText), { mode: 0o600 });
+      assertCurrent();
       renameSync(temp, briefPath);
     } else if (!brief.includes(issue.identifier)) {
       throw new AutonomyError("brief-conflict", `existing brief for ${taskId} is not bound to ${issue.identifier}`);
@@ -2043,7 +2049,7 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
 
     const body = `Linear ${issue.identifier}: ${issue.url}\nAutonomy owner: ${config.ownerId}\nDelivery: ${mode}; autonomous merge posture confirmed locally.`;
     try {
-      this.run("tasks-axi", ["add", taskId, `Linear ${issue.identifier}: ${issue.title}`, "--kind", "ship", "--repo", mapping.firstmateProject, "--body", body, "--start", "--json"]);
+      this.run("tasks-axi", ["add", taskId, `Linear ${issue.identifier}: ${issue.title}`, "--kind", "ship", "--repo", mapping.firstmateProject, "--body", body, "--start", "--json"], { assertMutation: assertCurrent });
     } catch (error) {
       const shown = this.run("tasks-axi", ["show", taskId, "--full"]);
       if (!shown.includes(issue.identifier)) throw error;
@@ -2052,19 +2058,19 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     if (profile.model) args.push("--model", profile.model);
     if (profile.effort) args.push("--effort", profile.effort);
     if (profile.backend) args.push("--backend", profile.backend);
-    this.run("bash", args, { timeout: 120000 });
+    this.run("bash", args, { timeout: 120000, assertMutation: assertCurrent });
     if (!this.taskExists(taskId)) throw new AutonomyError("dispatch-unconfirmed", `fm-spawn did not publish task metadata for ${taskId}`);
     return { taskId, mode, evidence: join(this.state, `${taskId}.meta`) };
   }
 
-  async prepareLanding(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string): Promise<PreparedLanding> {
+  async prepareLanding(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, route: ProjectRoute, assertCurrent: MutationFence): Promise<PreparedLanding> {
     assertCanonicalPullRequestUrl(prUrl);
-    this.assertProjectOwnership(config, issue);
+    this.assertProjectOwnership(config, issue, route);
     this.assertPullRequestRepository(config, issue, prUrl);
     if (!this.taskExists(taskId)) throw new AutonomyError("task-missing", `task ${taskId} has no Firstmate metadata`);
     const currentState = this.run("bash", [join(this.fmRoot, "bin", "fm-crew-state.sh"), taskId], { timeout: 30000 });
     if (!/^state: done\b/.test(currentState)) throw new AutonomyError("validation-not-green", `task ${taskId} is not at the current-code passing-checks result: ${currentState}`);
-    this.run("bash", [join(this.fmRoot, "bin", "fm-pr-check.sh"), taskId, prUrl], { timeout: 60000 });
+    this.run("bash", [join(this.fmRoot, "bin", "fm-pr-check.sh"), taskId, prUrl], { timeout: 60000, assertMutation: assertCurrent });
     const meta = readFileSync(join(this.state, `${taskId}.meta`), "utf8");
     let expectedHead = meta.split(/\r?\n/).filter((line) => line.startsWith("pr_head=")).at(-1)?.slice(8) ?? "";
     const gitlab = prUrl.match(/^https:\/\/([^/]+)\/(.+)\/-\/merge_requests\/([1-9][0-9]*)$/);
@@ -2080,27 +2086,27 @@ export class ShellFirstmateAdapter implements FirstmateAdapter {
     return { expectedHead, evidence: `prepared ${prUrl} at ${expectedHead} from current-code passing task ${taskId}` };
   }
 
-  async verifyMerged(config: AutonomyConfig, issue: LinearIssue, _taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult> {
+  async verifyMerged(config: AutonomyConfig, issue: LinearIssue, _taskId: string, prUrl: string, expectedHead: string, route: ProjectRoute): Promise<LandingResult> {
     assertCanonicalPullRequestUrl(prUrl);
-    this.assertProjectOwnership(config, issue);
+    this.assertProjectOwnership(config, issue, route);
     this.assertPullRequestRepository(config, issue, prUrl);
     if (!/^[0-9a-f]{40,64}$/i.test(expectedHead)) throw new AutonomyError("pr-head-missing", "landing verification requires one valid expected head");
     const currentHead = verifyMergedHeadWithForge(prUrl, expectedHead, this.run.bind(this));
     return { merged: true, green: true, currentHead, expectedHead, evidence: `verified merged ${prUrl} at ${currentHead}` };
   }
 
-  async mergeAndVerify(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string): Promise<LandingResult> {
+  async mergeAndVerify(config: AutonomyConfig, issue: LinearIssue, taskId: string, prUrl: string, expectedHead: string, route: ProjectRoute, assertCurrent: MutationFence): Promise<LandingResult> {
     assertCanonicalPullRequestUrl(prUrl);
     if (!this.taskExists(taskId)) throw new AutonomyError("task-missing", `task ${taskId} has no Firstmate metadata`);
     const currentState = this.run("bash", [join(this.fmRoot, "bin", "fm-crew-state.sh"), taskId], { timeout: 30000 });
     if (!/^state: done\b/.test(currentState)) throw new AutonomyError("validation-not-green", `task ${taskId} is not at the current-code passing-checks result: ${currentState}`);
     try {
-      return await this.verifyMerged(config, issue, taskId, prUrl, expectedHead);
+      return await this.verifyMerged(config, issue, taskId, prUrl, expectedHead, route);
     } catch (error) {
       if (!(error instanceof AutonomyError) || error.code !== "landing-unconfirmed") throw error;
     }
-    this.run("bash", [join(this.fmRoot, "bin", "fm-pr-merge.sh"), taskId, prUrl, "--green-head", expectedHead], { timeout: 120000 });
-    return this.verifyMerged(config, issue, taskId, prUrl, expectedHead);
+    this.run("bash", [join(this.fmRoot, "bin", "fm-pr-merge.sh"), taskId, prUrl, "--green-head", expectedHead], { timeout: 120000, assertMutation: assertCurrent });
+    return this.verifyMerged(config, issue, taskId, prUrl, expectedHead, route);
   }
 }
 
@@ -2634,10 +2640,8 @@ export class AutonomyOrchestrator {
       if (data.policyFingerprint !== expectedPolicyFingerprint) {
         throw new AutonomyError("journal-config-mismatch", `durable claim ${storedIssue.identifier} no longer matches its original exact local policy`);
       }
-      if (record.kind === "dispatch-deferred" && !data.profile) {
-        throw new AutonomyError("journal-malformed", `autonomy journal dispatch-deferred record ${record.seq} has no durable profile`);
-      }
-      if (data.profile) validateDispatchProfile(data.profile);
+      if (!data.profile) throw new AutonomyError("journal-malformed", `autonomy journal ${record.kind} record ${record.seq} has no durable main-session route and dispatch profile`);
+      validateDispatchProfile(data.profile);
       if (data.prUrl) {
         try {
           assertCanonicalPullRequestUrl(data.prUrl);
@@ -2675,7 +2679,7 @@ export class AutonomyOrchestrator {
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate dispatch adapter is unavailable");
     const config = this.config();
     const { decision, claim, issue } = this.issueFromDecision(decisionId, issueId);
-    this.firstmate.assertProjectOwnership(config, issue);
+    this.firstmate.assertProjectOwnership(config, issue, profile.route);
     guard.assertCurrent();
     const currentIssue = await this.linear.getIssue(config, issue.id);
     guard.assertCurrent();
@@ -2736,7 +2740,7 @@ export class AutonomyOrchestrator {
     }
     if (existing?.state === "claimed" && existing.profile && this.firstmate.taskExists(taskId)) {
       guard.assertCurrent();
-      const recovered = await this.firstmate.dispatch(config, issue, claim, taskId, existing.profile);
+      const recovered = await this.firstmate.dispatch(config, issue, claim, taskId, existing.profile, guard.assertCurrent);
       guard.assertCurrent();
       this.journal.append("dispatch-confirmed", issue.id, { ...existing, state: "dispatched", dispatchResult: recovered, dispatchEvidence: recovered.evidence } as unknown as JsonValue, `dispatch-confirmed:${existing.claimId}`);
       return recovered;
@@ -2771,12 +2775,12 @@ export class AutonomyOrchestrator {
     this.journal.append("claim-intent", issue.id, claimIntent as unknown as JsonValue, `claim-intent:${claimId}`);
     this.newClaimsAllowed();
     guard.assertCurrent();
-    const remote = await this.linear.claimIssue(config, issue, claimId, taskId);
+    const remote = await this.linear.claimIssue(config, issue, claimId, taskId, guard.assertCurrent);
     guard.assertCurrent();
     this.journal.append("claim-confirmed", issue.id, { ...base, state: "claimed", remoteEvidence: remote.evidence } as unknown as JsonValue, `claim-confirmed:${claimId}`);
     this.journal.append("dispatch-intent", issue.id, { ...base, state: "claimed", profile } as unknown as JsonValue, `dispatch-intent:${claimId}`);
     guard.assertCurrent();
-    const dispatched = await this.firstmate.dispatch(config, issue, claim, taskId, profile);
+    const dispatched = await this.firstmate.dispatch(config, issue, claim, taskId, profile, guard.assertCurrent);
     guard.assertCurrent();
     this.journal.append("dispatch-confirmed", issue.id, { ...base, state: "dispatched", profile, dispatchResult: dispatched, dispatchEvidence: dispatched.evidence } as unknown as JsonValue, `dispatch-confirmed:${claimId}`);
     await this.updateProgressUnlocked(issue.id, `Implementation is under way in Firstmate task \`${taskId}\`.`, guard);
@@ -2800,7 +2804,7 @@ export class AutonomyOrchestrator {
     const operationId = stableId("progress", { issueId, taskId: folded.taskId, summary: normalizedSummary });
     this.journal.append("progress-intent", issueId, { operationId, taskId: folded.taskId, summary: normalizedSummary }, `progress-intent:${operationId}`);
     guard.assertCurrent();
-    const evidence = await this.linear.setProgress(this.config(), folded.issue, folded.claimId, folded.taskId, normalizedSummary);
+    const evidence = await this.linear.setProgress(this.config(), folded.issue, folded.claimId, folded.taskId, normalizedSummary, guard.assertCurrent);
     guard.assertCurrent();
     this.journal.append("progress-confirmed", issueId, { operationId, taskId: folded.taskId, summary: normalizedSummary, evidence: evidence.evidence }, `progress-confirmed:${operationId}`);
   }
@@ -2814,7 +2818,8 @@ export class AutonomyOrchestrator {
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate adapter is unavailable");
-    this.firstmate.assertProjectOwnership(this.config(), folded.issue);
+    if (!folded.profile) throw new AutonomyError("journal-malformed", `issue ${issueId} has no durable main-session route binding`);
+    this.firstmate.assertProjectOwnership(this.config(), folded.issue, folded.profile.route);
     this.firstmate.assertPullRequestRepository(this.config(), folded.issue, prUrl);
     const taskPr = this.firstmate.taskPullRequest(folded.taskId);
     if (!taskPr) throw new AutonomyError("pr-missing", `task ${folded.taskId} must record its validated canonical PR before Linear linking`);
@@ -2826,7 +2831,7 @@ export class AutonomyOrchestrator {
     const operationId = stableId("pr-link", { issueId, taskId: folded.taskId, prUrl });
     this.journal.append("pr-link-intent", issueId, { operationId, taskId: folded.taskId, prUrl }, `pr-link-intent:${operationId}`);
     guard.assertCurrent();
-    const evidence = await this.linear.linkPullRequest(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl);
+    const evidence = await this.linear.linkPullRequest(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl, guard.assertCurrent);
     guard.assertCurrent();
     this.journal.append("pr-linked", issueId, { ...folded, operationId, prUrl, evidence: evidence.evidence } as unknown as JsonValue, `pr-link-confirmed:${operationId}`);
   }
@@ -2840,7 +2845,8 @@ export class AutonomyOrchestrator {
     const folded = this.foldedClaims().get(issueId);
     if (!folded || folded.state !== "dispatched") throw new AutonomyError("claim-missing", `issue ${issueId} is not dispatched under an owned claim`);
     if (!this.linear || !this.firstmate) throw new AutonomyError("adapter-unavailable", "Linear or Firstmate adapter is unavailable");
-    this.firstmate.assertProjectOwnership(this.config(), folded.issue);
+    if (!folded.profile) throw new AutonomyError("journal-malformed", `issue ${issueId} has no durable main-session route binding`);
+    this.firstmate.assertProjectOwnership(this.config(), folded.issue, folded.profile.route);
     this.firstmate.assertPullRequestRepository(this.config(), folded.issue, prUrl);
     if (strongBoundaryReasons(folded.claim).length > 0) throw new AutonomyError("stronger-boundary", "stronger boundary prevents autonomous landing");
     const taskPr = this.firstmate.taskPullRequest(folded.taskId);
@@ -2852,7 +2858,7 @@ export class AutonomyOrchestrator {
     guard.assertCurrent();
     if (ownershipBeforeMerge !== "owned") throw new AutonomyError("claim-conflict", `Linear claim reconciled as ${ownershipBeforeMerge} before merge; landing refused`);
     guard.assertCurrent();
-    const prepared = await this.firstmate.prepareLanding(this.config(), folded.issue, folded.taskId, prUrl);
+    const prepared = await this.firstmate.prepareLanding(this.config(), folded.issue, folded.taskId, prUrl, folded.profile.route, guard.assertCurrent);
     guard.assertCurrent();
     if (!/^[0-9a-f]{40,64}$/i.test(prepared.expectedHead)) throw new AutonomyError("pr-head-missing", "landing preparation did not produce one valid expected head");
     guard.assertCurrent();
@@ -2872,12 +2878,12 @@ export class AutonomyOrchestrator {
     try {
       try {
         guard.assertCurrent();
-        landing = await this.firstmate.verifyMerged(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead);
+        landing = await this.firstmate.verifyMerged(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead, folded.profile.route);
         guard.assertCurrent();
       } catch (error) {
         if (!(error instanceof AutonomyError) || error.code !== "landing-unconfirmed") throw error;
         guard.assertCurrent();
-        landing = await this.firstmate.mergeAndVerify(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead);
+        landing = await this.firstmate.mergeAndVerify(this.config(), folded.issue, folded.taskId, prUrl, prepared.expectedHead, folded.profile.route, guard.assertCurrent);
         guard.assertCurrent();
       }
     } catch (error) {
@@ -2901,7 +2907,7 @@ export class AutonomyOrchestrator {
       throw new AutonomyError("claim-conflict", `work landed but Linear claim reconciled as ${ownershipAfterMerge}; issue remains open for main`);
     }
     guard.assertCurrent();
-    const completed = await this.linear.completeIssue(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl);
+    const completed = await this.linear.completeIssue(this.config(), folded.issue, folded.claimId, folded.taskId, prUrl, guard.assertCurrent);
     guard.assertCurrent();
     this.journal.append("claim-completed", issueId, { ...folded, state: "completed", prUrl, landing, linearEvidence: completed.evidence } as unknown as JsonValue, `claim-completed:${folded.claimId}`);
     return landing;
@@ -2921,6 +2927,7 @@ export class AutonomyOrchestrator {
     if (this.linear && this.resolution.config) {
       const activeClaims = [...this.foldedClaims()].filter(([, folded]) => ["intent", "claimed", "dispatched"].includes(folded.state));
       for (const [issueId, folded] of activeClaims.slice(0, limits?.maxBatchIssues ?? 10)) {
+        if (!folded.profile) throw new AutonomyError("journal-malformed", `issue ${issueId} has no durable main-session route binding`);
         const issueOperation = await this.acquireIssueOperation(issueId);
         try {
         const claimRecords = this.journal.read();
@@ -2957,12 +2964,12 @@ export class AutonomyOrchestrator {
           try {
             try {
               issueOperation.assertCurrent();
-              landing = await this.firstmate.verifyMerged(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead);
+              landing = await this.firstmate.verifyMerged(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead, folded.profile.route);
               issueOperation.assertCurrent();
             } catch (error) {
               if (!(error instanceof AutonomyError) || error.code !== "landing-unconfirmed" || !this.firstmate.taskExists(folded.taskId)) throw error;
               issueOperation.assertCurrent();
-              landing = await this.firstmate.mergeAndVerify(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead);
+              landing = await this.firstmate.mergeAndVerify(this.resolution.config, folded.issue, folded.taskId, pendingPrUrl, pendingHead, folded.profile.route, issueOperation.assertCurrent);
               issueOperation.assertCurrent();
             }
             if (!landing.merged || !landing.green || landing.currentHead !== pendingHead || landing.expectedHead !== pendingHead) {
@@ -2992,6 +2999,7 @@ export class AutonomyOrchestrator {
             folded.taskId,
             confirmedPrUrl,
             confirmed.landing.expectedHead,
+            folded.profile.route,
           );
           issueOperation.assertCurrent();
           if (!verifiedLanding.merged || !verifiedLanding.green || verifiedLanding.currentHead !== confirmed.landing.expectedHead || verifiedLanding.expectedHead !== confirmed.landing.expectedHead) {
@@ -3007,7 +3015,7 @@ export class AutonomyOrchestrator {
             continue;
           }
           issueOperation.assertCurrent();
-          const completed = await this.linear.completeIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId, confirmedPrUrl);
+          const completed = await this.linear.completeIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId, confirmedPrUrl, issueOperation.assertCurrent);
           issueOperation.assertCurrent();
           this.journal.append("claim-completed", issueId, { ...folded, state: "completed", prUrl: confirmedPrUrl, landing: confirmed.landing, linearEvidence: completed.evidence } as unknown as JsonValue, `claim-completed:${folded.claimId}`);
           claims += 1;
@@ -3024,7 +3032,7 @@ export class AutonomyOrchestrator {
         if (verdict === "missing") {
           if (!this.claimsReady()) continue;
           issueOperation.assertCurrent();
-          await this.linear.claimIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId);
+          await this.linear.claimIssue(this.resolution.config, folded.issue, folded.claimId, folded.taskId, issueOperation.assertCurrent);
           issueOperation.assertCurrent();
         }
         if (folded.state === "intent") {
@@ -3033,7 +3041,7 @@ export class AutonomyOrchestrator {
         if (folded.profile && this.firstmate && folded.state !== "dispatched") {
           validateDispatchProfile(folded.profile);
           issueOperation.assertCurrent();
-          const dispatched = await this.firstmate.dispatch(this.resolution.config, folded.issue, folded.claim, folded.taskId, folded.profile);
+          const dispatched = await this.firstmate.dispatch(this.resolution.config, folded.issue, folded.claim, folded.taskId, folded.profile, issueOperation.assertCurrent);
           issueOperation.assertCurrent();
           this.journal.append("dispatch-confirmed", issueId, { ...folded, state: "dispatched", dispatchResult: dispatched, dispatchEvidence: dispatched.evidence } as unknown as JsonValue, `dispatch-confirmed:${folded.claimId}`);
         }
@@ -3143,7 +3151,7 @@ export interface RecordedHeldOutDecision {
   decision: SupervisionDecision;
 }
 
-function heldOutBatch(testCase: HeldOutCase): PendingBatch {
+export function heldOutBatch(testCase: HeldOutCase): PendingBatch {
   const expectedInputCount = Math.max(1, testCase.claims.length);
   if (testCase.inputs.length !== expectedInputCount) {
     throw new AutonomyError("heldout-input-invalid", `held-out case ${testCase.id} must contain ${expectedInputCount} complete classifier input event(s)`);

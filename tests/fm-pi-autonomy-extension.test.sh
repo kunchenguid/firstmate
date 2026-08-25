@@ -381,16 +381,22 @@ assert.equal(reconfigured.active, true, JSON.stringify(reconfigured));
 assert.equal(process.env.FM_TEST_LINEAR_KEY, undefined, "prior Linear credential returned to ambient env after reconfiguration");
 assert.equal(process.env.FM_TEST_LINEAR_KEY_B, undefined, "current Linear credential remained in ambient env after reconfiguration");
 
-writeFileSync(configPath, "{ invalid configuration");
+const invalidConfig = JSON.parse(readFileSync(configPath, "utf8"));
+invalidConfig.linear.credential.env = "FM_TEST_LINEAR_KEY_C";
+invalidConfig.capacity.maxActiveIssues = 0;
+process.env.FM_TEST_LINEAR_KEY_C = "fixture-third-secret-never-logged";
+writeFileSync(configPath, JSON.stringify(invalidConfig));
 await fire("model_select", { model: expensiveMainModel }, { sessionManager: mainSessionManager, model: expensiveMainModel, ui: { notify() {} } });
 const invalidReconfiguration = JSON.parse((await autonomyTool.execute("invalid-reconfigured-status", { action: "status" })).content[0].text);
 assert.equal(invalidReconfiguration.active, false);
 assert.equal(process.env.FM_TEST_LINEAR_KEY, undefined, "invalid reconfiguration restored a prior Linear credential");
 assert.equal(process.env.FM_TEST_LINEAR_KEY_B, undefined, "invalid reconfiguration restored the current Linear credential");
+assert.equal(process.env.FM_TEST_LINEAR_KEY_C, undefined, "invalid reconfiguration left a newly observed Linear credential ambient");
 
 await fire("session_shutdown");
 assert.equal(process.env.FM_TEST_LINEAR_KEY, "fixture-secret-never-logged", "session shutdown did not restore the parent Pi process environment for replacement activation");
 assert.equal(process.env.FM_TEST_LINEAR_KEY_B, "fixture-second-secret-never-logged", "session shutdown did not restore the reconfigured Linear credential");
+assert.equal(process.env.FM_TEST_LINEAR_KEY_C, "fixture-third-secret-never-logged", "session shutdown did not restore the invalidly reconfigured Linear credential");
 console.log("ok - active Pi autonomy uses one read-only cheaper-model brain, safe delivery, and silent visible transcript commits");
 JS
 

@@ -121,16 +121,28 @@ if (action === "kill-on" || action === "kill-off") {
     console.log("Pi autonomy kill switch removed; valid local activation may resume new claims.");
   }
 } else if (action === "eval") {
-  const corpusPath = join(root, "tests", "fixtures", "fm-autonomy-heldout.json");
-  const recordedOutputsPath = join(root, "tests", "fixtures", "fm-autonomy-recorded-outputs.json");
-  const baselinePath = join(root, "tests", "fixtures", "fm-autonomy-baseline.json");
+  const corpusPath = process.env.FM_AUTONOMY_EVAL_CORPUS || join(root, "tests", "fixtures", "fm-autonomy-heldout.json");
+  const recordedOutputsPath = process.env.FM_AUTONOMY_EVAL_RECORDED || join(root, "tests", "fixtures", "fm-autonomy-recorded-outputs.json");
+  const baselinePath = process.env.FM_AUTONOMY_EVAL_BASELINE || join(root, "tests", "fixtures", "fm-autonomy-baseline.json");
   const corpus = JSON.parse(readFileSync(corpusPath, "utf8"));
   const recordedOutputs = JSON.parse(readFileSync(recordedOutputsPath, "utf8"));
   const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
   const evaluation = autonomy.evaluateHeldOutRecordedOutputs(corpus.cases, recordedOutputs.outputs);
   const prompt = execFileSync("bash", [join(root, "bin", "fm-autonomy-prompt.sh")]);
   const promptSha256 = createHash("sha256").update(prompt).digest("hex");
+  const corpusSha256 = createHash("sha256").update(readFileSync(corpusPath)).digest("hex");
   const recordedOutputsSha256 = createHash("sha256").update(readFileSync(recordedOutputsPath)).digest("hex");
+  const provenance = recordedOutputs.provenance ?? {};
+  const captureRecords = Array.isArray(provenance.records) ? provenance.records : [];
+  const captureRecordsValid = corpus.cases.every((testCase) => {
+    const output = recordedOutputs.outputs.find((candidate) => candidate.caseId === testCase.id);
+    const record = captureRecords.find((candidate) => candidate.caseId === testCase.id);
+    if (!output || !record) return false;
+    const batch = autonomy.heldOutBatch(testCase);
+    return record.batchId === batch.id &&
+      record.inputSha256 === createHash("sha256").update(autonomy.canonicalJson(batch)).digest("hex") &&
+      record.outputSha256 === createHash("sha256").update(autonomy.canonicalJson(output.decision)).digest("hex");
+  });
   const requiredCasesPresent = baseline.requiredDisconfirmingCases.every(
     (id) => corpus.cases.some((testCase) => testCase.id === id && testCase.disconfirming),
   );
@@ -140,9 +152,23 @@ if (action === "kill-on" || action === "kill-off") {
     autonomy.AUTONOMY_DECISION_CONTRACT_VERSION === baseline.decisionContractVersion &&
     autonomy.AUTONOMY_MODEL_POLICY === baseline.modelPolicy &&
     promptSha256 === baseline.promptSha256 &&
+    corpusSha256 === baseline.corpusSha256 &&
+    corpus.cases.length === baseline.cases &&
+    recordedOutputs.outputs.length === baseline.cases &&
     recordedOutputsSha256 === baseline.recordedOutputsSha256 &&
+    provenance.captureInterface === baseline.captureProvenance?.interface &&
+    provenance.captureMode === baseline.captureProvenance?.mode &&
+    provenance.provider === baseline.captureProvenance?.provider &&
+    provenance.model === baseline.captureProvenance?.model &&
+    provenance.runtime === baseline.captureProvenance?.runtime &&
+    provenance.runId === baseline.captureProvenance?.runId &&
+    provenance.corpusSha256 === corpusSha256 &&
+    provenance.contractFingerprint === evaluation.contractFingerprint &&
+    provenance.promptSha256 === promptSha256 &&
+    provenance.caseCount === corpus.cases.length &&
+    captureRecords.length === corpus.cases.length && captureRecordsValid &&
     requiredCasesPresent;
-  console.log(JSON.stringify({ ...evaluation, promptSha256, recordedOutputsSha256, accepted }));
+  console.log(JSON.stringify({ ...evaluation, promptSha256, corpusSha256, recordedOutputsSha256, captureRecordsValid, accepted }));
   if (!accepted) process.exitCode = 1;
 } else {
   const resolution = autonomy.loadAutonomyConfiguration(configPath, killPath, process.env);
