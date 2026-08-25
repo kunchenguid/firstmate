@@ -18,9 +18,8 @@ Do this before recording or changing edge, not after blocker stalls.
 Read blocker and dependent acceptance criteria, relevant issue discussion, existing reports, current repository behavior, and backlog records.
 Do not infer hard dependency from preferred order, overlapping files, or broad issue titles.
 
-When project has issue or spec, that surface owns product dependency contract.
-Backlog mirrors task identity and scheduling edge, with concise pointer to owner.
-For work without project issue, backlog task body owns contract.
+Select one authoritative owner for product dependency contract: project issue or spec when either exists, otherwise backlog task body.
+Backlog mirrors task identity and scheduling edge, with concise pointer to selected owner.
 Task brief is execution snapshot, not second authority.
 
 ## Edge contract
@@ -75,7 +74,7 @@ An edge becomes clear only through normal completion flow after:
 
 1. unblocking task landed through configured delivery path and capability is present in exact fresh dependent spawn base
 2. executable proof passes against that base
-3. consumed contract matches dependent contract's authoritative owner: project issue or spec when present, otherwise backlog task body
+3. consumed contract matches dependent contract's selected authoritative owner
 
 After all checks pass, run normal guarded `bin/fm-teardown.sh` for unblocking task.
 A teardown refusal leaves task and edge active.
@@ -111,9 +110,9 @@ When remainder is independently shippable, brief only slice task and place remai
 
 ## Reconciliation
 
-Before dispatching dependency-bound work, compare project issue state, backlog task state, edge targets, and landed artifacts.
+Before dispatching dependency-bound work, compare selected authoritative owner, backlog task state, edge targets, and landed artifacts.
 A closed issue with unfinished acceptance work, open issue whose only task is done, missing edge contract, or edge targeting wrong whole-issue task is divergence.
-Reconcile authoritative issue and backlog before dispatch.
+Reconcile selected authoritative owner and backlog before dispatch.
 Never close issue from unblocking-slice PR unless slice completes whole issue.
 
 Completion: every active edge has one owner, exact consumed capability, executable landed proof, and one task whose completion releases dependent work.
