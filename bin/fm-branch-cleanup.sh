@@ -70,14 +70,27 @@ cleanup_remote_candidates() {
 }
 
 cleanup_matching_remote_tips() {
-  local branch=$1 tip=$2 remote remote_tip
+  local proof=$1 branch=$2 tip=$3 proof_arg=${4:-} remote remote_tip
   for remote in origin no-mistakes; do
     remote_tip=$(fm_branch_remote_tip "$PROJ" "$remote" "$branch") || continue
     [ "$remote_tip" = "$tip" ] || continue
-    if fm_branch_delete_remote_proven_tip "$PROJ" "$remote" "$branch" "$tip"; then
+    case "$proof" in
+      merged)
+        fm_branch_delete_remote_if_safely_merged "$PROJ" "$remote" "$branch" "$tip" "$proof_arg"
+        ;;
+      gone)
+        fm_branch_delete_remote_if_safely_gone "$PROJ" "$remote" "$branch" "$tip"
+        ;;
+      landed)
+        fm_branch_delete_remote_if_landed "$PROJ" "$remote" "$branch" "$tip"
+        ;;
+      *)
+        continue
+        ;;
+    esac && {
       echo "$label: pruned $remote/$branch"
       cleaned=$((cleaned + 1))
-    fi
+    }
   done
 }
 
@@ -94,7 +107,7 @@ while IFS= read -r branch; do
 
   if [ -n "$default" ] \
     && fm_branch_is_safely_merged "$PROJ" "$branch" "refs/heads/$default" "$tip"; then
-    cleanup_matching_remote_tips "$branch" "$tip"
+    cleanup_matching_remote_tips merged "$branch" "$tip" "refs/heads/$default"
     if fm_branch_delete_if_safely_merged "$PROJ" "$branch" "refs/heads/$default"; then
       echo "$label: pruned $branch (merged into $default)"
       cleaned=$((cleaned + 1))
@@ -103,7 +116,7 @@ while IFS= read -r branch; do
   fi
 
   if fm_branch_is_safely_gone "$PROJ" "$branch" "$tip"; then
-    cleanup_matching_remote_tips "$branch" "$tip"
+    cleanup_matching_remote_tips gone "$branch" "$tip"
     if fm_branch_delete_if_safely_gone "$PROJ" "$branch"; then
       echo "$label: pruned $branch (upstream gone)"
       cleaned=$((cleaned + 1))
@@ -112,7 +125,7 @@ while IFS= read -r branch; do
   fi
 
   if fm_branch_work_is_landed "$PROJ" "$branch" "" "$tip"; then
-    cleanup_matching_remote_tips "$branch" "$tip"
+    cleanup_matching_remote_tips landed "$branch" "$tip"
     if fm_branch_delete_local_proven_tip "$PROJ" "$branch" "$tip"; then
       echo "$label: pruned $branch (landed)"
       cleaned=$((cleaned + 1))

@@ -2292,7 +2292,7 @@ fi
 # Missing remotes, changed refs, inconclusive proofs, and any branch still
 # checked out elsewhere are silent best-effort skips.
 teardown_drop_task_branch_locked() {
-  local wt=$1 branch tip expected default local_landed=0 origin_tip='' no_mistakes_tip='' remote remote_tip
+  local wt=$1 branch tip expected default remote remote_tip
   branch=$2
   tip=$3
   [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)" = "$branch" ] || return 0
@@ -2302,16 +2302,6 @@ teardown_drop_task_branch_locked() {
     expected=${TEARDOWN_WORKTREE_TIP_FOR_SAFETY:-}
     [ "$branch" = "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ] || return 0
     [ -n "$expected" ] && [ "$tip" = "$expected" ] || return 0
-    fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$tip" && local_landed=1
-    for remote in origin no-mistakes; do
-      remote_tip=$(fm_branch_remote_tip "$wt" "$remote" "$branch") || continue
-      fm_branch_fetch_remote_tip "$wt" "$remote" "$branch" "$remote_tip" || continue
-      fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$remote_tip" || continue
-      case "$remote" in
-        origin) origin_tip=$remote_tip ;;
-        no-mistakes) no_mistakes_tip=$remote_tip ;;
-      esac
-    done
   fi
 
   git -C "$wt" checkout --detach -q 2>/dev/null || return 0
@@ -2327,17 +2317,17 @@ teardown_drop_task_branch_locked() {
       :
     elif _fm_branch_delete_if_safely_gone_locked "$wt" "$branch"; then
       :
-    elif [ "$local_landed" = 1 ]; then
+    elif fm_branch_work_is_landed "$wt" "$branch" "$PR_URL" "$tip"; then
       _fm_branch_delete_local_proven_tip_locked "$wt" "$branch" "$tip" || true
     fi
   fi
-  if [ -n "$origin_tip" ] \
-    && _fm_branch_delete_remote_proven_tip_locked "$wt" "$branch" origin "$origin_tip"; then
-    echo "teardown: pruned origin/$branch"
-  fi
-  if [ -n "$no_mistakes_tip" ] \
-    && _fm_branch_delete_remote_proven_tip_locked "$wt" "$branch" no-mistakes "$no_mistakes_tip"; then
-    echo "teardown: pruned no-mistakes/$branch"
+  if [ "$FORCE" != --force ] && [ "$KIND" != scout ]; then
+    for remote in origin no-mistakes; do
+      remote_tip=$(fm_branch_remote_tip "$wt" "$remote" "$branch") || continue
+      if _fm_branch_delete_remote_if_landed_locked "$wt" "$branch" "$remote" "$remote_tip" "$PR_URL"; then
+        echo "teardown: pruned $remote/$branch"
+      fi
+    done
   fi
 }
 

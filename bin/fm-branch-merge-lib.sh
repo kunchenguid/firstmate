@@ -212,8 +212,9 @@ fm_branch_fetch_remote_tip() {
 # fm_branch_delete_remote_proven_tip <repo> <remote> <branch> <expected_tip>:
 # delete only the exact remote tip a caller has already proved landed. Missing
 # remotes and refs are silent non-matches. The lease fails closed if the ref
-# changes after inspection, and the worktree guard applies even though a remote
-# delete would otherwise allow deleting the branch under a live task.
+# changes after inspection, and the worktree and local-tip guards apply even
+# though a remote delete would otherwise allow deleting the branch under a live
+# task.
 _fm_branch_delete_remote_proven_tip_locked() {
   local repo=$1 branch=$2 remote=$3 expected_tip=$4 current local_tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
@@ -222,7 +223,6 @@ _fm_branch_delete_remote_proven_tip_locked() {
   [ "$current" = "$expected_tip" ] || return 1
   local_tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" || true)
   [ -z "$local_tip" ] || [ "$local_tip" = "$expected_tip" ] || return 1
-  [ -z "$local_tip" ] || _fm_branch_delete_local_proven_tip_locked "$repo" "$branch" "$expected_tip" || return 1
   git -C "$repo" push --quiet \
     --force-with-lease="refs/heads/$branch:$expected_tip" \
     "$remote" ":refs/heads/$branch" >/dev/null 2>&1
@@ -234,16 +234,51 @@ fm_branch_delete_remote_proven_tip() {
     _fm_branch_delete_remote_proven_tip_locked "$remote" "$expected_tip"
 }
 
+_fm_branch_delete_remote_if_safely_merged_locked() {
+  local repo=$1 branch=$2 remote=$3 expected_tip=$4 merged_into=$5
+  fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" "$expected_tip" || return 1
+  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
+}
+
+fm_branch_delete_remote_if_safely_merged() {
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4 merged_into=$5
+  fm_branch_with_cleanup_lock "$repo" "$branch" \
+    _fm_branch_delete_remote_if_safely_merged_locked "$remote" "$expected_tip" "$merged_into"
+}
+
+_fm_branch_delete_remote_if_safely_gone_locked() {
+  local repo=$1 branch=$2 remote=$3 expected_tip=$4
+  fm_branch_is_safely_gone "$repo" "$branch" "$expected_tip" || return 1
+  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
+}
+
+fm_branch_delete_remote_if_safely_gone() {
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4
+  fm_branch_with_cleanup_lock "$repo" "$branch" \
+    _fm_branch_delete_remote_if_safely_gone_locked "$remote" "$expected_tip"
+}
+
+_fm_branch_delete_remote_if_landed_locked() {
+  local repo=$1 branch=$2 remote=$3 expected_tip=$4 pr_url=$5
+  fm_branch_worktree_has_branch "$repo" "$branch" && return 1
+  fm_branch_fetch_remote_tip "$repo" "$remote" "$branch" "$expected_tip" || return 1
+  fm_branch_work_is_landed "$repo" "$branch" "$pr_url" "$expected_tip" || return 1
+  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
+}
+
+fm_branch_delete_remote_if_landed() {
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4 pr_url=${5:-}
+  fm_branch_with_cleanup_lock "$repo" "$branch" \
+    _fm_branch_delete_remote_if_landed_locked "$remote" "$expected_tip" "$pr_url"
+}
+
 # fm_branch_cleanup_remote_candidate <repo> <remote> <branch> <expected_tip>:
 # prove and delete a remote-only sweep candidate in one branch cleanup critical
 # section.  The remote listing supplies the expected tip; every subsequently
 # mutable input to the proof is inspected only after the lock is held.
 _fm_branch_cleanup_remote_candidate_locked() {
   local repo=$1 branch=$2 remote=$3 expected_tip=$4
-  fm_branch_worktree_has_branch "$repo" "$branch" && return 1
-  fm_branch_fetch_remote_tip "$repo" "$remote" "$branch" "$expected_tip" || return 1
-  fm_branch_work_is_landed "$repo" "$branch" "" "$expected_tip" || return 1
-  _fm_branch_delete_remote_proven_tip_locked "$repo" "$branch" "$remote" "$expected_tip"
+  _fm_branch_delete_remote_if_landed_locked "$repo" "$branch" "$remote" "$expected_tip" ""
 }
 
 fm_branch_cleanup_remote_candidate() {
