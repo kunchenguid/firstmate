@@ -32,8 +32,8 @@ Item 6 is the one still open.
    worker. The crewmate's commits ride home as a digest-verified bundle and the
    local side keeps the landing authority. Direct push from a worker remains
    explicitly deferred.
-6a. OPEN. Resume still destroys an outcome that was never collected before the original VM and its executed marker were lost.
-   The authorized return bundle makes a completed first execution replayable and preserves uncommitted scout scratch when that execution reaches its collection tail, but it is not a collect-only reader for a task disk whose OS-disk marker is already gone.
+6a. BUILT. An explicit `execute --existing-task-disk` recovery binds the already-assigned repository without staging over it, runs one bounded continuation or no-op collection command, and returns the same authorized report, status, commit, and scratch bundle.
+   The request binds the exact landed recovery-supervisor digest, and the adapter executes those bytes without replacing the assignment's originally bootstrapped supervisor.
 6. BUILT. Release no longer waits for ordinary teardown.
    The monitor localizes the digest-bound return, reconstructs the ship branch or retains scout scratch, writes the required report and terminal status, mints the cloud-custody release receipt while the exact tracking endpoint is finishing, and retries release/reconcile until the assignment is complete.
 

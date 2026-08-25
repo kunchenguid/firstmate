@@ -248,6 +248,42 @@ action = {
     "payload_dir": str(payload_dir), "account_dir": str(account_dir),
 }
 
+# Recovery of an already-assigned task disk cannot rely on the supervisor that
+# assignment originally bootstrapped. The provider binds and embeds the exact
+# landed recovery bytes without changing that original executable.
+recovery_request = dict(request)
+recovery_request.pop("payload_files")
+recovery_request.pop("account_files")
+supervisor_body = (provider.ROOT / "bin" / "fm-worker-supervisor.py").read_bytes()
+recovery_request.update({
+    "existing_task_disk": True,
+    "supervisor_sha256": hashlib.sha256(supervisor_body).hexdigest(),
+    "return_contract": {
+        "schema": "fm.worker-return-contract/v1", "kind": "scout",
+        "report_required": True, "report_path": "data/task-one/report.md",
+        "status_path": "state/task-one.status", "visuals_path": "data/task-one/visuals",
+        "branch": "",
+    },
+})
+recovery_request.pop("request_digest")
+recovery_request["request_digest"] = hashlib.sha256(
+    json.dumps(recovery_request, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+).hexdigest()
+recovery_action = dict(action, request=recovery_request, request_digest=recovery_request["request_digest"])
+recovery_action.pop("payload_dir")
+recovery_action.pop("account_dir")
+recovery_script = provider.build_execute_script(recovery_action)
+assert "/usr/bin/base64 --decode" in recovery_script, recovery_script[:500]
+assert "recovery-supervisor-{}.py".format(recovery_request["supervisor_sha256"]) in recovery_script
+assert "/usr/bin/python3 '/var/lib/firstmate-worker/recovery-supervisor-" in recovery_script
+changed_recovery = dict(recovery_request, supervisor_sha256="f" * 64)
+try:
+    provider.build_execute_script(dict(recovery_action, request=changed_recovery))
+except provider.ProviderError as exc:
+    assert "supervisor binding differs" in str(exc), exc
+else:
+    raise AssertionError("provider accepted recovery supervisor bytes outside the request binding")
+
 execution = {
     "schema": "fm.worker-execution-result/v1",
     "request_digest": request["request_digest"], "task": "task-one",

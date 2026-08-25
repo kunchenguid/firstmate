@@ -32,6 +32,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 AZURE_PROVIDER = ROOT / "bin" / "fm-azure-worker-provider.py"
+WORKER_SUPERVISOR = ROOT / "bin" / "fm-worker-supervisor.py"
 # The ONE implementation of "what is a Pi profile", "which upstream account is
 # it", and "how is a single-profile account home written". Placement imports it
 # rather than re-deriving any of the three: a second implementation of an
@@ -2144,16 +2145,33 @@ def apply_action_result(env, state, action, result):
                 raise LifecycleError(
                     "provider execution reports no authorized return artifact bundle"
                 )
-            for field in ("return_ref", "return_commit", "return_manifest_sha256", "outcome_tip"):
-                if not isinstance(execution.get(field), str) or not execution[field]:
-                    raise LifecycleError(
-                        "provider execution return {} is absent".format(field)
-                    )
-            for field in ("return_commit", "return_manifest_sha256", "outcome_tip"):
-                if not re.fullmatch(r"[0-9a-f]{40,64}", execution[field]):
+            expected_return_ref = "refs/fm-return/{}".format(
+                action["request_digest"][:32]
+            )
+            if execution.get("return_ref") != expected_return_ref:
+                raise LifecycleError("provider execution return ref is not exact")
+            for field in ("return_commit", "outcome_tip"):
+                if not re.fullmatch(r"[0-9a-f]{40}", str(execution.get(field))):
                     raise LifecycleError(
                         "provider execution return {} is malformed".format(field)
                     )
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", str(execution.get("return_manifest_sha256"))
+            ):
+                raise LifecycleError(
+                    "provider execution return return_manifest_sha256 is malformed"
+                )
+            commits = execution.get("outcome_commits")
+            if not isinstance(commits, int) or isinstance(commits, bool) or commits < 0:
+                raise LifecycleError("provider execution outcome commit count is malformed")
+            if execution.get("outcome_present") is not (commits > 0):
+                raise LifecycleError(
+                    "provider execution outcome presence differs from its commit count"
+                )
+            if not isinstance(execution.get("outcome_uncommitted_changes"), bool):
+                raise LifecycleError(
+                    "provider execution working-tree disposition is malformed"
+                )
         state["executions"][action["request_digest"]] = execution
         worker["last_execution_digest"] = supplied
         worker["last_execution_at"] = iso_utc()
@@ -2828,6 +2846,10 @@ def parser():
     execute.add_argument("--account-dir", default=None)
     execute.add_argument("--outcome-dir", default=None)
     execute.add_argument("--return-kind", choices=("ship", "scout"), default=None)
+    execute.add_argument(
+        "--existing-task-disk", action="store_true",
+        help="continue or collect an assigned task disk without replacing its repository",
+    )
     execute.add_argument("--confirm-execute", action="store_true")
     execute.add_argument("--confirm-subscription", required=True)
     execute.add_argument("argv", nargs=argparse.REMAINDER)
@@ -3864,10 +3886,14 @@ def command_execute(env, args):
         raise LifecycleError("execution wall deadline must be between 1 and 21600 seconds")
     if (args.payload_dir is None) != (args.account_dir is None):
         raise LifecycleError("payload and account staging directories travel together or not at all")
-    if args.outcome_dir is not None and args.payload_dir is None:
-        raise LifecycleError("an outcome can only be collected from a staged repository")
+    if args.existing_task_disk and args.payload_dir is not None:
+        raise LifecycleError("existing task-disk recovery cannot replace payload or account state")
+    if args.outcome_dir is not None and args.payload_dir is None and not args.existing_task_disk:
+        raise LifecycleError("an outcome can only be collected from a staged repository or an explicitly retained repository")
     if args.return_kind is not None and args.outcome_dir is None:
         raise LifecycleError("an authorized task return requires an outcome directory")
+    if args.existing_task_disk and (args.outcome_dir is None or args.return_kind is None):
+        raise LifecycleError("existing task-disk recovery requires an authorized return outcome")
     if args.outcome_dir is not None:
         outcome_root = Path(args.outcome_dir)
         if outcome_root.is_symlink() or not outcome_root.is_dir():
@@ -3918,6 +3944,15 @@ def command_execute(env, args):
         if payload_manifest is not None:
             request["payload_files"] = payload_manifest
             request["account_files"] = account_manifest
+        if args.existing_task_disk:
+            try:
+                supervisor_body = WORKER_SUPERVISOR.read_bytes()
+            except OSError as exc:
+                raise LifecycleError(
+                    "existing task-disk recovery supervisor is unreadable: {}".format(exc)
+                ) from None
+            request["existing_task_disk"] = True
+            request["supervisor_sha256"] = hashlib.sha256(supervisor_body).hexdigest()
         if args.outcome_dir is not None:
             # Digest-bound, so withholding the staging URL downstream cannot
             # silently turn a landing task into a fire-and-forget one: the
