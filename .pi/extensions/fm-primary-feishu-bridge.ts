@@ -74,6 +74,7 @@ function fullStatus(): string {
     allowed_user?: string | null;
     transport_phase?: string;
     transport_healthy?: boolean;
+    live_session_owned?: boolean;
     inbound?: { pending?: number; queued?: number; delivered?: number };
     outbound_pending?: number;
     outbound_uncertain?: number;
@@ -91,6 +92,7 @@ function fullStatus(): string {
     `allowed_user=${value.allowed_user ?? "none"}`,
     `transport=${value.transport_phase ?? "stopped"}`,
     `transport_healthy=${value.transport_healthy === true ? "yes" : "no"}`,
+    `live_session_owned=${value.live_session_owned === true ? "yes" : "no"}`,
     `inbox_pending=${value.inbound?.pending ?? 0}`,
     `inbox_queued=${value.inbound?.queued ?? 0}`,
     `inbox_delivered=${value.inbound?.delivered ?? 0}`,
@@ -150,20 +152,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("fm-feishu-rebind", {
-    description: "Safely rebind the configured private Feishu channel to this exact local Pi session.",
+    description: "Hard-bind the configured private Feishu channel to this exact local Pi session.",
     handler: async (_args, ctx) => {
       try {
         requireLocalTui(ctx);
-        const result = await nativeChannel.rebind(ctx);
+        const result = await nativeChannel.hardBind(ctx);
         ctx.ui.notify(
           result === "already-current"
             ? "Feishu channel is already bound to this Pi session and healthy."
-            : "Feishu channel rebound to this Pi session and is healthy.",
+            : "Feishu channel hard-bound to this Pi session and is healthy.",
           "info",
         );
       } catch {
         ctx.ui.notify(
-          "Feishu rebind refused. Run /fm-feishu-status and bin/fm-feishu-transport.sh config-check locally, resolve pending delivery or ownership state, then retry /fm-feishu-rebind. If ownership remains ambiguous, fully exit other Pi processes for this Firstmate home and relaunch.",
+          "Feishu hard bind refused. Run /fm-feishu-status and bin/fm-feishu-transport.sh config-check locally, verify the protected configuration and current Firstmate session lock, then retry /fm-feishu-rebind.",
           "error",
         );
       }

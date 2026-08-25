@@ -25,12 +25,12 @@ const transportEnvironment = Object.fromEntries(Object.entries({
 }).filter(([, value]) => typeof value === "string"));
 
 function usage() {
-  return "usage: fm-feishu-lifecycle.mjs reconcile|manual-rebind";
+  return "usage: fm-feishu-lifecycle.mjs reconcile|hard-bind";
 }
 
 async function main(argv) {
   const action = argv.shift();
-  if (!new Set(["reconcile", "manual-rebind"]).has(action) || argv.length > 0) throw new Error(usage());
+  if (!new Set(["reconcile", "hard-bind"]).has(action) || argv.length > 0) throw new Error(usage());
   const child = spawn(TRANSPORT_SCRIPT, [action], {
     cwd: ROOT,
     env: transportEnvironment,

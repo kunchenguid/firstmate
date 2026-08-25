@@ -310,10 +310,12 @@ The dedicated `bin/fm-feishu-transport.mjs` process owns strict local-config cre
 `bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events and their media envelopes and cache bytes, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
 `.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu input, including its native image content, to the current Pi native queue.
 
-The Pi extension sends only the verified current persisted-session identity to a credential-blind lifecycle launcher.
+The Pi extension sends only the verified current persisted-session identity to a credential-blind lifecycle launcher and invokes hard takeover directly at trusted startup or an owned turn whenever live Pi ownership is missing.
 The dedicated transport process parses `config/feishu.env`, probes app authentication and P2P chat identity before binding mutation, gracefully stops the exact prior owner, converges the pairing and binding generation, and starts exactly one credential-bearing daemon process.
+Trusted local recovery then commits one state-owner hard takeover under the pairing, binding, inbound, outbound, and live-session locks: a replacement generation retargets pending delivery identities to the exact current persisted Pi, while every prior Pi fence fails immediately in both replacement and same-generation ownership recovery.
+Pending and uncertain outbound records retain their durable event, chunk UUID, receipt, and uncertainty identities instead of being dropped, replayed under new identities, or blocking ownership transfer.
 Credentials never enter Pi or a process argument.
-An unchanged session, configuration identity, generation, and healthy owner make startup a silent no-op.
+An unchanged session, configuration identity, generation, healthy transport, and matching live Pi owner make startup a silent no-op; healthy transport without live Pi ownership is a distinct state that triggers same-generation ownership recovery without restarting that transport.
 
 The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
 It calls only the current extension API's `sendUserMessage` with native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
