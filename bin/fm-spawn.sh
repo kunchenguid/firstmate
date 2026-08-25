@@ -1697,7 +1697,7 @@ if [ "$KIND" = ship ]; then
   if PROJECT_REGISTRY_ID=$(registered_project_id_for_path "$PROJ_ABS"); then
     PROJ_NAME=$PROJECT_REGISTRY_ID
     STANDING_MODE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-      "$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
+      "$FM_ROOT/bin/fm-project-mode.sh" --raw -- "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   else
     project_registry_status=$?
     [ "$project_registry_status" -eq 1 ] || {

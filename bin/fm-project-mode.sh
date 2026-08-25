@@ -105,8 +105,15 @@ while [ "$#" -gt 0 ]; do
     --)
       shift
       [ "$#" -eq 1 ] || { usage; exit 2; }
-      [ "$OP" = mode ] && [ -z "$NAME" ] || { usage; exit 2; }
+      if { [ "$OP" = mode ] || [ "$OP" = path ] || [ "$OP" = entry ] || [ "$OP" = child-entry ]; } \
+        && [ -z "$NAME" ]; then
+        :
+      else
+        usage
+        exit 2
+      fi
       NAME=$1
+      shift
       break
       ;;
     -*)

@@ -157,7 +157,7 @@ done < "$BRIEF" > "$TMP/charter.remote"
 project_path_in_home() {
   local project=$1
   FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    "$SCRIPT_DIR/fm-project-mode.sh" --path "$project"
+    "$SCRIPT_DIR/fm-project-mode.sh" --path -- "$project"
 }
 
 PROJECTS_CSV=
@@ -167,9 +167,9 @@ for project in "${PROJECT_NAMES[@]}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   REGISTRY_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    "$SCRIPT_DIR/fm-project-mode.sh" --child-entry "$project") \
+    "$SCRIPT_DIR/fm-project-mode.sh" --child-entry -- "$project") \
     || die "project $project has no registry record"
-  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" -- "$project")
   read -r MODE _ <<EOF
 $MODE_LINE
 EOF

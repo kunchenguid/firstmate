@@ -426,6 +426,29 @@ EOF
   pass "fm-project-mode: ambiguous input, unregistered clones, duplicate paths, and malformed path variants fail visibly"
 }
 
+test_project_mode_resolves_leading_hyphen_identifier() {
+  local home out
+  home="$TMP_ROOT/project-leading-hyphen/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- -foo [direct-PR] - fixture (added 2026-01-01) [path=irregular/foo]
+EOF
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-leading-hyphen/user" "$PROJECT_MODE" --path -- -foo)
+  [ "$out" = "$TMP_ROOT/project-leading-hyphen/user/dpe/irregular/foo" ] \
+    || fail "--path did not resolve a leading-hyphen identifier (got '$out')"
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-leading-hyphen/user" "$PROJECT_MODE" --entry -- -foo)
+  assert_contains "$out" '- -foo [direct-PR]' "--entry did not accept a leading-hyphen identifier"
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-leading-hyphen/user" "$PROJECT_MODE" --child-entry -- -foo)
+  assert_contains "$out" '[path=projects/-foo]' "--child-entry did not accept a leading-hyphen identifier"
+
+  out=$(FM_HOME="$home" HOME="$TMP_ROOT/project-leading-hyphen/user" "$PROJECT_MODE" -- -foo)
+  [ "$out" = 'direct-PR off' ] || fail "mode lookup did not accept a leading-hyphen identifier (got '$out')"
+  pass "fm-project-mode: every single-identifier API accepts a leading-hyphen registry id after --"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -436,4 +459,5 @@ test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
 test_project_mode_resolves_registered_project_path
 test_project_mode_rejects_ambiguous_and_duplicate_paths
+test_project_mode_resolves_leading_hyphen_identifier
 echo "# all fm-task-delivery tests passed"

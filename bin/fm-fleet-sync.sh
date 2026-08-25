@@ -82,7 +82,7 @@ fi
 project_path_for_id() {
   local id=$1
   FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    "$FM_ROOT/bin/fm-project-mode.sh" --path "$id"
+    "$FM_ROOT/bin/fm-project-mode.sh" --path -- "$id"
 }
 
 project_id_for_path() {
@@ -327,7 +327,7 @@ sync_project() {
     return 0
   fi
   mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    "$FM_ROOT/bin/fm-project-mode.sh" "$label") || {
+    "$FM_ROOT/bin/fm-project-mode.sh" -- "$label") || {
     echo "$label: skipped: cannot read registered project posture" >&2
     return 0
   }

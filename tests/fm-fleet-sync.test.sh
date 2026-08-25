@@ -460,6 +460,18 @@ test_single_project_by_registered_path_resolves() {
   pass "single-project bare name resolves through the registered path"
 }
 
+test_single_project_by_leading_hyphen_identifier_resolves() {
+  local home out
+  home=$(new_home)
+  build_pair "$home" -solar >/dev/null
+  advance_origin "$home" -solar C1
+
+  out=$(run_sync "$home" -solar)
+
+  assert_contains "$out" "-solar: synced" "leading-hyphen project id did not resolve through the registry"
+  pass "single-project form accepts a leading-hyphen registered identifier"
+}
+
 test_single_project_by_projects_relative_name_resolves() {
   local home out
   home=$(new_home)
@@ -733,6 +745,7 @@ test_local_only_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_registered_path_resolves
+test_single_project_by_leading_hyphen_identifier_resolves
 test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unregistered_name_fails

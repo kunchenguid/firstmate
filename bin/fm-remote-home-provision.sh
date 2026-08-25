@@ -228,12 +228,12 @@ EOF
   printf '%s\n' "$REGISTRY_LINE" >> "$MANIFEST_PROJECT_REG"
   CHILD_REGISTRY_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$MANIFEST_PROJECT_DATA" \
     FM_PROJECTS_OVERRIDE="$CHILD_PROJECTS" \
-    "$SCRIPT_DIR/fm-project-mode.sh" --child-entry "$NAME") \
+    "$SCRIPT_DIR/fm-project-mode.sh" --child-entry -- "$NAME") \
     || die "project $NAME registry line is malformed"
   printf '%s\n' "$CHILD_REGISTRY_LINE" >> "$PROJECT_REG"
   RESOLVED_PROJECT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$TMP" \
     FM_PROJECTS_OVERRIDE="$CHILD_PROJECTS" \
-    "$SCRIPT_DIR/fm-project-mode.sh" --path "$NAME") \
+    "$SCRIPT_DIR/fm-project-mode.sh" --path -- "$NAME") \
     || die "project $NAME child registry line is malformed"
   DEST="$CHILD_PROJECTS/$NAME"
   [ "$RESOLVED_PROJECT" = "$DEST" ] \

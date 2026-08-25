@@ -460,7 +460,7 @@ project_path_in_home() {
   local home=$1 data=$2 projects=$3 project=$4
   FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     FM_PROJECTS_OVERRIDE="$projects" \
-    "$FM_ROOT/bin/fm-project-mode.sh" --path "$project"
+    "$FM_ROOT/bin/fm-project-mode.sh" --path -- "$project"
 }
 
 clone_project() {
@@ -470,7 +470,7 @@ clone_project() {
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" -- "$project")
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -497,7 +497,7 @@ validate_seed_project() {
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" -- "$project")
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -672,7 +672,7 @@ seed_rollback() {
 project_mode_in_home() {
   local home=$1 project=$2 mode
   read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" -- "$project")
 EOF
   printf '%s\n' "$mode"
 }
@@ -699,7 +699,7 @@ sync_project_registry() {
       if [ "$selected" -eq 0 ]; then
         FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
           FM_PROJECTS_OVERRIDE="$home/projects" \
-          "$FM_ROOT/bin/fm-project-mode.sh" --entry "$existing_id" >> "$tmp" || return 1
+          "$FM_ROOT/bin/fm-project-mode.sh" --entry -- "$existing_id" >> "$tmp" || return 1
       fi
     done <<EOF
 $existing_pairs
@@ -709,7 +709,7 @@ EOF
   fi
   for project in "$@"; do
     FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
-      "$FM_ROOT/bin/fm-project-mode.sh" --child-entry "$project" >> "$tmp" || return 1
+      "$FM_ROOT/bin/fm-project-mode.sh" --child-entry -- "$project" >> "$tmp" || return 1
   done
   mv "$tmp" "$sub_reg"
 }
