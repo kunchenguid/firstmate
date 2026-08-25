@@ -1,6 +1,8 @@
 # Calm-mode harness feasibility
 
-This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+This document is a dated journal of Calm-mode observations: harness surveys, the Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+Each entry records when an observation was made, which harness version it was made against, and what was actually seen.
+An observation is not carried to a version it was not made on; where a survey has not been redone, the gap is stated instead of filled by deduction.
 [`calm.md`](calm.md) owns the current user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
@@ -13,15 +15,26 @@ Changing persisted context to remove hidden content, filtering provider context,
 ## Compatibility evidence
 
 [`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
+The Pi installed on 2026-08-16 is 0.84.2.
+What was observed against it that day is what the [2026-08-16 verification record](#2026-08-16-pi-0842-installed-version-verification) shows and nothing more: the `pi` and installed-package versions, one clean run of `tests/fm-calm-pi-extension.test.sh`, a declarations recheck of the two exported classes the adapters patch, and a typecheck run that produced no typecheck because `tsc` was absent.
+That run is not a uniformly reproducible pass: the follow-up adjacent case intermittently fails a known test-harness race, measured and referenced in the same entry.
+No survey in this document has been redone on 0.84.2.
+The extension-API survey and the transcript taxonomy were made against Pi 0.81.1 on 2026-07-22.
+The cross-harness inspection was made on 2026-07-22, with its Pi row reverified at 0.81.1 on 2026-07-23.
+The working-presentation observations were made against the Pi 0.82.0 CLI on 2026-07-30.
+Each section below repeats its own date and version.
 Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later reverification target.
-The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
+The Pi CHANGELOG read at those two versions showed no relevant presentation API introduced at either, so they were recorded as verification evidence rather than compatibility bounds.
+That reading was not repeated release by release afterwards; the later CHANGELOG entries that did touch Calm were found when they broke or changed it and are written up in the dated entries below.
 The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
 `tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
 
 ### Built-in tool override constraints
 
 [`calm.md`](calm.md#pi-compatibility) owns the current user-facing collision behavior and limitation.
-Inspection of Pi 0.80.10 and 0.82.0 established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
+Inspection of Pi 0.80.10 and 0.82.0, recorded on 2026-08-04, established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
+That inspection has not been redone on 0.84.2, so the Pi registration behavior described here is unverified there.
+0.84.2's new `defaultTools` setting selects which built-ins Pi starts with and was not tested against Calm; the [2026-08-16 verification record](#2026-08-16-pi-0842-installed-version-verification) owns that gap.
 Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously won those collisions even when its persisted preference was off.
 The losing definition's execution and render functions are both discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
 
@@ -78,7 +91,7 @@ The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` 
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `AssistantMessageComponent.updateContent` method.
+The fix installs one idempotent presentation adapter on the exported `AssistantMessageComponent.updateContent` method, verified on Pi 0.81.1 on 2026-07-23 and on Pi 0.82.0 on 2026-07-26; no release between or after those two was tested for this adapter beyond what the dated entries below record.
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
 The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
@@ -136,7 +149,7 @@ The real Pi viewport moved the unchanged assistant text from row 7 to row 2, ren
 The leading cause would have been falsified if the row or height remained, the provider lost or duplicated the message, or the persisted role or bytes changed.
 None occurred.
 
-The fix installs a separate idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `InteractiveMode.addMessageToChat` method.
+The fix installs a separate idempotent presentation adapter on the exported `InteractiveMode.addMessageToChat` method, verified on Pi 0.81.1 on 2026-07-23 and on Pi 0.82.0 on 2026-07-26; no release between or after those two was tested for this adapter beyond what the dated entries below record.
 The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
@@ -148,6 +161,9 @@ Calm off, an absent Calm preference, and an absent Calm extension retained ordin
 The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` compatibility shape hid under Calm, while quoted markers, ASCII `FIRSTMATE_OP:` without U+2063, ordinary text before the current marker, unrelated text after U+2063, and image-bearing input remained visible.
 
 ## Calm working presentation
+
+The Pi behaviors this section relies on - the documented custom working-indicator frames, the `agent_settled` emission point, widget disposal under a repeated key, and the above-editor spacer row - were observed against the Pi 0.82.0 CLI on 2026-07-30, recorded in the [2026-07-30 revision verification](#2026-07-30-calm-working-presentation-revision-verification).
+They have not been re-observed on 0.83.x or 0.84.2 and are unverified there; everything else below describes Calm's own implementation.
 
 Calm replaces Pi's stock working row with a small animated boat while Calm is on and one logical agent run is active.
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
@@ -196,12 +212,14 @@ Returning from stock export rendering instead invalidates only the tool rows Cal
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
 Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden operational custom messages.
 
-## Complete currently reachable Pi transcript taxonomy
+## Pi transcript taxonomy surveyed on Pi 0.81.1
 
-The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
-The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
+Surveyed on 2026-07-22 against Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
+That survey has not been redone on 0.82.0 or 0.84.2, so its transcript paths and every `unsupported boundary` conclusion are 0.81.1 observations and are unverified on later Pi releases.
+Two rows postdate it and carry their own dates instead: the Calm working-ship widget named in `working-status` was added on 2026-07-30 against the Pi 0.82.0 CLI, and the whole `assistant-working-note` row, transcript path included, was added on 2026-08-13 with its zero-height result observed on Pi 0.84.1.
+What the fixtures exercise against whichever Pi is installed is narrower than the table: `tests/fm-calm-pi-extension.test.sh` walks `CALM_TRANSCRIPT_CLASSES` and asserts only the visible-or-hidden policy classification, while the interactive fixture renders the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
 
-| Policy class | Pi transcript path | Calm result (baseline verified on Pi 0.81.1 through 0.82.0; newer evidence noted per row) |
+| Policy class | Pi transcript path | Calm result |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
@@ -221,12 +239,14 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter (verified on Pi 0.81.1 through 0.82.0) under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter (observed on Pi 0.81.1 and on 0.82.0; re-exercised on the installed 0.84.2 by the 2026-08-16 run, whose follow-up adjacent case is the intermittently failing one recorded there) under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
-The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
+The Pi 0.81.1 API survey found no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
+That survey has not been redone since, and the extension API did move afterwards - 0.84.2 adds an `expandPromptTemplates` option to `pi.sendUserMessage()` and a `defaultTools` setting - so the negative finding is unverified on 0.84.2.
+`AssistantMessageComponent` and `InteractiveMode` were observed exported on Pi 0.81.1, on 0.82.0, and again on the installed 0.84.2 on 2026-08-16, where both patched hooks are still declared (`updateContent` in `assistant-message.d.ts`, `addMessageToChat` in `interactive-mode.d.ts`); that recheck read the declarations only and exercised nothing else.
+Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -246,12 +266,16 @@ $ grok --version
 grok 0.2.106 (bde89716f679)
 ```
 
+Only Pi has been looked at since: on 2026-08-16 the Calm adapters were re-exercised end to end against the installed 0.84.2, recorded in the [2026-08-16 verification record](#2026-08-16-pi-0842-installed-version-verification).
+The harness API survey behind the conclusions below was not redone on that version.
+Claude Code, Codex CLI, OpenCode, and Grok CLI have not been reinspected since 2026-07-22 and are unverified on any later release.
+
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| Pi 0.81.1 | Partially feasible with two API-probed exported-class adapters. | Surveyed 2026-07-22 and reverified at 0.81.1 on 2026-07-23: public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. The adapter path was re-exercised end to end against the installed 0.84.2 on 2026-08-16; this row's API survey was not redone there. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -269,7 +293,9 @@ The operational provider path covers Calm loaded on, loaded off, default prefere
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.84.2 as read from the installed package manifest on 2026-08-16.
+That package version is independent of the `pi` binary version: the last recorded typecheck ran against Pi 0.80.10 on 2026-08-15.
+The test was rerun on 2026-08-16 but performed no typecheck, because `tsc` was absent from that machine and the script skips with `skip: tsc not found for Pi extension typecheck`, so the declarations are unverified against 0.84.2.
 
 The relevant commands are:
 
@@ -500,3 +526,52 @@ FM_TEST_SUMMARY total=46 failed=0 skipped_gate=16 duration_ms=279390
 FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=16 duration_ms=431 failed=0
 FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=30 duration_ms=277700 failed=0
 ```
+
+## 2026-08-16 Pi 0.84.2 installed-version verification
+
+Observed on 2026-08-16: the installed Pi is 0.84.2, `tests/fm-calm-pi-extension.test.sh` completed one clean run against it, and the two exported classes the adapters patch are still declared with their patched hooks.
+That is what this entry records.
+The run exercises the 0.84.1 export-confirmation fix and the guarantees the suite covers, and nothing beyond them.
+Several 0.84.2 changes fall outside what the suite exercises and were not tested against Calm.
+Reading the 0.84.2 CHANGELOG surfaced three that touch Calm's surface: the new `defaultTools` setting, which selects the initial built-in tool set globally or per project, while Calm registers its seven built-in wrappers synchronously at load only when the persisted preference is already on and none while Calm is off (see [Built-in tool override constraints](#built-in-tool-override-constraints)); the changed fallback rendering for extension tool results, which now collapses long output and honors tool expansion; and the experimental strict JSON-schema constrained sampling for the default `read`, `bash`, `edit`, and `write` tools under `PI_EXPERIMENTAL=1`, which covers four of the seven built-ins Calm re-registers under the same names.
+That is what one CHANGELOG reading found, not an exhaustive audit of the release.
+
+```text
+$ pi --version
+0.84.2
+
+$ jq -r .version "$(npm root -g)/@earendil-works/pi-coding-agent/package.json"
+0.84.2
+
+$ cd "$(npm root -g)/@earendil-works/pi-coding-agent"
+
+$ grep -oE 'AssistantMessageComponent|InteractiveMode' dist/index.d.ts | sort -u
+AssistantMessageComponent
+InteractiveMode
+
+$ grep -oE 'updateContent|addMessageToChat' dist/modes/interactive/components/assistant-message.d.ts dist/modes/interactive/interactive-mode.d.ts | sort -u
+dist/modes/interactive/components/assistant-message.d.ts:updateContent
+dist/modes/interactive/interactive-mode.d.ts:addMessageToChat
+
+$ tests/fm-pi-primary-types.test.sh
+skip: tsc not found for Pi extension typecheck
+
+$ tests/fm-calm-pi-extension.test.sh
+ok - Pi calm resolves its persistent home independently of Pi's launch directory
+ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
+ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
+ok - missing Pi presentation class exports reach the independent adapter degradation path
+ok - Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on
+ok - Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
+ok - Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
+ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
+ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
+ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched
+ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
+```
+
+The follow-up adjacent case intermittently fails a pane-capture timing race (`Pi follow-up adjacent case rendered a duplicate captain answer`), so the run above is a clean run rather than a uniformly reproducible pass.
+That race was measured on 2026-08-16 at 9 failures in 24 executions, at the same rate under both interpreters, and diagnosed there as a test-harness race rather than a Calm behavior break.
+A fix for it was written the same day in PR #2477 (branch `fm/fm-calm-bash5-regression`, head `adce327`), which was still open and unmerged on 2026-08-16.
+That fix is therefore in no branch of this repository, `main` included: the failure is reachable wherever this suite runs today, and the diagnosis rests on that measurement rather than on anything in the code this document describes.
