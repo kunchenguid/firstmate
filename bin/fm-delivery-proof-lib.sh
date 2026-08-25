@@ -58,10 +58,10 @@ case "$FM_DELIVERY_PROBE_TIMEOUT" in ''|*[!0-9]*) FM_DELIVERY_PROBE_TIMEOUT=20 ;
 # impose on THIS library's consumers, so the caller's setting is restored around
 # the source - the same dance bin/fm-classify-lib.sh performs.
 case $- in *u*) _fm_delivery_proof_nounset=on ;; *) _fm_delivery_proof_nounset=off ;; esac
-# shellcheck source=bin/fm-timeout-lib.sh
-# shellcheck disable=SC1091
 _fm_delivery_proof_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _fm_delivery_proof_lib_dir="."
 if [ -f "$_fm_delivery_proof_lib_dir/fm-timeout-lib.sh" ]; then
+  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck disable=SC1091
   . "$_fm_delivery_proof_lib_dir/fm-timeout-lib.sh"
 fi
 [ "$_fm_delivery_proof_nounset" = on ] || set +u
