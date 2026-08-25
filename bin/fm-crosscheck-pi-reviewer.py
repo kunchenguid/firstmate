@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,10 +23,14 @@ class VerdictProtocolError(ReviewError):
         self.telemetry = telemetry
 
 
-def session_id(model: str, extension: Path) -> str:
-    extension_digest = hashlib.sha256(extension.read_bytes()).hexdigest()
-    seed = f"{model}\n{extension_digest}\n".encode()
-    return "fm-crosscheck-" + hashlib.sha256(seed).hexdigest()[:32]
+def provider_error_diagnostic(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    printable = "".join(
+        character for character in normalized if character.isprintable()
+    )
+    return printable[:512] or None
 
 
 def recover_single_object(value: str) -> dict[str, Any]:
@@ -151,6 +154,7 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
     attempt_turns = 0
     agent_ended = False
     final_stop: Any = None
+    final_error: str | None = None
     final_provider: Any = None
     final_model: Any = None
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
@@ -177,6 +181,7 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
             turns += 1
             attempt_turns += 1
             final_stop = message.get("stopReason")
+            final_error = provider_error_diagnostic(message.get("errorMessage"))
             final_provider = message.get("provider")
             final_model = message.get("model")
             usage = message.get("usage")
@@ -232,6 +237,7 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
             agent_ended = False
             attempt_turns = 0
             final_stop = None
+            final_error = None
             final_provider = None
             final_model = None
             calls.clear()
@@ -250,6 +256,8 @@ def parse_events(source: Path, expected_provider: str, expected_model: str) -> d
     )
     if final_stop != "toolUse":
         message = f"model guest: Pi final stopReason was {final_stop!r}, not 'toolUse'"
+        if final_error is not None:
+            message += f": {final_error}"
         if not calls:
             raise VerdictProtocolError(message, telemetry)
         raise ReviewError(message)
@@ -294,8 +302,6 @@ def run(argv: list[str]) -> int:
         "with submit_crosscheck_verdict."
     )
     repair_prompt = result.with_name("repair-prompt.txt")
-    session_dir = result.with_name("pi-session")
-    session_dir.mkdir(mode=0o700)
     attempt_telemetry: list[dict[str, Any]] = []
     for attempt in range(2):
         active_prompt = prompt if attempt == 0 else repair_prompt
@@ -320,10 +326,7 @@ def run(argv: list[str]) -> int:
             str(extension),
             "--system-prompt",
             system_prompt,
-            "--session-dir",
-            str(session_dir),
-            "--session-id",
-            session_id(model, extension),
+            "--no-session",
             "--no-extensions",
             "--no-skills",
             "--no-prompt-templates",
@@ -354,10 +357,11 @@ def run(argv: list[str]) -> int:
                 ) from exc
             repair_prompt.write_text(
                 "VERDICT PROTOCOL REPAIR (trusted controller instruction):\n"
-                "Continue from the preceding attempt in this isolated session. "
-                "Do not repeat the review or restate its analysis. Do not end with "
-                "prose and do not call the tool more than once. Submit the complete "
-                "schema-valid verdict through submit_crosscheck_verdict exactly once.\n",
+                "Perform the exact independent review packet below in this fresh "
+                "minimal-reasoning attempt. Do not end with prose and do not call "
+                "the tool more than once. Submit the complete schema-valid verdict "
+                "through submit_crosscheck_verdict exactly once.\n\n"
+                + prompt.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             continue

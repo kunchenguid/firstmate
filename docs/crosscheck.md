@@ -76,13 +76,14 @@ For Pi, the terminal event must also report the exact provider slot and model se
 A run that reports the historical Fast selector, another provider, or no model identity is a tool failure rather than a regular-lane verdict.
 That proves which dedicated reviewer home executed the review without comparing it to an author account.
 Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
-Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, a deterministic session-affinity identifier, and only the read and Bash-capable review tools plus the explicit verdict tool.
+Pi is launched through the resolved installed executable at `xhigh` with JSON event output, offline startup, an ephemeral session, and only the read and Bash-capable review tools plus the explicit verdict tool.
 The prompt is passed by `@file` so repository and claim size cannot exceed the process argument limit.
 Extension discovery remains disabled while the tracked verdict extension is loaded explicitly.
 That extension registers a strict JSON-schema-constrained `submit_crosscheck_verdict` tool whose successful execution terminates that attempt without another model turn.
 Crosscheck accepts exactly one verdict tool call from the successful final attempt and preserves usage across Pi auto-retries.
-If an otherwise completed attempt makes zero, multiple, or malformed verdict calls, the same isolated reviewer session receives one fixed verdict-only repair prompt and retains the exact-head packet plus the first attempt's reasoning without repeating the review.
+If an attempt reaches the model but ends without exactly one well-formed verdict call, including an output-limit or provider terminal error, one fresh ephemeral minimal-reasoning attempt receives a fixed repair instruction plus the identical exact-head review packet.
 The repair is attempted once, its usage is included in the run economics, and a second protocol miss fails closed instead of selecting a convenient call or rotating to another reviewer.
+Provider terminal-error diagnostics are whitespace-normalized, stripped of non-printable characters, and limited to 512 characters before they reach operator-visible failure output.
 The model decides the provider slot through an explicit mapping derived from the lane registry that maps each registered model to its own slot, maps `gpt-5.6-sol` to `openai-codex`, and refuses an unmapped model rather than guessing.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
