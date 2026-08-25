@@ -176,7 +176,14 @@ fm_forge_check_auth() {
 
   case "$provider" in
     github)
-      command -v gh >/dev/null 2>&1 || return 1
+      if ! command -v gh >/dev/null 2>&1; then
+        if [ -n "$host" ]; then
+          echo "NEEDS_GH_AUTH: $host"
+        else
+          echo "NEEDS_GH_AUTH"
+        fi
+        return 1
+      fi
       if [ -n "$host" ]; then
         gh auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GH_AUTH: $host"; return 1; }
       else
@@ -184,7 +191,14 @@ fm_forge_check_auth() {
       fi
       ;;
     gitlab)
-      command -v glab >/dev/null 2>&1 || return 1
+      if ! command -v glab >/dev/null 2>&1; then
+        if [ -n "$host" ]; then
+          echo "NEEDS_GLAB_AUTH: $host"
+        else
+          echo "NEEDS_GLAB_AUTH"
+        fi
+        return 1
+      fi
       if [ -n "$host" ]; then
         glab auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GLAB_AUTH: $host"; return 1; }
       else
