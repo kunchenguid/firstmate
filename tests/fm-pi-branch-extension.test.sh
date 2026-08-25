@@ -1511,7 +1511,7 @@ delete stockDefinition.renderResult;
 
 const args = { recent: 2 };
 const result = {
-  content: [{ type: "text", text: "OUTCOME_ONE\nOUTCOME_TWO" }],
+  content: [{ type: "text", text: "\x1b[31mOUTCOME_ONE\x1b[0m\r\nOUT\u0000COME_TWO\uFFF9" }],
   details: { ok: true },
   isError: false,
 };

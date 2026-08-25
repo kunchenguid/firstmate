@@ -748,6 +748,26 @@ ${context.command}
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  const outcomesToolAnsiPattern = new RegExp(
+    "(?:\\u001B\\][\\s\\S]*?(?:\\u0007|\\u001B\\u005C|\\u009C))|[\\u001B\\u009B][[\\]\\()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]",
+    "g",
+  );
+  const normalizeOutcomesToolOutput = (value: string): string => {
+    const withoutAnsi = value.includes("\u001B") || value.includes("\u009B")
+      ? value.replace(outcomesToolAnsiPattern, "")
+      : value;
+    return Array.from(withoutAnsi)
+      .filter((char) => {
+        const code = char.codePointAt(0);
+        if (code === undefined) return false;
+        if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
+        if (code <= 0x1f) return false;
+        return code < 0xfff9 || code > 0xfffb;
+      })
+      .join("")
+      .replace(/\r/g, "");
+  };
+
   type OutcomesToolShellState = {
     shell?: Box;
     call?: Text;
@@ -794,7 +814,7 @@ ${context.command}
       if (calmHides("tool-result")) return new Container();
       const output = result.content
         .filter((item) => item.type === "text")
-        .map((item) => item.text)
+        .map((item) => normalizeOutcomesToolOutput(item.text))
         .join("\n");
       const shellState = context.state as OutcomesToolShellState;
       shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
