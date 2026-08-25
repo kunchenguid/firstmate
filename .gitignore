@@ -6,7 +6,7 @@ projects/
 state/
 data/
 config/
-scratchpad/
+scratchpad*
 .no-mistakes/
 .lavish/
 .fm-secondmate-home

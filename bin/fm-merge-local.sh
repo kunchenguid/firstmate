@@ -19,6 +19,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-helm-lib.sh
 . "$SCRIPT_DIR/fm-helm-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# Role partition: landing local-only work is MAIN-owned; the Pi supervision
+# branch reports readiness and never lands (contract: bin/fm-lease-lib.sh;
+# no-op in homes without a branch actor).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 # Same reasoning as bin/fm-pr-merge.sh: landing work is irreversible, so a
 # machine that is not the control plane refuses before it looks at anything

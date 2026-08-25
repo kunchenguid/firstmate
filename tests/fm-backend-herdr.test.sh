@@ -3606,11 +3606,11 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
 # --- the never-idle-native-state harness (real cursor on herdr) --------------
 # Measured live on cursor-agent 2026.08.11-e8db854 under herdr: `agent get`
 # reports a cursor pane `blocked` in EVERY state - idle, mid-turn, and after -
-# so the idle-baseline native path is structurally unreachable and every send
-# lands in the composer branch. Cursor's mid-turn composer row renders its own
+# so the idle-baseline native path is structurally unreachable and every typed
+# send lands in the composer branch. Cursor's mid-turn composer row renders its own
 # `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
 # content verdict is `pending` on a composer holding no user text, and every
-# steer reported delivery unconfirmed on a message that had actually landed.
+# typed steer reported delivery unconfirmed on a message that had actually landed.
 # The bytes below are the real captures from that pane.
 
 # The idle capture: no busy token anywhere, which is the pre-Enter baseline.

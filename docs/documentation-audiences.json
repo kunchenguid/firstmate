@@ -325,6 +325,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

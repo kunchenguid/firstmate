@@ -352,12 +352,21 @@ assert_not_contains "$out" "THIS-IS-THE-DECOY-PANE" "fm-peek must not read the a
 pass "fm-peek reads the task's recorded tmux server, not the ambient one"
 
 out=$(as_reader "$ROOT/bin/fm-send.sh" chain --key Escape 2>&1) || fail "fm-send failed: $out"
+# Since the 2026-08-25 upstream sync, an ordinary text steer is a durable record
+# in the task's steering inbox and the terminal receives only a constant doorbell
+# line (bin/fm-task-inbox-lib.sh). Isolation is still exactly what is under test:
+# the payload must land in THIS task's inbox, and the doorbell must ring the
+# RECORDED server's pane and never the ambient decoy's same-named window.
 as_reader "$ROOT/bin/fm-send.sh" chain "echo SENT-BY-FM-SEND" >/dev/null 2>&1 || true
 sleep 1
+record=$(cat "$STATE_DIR"/chain.inbox/*.msg 2>/dev/null || true)
+assert_contains "$record" "SENT-BY-FM-SEND" "fm-send must leave the payload as a durable inbox record for this task"
 fleet_pane=$(fleet capture-pane -p -t "$SES:fm-chain")
 decoy_pane=$(decoy capture-pane -p -t "$SES:fm-chain")
-assert_contains "$fleet_pane" "SENT-BY-FM-SEND" "fm-send must deliver to the recorded server's pane"
-assert_not_contains "$decoy_pane" "SENT-BY-FM-SEND" "fm-send must never deliver to the ambient server's same-named window"
+# Match a short mid-line fragment of the doorbell: a pane capture wraps at the
+# terminal width and the prompt can eat the leading character.
+assert_contains "$fleet_pane" "instruction waiting" "fm-send must ring the recorded server's pane"
+assert_not_contains "$decoy_pane" "instruction waiting" "fm-send must never ring the ambient server's same-named window"
 pass "fm-send delivers to the task's recorded tmux server"
 
 # crew-state: with the task's own window killed on the FLEET while the decoy

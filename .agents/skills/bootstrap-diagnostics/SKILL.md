@@ -88,8 +88,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   A line naming a desktop host session is that machine's own one-time action and needs its operator; nothing on this side can start it (`docs/relay-gui-host.md`).
   `RELAY:` lines can also come from fleet task adoption on a machine that holds the helm - "could not ask `<machine>` what it is running", an id collision, or a `bin/fm-pr-check.sh` re-arm instruction for adopted work carrying an open change - and each is handled as `docs/helm.md` describes rather than by re-running adoption blind.
   `docs/relay-host.md` owns the mechanism and the evidence.
-- `SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)` - queued work has already left the main dispatchable backlog and remains safe in the named remote route's backlog-format outbox.
-  Preserve that outbox and rerun `bin/fm-backlog-handoff.sh --resume-pending` after same-host connectivity returns; never re-add or dispatch the items from the main backlog.
+- `SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)` - queued work has already left the main dispatchable backlog and remains safe in the named remote route's backlog-format outbox, pending backlog receipt or receiver-wake confirmation.
+  Preserve that outbox and rerun `bin/fm-backlog-handoff.sh --resume-pending` after the route or endpoint problem is resolved; never re-add or dispatch the items from the main backlog.
   An unsafe-outbox variant requires path and file-type inspection before any retry.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - secondmate convergence changed a running home's loaded instructions or inherited config, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.

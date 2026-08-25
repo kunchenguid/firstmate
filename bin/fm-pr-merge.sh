@@ -48,6 +48,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shared default branch. So the gate is here, ahead of everything else this
 # script does. Silent and free on a home that declared no fleet.
 fm_helm_assert "$FM_HOME" "merging a change" || exit 1
+# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
+# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
+# without a branch actor).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2

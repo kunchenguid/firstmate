@@ -3,8 +3,8 @@
 #
 # WHY THIS EXISTS. Every external-network call a session start makes used to run
 # BEFORE the digest printed, on a hook that blocks session initialization: `gh
-# auth status`, the secondmate liveness and convergence sweeps (11 sequential,
-# individually unbounded SSH connections per REMOTE secondmate), pending remote
+# auth status`, the secondmate liveness and convergence sweeps (per-secondmate
+# remote probes, which bootstrap runs concurrently), pending remote
 # handoff delivery, and the fleet-sync fetch of every project clone. None of
 # those calls is individually bounded, so one unreachable host could consume the
 # whole FM_SESSION_START_TIMEOUT budget and truncate the digest outright, turning
