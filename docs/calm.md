@@ -28,7 +28,7 @@ Legacy operational custom messages remain in session data and Pi's sidebar tree,
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
 
 Pi's supported presentation API does not expose a global transcript filter.
-Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
+Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
 ## Pi compatibility
@@ -53,6 +53,7 @@ Regression entry points:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
+tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
