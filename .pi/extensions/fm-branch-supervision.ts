@@ -57,6 +57,7 @@ import {
   createBashToolDefinition,
   DefaultResourceLoader,
   getAgentDir,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type ExtensionAPI,
@@ -136,6 +137,7 @@ function afkActive(): boolean {
 // the extension only ever passes a registry-resolved model straight back to
 // createAgentSession.
 type BranchModel = NonNullable<ReturnType<ModelRegistry["find"]>>;
+type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 
 // The supervision-branch model pin, owned operator-side by
 // docs/configuration.md: one "<provider>/<model-id>" line under this home's
@@ -322,6 +324,7 @@ export default function (pi: ExtensionAPI) {
   // build. session_start always fires before any wake, so a pinned home
   // always has a registry to resolve against.
   let modelRegistry: ModelRegistry | null = null;
+  let modelSelectionRevision = 0;
 
   function rememberModelRegistry(ctx: Pick<ExtensionContext, "modelRegistry">): void {
     if (ctx?.modelRegistry) modelRegistry = ctx.modelRegistry;
@@ -331,21 +334,38 @@ export default function (pi: ExtensionAPI) {
   // back is a refusal, not a silent downgrade: the caller turns it into the
   // extension's ordinary fall back to main, which tells the captain what is
   // wrong instead of quietly spending main's model in the branch.
-  function pinnedBranchModel(): BranchModel | undefined {
-    const pin = readModelPin();
-    if (!pin) return undefined;
+  async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
     const label = `${pin.provider}/${pin.modelId}`;
     if (!modelRegistry) {
       throw new Error(`supervision model pin ${label} could not be resolved: no model registry available yet`);
     }
-    const model = modelRegistry.find(pin.provider, pin.modelId);
-    if (!model) {
+    const selected = modelRegistry.find(pin.provider, pin.modelId);
+    if (!selected) {
       throw new Error(`supervision model pin ${label} names no model Pi knows (config/supervision-branch-model)`);
     }
-    if (!modelRegistry.hasConfiguredAuth(model)) {
+    if (!modelRegistry.hasConfiguredAuth(selected)) {
       throw new Error(`supervision model pin ${label} has no configured credentials (config/supervision-branch-model)`);
     }
-    return model;
+
+    const modelRuntime = await ModelRuntime.create();
+    const nativeProvider = modelRegistry.getRegisteredNativeProvider(pin.provider);
+    if (nativeProvider) modelRuntime.registerNativeProvider(nativeProvider);
+    const providerConfig = modelRegistry.getRegisteredProviderConfig(pin.provider);
+    if (providerConfig) modelRuntime.registerProvider(pin.provider, providerConfig);
+    const auth = await modelRegistry.getProviderAuth(pin.provider);
+    if (auth?.auth.apiKey) {
+      await modelRuntime.setRuntimeApiKey(pin.provider, auth.auth.apiKey, { allowNetwork: false });
+    }
+    const model = modelRuntime.getModel(pin.provider, pin.modelId) as BranchModel | undefined;
+    if (!model || !modelRuntime.hasConfiguredAuth(pin.provider)) {
+      throw new Error(`supervision model pin ${label} is unavailable to the isolated branch runtime`);
+    }
+    return { model, modelRuntime };
+  }
+
+  async function pinnedBranchModel(): Promise<PinnedBranchModel | undefined> {
+    const pin = readModelPin();
+    return pin ? preparePinnedBranchModel(pin) : undefined;
   }
 
   function generationOwnsLock(expectedGeneration: number): boolean {
@@ -530,7 +550,7 @@ export default function (pi: ExtensionAPI) {
     // stays undefined and Pi picks the branch's model exactly as it did
     // before this existed: restored from the reopened branch session, else
     // the same default main takes.
-    const model = pinnedBranchModel();
+    const pinned = await pinnedBranchModel();
     const prompt = spawnSync("bash", [promptScript], {
       cwd: fmRoot,
       encoding: "utf8",
@@ -620,7 +640,7 @@ ${context.command}
       resourceLoader: loader,
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [bashTool as unknown as ToolDefinition, createReportTool(branchGeneration)],
-      ...(model ? { model } : {}),
+      ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
     });
     if (!actingAsOwner(branchGeneration)) {
       try {
@@ -640,21 +660,31 @@ ${context.command}
     if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     if (branch) return branch;
     if (branchBroken) throw new Error(branchBroken);
-    try {
-      const created = await createBranch(expectedGeneration);
-      if (!actingAsOwner(expectedGeneration)) {
-        try {
-          created.dispose();
-        } catch {}
-        throw new Error("supervision session was replaced or lost lock ownership");
+    while (true) {
+      const buildRevision = modelSelectionRevision;
+      try {
+        const created = await createBranch(expectedGeneration);
+        if (buildRevision !== modelSelectionRevision) {
+          try {
+            created.dispose();
+          } catch {}
+          continue;
+        }
+        if (!actingAsOwner(expectedGeneration)) {
+          try {
+            created.dispose();
+          } catch {}
+          throw new Error("supervision session was replaced or lost lock ownership");
+        }
+        branch = created;
+        return created;
+      } catch (error) {
+        if (buildRevision !== modelSelectionRevision) continue;
+        if (expectedGeneration === generation && !shuttingDown) {
+          branchBroken = error instanceof Error ? error.message : String(error);
+        }
+        throw error;
       }
-      branch = created;
-      return created;
-    } catch (error) {
-      if (expectedGeneration === generation && !shuttingDown) {
-        branchBroken = error instanceof Error ? error.message : String(error);
-      }
-      throw error;
     }
   }
 
@@ -864,15 +894,22 @@ ${context.command}
       const picked = await ctx.ui.select(`Supervision branch model (now: ${current})`, choices);
       if (picked === undefined) return; // cancelled: the current choice stands
       try {
-        if (picked === followMain) clearModelPin();
-        else writeModelPin(picked);
+        if (picked === followMain) {
+          clearModelPin();
+        } else {
+          const separator = picked.indexOf("/");
+          if (separator <= 0 || separator >= picked.length - 1) throw new Error(`invalid model selection: ${picked}`);
+          await preparePinnedBranchModel({ provider: picked.slice(0, separator), modelId: picked.slice(separator + 1) });
+          writeModelPin(picked);
+        }
       } catch (error) {
         ctx.ui.notify(
-          `Could not save the supervision branch model: ${error instanceof Error ? error.message : String(error)}`,
+          `Could not apply or save the supervision branch model: ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
         return;
       }
+      modelSelectionRevision += 1;
       releaseBranchForModelChange();
       ctx.ui.notify(
         picked === followMain

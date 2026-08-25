@@ -50,7 +50,8 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 
 Supervision is an easier job than the captain's own conversation, so the branch can run on a cheaper model than main.
 The Pi `/supervision-model` command opens Pi's own selector over Pi's own catalog of models with configured credentials, plus a first "Follow main" entry, and persists the pick in gitignored `config/supervision-branch-model` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
-Firstmate keeps no model catalog of its own; the list is whatever Pi reports at the moment the picker opens.
+Firstmate keeps no model catalog of its own; the list is whatever Pi reports at the moment the picker opens, including models registered dynamically in that session.
+Before saving a pick, Firstmate prepares an isolated branch model runtime and copies only the chosen provider's effective Pi registration and resolved API key into it, so every offered choice either works without loading main-session extensions or is rejected without a success notification.
 The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
 An absent, unreadable, or unparseable file means no pin, which is exactly today's behavior: the branch takes Pi's own default model, the same one main takes.
 Picking "Follow main" removes the file, and the command replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.

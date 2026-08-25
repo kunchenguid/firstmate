@@ -47,6 +47,37 @@ export function getMarkdownTheme() {
 
 export class UserMessageComponent {}
 
+export class ModelRuntime {
+  constructor() {
+    this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
+    this.authenticated = new Set(this.models.filter((model) => model.auth !== false).map((model) => model.provider));
+  }
+  static async create() {
+    const runtime = new ModelRuntime();
+    (globalThis.__fmModelRuntimes ??= []).push(runtime);
+    return runtime;
+  }
+  registerNativeProvider(provider) {
+    this.models = this.models.filter((model) => model.provider !== provider.id);
+    this.models.push(...provider.getModels().map((model) => ({ ...model })));
+    this.authenticated.add(provider.id);
+  }
+  registerProvider(provider, config) {
+    if (config.failRegistration) throw new Error(`synthetic provider registration failure: ${provider}`);
+    this.models = this.models.filter((model) => model.provider !== provider);
+    this.models.push(...(config.models ?? []).map((model) => ({ ...model, provider })));
+    if (config.apiKey || config.authenticated) this.authenticated.add(provider);
+  }
+  async setRuntimeApiKey(provider) {
+    this.authenticated.add(provider);
+  }
+  getModel(provider, id) {
+    return this.models.find((model) => model.provider === provider && model.id === id);
+  }
+  hasConfiguredAuth(provider) {
+    return this.authenticated.has(provider);
+  }
+}
 export class DefaultResourceLoader {
   constructor(options) {
     this.options = options;
@@ -94,6 +125,11 @@ export function createBashToolDefinition(cwd, options) {
 
 export async function createAgentSession(options) {
   if (globalThis.__fmCreateSessionError) throw new Error(globalThis.__fmCreateSessionError);
+  globalThis.__fmCreateStarted = (globalThis.__fmCreateStarted ?? 0) + 1;
+  if (globalThis.__fmCreateGate) await globalThis.__fmCreateGate;
+  if (options.model && (!options.modelRuntime || !options.modelRuntime.getModel(options.model.provider, options.model.id))) {
+    throw new Error(`branch runtime cannot use ${options.model.provider}/${options.model.id}`);
+  }
   const session = {
     options,
     ops: [],
@@ -224,10 +260,17 @@ const uiPrompts = [];
 const notices = [];
 const commands = new Map();
 let mainModel = { provider: "anthropic", id: "main-model" };
+globalThis.__fmBranchStaticModels = () => registryModels.filter((model) => !model.registered).map((model) => ({ ...model }));
 const modelRegistry = {
   getAvailable: () => registryModels.slice(),
   find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
   hasConfiguredAuth: (model) => model.auth !== false,
+  getRegisteredProviderConfig: (provider) => registryModels.find((model) => model.provider === provider)?.registeredConfig,
+  getRegisteredNativeProvider: (provider) => registryModels.find((model) => model.provider === provider)?.registeredNative,
+  getProviderAuth: async (provider) => {
+    const model = registryModels.find((candidate) => candidate.provider === provider);
+    return model?.auth === false ? undefined : { auth: { apiKey: model?.runtimeApiKey ?? "stub-key" } };
+  },
 };
 function makeCtx(extra) {
   return {
@@ -1149,7 +1192,15 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle
 const { fire, dispatch, settle, makeCtx, commands, registryModels, uiSelections, uiPrompts, notices, home } = globalThis.__t;
 import { existsSync, readFileSync, statSync } from "node:fs";
 
-registryModels.push({ provider: "anthropic", id: "main-model" }, { provider: "openai", id: "cheap-1" });
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  {
+    provider: "openai",
+    id: "cheap-1",
+    registered: true,
+    registeredConfig: { authenticated: true, models: [{ id: "cheap-1" }] },
+  },
+);
 const command = commands.get("supervision-model");
 if (!command) throw new Error("the supervision-model command was not registered");
 
@@ -1189,6 +1240,9 @@ const repinned = globalThis.__fmSessions[1];
 if (!repinned.options.model || repinned.options.model.id !== "cheap-1") {
   throw new Error(`the pick did not bind the next branch build: ${JSON.stringify(repinned.options.model)}`);
 }
+if (!repinned.options.modelRuntime?.getModel("openai", "cheap-1")) {
+  throw new Error("the branch runtime did not receive the dynamically registered chosen provider");
+}
 if (!repinned.options.sessionManager.opened) throw new Error("the pick must keep the branch conversation, not start a new one");
 
 // Following main again clears the file and restores the default path.
@@ -1202,13 +1256,50 @@ if ("model" in globalThis.__fmSessions[2].options) {
   throw new Error("following main must restore the no-model-option default path");
 }
 
-// A cancelled picker changes nothing.
+// A pick made while the old-model branch build is in flight invalidates that
+// build. The accepted wake continues on a second build under the newest pin.
+uiSelections.push("Follow main (anthropic/main-model)");
+await command.handler("", makeCtx());
+let releaseCreate;
+globalThis.__fmCreateGate = new Promise((resolve) => { releaseCreate = resolve; });
+const createsBeforeRace = globalThis.__fmCreateStarted;
+dispatch("signal: model race");
+await settle(() => globalThis.__fmCreateStarted === createsBeforeRace + 1, "in-flight old-model build");
 uiSelections.push("openai/cheap-1");
 await command.handler("", makeCtx());
-if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("re-pick did not persist");
+releaseCreate();
+await settle(() => (globalThis.__fmSessions ?? []).length === 5, "replacement build after in-flight pick");
+const staleBuild = globalThis.__fmSessions[3];
+const winningBuild = globalThis.__fmSessions[4];
+if (!staleBuild.disposed || "model" in staleBuild.options) {
+  throw new Error("the in-flight old-model build was adopted after the pick");
+}
+if (winningBuild.options.model?.id !== "cheap-1") {
+  throw new Error(`the newest pin did not win the in-flight build race: ${JSON.stringify(winningBuild.options.model)}`);
+}
+await settle(() => (globalThis.__fmPrompts ?? []).some((prompt) => prompt.includes("signal: model race")), "raced wake prompt");
+
+// A cancelled picker changes nothing.
 uiSelections.push(undefined);
 await command.handler("", makeCtx());
 if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("a cancelled picker must not change the pin");
+
+// If the chosen provider cannot be installed into the isolated runtime, the
+// old pin remains and no success notification is emitted.
+registryModels.push({
+  provider: "broken",
+  id: "dynamic-model",
+  registered: true,
+  registeredConfig: { failRegistration: true, models: [{ id: "dynamic-model" }] },
+});
+const noticeCount = notices.length;
+uiSelections.push("broken/dynamic-model");
+await command.handler("", makeCtx());
+if (readFileSync(pinFile, "utf8") !== "openai/cheap-1\n") throw new Error("an unapplied model replaced the working pin");
+const newNotices = notices.slice(noticeCount);
+if (newNotices.length !== 1 || newNotices[0].type !== "error") {
+  throw new Error(`an unapplied model emitted a success notification: ${JSON.stringify(newNotices)}`);
+}
 process.exit(0);
 EOF
   status=$?
