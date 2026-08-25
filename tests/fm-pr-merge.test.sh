@@ -28,6 +28,7 @@
 #   (s) an open GitHub PR that is neither merged nor queued fails verification
 #   (t) a GitHub PR in the merge queue is reported as queued, not merged
 #   (u) a queue-required refusal names the exact compatible retry flags
+#   (v) a failed poll setup cannot be reported as a verified GitHub merge
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -48,6 +49,7 @@ MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
+REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
 # Build a fresh sandbox for one test case: a state dir with a task meta and a
 # fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
@@ -119,14 +121,39 @@ add_gh_mocks_merge_fails() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
-esac
-exit 0
+  esac
+  exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "api graphql")
+    cat "$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+  api\ repos/*)
+    cat "$FM_TEST_GH_RULES"
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_failing_poll_publish_mv() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-pr-poll-data.*) exit 1 ;;
+  esac
+done
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$case_dir/fakebin/mv"
 }
 
 # glab mock recording every invocation together with the GITLAB_HOST it was
@@ -243,6 +270,7 @@ run_pr_merge() {
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   PATH="$case_dir/fakebin:$PATH" \
@@ -327,6 +355,31 @@ test_github_merged_outcome_is_verified() {
   pass "fm-pr-merge verifies a genuinely merged GitHub pull request"
 }
 
+test_github_verified_merge_requires_poll_recording() {
+  local case_dir rc
+  case_dir=$(make_case github-poll-recording-fails)
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  add_failing_poll_publish_mv "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/55 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-poll-recording-fails: poll setup failure should fail the merge wrapper"
+  assert_grep 'error: could not publish PR poll' "$case_dir/stderr" \
+    "github-poll-recording-fails: poll setup failure was not reported"
+  assert_no_grep 'verified: .* is merged' "$case_dir/stdout" \
+    "github-poll-recording-fails: failed poll setup was reported as a verified merge"
+  assert_grep 'pr=https://github.com/example/repo/pull/55' "$case_dir/state/task-x1.meta" \
+    "github-poll-recording-fails: metadata was not retained for the attempted merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "github-poll-recording-fails: the failed poll setup left a runnable poll"
+  pass "fm-pr-merge refuses to claim a merge when poll recording fails"
+}
+
 test_github_open_unqueued_outcome_refuses() {
   local case_dir rc
   case_dir=$(make_case github-open-unqueued)
@@ -381,7 +434,7 @@ test_github_queue_required_refusal_names_retry_flags() {
   local case_dir rc
   case_dir=$(make_case github-queue-required)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 4040404040404040404040404040404040404040
+  add_gh_mocks_merge_fails "$case_dir"
   write_github_outcome "$case_dir" OPEN false false master
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
   : > "$case_dir/gh-axi.log"
@@ -394,12 +447,16 @@ test_github_queue_required_refusal_names_retry_flags() {
   set -e
 
   expect_code 1 "$rc" "github-queue-required: an incompatible direct merge must fail"
+  assert_grep 'error: pr merge failed' "$case_dir/stderr" \
+    "github-queue-required: the original forge failure was not preserved"
   assert_grep 'base branch master requires the merge queue' "$case_dir/stderr" \
     "github-queue-required: refusal did not name the queue requirement"
   grep -F -- '-- --auto --merge' "$case_dir/stderr" >/dev/null \
     || fail "github-queue-required: refusal did not name the exact compatible flags"
   grep -qxF 'pr merge 54 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "github-queue-required: the wrapper silently changed the attempted merge semantics"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "github-queue-required: the failed forge call did not leave the merge poll armed"
   pass "fm-pr-merge explains how to retry with the required GitHub merge queue method"
 }
 
@@ -946,6 +1003,7 @@ test_verified_merge_records_pr_and_head
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
 test_github_merged_outcome_is_verified
+test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
 test_github_queue_required_refusal_names_retry_flags
 test_extra_merge_args_forwarded

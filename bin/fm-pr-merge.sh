@@ -332,11 +332,27 @@ METHODS
 }
 
 record_pr_metadata() {
-  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
+    return 1
+  fi
   grep -qxF "pr=$URL" "$META" || {
     echo "error: PR metadata recording failed" >&2
     return 1
   }
+}
+
+github_report_unmerged_outcome() {
+  printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
+    "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
+  if github_read_queue_method; then
+    case "$FM_PR_GITHUB_QUEUE_METHOD" in
+      MERGE) queue_method=merge ;;
+      SQUASH) queue_method=squash ;;
+      REBASE) queue_method=rebase ;;
+    esac
+    printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
+      "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
+  fi
 }
 
 case "$PROVIDER" in
@@ -346,11 +362,19 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    if ! merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
-      record_pr_metadata || exit 1
+      :
+    else
+      merge_status=$?
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
-      exit 1
+      record_pr_metadata || exit "$merge_status"
+      if github_read_outcome; then
+        if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
+          github_report_unmerged_outcome
+        fi
+      fi
+      exit "$merge_status"
     fi
     github_read_outcome || exit 1
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
@@ -362,17 +386,7 @@ case "$PROVIDER" in
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
     else
-      printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
-        "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
-      if github_read_queue_method; then
-        case "$FM_PR_GITHUB_QUEUE_METHOD" in
-          MERGE) queue_method=merge ;;
-          SQUASH) queue_method=squash ;;
-          REBASE) queue_method=rebase ;;
-        esac
-        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
-          "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
-      fi
+      github_report_unmerged_outcome
       exit 1
     fi
     ;;
