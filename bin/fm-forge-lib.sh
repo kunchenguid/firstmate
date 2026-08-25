@@ -140,7 +140,10 @@ fm_forge_resolve_host() {
     resolved=$(ssh -G -- "$host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
     [ -n "$resolved" ] && host=$resolved
   fi
-  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+  # A fully-qualified DNS name may carry its optional root label (for
+  # example, github.com.).  Forge host policy stores canonical names without
+  # that label, so normalize it before provider classification and auth.
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//'
 }
 
 
