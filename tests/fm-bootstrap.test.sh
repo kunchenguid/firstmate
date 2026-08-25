@@ -144,6 +144,10 @@ make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
   mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-project-mode.sh" <<SH
+#!/usr/bin/env bash
+exec '$ROOT/bin/fm-project-mode.sh' "\$@"
+SH
   cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
@@ -151,29 +155,33 @@ printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
 exec perl -e 'sleep 300'
 SH
-  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  chmod +x "$fake_root/bin/fm-project-mode.sh" "$fake_root/bin/fm-fleet-sync.sh"
   printf '%s\n' "$fake_root"
 }
 
 add_origin_backed_projects() {
-  local home=$1 count=$2 i repo
-  mkdir -p "$home/projects"
+  local home=$1 count=$2 root=${3:-$1/projects} i repo
+  mkdir -p "$root" "$home/data"
   i=1
   while [ "$i" -le "$count" ]; do
-    repo=$(printf '%s/projects/repo-%02d' "$home" "$i")
+    repo=$(printf '%s/repo-%02d' "$root" "$i")
     git init -q "$repo"
     git -C "$repo" remote add origin "file://$home/remotes/repo-$i.git"
+    printf -- '- repo-%02d [direct-PR] - fixture (added 2026-08-25) [path=%s]\n' \
+      "$i" "$repo" >> "$home/data/projects.md"
     i=$((i + 1))
   done
 }
 
 add_no_origin_projects() {
-  local home=$1 count=$2 i repo
-  mkdir -p "$home/projects"
+  local home=$1 count=$2 root=${3:-$1/projects} i repo
+  mkdir -p "$root" "$home/data"
   i=1
   while [ "$i" -le "$count" ]; do
-    repo=$(printf '%s/projects/local-%02d' "$home" "$i")
+    repo=$(printf '%s/local-%02d' "$root" "$i")
     git init -q "$repo"
+    printf -- '- local-%02d [direct-PR] - fixture (added 2026-08-25) [path=%s]\n' \
+      "$i" "$repo" >> "$home/data/projects.md"
     i=$((i + 1))
   done
 }
@@ -714,14 +722,14 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
-test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
+test_fleet_sync_timeout_scales_with_registered_irregular_paths() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
-  add_origin_backed_projects "$home" 18
-  add_no_origin_projects "$home" 3
+  add_origin_backed_projects "$home" 18 "$case_dir/dpe/team-services"
+  add_no_origin_projects "$home" 3 "$case_dir/dpe/local-services"
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
 
@@ -729,7 +737,8 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
 
   assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "bootstrap timeout should relay partial fleet-sync output first"
   assert_timeout_report "$out" 59
-  pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
+  assert_absent "$home/projects" "irregular-path timeout case unexpectedly created the legacy projects directory"
+  pass "bootstrap starts and sizes fleet sync from registered irregular paths"
 }
 
 test_fleet_sync_timeout_floor_preserves_small_fleets() {
@@ -990,6 +999,8 @@ test_network_phases_record_per_step_elapsed_times() {
   # A real clone with a real origin, so fm-fleet-sync.sh genuinely iterates it.
   fm_git_init_commit "$case_dir/home/projects/alpha"
   fm_git_add_origin "$case_dir/home/projects/alpha" "$case_dir/alpha-origin"
+  printf '%s\n' '- alpha [direct-PR] - fixture (added 2026-08-25) [path=projects/alpha]' \
+    > "$case_dir/home/data/projects.md"
   # A secondmate the liveness sweep must account for. Whatever verdict it reaches
   # is owned elsewhere; what matters here is that the step is measured.
   fm_write_secondmate_meta "$case_dir/home/state/mate-a.meta" "$case_dir/home"
@@ -1163,7 +1174,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
-test_fleet_sync_timeout_scales_with_origin_backed_project_count
+test_fleet_sync_timeout_scales_with_registered_irregular_paths
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default

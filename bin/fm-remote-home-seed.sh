@@ -14,7 +14,7 @@
 # Each project needs an origin the remote account can clone. Firstmate resolves
 # that origin and names it as <project>=<origin-url>, so seeding never requires
 # a clone of that project in this home; a bare <project> is accepted only when
-# this home already has projects/<project>, whose origin is then read instead.
+# this home has a clone at its registered resolved path, whose origin is read.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
 # unregistered or local-only project is refused rather than provisioned.

@@ -75,7 +75,7 @@
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
-#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
+#          max(20, 5 + 3 * registered origin-backed clone count). A timed-out
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -241,20 +241,19 @@ secondmate_note_respawned() {  # <id>
 }
 
 fleet_sync_origin_backed_project_count() {
-  local count proj
+  local project_pairs=$1 count project_path
   count=0
-  [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
-    [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+  while IFS=$'\t' read -r _ project_path; do
+    [ -n "$project_path" ] || continue
+    git -C "$project_path" rev-parse --git-dir >/dev/null 2>&1 || continue
+    git -C "$project_path" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
-  done
+  done <<< "$project_pairs"
   echo "$count"
 }
 
 fleet_sync_bootstrap_timeout() {
-  local count timeout
+  local project_pairs=$1 count timeout
   if [ -n "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" ]; then
     case "$FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT" in
       *[!0-9]*) echo 20 ;;
@@ -263,7 +262,7 @@ fleet_sync_bootstrap_timeout() {
     return 0
   fi
 
-  count=$(fleet_sync_origin_backed_project_count)
+  count=$(fleet_sync_origin_backed_project_count "$project_pairs")
   timeout=$((5 + (3 * count)))
   [ "$timeout" -ge 20 ] || timeout=20
   echo "$timeout"
@@ -291,11 +290,17 @@ fleet_sync_relay_all_output() {
 }
 
 fleet_sync() {
+  local project_pairs
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
+  project_pairs=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --list-paths) || {
+    echo "FLEET_SYNC: fleet: skipped: cannot read registered project paths"
+    return 0
+  }
+  [ -n "$project_pairs" ] || return 0
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
-  timeout=$(fleet_sync_bootstrap_timeout)
+  timeout=$(fleet_sync_bootstrap_timeout "$project_pairs")
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
