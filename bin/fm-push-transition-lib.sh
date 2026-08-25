@@ -3,7 +3,7 @@
 #
 # The watcher and event-wait smoke tests source this library instead of loading
 # the whole watcher to obtain handle_push_transition. Its source list is limited
-# to the four production boundaries the transition handler actually calls.
+# to the production boundaries the transition handler actually calls.
 
 FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-timeout-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -25,6 +27,8 @@ FM_WAKE_POST_OUTPUT_ACTION=
 FM_WATCH_DELIVERED_REASON=
 FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
+FM_WAKE_QUEUE_LOCK_HELD=0
+FM_WAKE_PROGRESS_LOCK_HELD=0
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 WATCH_DELIVERY_PROGRESS="$STATE/.watch-delivery-progress"
@@ -42,21 +46,46 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
-watch_delivery_progress_watermark() {
+watch_delivery_serialization_acquire() {
+  case "$FM_WAKE_QUEUE_LOCK_HELD:$FM_WAKE_PROGRESS_LOCK_HELD" in
+    0:0)
+      fm_lock_acquire_wait "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+      FM_WAKE_PROGRESS_LOCK_HELD=1
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+        fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+        FM_WAKE_PROGRESS_LOCK_HELD=0
+        return 1
+      }
+      FM_WAKE_QUEUE_LOCK_HELD=1
+      ;;
+    1:1) ;;
+    *) return 1 ;;
+  esac
+}
+
+watch_delivery_serialization_release() {
+  if [ "$FM_WAKE_QUEUE_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    FM_WAKE_QUEUE_LOCK_HELD=0
+  fi
+  if [ "$FM_WAKE_PROGRESS_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+    FM_WAKE_PROGRESS_LOCK_HELD=0
+  fi
+}
+
+watch_delivery_progress_watermark_locked() {
   local watermark
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   watermark=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   case "$watermark" in ''|*[!0-9]*) watermark=0 ;; esac
   printf '%s\n' "$watermark"
 }
 
-watch_delivery_progress_publish() {
+watch_delivery_progress_publish_locked() {
   local watermark=$1 transition previous previous_transition previous_watermark extra tab tmp status=0
   case "$watermark" in ''|*[!0-9]*) return 1 ;; esac
   transition=$(date +%s 2>/dev/null) || return 1
   case "$transition" in ''|*[!0-9]*) return 1 ;; esac
-  fm_lock_acquire_wait "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
   previous=$(awk -F '\t' '
     NR == 1 && NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { value = $1 "\t" $2 }
     END { if (NR == 1) print value }
@@ -75,9 +104,6 @@ EOF
             if [ "$previous_transition" -gt "$transition" ]; then
               transition=$previous_transition
             fi
-            if [ "$previous_watermark" -gt "$watermark" ]; then
-              watermark=$previous_watermark
-            fi
           fi
           ;;
       esac
@@ -91,7 +117,6 @@ EOF
     mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || status=1
   fi
   [ "$status" -eq 0 ] || rm -f -- "${tmp:-}" 2>/dev/null || true
-  fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
   return "$status"
 }
 
@@ -146,16 +171,16 @@ wake() {
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  progress_watermark=$(watch_delivery_progress_watermark) || {
-    printf 'fm-watch: could not capture actionable wake progress.\n' >&2
+  watch_delivery_serialization_acquire || {
+    printf 'fm-watch: could not serialize actionable wake progress.\n' >&2
     exit 1
   }
+  progress_watermark=$(watch_delivery_progress_watermark_locked)
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
-  if echo "$1"; then
-    if watch_delivery_progress_publish "$progress_watermark"; then
+  if fm_run_timed 2 bash -c "printf '%s' \"\$1\" && sleep 0.02 && printf '\\n'" _ "$1"; then
+    if watch_delivery_progress_publish_locked "$progress_watermark"; then
       output_status=0
-      watch_delivery_publish "$1" || true
       # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
       FM_WATCH_DELIVERED_REASON=$1
     else
@@ -167,6 +192,10 @@ wake() {
   fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
+  fi
+  watch_delivery_serialization_release
+  if [ "$output_status" -eq 0 ]; then
+    watch_delivery_publish "$1" || true
   fi
   [ "$output_status" -eq 0 ] || exit "$output_status"
   exit 0

@@ -459,8 +459,7 @@ EOF
         case "$progress_seq" in
           ''|*[!0-9]*) ;;
           *)
-            if [ -z "$extra" ] && [ "$progress_epoch" -le "$now" ] \
-              && [ "$progress_epoch" -ge "$epoch" ] && [ "$progress_seq" -ge "$seq" ]; then
+            if [ -z "$extra" ] && [ "$progress_seq" -ge "$seq" ]; then
               continue
             fi
             ;;
@@ -817,7 +816,6 @@ procevent_surface_after_output() {
       fi
     done
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
@@ -825,14 +823,14 @@ procevent_surface_queued() {
   local key reason
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  watch_delivery_serialization_acquire || return 1
   while IFS= read -r key; do
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
   done < <(fm_wake_queued_keys_locked check)
   if [ -z "$PROCEVENT_SURFACED" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    watch_delivery_serialization_release
     return 0
   fi
   reason="check: process-event result captured:$PROCEVENT_SURFACED"

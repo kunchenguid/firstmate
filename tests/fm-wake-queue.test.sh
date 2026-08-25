@@ -330,7 +330,7 @@ test_secondmate_stall_follows_actionable_handoff_progress() {
     "$sub" > "$state/mate.meta"
   now=$(date +%s)
   aged=$((now - 700))
-  handoff=$((now - 600))
+  handoff=$((now - 800))
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$aged" > "$sub/state/.wake-queue"
   printf '7\n' > "$sub/state/.wake-queue.seq"
   fakebin="$dir/fakebin"
@@ -374,7 +374,7 @@ SH
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/served.out" 2> "$dir/served.err" || true
   ! grep -F 'secondmate wake-loop stalled' "$dir/served.out" >/dev/null \
-    || fail "a handed-off foreign queue alerted during a long handling turn: $(cat "$dir/served.out")"
+    || fail "a handed-off foreign queue alerted after a clock rollback during a long handling turn: $(cat "$dir/served.out")"
   if [ -s "$state/.wake-queue" ]; then
     ! grep -F 'secondmate-wake-loop-mate-' "$state/.wake-queue" >/dev/null \
       || fail "a handed-off foreign queue published a durable stall notification"
