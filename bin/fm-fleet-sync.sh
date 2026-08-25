@@ -235,7 +235,6 @@ prune_gone_branches() {
     [ "$track" = "[gone]" ] || continue
     [ -n "$branch" ] || continue
     tip=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$branch") || continue
-    fm_branch_is_safely_gone "$PROJ" "$branch" "$tip" || continue
     if fm_branch_delete_remote_if_safely_gone "$PROJ" no-mistakes "$branch" "$tip"; then
       echo "$label: pruned no-mistakes/$branch"
     fi

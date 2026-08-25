@@ -130,8 +130,10 @@ fm_branch_is_safely_merged() {
 # fleet-sync squash cleanup proof. The optional expected tip binds a later
 # deletion to the ref state the caller inspected.
 fm_branch_is_safely_gone() {
-  local repo=$1 branch=$2 expected_tip=${3:-} tip track
+  local repo=$1 branch=$2 expected_tip=${3:-} tip track default
   [ -n "$branch" ] || return 1
+  default=$(fm_branch_default_branch "$repo" 2>/dev/null || true)
+  [ "$branch" != "$default" ] || return 1
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   [ -z "$expected_tip" ] || [ "$tip" = "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
