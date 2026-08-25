@@ -1361,12 +1361,12 @@ test_local_only_force_overrides_unpushed() {
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
-  task_branch_exists "$case_dir" \
-    || fail "force-override: forced teardown deleted the only unlanded task branch"
-  pass "forced teardown discards an unpushed worktree but preserves its unlanded task branch"
+  ! task_branch_exists "$case_dir" \
+    || fail "force-override: forced teardown retained the explicitly discarded task branch"
+  pass "forced teardown discards the unpushed worktree and its task branch"
 }
 
-test_scout_teardown_retains_unproven_task_branch() {
+test_scout_teardown_drops_scratch_task_branch() {
   local case_dir rc
   case_dir=$(make_case scout-branch-retention)
   write_meta "$case_dir" local-only scout
@@ -1382,9 +1382,9 @@ test_scout_teardown_retains_unproven_task_branch() {
   set -e
 
   expect_code 0 "$rc" "scout-branch-retention: reported scout teardown should succeed"
-  task_branch_exists "$case_dir" \
-    || fail "scout-branch-retention: scout teardown deleted an unproven task branch"
-  pass "reported scout teardown preserves its unproven task branch"
+  ! task_branch_exists "$case_dir" \
+    || fail "scout-branch-retention: scout teardown retained its disposable task branch"
+  pass "reported scout teardown drops its disposable task branch"
 }
 
 test_teardown_missing_busy_sidecar_completes() {
@@ -2694,7 +2694,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_teardown_prunes_landed_task_from_both_remotes
 test_local_only_force_overrides_unpushed
-test_scout_teardown_retains_unproven_task_branch
+test_scout_teardown_drops_scratch_task_branch
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
