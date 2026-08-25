@@ -538,8 +538,9 @@ Its plugin/hook engine reports `plugins are not available in this build` unless 
 ## omp (CANDIDATE, NOT LIVE-VERIFIED - Oh My Pi v17.2.9)
 
 Oh My Pi is a candidate crewmate/scout adapter, not a live-verified worker.
-It remains dormant: every runnable selection is refused until separately gated ATX-2170 empirically proves First Mate interrupt, exit, and relaunch control.
-Until that proof exists, OMP operational verdicts are untrusted and classify unknown; do not dispatch work or describe the adapter as supervised or live-ready.
+Its pinned 17.2.9 effective configuration and effective tool registry remain unproven because no supported matching session-free importable consumer artifact is available.
+It remains dormant: every runnable selection is refused until that consumer proof and separately gated ATX-2170 First Mate interrupt, exit, and relaunch proof both pass; neither mandatory gate substitutes for the other.
+Until both proofs exist, OMP operational verdicts are untrusted and classify unknown; do not dispatch work or describe the adapter as containment-complete, supervised, or live-ready.
 
 The candidate is designed to preserve Orca as the only execution backend and First Mate as the only supervisor.
 Its capability boundary requires an explicit qualified provider/model, disables model and usage-aware fallback and clears fallback chains, forces trace propagation off, and excludes command execution, delegation, network, MCP, browser, and desktop tools.
@@ -549,4 +550,4 @@ It is never a secondmate, coordinator, backend, implicit default, or live pilot.
 `bin/fm-omp-candidate-artifacts.sh` owns the exact launch flags, environment boundary, per-launch fallback overlay, candidate input policy, and lifecycle extension.
 `bin/fm-busy-lib.sh` owns the untrusted operational verdict.
 `bin/fm-teardown.sh` owns artifact cleanup.
-The deterministic behavior contract lives in `tests/fm-omp-harness.test.sh`, `tests/fm-send-inbox.test.sh`, and `tests/fm-busy-adapter-wiring.test.sh`; the unresolved session-free consumer proof gate lives in `tests/fm-omp-tools-live-e2e.test.sh`.
+Portable policy regressions live in `tests/fm-omp-harness.test.sh`, `tests/fm-send-inbox.test.sh`, and `tests/fm-busy-adapter-wiring.test.sh`; the unresolved session-free consumer proof gate lives in `tests/fm-omp-tools-live-e2e.test.sh`.

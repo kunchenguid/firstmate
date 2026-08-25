@@ -980,7 +980,7 @@ The extension executes inside the signed CLI's own runtime, so a CLI upgrade can
 
 On 2026-08-24, source review invalidated the earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it is outside this candidate's no-session and no-network verification authority.
 
-The installed exact-version bundle contains the compiled `omp/17.2.9` executable, provenance, and notice, but no importable matching SDK surface. The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove 17.2.9 behavior. The opt-in proof gate therefore no longer executes OMP and fails closed when requested:
+The installed exact-version bundle contains the compiled `omp/17.2.9` executable, provenance, and notice, but no importable matching SDK surface. The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove 17.2.9 behavior. The opt-in proof gate executes only a bounded `omp --version` identity probe, then fails closed before any agent session or provider startup:
 
 ```sh
 FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
@@ -990,4 +990,4 @@ FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 not ok - exact omp/17.2.9 has no available importable session-free configuration and tool consumer; candidate remains dormant
 ```
 
-No effective-configuration or effective-tool compatibility proof is claimed. A matching importable session-free consumer is an unresolved prerequisite; OMP remains dormant until that proof exists and separately gated ATX-2170 verifies interrupt, exit, and relaunch control.
+No effective-configuration or effective-tool-registry containment proof is claimed. A matching importable session-free consumer and separately gated ATX-2170 interrupt, exit, and relaunch verification are independent mandatory prerequisites; OMP remains dormant until both pass, and neither substitutes for the other.

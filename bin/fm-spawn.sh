@@ -184,8 +184,10 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# omp (Oh My Pi) is dormant. Every runnable selection is refused until ATX-2170
-# records live proof that firstmate can interrupt, exit, and relaunch it.
+# omp (Oh My Pi) is dormant. Every runnable selection is refused until a
+# supported session-free omp/17.2.9 consumer proves effective configuration and
+# tool containment, and ATX-2170 independently proves firstmate interrupt,
+# exit, and relaunch control. Neither mandatory gate substitutes for the other.
 # bin/fm-omp-candidate-artifacts.sh owns the candidate-only launch manifest,
 # isolated config, and extension.
 # Its executable must report exactly omp/17.2.9 through one portable,
@@ -503,8 +505,8 @@ resolve_omp_binary() {
   printf '%s\n' "$candidate"
 }
 
-refuse_omp_unverified_lifecycle() {
-  echo "error: omp is dormant until ATX-2170 empirically verifies First Mate interrupt, exit, and relaunch control; refusing every runnable OMP launch" >&2
+refuse_omp_unverified_gates() {
+  echo "error: omp is dormant until both a supported session-free omp/17.2.9 consumer proves effective configuration and tool containment and ATX-2170 independently verifies First Mate interrupt, exit, and relaunch control; neither mandatory gate substitutes for the other; refusing every runnable OMP launch" >&2
   return 1
 }
 
@@ -832,7 +834,7 @@ if spawn_selection_is_omp; then
   require_omp_launch_model || exit 1
   require_omp_orca_backend || exit 1
   OMP_BIN=$(resolve_omp_binary) || exit 1
-  refuse_omp_unverified_lifecycle || exit 1
+  refuse_omp_unverified_gates || exit 1
 fi
 
 # Now the fresh-spawn watcher guard, which writes home state. Relaunch runs it
@@ -1500,7 +1502,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
     require_omp_launch_model || exit 1
     require_omp_orca_backend "$BACKEND" || exit 1
-    refuse_omp_unverified_lifecycle || exit 1
+    refuse_omp_unverified_gates || exit 1
   fi
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
@@ -1656,7 +1658,7 @@ launch_template() {
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # omp (Oh My Pi): this dormant candidate template cannot reach an endpoint
-    # until ATX-2170 verifies First Mate lifecycle control.
+    # until its independent consumer-containment and ATX-2170 control gates pass.
     # --approval-mode yolo is the autonomy flag an unattended crewmate needs, the
     # targeted equivalent of claude's --dangerously-skip-permissions.
     # --no-title leaves the pane title firstmate's to own, --no-extensions drops

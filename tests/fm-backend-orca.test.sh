@@ -360,16 +360,40 @@ test_remove_worktree_refuses_empty_id() {
   pass "fm_backend_orca_remove_worktree: refuses empty worktree ids"
 }
 
-test_remove_worktree_rejects_orca_error_json() {
+test_remove_worktree_accepts_already_absent_json() {
   local out status
   orca_case remove-error-json
   printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-gone' "$ROOT" 2>&1 )
   status=$?
-  [ "$status" -ne 0 ] || fail "remove_worktree should fail on Orca ok:false JSON"
-  assert_contains "$out" "worktree not found" "remove_worktree should surface the Orca removal error"
-  pass "fm_backend_orca_remove_worktree: fails closed on ok:false JSON"
+  [ "$status" -eq 0 ] || fail "remove_worktree should accept authoritative worktree_not_found JSON: $out"
+  [ -z "$out" ] || fail "already-absent worktree cleanup should be quiet, got '$out'"
+  pass "fm_backend_orca_remove_worktree: accepts authoritative already-absent state"
+}
+
+test_remove_worktree_rejects_other_orca_error_json() {
+  local out status
+  orca_case remove-other-error-json
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-stuck' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "remove_worktree should fail on non-idempotent Orca error JSON"
+  assert_contains "$out" "worktree not removed" "remove_worktree should surface the Orca removal error"
+  pass "fm_backend_orca_remove_worktree: rejects other ok:false JSON"
+}
+
+test_close_terminal_accepts_already_absent_json() {
+  local out status
+  orca_case close-absent-json
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_close_terminal term-gone' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "close_terminal should accept authoritative terminal_not_found JSON: $out"
+  [ -z "$out" ] || fail "already-absent terminal cleanup should be quiet, got '$out'"
+  pass "fm_backend_orca_close_terminal: accepts authoritative already-absent state"
 }
 
 test_worktree_path_resolves_id() {
@@ -1038,8 +1062,8 @@ test_spawn_refuses_dormant_omp_before_orca_allocation() {
       --mode no-mistakes --yolo off --backend orca 2>&1 )
   rc=$?
   expect_code 1 "$rc" "dormant omp spawn should be refused"$'\n'"$out"
-  assert_contains "$out" "omp is dormant until ATX-2170" \
-    "dormant omp refusal did not identify the lifecycle verification gate"
+  assert_contains "$out" "session-free omp/17.2.9 consumer" \
+    "dormant omp refusal did not identify both mandatory verification gates"
   [ ! -s "$log" ] || fail "dormant omp refusal allocated or dispatched through Orca"
   assert_absent "$state/$id.meta" "dormant omp refusal wrote task metadata"
   pass "fm-spawn.sh --backend orca: refuses dormant omp before allocation"
@@ -1392,7 +1416,7 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
     "orca_worktree_id=wt-recovery-retry" "orca_allocation=worktree-only"
 
   orca_case recovery-retry-remove-fails
-  printf '{"ok":true}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1404,14 +1428,14 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
   [ "$rc" -ne 0 ] || fail "recovery teardown should fail when worktree removal fails"
   assert_contains "$out" "worktree not removed" "recovery teardown did not surface worktree removal failure"
   assert_present "$state/$id.meta" "failed recovery worktree removal retired metadata"
-  assert_no_grep 'terminal=' "$state/$id.meta" "successful terminal cleanup was not retired before worktree failure"
+  assert_no_grep 'terminal=' "$state/$id.meta" "resolved terminal cleanup was not retired before worktree failure"
   assert_grep 'orca_allocation=worktree-only' "$state/$id.meta" "recovery metadata lost its remaining worktree cleanup state"
   log_text=$(cat "$LOG")
   assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-recovery-retry'$'\x1f''--json' \
     "recovery teardown did not close the retained terminal"
 
   orca_case recovery-retry-remove-succeeds
-  printf '{"ok":true}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
   printf 'malformed\n' > "$state/.status-presentation-cursor"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1443,7 +1467,7 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
   expect_code 0 $? "cleanup-complete recovery retry should succeed"$'\n'"$out"
   [ ! -s "$LOG" ] || fail "cleanup-complete recovery retry dispatched another Orca cleanup"
   assert_absent "$state/$id.meta" "successful cleanup-complete retry retained task metadata"
-  pass "Orca recovery advances metadata after each successful backend cleanup"
+  pass "Orca recovery advances metadata after completed or already-absent cleanup"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
@@ -1834,7 +1858,9 @@ test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_remove_worktree_refuses_empty_id
-test_remove_worktree_rejects_orca_error_json
+test_remove_worktree_accepts_already_absent_json
+test_remove_worktree_rejects_other_orca_error_json
+test_close_terminal_accepts_already_absent_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes

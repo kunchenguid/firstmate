@@ -7,7 +7,8 @@
 # `omp` executable on PATH. The installed Oh My Pi asset is never executed, no
 # provider call, model discovery, prompt, or TUI/RPC session happens, and no
 # live omp process is ever created. The stub answers `--version` only, and the
-# runnable boundary remains closed pending ATX-2170 lifecycle proof.
+# runnable boundary remains closed pending independent consumer-containment and
+# ATX-2170 lifecycle proofs.
 #
 # Two of the cases are POLICY MATRICES that report their own row counts rather
 # than a bare pass, so a silently shrinking matrix cannot read as green:
@@ -268,7 +269,7 @@ test_omp_accepts_only_the_exact_pinned_version() {
   out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   [ "$?" -ne 0 ] || fail "the pinned OMP build must remain dormant: $out"
-  assert_contains "$out" "dormant until ATX-2170" "the pinned build did not reach the lifecycle gate: $out"
+  assert_contains "$out" "session-free omp/17.2.9 consumer" "the pinned build did not reach both mandatory gates: $out"
   [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
     || fail "adapter must invoke omp exactly once, with --version only, got: $(cat "$stub_log")"
   assert_absent "$HOME_DIR/state/$id.meta" "the dormant OMP selection published metadata"
@@ -387,7 +388,7 @@ NODE
   pass "OMP candidate renderer emits one contained argv with no tool surface"
 }
 
-test_omp_consumer_proof_gate_fails_closed_without_launch() {
+test_omp_consumer_proof_gate_checks_version_then_fails_closed() {
   local dir fakebin log out status
   dir="$TMP_ROOT/omp-consumer-proof"
   fakebin="$dir/fakebin"
@@ -397,6 +398,10 @@ test_omp_consumer_proof_gate_fails_closed_without_launch() {
   cat > "$fakebin/omp" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_OMP_PROOF_STUB_LOG"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_OMP_PROOF_STUB_VERSION:-omp/17.2.9}"
+  exit 0
+fi
 exit 97
 SH
   chmod +x "$fakebin/omp"
@@ -406,8 +411,20 @@ SH
   [ "$status" -ne 0 ] || fail "the unavailable exact-version consumer proof must fail closed"
   assert_contains "$out" "no available importable session-free configuration and tool consumer" \
     "the consumer proof gate did not name its unresolved prerequisite"
-  [ ! -s "$log" ] || fail "the unresolved consumer proof gate launched OMP: $(cat "$log")"
-  pass "OMP consumer proof gate fails closed without launching OMP"
+  [ "$(cat "$log")" = "--version" ] \
+    || fail "the unresolved consumer proof gate must execute only omp --version: $(cat "$log")"
+
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" FM_OMP_PROOF_STUB_LOG="$log" \
+    FM_OMP_PROOF_STUB_VERSION=omp/17.3.0 FM_OMP_TOOLS_LIVE_E2E=1 \
+    "$ROOT/tests/fm-omp-tools-live-e2e.test.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the consumer proof gate accepted OMP version drift"
+  assert_contains "$out" "expected exact omp/17.2.9" \
+    "the consumer proof gate did not reject version drift"
+  [ "$(cat "$log")" = "--version" ] \
+    || fail "the drift check must execute only omp --version: $(cat "$log")"
+  pass "OMP consumer proof gate bounds identity and fails closed before sessions"
 }
 
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation() {
@@ -1132,8 +1149,8 @@ test_omp_relaunch_still_requires_the_model() {
     "$id" --relaunch --model "$OMP_MODEL")
   status=$?
   [ "$status" -ne 0 ] || fail "an OMP relaunch must retain its recovery-grade endpoint gate: $out"
-  assert_contains "$out" "dormant until ATX-2170" \
-    "a valid OMP record did not stop at the lifecycle-verification gate: $out"
+  assert_contains "$out" "session-free omp/17.2.9 consumer" \
+    "a valid OMP record did not stop at both mandatory gates: $out"
   assert_not_contains "$out" "regular, non-symlink metadata" \
     "a valid OMP record was incorrectly rejected by the new metadata preflight: $out"
   pass "an OMP relaunch requires qualified metadata and remains dormant"
@@ -1165,7 +1182,7 @@ test_omp_refuses_version_drift
 test_omp_refuses_a_substituted_binary
 test_omp_version_probe_is_hard_bounded
 test_omp_launch_argv_is_contained
-test_omp_consumer_proof_gate_fails_closed_without_launch
+test_omp_consumer_proof_gate_checks_version_then_fails_closed
 test_omp_candidate_artifacts_disable_fallbacks_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix
