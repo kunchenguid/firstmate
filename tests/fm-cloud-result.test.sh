@@ -337,6 +337,33 @@ EOF
   pass "a visual parent symlink is refused before any artifact is installed"
 }
 
+test_state_directory_symlink_is_refused_before_writes() {
+  local record root home repo id out status presented
+  id=cloud-return-state-symlink
+  record=$(make_return_case state-symlink "$id" scout yes yes no yes)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  presented="$root/presented-home"
+  mkdir "$presented"
+  ln -s "$home/state" "$presented/state"
+  out=$(python3 "$ROOT/bin/fm-cloud-result.py" collect --state "$presented/state" --task "$id" \
+    --task-generation spawn:gen-1 --assignment-generation asg-00000001 2>&1)
+  status=$?
+  expect_code 2 "$status" "a redirected state directory should be refused: $out"
+  assert_contains "$out" "task state directory is redirected or unavailable" \
+    "state directory refusal did not identify the redirected path"
+  assert_absent "$home/data/$id/report.md" "report escaped through the redirected state path"
+  assert_absent "$home/data/$id/cloud-return.json" "manifest escaped through the redirected state path"
+  assert_absent "$home/data/$id/cloud-scratch.patch" "scratch patch escaped through the redirected state path"
+  assert_absent "$home/data/$id/cloud-scratch-untracked.tar" \
+    "untracked scratch escaped through the redirected state path"
+  assert_absent "$home/data/$id/visuals/nested/proof.txt" \
+    "visual escaped through the redirected state path"
+  assert_absent "$home/state/$id.status" "redirected state path emitted terminal status"
+  pass "a redirected state directory cannot relocate any returned artifact"
+}
+
 test_cloud_custody_authority_reads_localized_return() {
   local record root home repo id out
   id=cloud-return-authority
@@ -521,6 +548,7 @@ test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
 test_task_artifact_root_symlink_is_refused
 test_visual_parent_symlink_is_refused_before_writes
+test_state_directory_symlink_is_refused_before_writes
 test_cloud_custody_authority_reads_localized_return
 test_lifecycle_accepts_only_exact_return_identity
 test_release_authority_requires_retained_scout_scratch

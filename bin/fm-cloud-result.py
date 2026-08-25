@@ -296,6 +296,20 @@ def ensure_directory(path):
     check_directory(path)
 
 
+def physical_state_directory(argument):
+    state = Path(os.path.abspath(str(argument)))
+    if state.name != "state":
+        raise ReturnError("task state directory is unavailable")
+    current = Path(state.anchor)
+    for part in state.parts[1:]:
+        current = current / part
+        if current.is_symlink() or not current.is_dir():
+            raise ReturnError("task state directory is redirected or unavailable")
+    if state.resolve() != state or state.parent.resolve() != state.parent:
+        raise ReturnError("task state directory is redirected or unavailable")
+    return state
+
+
 def read_visuals(body):
     total = 0
     count = 0
@@ -436,9 +450,7 @@ def collect(args):
         raise ReturnError("task generation identity is malformed")
     if not SAFE_GENERATION.fullmatch(args.assignment_generation):
         raise ReturnError("assignment identity is malformed")
-    state = Path(args.state).resolve()
-    if state.name != "state" or state.is_symlink() or not state.is_dir():
-        raise ReturnError("task state directory is unavailable")
+    state = physical_state_directory(args.state)
     home = state.parent
     values = meta_values(state / (args.task + ".meta"))
     if exactly(values, "generation_id") != args.task_generation:
