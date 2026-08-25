@@ -2291,11 +2291,12 @@ fi
 # shared merged-PR/content proof before an expected-old-value push deletes it.
 # Missing remotes, changed refs, inconclusive proofs, and any branch still
 # checked out elsewhere are silent best-effort skips.
-teardown_drop_task_branch() {
+teardown_drop_task_branch_locked() {
   local wt=$1 branch tip expected default local_landed=0 origin_tip='' no_mistakes_tip='' remote remote_tip
-  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  [ "$branch" != HEAD ] || return 0
-  tip=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 0
+  branch=$2
+  tip=$3
+  [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)" = "$branch" ] || return 0
+  [ "$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null || true)" = "$tip" ] || return 0
 
   if [ "$FORCE" != --force ] && [ "$KIND" != scout ]; then
     expected=${TEARDOWN_WORKTREE_TIP_FOR_SAFETY:-}
@@ -2315,26 +2316,37 @@ teardown_drop_task_branch() {
 
   git -C "$wt" checkout --detach -q 2>/dev/null || return 0
   if [ "$FORCE" = --force ] || [ "$KIND" = scout ]; then
+    # The force/scout exceptions intentionally bypass landedness, but their
+    # destructive checkout and delete still share the same serialization
+    # boundary as ordinary proven cleanup.
     git -C "$wt" branch -D -- "$branch" >/dev/null 2>&1 || true
   else
     default=$(fm_branch_default_branch "$wt" 2>/dev/null || true)
     if [ -n "$default" ] \
-      && fm_branch_delete_if_safely_merged "$wt" "$branch" "refs/heads/$default"; then
+      && _fm_branch_delete_if_safely_merged_locked "$wt" "$branch" "refs/heads/$default"; then
       :
-    elif fm_branch_delete_if_safely_gone "$wt" "$branch"; then
+    elif _fm_branch_delete_if_safely_gone_locked "$wt" "$branch"; then
       :
     elif [ "$local_landed" = 1 ]; then
-      fm_branch_delete_local_proven_tip "$wt" "$branch" "$tip" || true
+      _fm_branch_delete_local_proven_tip_locked "$wt" "$branch" "$tip" || true
     fi
   fi
   if [ -n "$origin_tip" ] \
-    && fm_branch_delete_remote_proven_tip "$wt" origin "$branch" "$origin_tip"; then
+    && _fm_branch_delete_remote_proven_tip_locked "$wt" "$branch" origin "$origin_tip"; then
     echo "teardown: pruned origin/$branch"
   fi
   if [ -n "$no_mistakes_tip" ] \
-    && fm_branch_delete_remote_proven_tip "$wt" no-mistakes "$branch" "$no_mistakes_tip"; then
+    && _fm_branch_delete_remote_proven_tip_locked "$wt" "$branch" no-mistakes "$no_mistakes_tip"; then
     echo "teardown: pruned no-mistakes/$branch"
   fi
+}
+
+teardown_drop_task_branch() {
+  local wt=$1 branch tip
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  [ "$branch" != HEAD ] || return 0
+  tip=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || return 0
+  fm_branch_with_cleanup_lock "$wt" "$branch" teardown_drop_task_branch_locked "$tip" || true
 }
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.

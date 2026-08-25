@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared "is this branch provably safe to delete?" decision procedures.
 #
-# ONE owner for the branch proofs and exact-tip deletion primitives used by
-# fm-fleet-sync.sh, fm-teardown.sh, and fm-branch-cleanup.sh.
+# ONE owner for the branch proofs, per-branch cleanup serialization, and
+# exact-tip deletion primitives used by fm-fleet-sync.sh, fm-teardown.sh, and
+# fm-branch-cleanup.sh.
 #
 # The ancestor proof below says a local branch is provably safe to delete iff
 # ALL of the following hold:
@@ -29,6 +30,48 @@
 # neither proof holds - returns non-zero (NOT safe): fail safe, never force a
 # delete this cannot prove. The caller decides what "not safe" means (leave it
 # alone and move on, never an error worth failing over).
+
+FM_BRANCH_MERGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+fm_branch_cleanup_lock_path() {
+  local repo=$1 branch=$2 common_dir key lock_root
+  [ -n "$branch" ] || return 1
+  common_dir=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir=$(cd "$repo/$common_dir" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  key=$(printf '%s' "$branch" | git -C "$repo" hash-object --stdin 2>/dev/null) || return 1
+  lock_root="$common_dir/firstmate-branch-cleanup-locks"
+  mkdir -p "$lock_root" || return 1
+  printf '%s/%s.lock\n' "$lock_root" "$key"
+}
+
+# fm_branch_with_cleanup_lock <repo> <branch> <callback> [args...]: run one
+# branch cleanup critical section. The lock lives in the repository's shared
+# git common directory, so the main checkout and every linked task worktree use
+# the same boundary. All firstmate branch-deletion paths enter here before
+# inspecting or detaching a candidate, and retain the lock through the local
+# deletion and any expected-old-value remote push.
+fm_branch_with_cleanup_lock() (
+  local repo=$1 branch=$2 callback=$3 lock state_root
+  shift 3
+  lock=$(fm_branch_cleanup_lock_path "$repo" "$branch") || return 1
+  state_root=${lock%/*}
+  if ! command -v fm_lock_acquire_wait >/dev/null 2>&1; then
+    FM_STATE_OVERRIDE=$state_root
+    export FM_STATE_OVERRIDE
+    # Reuse the repository's one portable lock implementation. This function
+    # is a subshell so fm-wake-lib's resolved state variables cannot leak into
+    # a cleanup caller that had not already sourced it.
+    # shellcheck source=/dev/null
+    . "$FM_BRANCH_MERGE_LIB_DIR/fm-wake-lib.sh"
+  fi
+  fm_lock_acquire_wait "$lock" || return 1
+  trap 'fm_lock_release "$lock"' EXIT
+  trap 'exit 1' HUP INT TERM
+  "$callback" "$repo" "$branch" "$@"
+)
 
 # fm_branch_worktree_branches <repo>: newline list of branch shortnames
 # currently checked out in any worktree of <repo> (the main checkout included).
@@ -96,15 +139,22 @@ fm_branch_is_safely_gone() {
   [ "$track" = "[gone]" ]
 }
 
-# fm_branch_delete_local_proven_tip <repo> <branch> <expected_tip>: delete the
-# exact local tip a caller has already proved landed.
-fm_branch_delete_local_proven_tip() {
+# Internal counterpart for callers that already hold the branch cleanup lock.
+_fm_branch_delete_local_proven_tip_locked() {
   local repo=$1 branch=$2 expected_tip=$3 tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   [ "$tip" = "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   git -C "$repo" branch -D -- "$branch" >/dev/null 2>&1
+}
+
+# fm_branch_delete_local_proven_tip <repo> <branch> <expected_tip>: delete the
+# exact local tip a caller has already proved landed, under the shared cleanup
+# boundary. The expected-tip comparison and Git's native linked-worktree guard
+# both run inside the critical section.
+fm_branch_delete_local_proven_tip() {
+  fm_branch_with_cleanup_lock "$1" "$2" _fm_branch_delete_local_proven_tip_locked "$3"
 }
 
 # fm_branch_delete_if_safely_merged <repo> <branch> <merged_into_ref>: delete
@@ -114,18 +164,26 @@ fm_branch_delete_local_proven_tip() {
 # The shared exact-tip helper performs the final race-safe delete after this
 # function establishes the ancestor proof.
 # Returns non-zero, unchanged, for anything the proof does not cover.
-fm_branch_delete_if_safely_merged() {
+_fm_branch_delete_if_safely_merged_locked() {
   local repo=$1 branch=$2 merged_into=$3 tip
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   fm_branch_is_safely_merged "$repo" "$branch" "$merged_into" "$tip" || return 1
-  fm_branch_delete_local_proven_tip "$repo" "$branch" "$tip"
+  _fm_branch_delete_local_proven_tip_locked "$repo" "$branch" "$tip"
 }
 
-fm_branch_delete_if_safely_gone() {
+fm_branch_delete_if_safely_merged() {
+  fm_branch_with_cleanup_lock "$1" "$2" _fm_branch_delete_if_safely_merged_locked "$3"
+}
+
+_fm_branch_delete_if_safely_gone_locked() {
   local repo=$1 branch=$2 tip
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   fm_branch_is_safely_gone "$repo" "$branch" "$tip" || return 1
-  fm_branch_delete_local_proven_tip "$repo" "$branch" "$tip"
+  _fm_branch_delete_local_proven_tip_locked "$repo" "$branch" "$tip"
+}
+
+fm_branch_delete_if_safely_gone() {
+  fm_branch_with_cleanup_lock "$1" "$2" _fm_branch_delete_if_safely_gone_locked
 }
 
 # fm_branch_remote_tip <repo> <remote> <branch>: print exactly one current
@@ -156,18 +214,24 @@ fm_branch_fetch_remote_tip() {
 # remotes and refs are silent non-matches. The lease fails closed if the ref
 # changes after inspection, and the worktree guard applies even though a remote
 # delete would otherwise allow deleting the branch under a live task.
-fm_branch_delete_remote_proven_tip() {
-  local repo=$1 remote=$2 branch=$3 expected_tip=$4 current local_tip
+_fm_branch_delete_remote_proven_tip_locked() {
+  local repo=$1 branch=$2 remote=$3 expected_tip=$4 current local_tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   current=$(fm_branch_remote_tip "$repo" "$remote" "$branch") || return 1
   [ "$current" = "$expected_tip" ] || return 1
   local_tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" || true)
   [ -z "$local_tip" ] || [ "$local_tip" = "$expected_tip" ] || return 1
-  [ -z "$local_tip" ] || fm_branch_delete_local_proven_tip "$repo" "$branch" "$expected_tip" || return 1
+  [ -z "$local_tip" ] || _fm_branch_delete_local_proven_tip_locked "$repo" "$branch" "$expected_tip" || return 1
   git -C "$repo" push --quiet \
     --force-with-lease="refs/heads/$branch:$expected_tip" \
     "$remote" ":refs/heads/$branch" >/dev/null 2>&1
+}
+
+fm_branch_delete_remote_proven_tip() {
+  local repo=$1 remote=$2 branch=$3 expected_tip=$4
+  fm_branch_with_cleanup_lock "$repo" "$branch" \
+    _fm_branch_delete_remote_proven_tip_locked "$remote" "$expected_tip"
 }
 
 fm_branch_pr_number_from_branch() {

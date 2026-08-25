@@ -448,36 +448,52 @@ EOF
 }
 
 test_branch_rewind_at_delete_is_left_alone() {
-  local home clone fakegit merged_tip rewind_tip real_git
+  local home clone merged_tip rewind_tip ready release holder_pid delete_pid delete_rc i
   home=$(new_home)
   clone=$(build_pair "$home" rewind_race)
   ff_merge_task_branch "$clone" fm/task-rewind feature.txt merged
   merged_tip=$(git -C "$clone" rev-parse fm/task-rewind)
   rewind_tip=$(git -C "$clone" rev-parse "$merged_tip^")
-  fakegit="$home/fake-git"; mkdir -p "$fakegit"
-  real_git=$(command -v git)
-  cat > "$fakegit/git" <<'EOF'
-#!/bin/sh
-if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
-  && [ "$3" = "update-ref" ] && [ "$4" = "-d" ] \
-  && [ "$5" = "refs/heads/$RACE_BRANCH" ]; then
-  "$REAL_GIT" -C "$RACE_REPO" update-ref "refs/heads/$RACE_BRANCH" "$RACE_REWIND_TIP"
-fi
-exec "$REAL_GIT" "$@"
-EOF
-  chmod +x "$fakegit/git"
+  ready="$home/rewind-holder-ready"
+  release="$home/rewind-holder-release"
 
-  PATH="$fakegit:$PATH" REAL_GIT="$real_git" RACE_REPO="$clone" \
-    RACE_BRANCH=fm/task-rewind RACE_REWIND_TIP="$rewind_tip" \
-    bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-rewind refs/heads/main' \
-    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
-    && fail "concurrent-branch-rewind: deletion unexpectedly succeeded"
+  bash -c '
+    . "$1"
+    locked_rewind() {
+      local repo=$1 branch=$2 expected=$3 replacement=$4 ready=$5 release=$6
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.02; done
+      git -C "$repo" update-ref "refs/heads/$branch" "$replacement" "$expected"
+    }
+    fm_branch_with_cleanup_lock "$2" fm/task-rewind locked_rewind \
+      "$3" "$4" "$5" "$6"
+  ' bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" "$merged_tip" "$rewind_tip" "$ready" "$release" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "concurrent-branch-rewind: lock holder never became ready"
+
+  bash -c '. "$1"; fm_branch_delete_local_proven_tip "$2" fm/task-rewind "$3"' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" "$merged_tip" &
+  delete_pid=$!
+  sleep 0.2
+  kill -0 "$delete_pid" 2>/dev/null \
+    || fail "concurrent-branch-rewind: deletion did not wait for the per-branch lock"
+  : > "$release"
+  wait "$holder_pid" || fail "concurrent-branch-rewind: locked ref move failed"
+  delete_rc=0
+  wait "$delete_pid" || delete_rc=$?
+  [ "$delete_rc" -ne 0 ] || fail "concurrent-branch-rewind: deletion unexpectedly succeeded"
 
   branch_exists "$clone" fm/task-rewind \
     || fail "concurrent-branch-rewind: branch was deleted after its tip changed"
   [ "$(git -C "$clone" rev-parse fm/task-rewind)" = "$rewind_tip" ] \
     || fail "concurrent-branch-rewind: rewound tip was not preserved"
-  pass "a branch rewind at final deletion is left intact"
+  pass "the per-branch lock serializes a competing ref move and the in-lock exact-tip check preserves it"
 }
 
 test_worktree_added_between_proof_and_delete_is_left_alone() {
@@ -488,11 +504,15 @@ test_worktree_added_between_proof_and_delete_is_left_alone() {
   fakegit="$home/fake-git"; mkdir -p "$fakegit"
   worktree="$home/active-task-worktree"
   real_git=$(command -v git)
-cat > "$fakegit/git" <<'EOF'
+  cat > "$fakegit/git" <<'EOF'
 #!/bin/sh
-if [ "$1" = "-C" ] && [ "$3" = "worktree" ] \
-  && [ "$4" = "add" ]; then
-  "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
+if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
+  && [ "$3" = "merge-base" ] && [ "$4" = "--is-ancestor" ]; then
+  "$REAL_GIT" "$@"; status=$?
+  if [ "$status" -eq 0 ]; then
+    "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH"
+  fi
+  exit "$status"
 fi
 exec "$REAL_GIT" "$@"
 EOF
@@ -523,8 +543,8 @@ test_worktree_checkout_at_final_delete_is_refused() {
   cat > "$fakegit/git" <<'EOF'
 #!/bin/sh
 if [ "$1" = "-C" ] && [ "$2" = "$RACE_REPO" ] \
-  && [ "$3" = "update-ref" ] && [ "$4" = "-d" ] \
-  && [ "$5" = "refs/heads/$RACE_BRANCH" ]; then
+  && [ "$3" = "branch" ] && [ "$4" = "-D" ] \
+  && [ "$6" = "$RACE_BRANCH" ]; then
   "$REAL_GIT" -C "$RACE_REPO" worktree add -q "$RACE_WORKTREE" "$RACE_BRANCH" >/dev/null 2>&1
   printf '%s\n' "$?" > "$RACE_MARKER"
 fi
@@ -536,15 +556,15 @@ EOF
     RACE_BRANCH=fm/task-final-worktree RACE_WORKTREE="$worktree" RACE_MARKER="$marker" \
     bash -c '. "$1"; fm_branch_delete_if_safely_merged "$2" fm/task-final-worktree refs/heads/main' \
     bash "$ROOT/bin/fm-branch-merge-lib.sh" "$clone" \
-    || fail "final-worktree-checkout: deletion unexpectedly failed"
+    && fail "final-worktree-checkout: deletion unexpectedly succeeded"
 
-  [ "$(cat "$marker")" -ne 0 ] \
-    || fail "final-worktree-checkout: a concurrent worktree checkout succeeded during deletion"
+  [ "$(cat "$marker")" -eq 0 ] \
+    || fail "final-worktree-checkout: the fixture did not check out the branch at the native deletion boundary"
   branch_exists "$clone" fm/task-final-worktree \
-    && fail "final-worktree-checkout: eligible branch was not deleted"
-  [ ! -e "$worktree/.git" ] \
-    || fail "final-worktree-checkout: rejected checkout left an active worktree"
-  pass "the temporary branch checkout excludes a concurrent final-window worktree"
+    || fail "final-worktree-checkout: native branch deletion removed a concurrently checked-out branch"
+  [ "$(git -C "$worktree" symbolic-ref --short HEAD)" = fm/task-final-worktree ] \
+    || fail "final-worktree-checkout: linked worktree did not retain its checked-out task branch"
+  pass "git's native branch deletion guard refuses a checkout at the final locked boundary"
 }
 
 test_gone_upstream_task_branch_is_pruned() {

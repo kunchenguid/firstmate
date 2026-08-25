@@ -191,6 +191,62 @@ SH
   pass "an exact-tip lease preserves a remote branch that advances after landedness proof"
 }
 
+test_remote_only_delete_serializes_a_linked_checkout() {
+  local dir repo tip worktree ready release holder_pid delete_pid delete_rc i
+  dir=$(make_project remote-only-lock)
+  repo="$dir/project"
+  worktree="$dir/active-remote-only"
+  ready="$dir/remote-only-holder-ready"
+  release="$dir/remote-only-holder-release"
+
+  git -C "$repo" checkout -qb fm/remote-only
+  commit_file "$repo" remote-only.txt landed landed
+  tip=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" push -q no-mistakes fm/remote-only
+  git -C "$repo" checkout -q main
+  git -C "$repo" merge -q --ff-only fm/remote-only
+  git -C "$repo" branch -D fm/remote-only >/dev/null
+
+  bash -c '
+    . "$1"
+    locked_checkout() {
+      local repo=$1 branch=$2 tip=$3 worktree=$4 ready=$5 release=$6
+      git -C "$repo" branch "$branch" "$tip"
+      git -C "$repo" worktree add -q "$worktree" "$branch"
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.02; done
+    }
+    fm_branch_with_cleanup_lock "$2" fm/remote-only locked_checkout \
+      "$3" "$4" "$5" "$6"
+  ' bash "$ROOT/bin/fm-branch-merge-lib.sh" "$repo" "$tip" "$worktree" "$ready" "$release" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "remote-only-lock: linked-checkout holder never became ready"
+
+  bash -c '. "$1"; fm_branch_delete_remote_proven_tip "$2" no-mistakes fm/remote-only "$3"' \
+    bash "$ROOT/bin/fm-branch-merge-lib.sh" "$repo" "$tip" &
+  delete_pid=$!
+  sleep 0.2
+  kill -0 "$delete_pid" 2>/dev/null \
+    || fail "remote-only-lock: remote cleanup did not wait for the per-branch lock"
+  : > "$release"
+  wait "$holder_pid" || fail "remote-only-lock: linked checkout fixture failed"
+  delete_rc=0
+  wait "$delete_pid" || delete_rc=$?
+  [ "$delete_rc" -ne 0 ] || fail "remote-only-lock: remote cleanup deleted under a linked checkout"
+
+  remote_branch_exists "$dir/no-mistakes.git" fm/remote-only \
+    || fail "remote-only-lock: no-mistakes ref was deleted while its branch was checked out"
+  local_branch_exists "$repo" fm/remote-only \
+    || fail "remote-only-lock: local checked-out branch was deleted"
+  pass "remote-only cleanup shares the branch lock and preserves a branch checked out before deletion"
+}
+
 test_pr_merge_delete_flag_drives_real_origin_deletion() {
   local dir repo fakebin state branch_tip
   dir=$(make_project merge-delete)
@@ -239,4 +295,5 @@ SH
 test_full_sweep_deletes_only_proven_inactive_branches
 test_squash_landed_branch_uses_shared_github_proof
 test_remote_advance_after_proof_is_preserved
+test_remote_only_delete_serializes_a_linked_checkout
 test_pr_merge_delete_flag_drives_real_origin_deletion
