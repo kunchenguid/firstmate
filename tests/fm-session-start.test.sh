@@ -238,7 +238,7 @@ case "$*" in
   *"args="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
-      if [ "$harness" = hermes ]; then printf '%s\n' 'hermes --cli'; else printf '%s\n' "$harness"; fi
+      if [ "$harness" = hermes ]; then printf '%s\n' 'hermes --cli --no-restore-cwd'; else printf '%s\n' "$harness"; fi
     else
       printf 'bash\n'
     fi

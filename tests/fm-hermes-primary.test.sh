@@ -32,7 +32,7 @@ make_fake_hermes() {
   cat > "$fakebin/hermes" <<SH
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} ARGS=\$*" >> '$dir/calls'
+printf '%s\n' "HERMES_ENABLE_PROJECT_PLUGINS=\${HERMES_ENABLE_PROJECT_PLUGINS:-} FM_BACKEND=\${FM_BACKEND:-} FM_HERMES_PRIMARY_POLICY=\${FM_HERMES_PRIMARY_POLICY:-} ARGS=\$*" >> '$dir/calls'
 if [ "\${1:-}" = config ] && [ "\${2:-}" = get ]; then
   [ '$status' = enabled ] && printf '%s\n' '- firstmate-primary'
   exit 0
@@ -47,31 +47,76 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/hermes"
+  mkdir -p "$dir/firstmate-config"
+  printf '%s\n' pi > "$dir/firstmate-config/crew-harness"
+  printf '%s\n' pi > "$dir/firstmate-config/secondmate-harness"
+  printf '%s\n' herdr > "$dir/firstmate-config/backend"
   printf '%s\n' "$fakebin"
+}
+
+run_primary_launcher() {
+  local fakebin=$1 case_dir=$2
+  shift 2
+  PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$case_dir/firstmate-config" \
+    "$ROOT/bin/fm-hermes-primary.sh" "$@"
 }
 
 test_launcher_scope_and_fail_closed() {
   local fakebin out rc=0 calls
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-enabled" enabled)
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" --provider openai-codex --model gpt-5) || rc=$?
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --provider openai-codex --model gpt-5) || rc=$?
   [ "$rc" -eq 0 ] || fail "enabled launcher failed: $out"
   calls=$(cat "$TMP_ROOT/launcher-enabled/calls")
   assert_contains "$calls" 'ARGS=config get plugins.enabled' "launcher did not check allow-list"
-  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not scope project discovery and persistent CLI mode"
+  assert_contains "$calls" 'HERMES_ENABLE_PROJECT_PLUGINS=1 FM_BACKEND=herdr FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 ARGS=--cli --no-restore-cwd --provider openai-codex --model gpt-5' "launcher did not scope project discovery, worker policy, and persistent CLI mode"
 
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" --safe-mode 2>&1) || rc=$?
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" --safe-mode 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "launcher must refuse options that disable the primary plugin"
   assert_contains "$out" "incompatible with the persistent Hermes Firstmate primary" \
     "unsafe Hermes launch option omitted its refusal"
 
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" -z prompt 2>&1) || rc=$?
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" -z prompt 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "launcher must refuse one-shot Hermes mode"
+
+  for escaped in '--profile=other' gateway acp; do
+    rc=0
+    out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" "$escaped" 2>&1) || rc=$?
+    [ "$rc" -eq 1 ] || fail "launcher must refuse Hermes surface escape '$escaped'"
+    assert_contains "$out" "incompatible with the persistent Hermes Firstmate primary" \
+      "surface escape '$escaped' omitted its refusal"
+  done
+
+  printf '%s\n' codex > "$TMP_ROOT/launcher-enabled/firstmate-config/crew-harness"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must require Pi crewmates"
+  assert_contains "$out" "crew-harness to contain 'pi'" "Pi worker-policy refusal was not actionable"
+
+  printf '%s\n' pi > "$TMP_ROOT/launcher-enabled/firstmate-config/crew-harness"
+  printf '%s\n' codex > "$TMP_ROOT/launcher-enabled/firstmate-config/secondmate-harness"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must require Pi secondmates"
+  assert_contains "$out" "secondmate-harness to contain 'pi'" "Pi secondmate-policy refusal was not actionable"
+
+  printf '%s\n' pi > "$TMP_ROOT/launcher-enabled/firstmate-config/secondmate-harness"
+  printf '%s\n' tmux > "$TMP_ROOT/launcher-enabled/firstmate-config/backend"
+  rc=0
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must require the Herdr backend"
+  assert_contains "$out" "backend to contain 'herdr'" "Herdr policy refusal was not actionable"
+
+  printf '%s\n' herdr > "$TMP_ROOT/launcher-enabled/firstmate-config/backend"
+  rc=0
+  out=$(FM_BACKEND=tmux run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-enabled" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher must reject an ambient non-Herdr backend override"
+  assert_contains "$out" "FM_BACKEND=herdr" "ambient backend refusal was not actionable"
 
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-disabled" disabled)
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" 2>&1) || rc=$?
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-disabled" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "disabled plugin must fail closed, got $rc"
   assert_contains "$out" '--setup' "disabled launcher omitted setup guidance"
   pass "Hermes launcher is explicit, scoped, and fail-closed"
@@ -80,7 +125,7 @@ test_launcher_scope_and_fail_closed() {
 test_setup_keeps_normal_wrapper_plugin_discoverable() {
   local fakebin out link target rc=0
   fakebin=$(make_fake_hermes "$TMP_ROOT/launcher-setup" enabled)
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-hermes-primary.sh" --setup) || rc=$?
+  out=$(run_primary_launcher "$fakebin" "$TMP_ROOT/launcher-setup" --setup) || rc=$?
   [ "$rc" -eq 0 ] || fail "Hermes setup failed: $out"
   link="$TMP_ROOT/launcher-setup/plugins/firstmate-primary"
   [ -L "$link" ] || fail "Hermes setup did not retain the user-plugin link for the normal wrapper"
@@ -133,7 +178,9 @@ def activate(root, argv=None):
     os.environ["FM_HOME"] = str(root)
     os.environ["FM_STATE_OVERRIDE"] = str(root / "state")
     os.chdir(root)
-    sys.argv = argv or ["hermes", "--cli"]
+    sys.argv = argv or ["hermes", "--cli", "--no-restore-cwd"]
+    os.environ["FM_HERMES_PRIMARY_POLICY"] = "pi-herdr-v1"
+    os.environ["FM_HERMES_PRIMARY_PID"] = str(os.getpid())
     ctx = Context()
     module.register(ctx)
     return ctx
@@ -151,8 +198,8 @@ ctx = Context()
 module.register(ctx)
 assert ctx.hooks == {}
 
-ctx = activate(primary, ["hermes", "-p", "firstmate", "--tui"])
-assert set(ctx.hooks) == {"pre_tool_call", "post_llm_call", "on_session_finalize"}
+ctx = activate(primary)
+assert set(ctx.hooks) == {"pre_tool_call", "on_session_end", "on_session_finalize"}
 marker = primary / "state" / ".hermes-primary-plugin-loaded"
 lines = marker.read_text().splitlines()
 assert lines[0].startswith("sha256:")
@@ -172,28 +219,30 @@ assert pre(
     {"command": "bin/fm-watch-arm.sh", "background": True, "notify_on_complete": True},
 ) is None
 
-post = ctx.hooks["post_llm_call"]
-post(session_id="s1", platform="cli")
+end = ctx.hooks["on_session_end"]
+end(session_id="s1", platform="cli", completed=True)
 assert ctx.injected == []
-post(session_id="s1", platform="telegram")
+end(session_id="s1", platform="telegram", completed=True)
 assert ctx.injected == []
 (primary / "state" / "worker.meta").write_text("project=fixture\n")
-post(session_id="s1", platform="cli")
+end(session_id="s1", platform="cli", completed=False, failed=True)
 assert len(ctx.injected) == 1
 repair = ctx.injected[0][0]
 assert repair.startswith("[firstmate-supervision-repair-v1]")
 assert "terminal(background=true, notify_on_complete=true)" in repair
-post(session_id="s1", platform="cli")
+end(session_id="s1", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 1
-post(session_id="s1", platform="cli")
+end(session_id="s2", platform="cli", completed=False, interrupted=True)
 assert len(ctx.injected) == 2
+ctx.hooks["on_session_finalize"](session_id="s1")
+assert marker.exists()
+end(session_id="s1", platform="cli", completed=True)
+assert len(ctx.injected) == 3
 
 os.chdir(primary.parent)
 pre("delegate_task", {}) is None
-post(session_id="s2", platform="cli")
-assert len(ctx.injected) == 2
-ctx.hooks["on_session_finalize"]()
-assert not marker.exists()
+end(session_id="s3", platform="cli", completed=False, failed=True)
+assert len(ctx.injected) == 3
 PY
   pass "Hermes plugin is scoped, blocks delegation, preserves ordinary tools, and has bounded recovery"
 }

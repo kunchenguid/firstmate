@@ -75,8 +75,8 @@ Pick whichever one matches your subscription and workflow.
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
-Hermes Agent is verified only for the primary session through a tracked project plugin; workers must use another verified harness.
-See [Hermes primary setup](docs/hermes-primary.md) for the one-time plugin setup and worker selection.
+Hermes Agent is verified only for the primary session through a tracked project plugin; every worker uses Pi on Herdr.
+See [Hermes primary setup](docs/hermes-primary.md) for the one-time plugin and local policy setup.
 
 ### Install and launch
 
@@ -216,7 +216,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
-- [docs/hermes-primary.md](docs/hermes-primary.md) - set up and verify the primary-only Hermes integration with a separate worker harness.
+- [docs/hermes-primary.md](docs/hermes-primary.md) - set up and verify the primary-only Hermes integration with Pi workers on Herdr.
 - [docs/zellij-backend.md](docs/zellij-backend.md) - current setup and limits for the experimental Zellij backend.
 - [docs/orca-backend.md](docs/orca-backend.md) - current setup and limits for the experimental Orca backend.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - current setup, socket security, and limits for the experimental cmux backend.

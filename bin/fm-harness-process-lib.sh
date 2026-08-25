@@ -30,7 +30,7 @@ fm_process_is_hermes() {
 # Firstmate session lock.
 fm_process_is_hermes_primary() {
   local args=$1 first second token start=0 i next
-  local profile='' cli=0 tui=0
+  local cli=0 rooted=0
   local -a words=()
   fm_process_is_hermes "$args" || return 1
   read -r -a words <<< "$args"
@@ -51,33 +51,21 @@ fm_process_is_hermes_primary() {
   for ((i=start; i<${#words[@]}; i++)); do
     token=${words[i]}
     case "$token" in
-      -z|--oneshot|--oneshot=*) return 1 ;;
-      -p|--profile)
-        next=${words[i+1]:-}
-        [ "$next" = firstmate ] || return 1
-        profile=firstmate
-        i=$((i + 1))
-        ;;
-      --profile=*)
-        profile=${token#--profile=}
-        [ "$profile" = firstmate ] || return 1
-        ;;
-      -m|--model|--provider|--reasoning|-t|--toolsets|--resume|-r|--skills|-s|--usage-file)
+      -m|--model|--provider|--reasoning|--resume|-r|--skills|-s)
         [ "$((i + 1))" -lt "${#words[@]}" ] || return 1
         i=$((i + 1))
         ;;
-      --model=*|--provider=*|--reasoning=*|--toolsets=*|--resume=*|--skills=*|--usage-file=*) ;;
+      --model=?*|--provider=?*|--reasoning=?*|--resume=?*|--skills=?*) ;;
       -c|--continue)
         next=${words[i+1]:-}
         case "$next" in ''|-*) ;; *) i=$((i + 1)) ;; esac
         ;;
-      --continue=*) ;;
+      --continue=?*) ;;
       --cli) cli=1 ;;
-      --tui) tui=1 ;;
-      --no-restore-cwd|--worktree|-w|--accept-hooks|--yolo|--pass-session-id|--ignore-user-config|--ignore-rules|--safe-mode|--dev) ;;
-      -*) ;;
+      --no-restore-cwd) rooted=1 ;;
+      --accept-hooks|--yolo|--pass-session-id) ;;
       *) return 1 ;;
     esac
   done
-  [ "$cli" -eq 1 ] || { [ "$profile" = firstmate ] && [ "$tui" -eq 1 ]; }
+  [ "$cli" -eq 1 ] && [ "$rooted" -eq 1 ]
 }

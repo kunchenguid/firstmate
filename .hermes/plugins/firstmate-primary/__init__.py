@@ -29,20 +29,12 @@ def _state_dir() -> Path:
 
 
 def _persistent_cli_launch() -> bool:
-    args = sys.argv[1:]
-    if "-z" in args or "--oneshot" in args or any(
-        arg.startswith("--oneshot=") for arg in args
-    ):
-        return False
-    if "--cli" in args:
-        return True
-    profile = None
-    for index, arg in enumerate(args):
-        if arg in {"-p", "--profile"}:
-            profile = args[index + 1] if index + 1 < len(args) else None
-        elif arg.startswith("--profile="):
-            profile = arg.split("=", 1)[1]
-    return profile == "firstmate" and "--tui" in args
+    return (
+        "--cli" in sys.argv[1:]
+        and "--no-restore-cwd" in sys.argv[1:]
+        and os.environ.get("FM_HERMES_PRIMARY_POLICY") == "pi-herdr-v1"
+        and os.environ.get("FM_HERMES_PRIMARY_PID") == str(os.getpid())
+    )
 
 
 def _primary_scope_matches() -> bool:
@@ -95,16 +87,6 @@ def _write_loaded_marker() -> None:
             tmp.unlink()
         except OSError:
             pass
-
-
-def _remove_loaded_marker() -> None:
-    marker = _state_dir() / _MARKER_NAME
-    try:
-        lines = marker.read_text(encoding="utf-8").splitlines()
-        if len(lines) >= 2 and lines[1] == str(os.getpid()):
-            marker.unlink()
-    except OSError:
-        pass
 
 
 def _run_checker(path: Path, *args: str, payload: str | None = None) -> subprocess.CompletedProcess[str] | None:
@@ -174,7 +156,7 @@ def register(ctx: Any) -> None:
         reason = (result.stderr or result.stdout or "unsafe watcher command shape").strip()
         return {"action": "block", "message": reason[:2000]}
 
-    def post_llm_call(
+    def on_session_end(
         session_id: str = "",
         platform: str = "",
         **kwargs: Any,
@@ -211,11 +193,12 @@ def register(ctx: Any) -> None:
             with _retry_lock:
                 _pending_retries.discard(sid)
 
-    def on_session_finalize(**kwargs: Any) -> None:
+    def on_session_finalize(session_id: str = "", **kwargs: Any) -> None:
         del kwargs
-        _remove_loaded_marker()
+        with _retry_lock:
+            _pending_retries.discard(str(session_id or ""))
 
     ctx.register_hook("pre_tool_call", pre_tool_call)
-    ctx.register_hook("post_llm_call", post_llm_call)
+    ctx.register_hook("on_session_end", on_session_end)
     ctx.register_hook("on_session_finalize", on_session_finalize)
     _write_loaded_marker()

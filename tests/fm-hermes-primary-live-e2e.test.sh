@@ -29,6 +29,12 @@ cleanup() {
     kill -KILL "$hermes_pid" 2>/dev/null || true
   fi
   if [ -n "$launcher_pid" ]; then
+    child_pids=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$launcher_pid" '$2 == parent { print $1 }')
+    while IFS= read -r child_pid; do
+      [ -z "$child_pid" ] || kill -TERM "$child_pid" 2>/dev/null || true
+    done <<EOF
+$child_pids
+EOF
     kill -TERM "$launcher_pid" 2>/dev/null || true
     wait "$launcher_pid" 2>/dev/null || true
   fi

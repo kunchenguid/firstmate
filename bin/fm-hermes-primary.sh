@@ -12,15 +12,17 @@
 # Usage:
 #   bin/fm-hermes-primary.sh --check
 #   bin/fm-hermes-primary.sh --setup
-#   bin/fm-hermes-primary.sh [Hermes global options]
+#   bin/fm-hermes-primary.sh [classic-session options]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLUGIN=firstmate-primary
+HOME_ROOT=${FM_HOME:-$ROOT}
+CONFIG=${FM_CONFIG_OVERRIDE:-$HOME_ROOT/config}
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 require_root() {
@@ -35,6 +37,68 @@ require_root() {
 
 plugin_status() {
   hermes config get plugins.enabled 2>/dev/null | grep -Fx -- "- $PLUGIN" >/dev/null
+}
+
+require_local_policy() {
+  local path value
+  for path in crew-harness secondmate-harness; do
+    value=$(tr -d '[:space:]' < "$CONFIG/$path" 2>/dev/null || true)
+    [ "$value" = pi ] || {
+      echo "error: Hermes primary requires $CONFIG/$path to contain 'pi'" >&2
+      exit 1
+    }
+  done
+  value=$(tr -d '[:space:]' < "$CONFIG/backend" 2>/dev/null || true)
+  [ "$value" = herdr ] || {
+    echo "error: Hermes primary requires $CONFIG/backend to contain 'herdr'" >&2
+    exit 1
+  }
+  case "${FM_BACKEND:-herdr}" in
+    herdr) ;;
+    *)
+      echo "error: Hermes primary requires FM_BACKEND=herdr when FM_BACKEND is set" >&2
+      exit 1
+      ;;
+  esac
+}
+
+validate_launch_args() {
+  local arg
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      -m|--model|--provider|--reasoning|-r|--resume|-s|--skills)
+        [ "$#" -gt 0 ] && [ -n "$1" ] || {
+          echo "error: option '$arg' requires a value" >&2
+          exit 1
+        }
+        shift
+        ;;
+      --model=*|--provider=*|--reasoning=*|--resume=*|--skills=*)
+        [ -n "${arg#*=}" ] || {
+          echo "error: option '${arg%%=*}' requires a value" >&2
+          exit 1
+        }
+        ;;
+      -c|--continue)
+        if [ "$#" -gt 0 ]; then
+          case "$1" in -*) ;; *) shift ;; esac
+        fi
+        ;;
+      --continue=*)
+        [ -n "${arg#*=}" ] || {
+          echo "error: option '${arg%%=*}' requires a value" >&2
+          exit 1
+        }
+        ;;
+      --accept-hooks|--yolo|--pass-session-id) ;;
+      *)
+        echo "error: option or command '$arg' is incompatible with the persistent Hermes Firstmate primary" >&2
+        exit 1
+        ;;
+    esac
+  done
 }
 
 enable_plugin() {
@@ -98,14 +162,11 @@ plugin_status || {
   exit 1
 }
 
-for arg in "$@"; do
-  case "$arg" in
-    -z|--oneshot|--oneshot=*|--tui|--safe-mode|--ignore-user-config|--ignore-rules|-w|--worktree|--in|--in=*)
-      echo "error: option '$arg' is incompatible with the persistent Hermes Firstmate primary" >&2
-      exit 1
-      ;;
-  esac
-done
+validate_launch_args "$@"
+require_local_policy
 
 export HERMES_ENABLE_PROJECT_PLUGINS=1
+export FM_BACKEND=herdr
+export FM_HERMES_PRIMARY_POLICY=pi-herdr-v1
+export FM_HERMES_PRIMARY_PID=$$
 exec hermes --cli --no-restore-cwd "$@"

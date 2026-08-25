@@ -6,8 +6,8 @@ This integration is primary-only: Hermes never runs crewmates, scouts, or second
 ## Requirements
 
 - Hermes Agent with native project-plugin support.
-- A separate verified worker harness in `config/crew-harness`.
-- The normal Firstmate backend requirements for that worker harness.
+- Pi in both `config/crew-harness` and `config/secondmate-harness`.
+- Herdr in `config/backend`, with the normal Herdr backend requirements.
 
 The integration was live-verified with Hermes Agent 0.20.5 on 2026-08-25.
 Run the live drift guard after every Hermes upgrade before trusting the refreshed installation.
@@ -25,8 +25,7 @@ Setup links the tracked plugin into the active Hermes home and enables its exact
 It refuses to replace an existing non-matching plugin path.
 Normal launches only check that enablement and do not rewrite Hermes configuration.
 
-Configure the workers independently because an absent or `default` worker setting would mirror the Hermes primary and `fm-spawn.sh` deliberately refuses that primary-only runtime.
-For Pi workers on Herdr:
+Configure the required Pi workers and Herdr backend before launching Hermes:
 
 ```sh
 mkdir -p config
@@ -36,6 +35,7 @@ printf '%s\n' herdr > config/backend
 ```
 
 These operator choices remain local and gitignored by design.
+The launcher refuses missing or different values, exports Herdr as the effective backend, and propagates a policy that makes `fm-spawn.sh` reject raw launch commands or per-task harness and backend overrides.
 Configure the Hermes model or provider separately with `hermes setup` or `hermes model`; Firstmate does not copy, modify, or own provider credentials.
 
 ## Launch
@@ -47,15 +47,15 @@ bin/fm-hermes-primary.sh
 ```
 
 The launcher forces the persistent classic CLI and keeps resumed sessions in the checkout root.
-It refuses one-shot mode, the TUI, safe mode, ignored rules or user configuration, Hermes-managed worktrees, and alternate starting directories because those shapes would disable or escape the Firstmate integration.
+It accepts only bounded classic-session options and refuses profiles, subcommands, one-shot mode, the TUI, safe mode, ignored rules or user configuration, Hermes-managed worktrees, and alternate starting directories because those shapes would disable or escape the Firstmate integration.
 
 The plugin then:
 
 - blocks Hermes's built-in `delegate_task` so work stays in visible Firstmate-managed sessions;
 - validates watcher-arm terminal calls through Firstmate's shared command policy;
 - requires `terminal(background=true, notify_on_complete=true)` for the one managed watcher process;
-- injects one bounded recovery turn when the shared turn-end predicate finds active work without healthy supervision;
-- publishes a versioned process marker so session start can prove the current lock-owning Hermes process loaded the current plugin build.
+- runs the shared turn-end predicate after successful, failed, and interrupted turns and injects one bounded recovery turn when active work lacks healthy supervision;
+- publishes a versioned process marker for the lifetime of the CLI process so session start can prove the current lock-owning Hermes process loaded the current plugin build across `/new` and reset boundaries.
 
 ## Verification and upgrades
 
@@ -86,4 +86,4 @@ If the check fails, use `hermes plugins show firstmate-primary` and `bin/fm-herm
 - The classic interactive CLI is the only verified primary surface.
 - Hermes gateway, desktop, web, TUI, one-shot, ACP, and outer-wrapper modes are outside this integration.
 - The plugin intentionally disables built-in Hermes delegation in Firstmate scope.
-- Worker busy state, steering, interruption, cleanup, and backend behavior remain properties of the selected worker harness, not Hermes.
+- Worker busy state, steering, interruption, cleanup, and backend behavior remain properties of Pi and Herdr, not Hermes.

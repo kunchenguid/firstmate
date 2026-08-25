@@ -396,6 +396,20 @@ else
   fi
 fi
 
+hermes_primary_policy_backend() {
+  [ "${FM_HERMES_PRIMARY_POLICY:-}" != pi-herdr-v1 ] || [ "$1" = herdr ] || {
+    echo "error: the Hermes primary policy requires backend=herdr, not '$1'" >&2
+    return 1
+  }
+}
+
+hermes_primary_policy_harness() {
+  [ "${FM_HERMES_PRIMARY_POLICY:-}" != pi-herdr-v1 ] || [ "$1" = pi ] || {
+    echo "error: the Hermes primary policy requires harness=pi, not '$1'" >&2
+    return 1
+  }
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -437,6 +451,11 @@ spawn_remote_secondmate() {
     harness=$positional
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+  fi
+  if ! hermes_primary_policy_harness "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
@@ -557,6 +576,10 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ]; then
+    [ -n "$remote_traceparent" ] || launch_args+=(-)
+    launch_args+=(pi-herdr-v1)
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -965,6 +988,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   else
     BACKEND=$(fm_backend_name)
   fi
+  hermes_primary_policy_backend "$BACKEND" || exit 1
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
@@ -1008,6 +1032,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  hermes_primary_policy_backend "$BACKEND" || exit 1
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
@@ -1195,8 +1220,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1230,6 +1257,15 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  echo "error: the Hermes primary policy requires the verified Pi launch template, not a raw launch command" >&2
+  exit 1
+fi
+hermes_primary_policy_harness "$HARNESS" || exit 1
+if [ "${FM_HERMES_PRIMARY_POLICY:-}" = pi-herdr-v1 ]; then
+  LAUNCH="FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr $LAUNCH"
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its

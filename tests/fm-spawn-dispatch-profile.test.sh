@@ -840,6 +840,28 @@ test_hermes_is_not_a_crewmate_or_secondmate_runtime() {
   pass "Hermes remains primary-only and any visible crewmate dispatch stays on fm-spawn"
 }
 
+test_hermes_primary_policy_rejects_worker_overrides() {
+  local rec id out status
+  id=profile-hermes-policy-z21
+  rec=$(make_spawn_case profile-hermes-policy pi "$id")
+  read_case_record "$rec"
+
+  out=$(FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Hermes primary policy must refuse a non-Pi worker"
+  assert_contains "$out" "requires harness=pi" "Hermes worker-harness refusal was not actionable"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes policy override wrote task metadata"
+
+  out=$(FM_HERMES_PRIMARY_POLICY=pi-herdr-v1 FM_BACKEND=herdr \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness pi --backend tmux)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Hermes primary policy must refuse a non-Herdr backend"
+  assert_contains "$out" "requires backend=herdr" "Hermes backend refusal was not actionable"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Hermes backend override wrote task metadata"
+  pass "Hermes primary policy fixes Pi workers to Herdr"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -872,5 +894,6 @@ test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_hermes_is_not_a_crewmate_or_secondmate_runtime
+test_hermes_primary_policy_rejects_worker_overrides
 
 echo "# all fm-spawn-dispatch-profile tests passed"

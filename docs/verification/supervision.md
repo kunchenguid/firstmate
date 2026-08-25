@@ -217,7 +217,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
-| Hermes | 0.20.5 | Project plugin `pre_tool_call` policy plus passive `post_llm_call` recovery | A real persistent CLI loaded and registered the exact tracked plugin build; deterministic callback coverage blocked delegation and unsafe watcher arms and bounded recovery to one injected turn per blind boundary. |
+| Hermes | 0.20.5 | Project plugin `pre_tool_call` policy plus passive every-turn `on_session_end` recovery | A real persistent CLI loaded and registered the exact tracked plugin build; deterministic callback coverage blocked delegation and unsafe watcher arms, covered failed and interrupted boundaries, and bounded recovery to one injected turn per blind boundary. |
 
 ### Hermes primary plugin, 2026-08-25
 
@@ -236,7 +236,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
 `tests/fm-hermes-primary.test.sh` invokes the registered callbacks deterministically in a primary checkout and a child worktree.
-It proves the plugin stays inert outside primary scope, blocks `delegate_task`, refuses unmanaged watcher-arm shapes, passes ordinary tools, injects one recovery turn after the shared guard blocks, suppresses that recovery turn's own boundary, and becomes eligible again for a later independent blind boundary.
+It proves the plugin stays inert outside primary scope, blocks `delegate_task`, refuses unmanaged watcher-arm shapes, passes ordinary tools, injects one recovery turn after failed and interrupted boundaries when the shared guard blocks, suppresses that recovery turn's own boundary, preserves its loaded marker across conversation finalization, and becomes eligible again for a later independent blind boundary.
 The live check deliberately sends no model turn, so provider behavior and token use are outside this evidence; hook registration, executable identity, and callback policy are the active guarantees.
 
 ### Cursor primary park, 2026-08-13

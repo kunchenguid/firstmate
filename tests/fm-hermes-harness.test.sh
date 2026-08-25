@@ -54,16 +54,20 @@ test_hermes_process_shapes() {
   fakebin=$(make_fake_ps "$TMP_ROOT/shapes")
 
   out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd')
+  [ "$out" = hermes ] || fail "trusted persistent Hermes CLI was not detected, got '$out'"
+
+  out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
     FM_TEST_PS_ARGS='hermes --cli')
-  [ "$out" = hermes ] || fail "persistent Hermes CLI was not detected, got '$out'"
+  [ "$out" = unknown ] || fail "a direct CLI outside the trusted launcher must stay unknown, got '$out'"
 
   out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=hermes \
     FM_TEST_PS_ARGS='hermes -p firstmate --tui')
-  [ "$out" = hermes ] || fail "the normal Firstmate Hermes TUI was not detected, got '$out'"
+  [ "$out" = unknown ] || fail "the Hermes profile TUI must stay outside primary detection, got '$out'"
 
   out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python3 \
-    FM_TEST_PS_ARGS='/opt/hermes-agent/venv/bin/python3 /opt/hermes-agent/venv/bin/hermes -p firstmate --tui')
-  [ "$out" = hermes ] || fail "the Hermes interpreter launch was not detected, got '$out'"
+    FM_TEST_PS_ARGS='/opt/hermes-agent/venv/bin/python3 /opt/hermes-agent/venv/bin/hermes gateway')
+  [ "$out" = unknown ] || fail "a Hermes subcommand must stay outside primary detection, got '$out'"
 
   out=$(run_detect "$fakebin" env FM_TEST_PS_COMM=python \
     FM_TEST_PS_ARGS='/usr/local/lib/hermes-agent/venv/bin/python /usr/local/lib/hermes-agent/hermes --cli --no-restore-cwd')
@@ -80,18 +84,13 @@ test_hermes_process_shapes() {
 
   out=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-harness-process-lib.sh"; fm_process_is_hermes_primary "$1"; printf primary' \
-    "$ROOT" 'hermes --cli')
-  [ "$out" = primary ] || fail "persistent Hermes CLI did not satisfy the primary predicate"
-
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-harness-process-lib.sh"; fm_process_is_hermes_primary "$1"; printf primary' \
-    "$ROOT" 'hermes -p firstmate --tui')
-  [ "$out" = primary ] || fail "the normal Firstmate Hermes TUI did not satisfy the primary predicate"
+    "$ROOT" 'hermes --cli --no-restore-cwd')
+  [ "$out" = primary ] || fail "trusted persistent Hermes CLI did not satisfy the primary predicate"
 
   out=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-harness-process-lib.sh"; if fm_process_is_hermes_primary "$1"; then printf primary; fi' \
-    "$ROOT" 'hermes -p unrelated --tui' 2>/dev/null) || true
-  [ "$out" != primary ] || fail "an unrelated Hermes profile must not satisfy the primary predicate"
+    "$ROOT" 'hermes --cli gateway --no-restore-cwd' 2>/dev/null) || true
+  [ "$out" != primary ] || fail "a Hermes subcommand must not satisfy the primary predicate"
   pass "Hermes detection distinguishes persistent CLI and one-shot worker argv"
 }
 
@@ -102,7 +101,7 @@ test_lock_accepts_primary_and_rejects_worker_or_prompt() {
   mkdir -p "$home/state"
 
   out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
-    FM_TEST_PS_ARGS='hermes --cli' PATH="$fakebin:$BASE_PATH" \
+    FM_TEST_PS_ARGS='hermes --cli --no-restore-cwd' PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-lock.sh") || rc=$?
   [ "$rc" -eq 0 ] || fail "fm-lock rejected a persistent Hermes primary: $out"
   assert_contains "$out" "lock acquired: harness pid" "Hermes primary did not acquire the lock"
@@ -111,7 +110,7 @@ test_lock_accepts_primary_and_rejects_worker_or_prompt() {
   out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes \
     FM_TEST_PS_ARGS='hermes -p firstmate --tui' PATH="$fakebin:$BASE_PATH" \
     "$ROOT/bin/fm-lock.sh") || rc=$?
-  [ "$rc" -eq 0 ] || fail "fm-lock rejected the normal Firstmate Hermes TUI: $out"
+  [ "$rc" -ne 0 ] || fail "fm-lock accepted the unsupported Hermes profile TUI"
 
   printf '%s\n' "$$" > "$home/state/.lock"
   out=$(FM_HOME="$home" FM_TEST_PS_COMM=hermes FM_TEST_PS_ARGS='hermes -z prompt' \

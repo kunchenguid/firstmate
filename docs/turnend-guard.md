@@ -53,7 +53,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
-- Hermes registers `post_llm_call` in `.hermes/plugins/firstmate-primary`, calls the shared predicate after a persistent CLI turn, and uses `ctx.inject_message()` for one bounded recovery turn when the guard returns 2.
+- Hermes registers `on_session_end` in `.hermes/plugins/firstmate-primary`, calls the shared predicate after every persistent CLI turn including failures and interruptions, and uses `ctx.inject_message()` for one bounded recovery turn when the guard returns 2.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment: Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
@@ -100,8 +100,9 @@ The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `
 Each passive adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
-Hermes keeps a per-session latch only until the injected recovery turn reaches its own `post_llm_call`, then clears it so a later independent captain turn can detect a new blind boundary.
-The plugin is inert outside the checkout root, outside a persistent CLI launch, and inside child task worktrees.
+Hermes keeps a per-session latch only until the injected recovery turn reaches its own `on_session_end`, then clears it so a later independent captain turn can detect a new blind boundary.
+Conversation finalization clears only that session's retry latch and preserves the process-scoped loaded marker across `/new` and reset boundaries.
+The plugin is inert outside the checkout root, outside the trusted persistent CLI launch, and inside child task worktrees.
 
 Grok makes exactly one typed capability decision from each running Stop payload.
 A boolean `stopHookActive` selects native blocking, including both false on the initial stop and true on the bounded continuation.
