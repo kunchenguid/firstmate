@@ -963,7 +963,7 @@ test_unusable_task_id_refuses_unrescuable_committed_work() {
 # a case-local bin dir; the result is verified to still run git and to no longer
 # find treehouse, so a case can never fail for a PATH reason it does not name.
 make_no_treehouse_path() {  # <case-dir>
-  local case_dir=$1 toolbin dir tool resolved out= built saved_ifs=$IFS
+  local case_dir=$1 toolbin dir tool resolved out='' built saved_ifs=$IFS
   toolbin="$case_dir/toolbin"
   mkdir -p "$toolbin" || return 1
   for tool in git bash env sh; do
