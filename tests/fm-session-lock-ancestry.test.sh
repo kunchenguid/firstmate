@@ -640,12 +640,15 @@ SH
 }
 
 # A real fm-lock.sh is run to a controlled stopping point - the ps call
-# fm_harness_record_omp_claude issues right after $LOCK is written - and
-# killed there with SIGTERM, the same signal an interrupted terminal or a
-# supervisor's graceful shutdown would send. The fake ps only sleeps once
-# state/.lock already exists, so the delay lands exactly in the publication
-# gap between writing $LOCK and persisting its omp-identity marker, never
-# during the earlier ancestry walk that resolves $me.
+# fm_harness_record_omp_claude issues to persist the omp-identity marker,
+# which fm-lock.sh now runs BEFORE $LOCK is written so that $LOCK's own
+# visibility can never precede the marker a foreign checker needs (an
+# untrappable SIGKILL landing between the old write order could otherwise
+# leave a live, unverifiable lock behind) - and killed there with SIGTERM,
+# the same signal an interrupted terminal or a supervisor's graceful shutdown
+# would send. The fake ps only sleeps once the claim lock is held, so the
+# delay lands exactly in that marker-persistence gap, before $LOCK exists and
+# never during the earlier ancestry walk that resolves $me.
 test_e2e_interrupted_omp_publication_does_not_leave_an_unverifiable_lock() {
   local dir fakebin pid i rc lock_after
   dir="$TMP_ROOT/e2e-omp-interrupted-publication"
@@ -663,7 +666,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-if [ "$field" = comm= ] && [ -f "$FM_HOME/state/.lock" ]; then
+if [ "$field" = comm= ] && [ -L "$FM_HOME/state/.lock.acquire" ] && [ ! -f "$FM_HOME/state/.lock" ]; then
   sleep 0.5
 fi
 case "$field" in
@@ -680,14 +683,14 @@ SH
   pid=$!
 
   i=0
-  while [ "$i" -lt 200 ] && [ ! -f "$dir/state/.lock" ]; do
+  while [ "$i" -lt 200 ] && [ ! -L "$dir/state/.lock.acquire" ]; do
     sleep 0.02
     i=$((i + 1))
   done
-  if [ ! -f "$dir/state/.lock" ]; then
+  if [ ! -L "$dir/state/.lock.acquire" ]; then
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    fail "fm-lock.sh never reached the session-lock write within the timeout"
+    fail "fm-lock.sh never reached the claim-lock acquisition within the timeout"
   fi
 
   kill -TERM "$pid" 2>/dev/null || true
@@ -701,7 +704,7 @@ SH
     || fail "an omp acquisition interrupted before its identity marker was persisted left the session lock claiming pid $lock_after, unverifiable by any foreign session"
   [ -e "$dir/state/.lock.omp-claude" ] \
     && fail "an interrupted omp acquisition left a stale omp-identity marker behind"
-  pass "session-lock e2e: an omp acquisition interrupted between writing the lock and persisting its identity marker rolls the lock back instead of leaving it unverifiable"
+  pass "session-lock e2e: an omp acquisition interrupted while persisting its identity marker leaves no lock behind instead of publishing an unverifiable one"
 }
 
 test_version_named_session_is_identified_on_both_platforms

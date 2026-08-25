@@ -46,16 +46,17 @@ rm -f "$probe" 2>/dev/null || {
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
-# Set the moment $LOCK is written with $me, cleared only once the whole
-# publication contract (ownership verification and, for an omp holder, the
-# fm_harness_record_omp_claude marker) has completed. If this script is
-# interrupted anywhere in between - a signal, an unexpected error, a crash -
-# the EXIT trap below still fires and must not leave that half-published
-# $LOCK behind: a foreign checker has no way to tell a genuinely interrupted
-# write apart from a legitimately live one, and for an omp holder specifically
-# it cannot verify liveness at all without the marker this invocation never
-# got to write (see fm_harness_pid_alive). Rolling the write back makes an
-# interrupted acquisition look exactly like one that never started.
+# Set the moment $LOCK is written with $me, cleared only once ownership of
+# that write has been verified. fm_harness_record_omp_claude runs BEFORE
+# $LOCK is ever written (see below) specifically so that $LOCK's own
+# visibility is the single moment publication completes: an untrappable
+# termination (SIGKILL, a crash) can only land before that marker exists, in
+# which case $LOCK itself was never written either, or after both exist. There
+# is no ordering in which $LOCK is visible while the marker a foreign omp
+# checker needs is still missing, so that gap cannot depend on the EXIT trap
+# below. The trap still rolls $LOCK back for the narrower case of a signal or
+# crash landing during the write or its own readback verification, so an
+# interrupted acquisition still looks exactly like one that never started.
 LOCK_PUBLISHED_BY_ME=0
 LOCK_PUBLISH_COMPLETE=0
 release_claim_lock() {
@@ -107,6 +108,21 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   fi
 fi
+# A foreign session cannot later read $me's own $CLAUDECODE to verify an omp
+# identity (see fm_harness_pid_alive), so persist that verification now, in
+# the one context - the writer's own environment, immediately after the
+# no-live-foreign-holder checks above - where it is sound evidence. Runs on
+# every acquisition, omp or not, so a non-omp session correctly clears any
+# stale prior record. Written BEFORE $LOCK: $LOCK is what makes $me
+# discoverable to every other session, so the marker a foreign omp checker
+# needs to verify $me must already exist by the time that happens, not
+# racing to catch up afterward. A write failure here means no foreign
+# session could ever prove $me alive, so it fails the whole acquisition
+# before $LOCK is touched at all - nothing to roll back.
+if ! fm_harness_record_omp_claude "$STATE" "$me"; then
+  echo "error: cannot persist omp session-lock identity marker; operate read-only until resolved" >&2
+  exit 1
+fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -118,22 +134,6 @@ written=$(cat "$LOCK" 2>/dev/null) || {
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
-  exit 1
-fi
-# A foreign session cannot later read $me's own $CLAUDECODE to verify an omp
-# identity (see fm_harness_pid_alive), so persist that verification now, in
-# the one context - the writer's own environment, immediately after winning
-# the lock - where it is sound evidence. Runs on every acquisition, omp or
-# not, so a non-omp session correctly clears any stale prior record. A write
-# failure here means no foreign session can ever prove $me alive, so it must
-# fail the whole acquisition rather than leave $LOCK claiming an identity
-# nothing else can verify. LOCK_PUBLISH_COMPLETE stays unset on this path, so
-# the EXIT trap's rollback removes $LOCK - the same rollback that also covers
-# a signal or crash landing anywhere between the write above and here - and a
-# later invocation from this same session cannot short-circuit past the
-# broken marker write via the "$old" = "$me" fast path above.
-if ! fm_harness_record_omp_claude "$STATE" "$me"; then
-  echo "error: cannot persist omp session-lock identity marker; operate read-only until resolved" >&2
   exit 1
 fi
 LOCK_PUBLISH_COMPLETE=1
