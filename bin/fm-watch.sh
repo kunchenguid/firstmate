@@ -2125,6 +2125,25 @@ EOF
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
+              # v7 (2026-08-25): same-hash recovery WITHOUT a declared pause.
+              # Greptile R6: a pane can genuinely recover without entering the
+              # declared-pause branch (e.g., the worker recovers via file
+              # activity or run-step without `paused:` ever being declared).
+              # In that case v5/v6's permanent marker silently suppresses every
+              # later wedge on the same captured content. Lift the marker when
+              # the worker is verifiably active again - pause_state_class is
+              # the same gate v6 site 1/site 2 already use, so a recovery here
+              # is just as unambiguous. Counter is intentionally NOT reset;
+              # the next wedge episode starts from where the previous one
+              # left off, so the cap fires on the first wedge_timer_check call
+              # after this lift and the LLM sees one "PERMANENTLY-WEDGED" per
+              # wedge episode rather than a continuous drain.
+              if [ -e "$STATE/.wedge-permanent-$key-${h:0:12}" ] \
+                && ! afk_present \
+                && [ "$(pause_state_class "$w" "$task")" = working ]; then
+                rm -f "$STATE/.wedge-permanent-$key-${h:0:12}"
+                triage_log "lifted cap marker (same-hash worker recovery): hash=$h window=$w"
+              fi
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi
           fi
