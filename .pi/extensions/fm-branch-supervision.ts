@@ -5,7 +5,8 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
-// merges an append-only note to main's tail. Main's captain/assistant dialog
+// routes it through the freshness boundary before any note reaches main's
+// tail. Main's captain/assistant dialog
 // is mirrored into the branch as read-only fm-main-mirror context at main's
 // turn_end. Pi-only by construction: this file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
@@ -391,7 +392,8 @@ export default function (pi: ExtensionAPI) {
   // Keep every note HERE with the task's claim anchor until the single
   // delivery boundary re-checks it. A note Pi already owns can no longer be
   // re-checked before it is rendered. The row stays unread until the note is
-  // actually delivered, so a session that ends first replays it at startup.
+  // delivered or deliberately dropped as stale, so a session that ends before
+  // either decision replays it at startup.
   function enqueueNote(
     expectedGeneration: number,
     seq: string,
@@ -407,8 +409,8 @@ export default function (pi: ExtensionAPI) {
   // Delivery boundary: deliver queued notes, re-checking each claim against
   // the task's durable record first. A stale routine note is dropped (the
   // durable row keeps it, and fm_branch_outcomes still reads it) and a stale
-  // captain-relevant one is refreshed, so a queued summary is never rendered
-  // as if its claim were still true.
+  // captain-relevant one is refreshed, narrowing stale exposure to the final
+  // non-atomic check-to-handoff instant documented by the architecture.
   function releasePendingNotes(releaseAllowed: boolean): "released" | "blocked" | "refused" {
     while (pendingNotes.length > 0) {
       if (!releaseAllowed || mainStreaming) return "blocked";

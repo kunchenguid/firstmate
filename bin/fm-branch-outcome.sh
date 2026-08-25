@@ -15,17 +15,18 @@
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as an append-only merge note, emitted by the locked session-start
+#     Pi as an append-only merge note, deliberately dropped as a stale routine
+#     note at the delivery boundary, emitted by the locked session-start
 #     replay, or silently consumed there because `silent` is true. Records
-#     above the cursor are "unread": the branch stored them but
-#     did not reach either handoff. A crash inside Pi's delivery window after
+#     above the cursor are "unread": the branch stored them but did not reach
+#     a delivery boundary or replay. A crash inside Pi's delivery window after
 #     cursor advancement does not auto-replay the row; it remains durable and
 #     available through the main session's fm_branch_outcomes tool.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
-#   - The store is written BEFORE the merge note is appended to main
-#     (store-first durability): nothing about a handled event depends on
-#     conversation memory.
+#   - The store is written BEFORE the delivery boundary can append a merge
+#     note to main (store-first durability): nothing about a handled event
+#     depends on conversation memory.
 #   - CLAIM ANCHOR (freshness). An outcome is recorded when its claim is true
 #     and delivered later, so every delivery re-checks the claim instead of
 #     trusting the recorded text. `anchor` is the task's claim anchor at
@@ -50,7 +51,8 @@
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
-#     Advance the cursor (never backwards) after handing the records to Pi.
+#     Advance the cursor (never backwards) after accounting for records at the
+#     delivery boundary.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay

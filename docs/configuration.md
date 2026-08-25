@@ -45,7 +45,7 @@ The branch's role stays bounded exactly as the captain-approved architecture set
 Homes on any other primary harness never load this feature and are entirely unaffected.
 Runtime state lives in `state/branch-outcomes.jsonl` with its `.branch-outcomes-cursor`, the persistent conversation under `state/branch-session/` with its `.branch-session` pointer and `.branch-mirror-cursor`, and per-task `state/.lease-<task>` files; `bin/fm-branch-outcome.sh` and `bin/fm-lease-lib.sh` own those formats.
 A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and Pi never separately prints or renders the merge note itself.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+Routine-note visibility and delivery-time freshness behavior are owned by [docs/pi-supervision-branch.md](pi-supervision-branch.md).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

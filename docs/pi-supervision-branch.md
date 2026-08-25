@@ -6,7 +6,7 @@ The poster is the visual of the idea.
 This document stays the owner and the contract.
 
 Fleet supervision on the Pi primary harness runs on a second, persistent conversation - the supervision branch - inside the same `pi` process as the captain's chat.
-Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch absorbs every ordinary actionable wake that passes the watcher's unchanged first-stage classifier and resolves wholly to one or more tasks, plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, handles them with real tools, and merges each outcome back by appending a short note to the captain conversation's tail.
+Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch absorbs every ordinary actionable wake that passes the watcher's unchanged first-stage classifier and resolves wholly to one or more tasks, plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, handles them with real tools, and routes each durable outcome through delivery-time freshness before any note is merged into the captain conversation's tail.
 Every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main, and only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so Pi never separately prints or renders a captain-facing merge note.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
@@ -24,8 +24,8 @@ This feature is Pi-only by construction and changes nothing anywhere else:
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect so replacement or lock loss cannot let an old continuation mutate the new session.
   Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
-- Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format, the read cursor, and the claim anchor that keeps a delivered outcome honest (see "Freshness at delivery" below).
-  Outcomes are written to the store before any note is handed to Pi, and rows that never reach that handoff replay once through the next locked session-start digest.
+- Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format, the read cursor, and the claim anchor used for delivery-time freshness (see "Freshness at delivery" below).
+  Outcomes are written to the store before any note is handed to Pi, and rows left unread because a session ends before delivery replay once through the next locked session-start digest.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
@@ -47,7 +47,7 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 A note reported after the extension observes `agent_start` is held and delivered only at `agent_settled` after `isIdle()` confirms that retries, compaction, and queued continuations are finished, so its claim can still be re-checked after that work.
 A `routine` note explicitly disables turn triggering, so it never steers and never opens a turn, while a `captain` note uses follow-up delivery to open exactly one turn without steering.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never printed or rendered in Pi.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other current `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
