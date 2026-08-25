@@ -250,7 +250,7 @@ def substantive_report(body):
     missing = [name for name in REQUIRED_SECTIONS if name not in seen]
     empty = []
     for name, lines in sections.items():
-        if lines and not any(
+        if not any(
             any(character.isalnum() or unicodedata.category(character).startswith("S") for character in line)
             for line in lines
         ):

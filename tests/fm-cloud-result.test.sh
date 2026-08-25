@@ -5,7 +5,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-make_return_case() {  # <name> <id> <kind> <report yes|no> <scratch yes|no> <commit yes|no>
+make_return_case() {  # <name> <id> <kind> <report yes|no|empty> <scratch yes|no> <commit yes|no>
   local name=$1 id=$2 kind=$3 report=$4 scratch=$5 commit=$6
   local root home repo worker state
   root=$(fm_test_tmproot "fm-cloud-result-$name")
@@ -50,6 +50,17 @@ if with_report == "yes":
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         "## Summary\n\nReturned task outcome.\n\n"
+        "## What changed\n\nThe requested work ran.\n\n"
+        "## Verification\n\nThe fixture exercised the return path.\n\n"
+        "## Visual evidence\n\nNone.\n\n"
+        "## Artifacts\n\nThe return bundle is retained.\n\n"
+        "## Follow-ups\n\nNone.\n",
+        encoding="utf-8",
+    )
+elif with_report == "empty":
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        "## Summary\n\n"
         "## What changed\n\nThe requested work ran.\n\n"
         "## Verification\n\nThe fixture exercised the return path.\n\n"
         "## Visual evidence\n\nNone.\n\n"
@@ -211,6 +222,22 @@ EOF
   assert_grep 'requested outcome is not complete' "$home/data/$id/report.md" \
     "absent report did not produce a truthful completion-stack artifact"
   pass "an absent required scout report yields a substantive failure report before terminal status"
+}
+
+test_empty_report_section_is_truthful_failure() {
+  local record root home repo id out
+  id=cloud-return-empty-report-section
+  record=$(make_return_case empty-report-section "$id" scout empty no no)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  out=$(run_collect "$home" "$id" 2>&1) || fail "empty report section should be retained as a failure: $out"
+  assert_contains "$out" "failed:" "empty report section was reported done"
+  assert_grep 'required worker report was absent or invalid' "$home/state/$id.status" \
+    "empty report section did not invalidate the returned report"
+  assert_grep 'requested outcome is not complete' "$home/data/$id/report.md" \
+    "empty report section did not produce a truthful completion-stack artifact"
+  pass "a required report heading without substantive content cannot authorize release"
 }
 
 test_local_divergence_retains_custody() {
@@ -435,6 +462,7 @@ SH
 test_ship_success_and_replay
 test_scout_success_with_uncommitted_scratch
 test_absent_report_is_truthful_failure
+test_empty_report_section_is_truthful_failure
 test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
 test_cloud_custody_authority_reads_localized_return
