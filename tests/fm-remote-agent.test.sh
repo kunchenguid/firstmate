@@ -409,9 +409,9 @@ test_terminal_outcomes_with_visible_answer() {
   home=$(new_home answered-terminal); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
   for id in ida-failed-answered ida-cancelled-answered ida-closed-answered; do
     case "$id" in
-      ida-failed-answered) mode=failed-answered; phase=terminal-failure; availability=error; class=provider-terminal-failure; status=failed; outcome=failed ;;
-      ida-cancelled-answered) mode=cancelled-answered; phase=terminal-cancelled; availability=unavailable; class=provider-cancelled; status=cancelled; outcome=cancelled ;;
-      ida-closed-answered) mode=closed-answered; phase=terminal-cancelled; availability=unavailable; class=provider-cancelled; status=closed; outcome=cancelled ;;
+      ida-failed-answered) mode=failed-answered; phase=terminal-failure; availability=error; class="provider-terminal-failure"; status=failed; outcome=failed ;;
+      ida-cancelled-answered) mode=cancelled-answered; phase=terminal-cancelled; availability=unavailable; class="provider-cancelled"; status=cancelled; outcome=cancelled ;;
+      ida-closed-answered) mode=closed-answered; phase=terminal-cancelled; availability=unavailable; class="provider-cancelled"; status=closed; outcome=cancelled ;;
     esac
     new_task "$home" "$id"; : >"$home/bytedcli.log"
     sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}'); marker="firstmate:$id:${sha:0:16}"
