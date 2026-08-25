@@ -10,17 +10,17 @@ metadata:
 
 # Dependency contracts
 
-Map every dependency edge to exact capability that dependent task consumes.
-Do this before recording or changing edge, not after blocker stalls.
+Map every dependency edge to the exact capability that the dependent task consumes.
+Do this before recording, changing, or clearing an edge, not after the blocker stalls.
 
 ## Evidence
 
 Read blocker and dependent acceptance criteria, relevant issue discussion, existing reports, current repository behavior, and backlog records.
 Do not infer hard dependency from preferred order, overlapping files, or broad issue titles.
 
-Select one authoritative owner for product dependency contract: project issue or spec when either exists, otherwise backlog task body.
-Backlog mirrors task identity and scheduling edge, with concise pointer to selected owner.
-Task brief is execution snapshot, not second authority.
+Select one authoritative owner for the product dependency contract: a project issue or spec when either exists, otherwise the backlog task body.
+When an issue or spec owns the contract, the backlog mirrors task identity and the scheduling edge with a concise pointer; otherwise the backlog body states the contract.
+The task brief is an execution snapshot, not a second authority.
 
 ## Edge contract
 
@@ -66,9 +66,9 @@ Never weaken trust-boundary validation, data safety, security, accessibility, or
 
 ## Backlog mutation
 
-Use current `tasks-axi` help for exact commands.
-Create blocker task before dependent task when recording edge.
-Preserve contract pointer in dependent task body and full structured dependency identifiers in backlog metadata.
+Use the configured backlog backend under `AGENTS.md` section 10; when it selects `tasks-axi`, use current help for exact commands.
+Create the blocker task before the dependent task when recording an edge.
+Preserve full structured dependency identifiers in backlog metadata; in the dependent task body, preserve the full contract when the backlog owns it or the concise pointer when an issue or spec owns it.
 
 An edge becomes clear only through normal completion flow after:
 
