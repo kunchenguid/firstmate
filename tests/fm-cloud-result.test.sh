@@ -7,6 +7,7 @@ set -u
 
 make_return_case() {  # <name> <id> <kind> <report yes|no|empty> <scratch yes|no> <commit yes|no>
   local name=$1 id=$2 kind=$3 report=$4 scratch=$5 commit=$6
+  local visuals=${7:-no}
   local root home repo worker state
   root=$(fm_test_tmproot "fm-cloud-result-$name")
   home="$root/home"
@@ -18,7 +19,7 @@ make_return_case() {  # <name> <id> <kind> <report yes|no|empty> <scratch yes|no
   git clone --quiet "$repo" "$worker/task/repo"
   fm_git_identity "$worker/task/repo"
   git -C "$worker/task/repo" checkout --quiet --detach
-  python3 - "$ROOT/bin/fm-worker-supervisor.py" "$root" "$id" "$kind" "$report" "$scratch" "$commit" <<'PY'
+  python3 - "$ROOT/bin/fm-worker-supervisor.py" "$root" "$id" "$kind" "$report" "$scratch" "$commit" "$visuals" <<'PY'
 import hashlib
 import importlib.util
 import json
@@ -27,7 +28,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-supervisor_path, root_text, task, kind, with_report, with_scratch, with_commit = sys.argv[1:]
+supervisor_path, root_text, task, kind, with_report, with_scratch, with_commit, with_visuals = sys.argv[1:]
 root = Path(root_text)
 spec = importlib.util.spec_from_file_location("worker_supervisor", supervisor_path)
 module = importlib.util.module_from_spec(spec)
@@ -68,6 +69,10 @@ elif with_report == "empty":
         "## Follow-ups\n\nNone.\n",
         encoding="utf-8",
     )
+if with_visuals == "yes":
+    visual_path = return_root / "data" / task / "visuals" / "nested" / "proof.txt"
+    visual_path.parent.mkdir(parents=True, exist_ok=True)
+    visual_path.write_text("returned visual evidence\n", encoding="utf-8")
 request = {
     "schema": "fm.worker-execution/v1",
     "home_binding": "a" * 64,
@@ -289,6 +294,49 @@ EOF
   pass "truncated or corrupt return bytes cannot publish artifacts or terminal state"
 }
 
+test_task_artifact_root_symlink_is_refused() {
+  local record root home repo id out status escaped
+  id=cloud-return-task-root-symlink
+  record=$(make_return_case task-root-symlink "$id" scout yes no no)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  escaped="$root/escaped-task-root"
+  rmdir "$home/data/$id"
+  mkdir "$escaped"
+  ln -s "$escaped" "$home/data/$id"
+  out=$(run_collect "$home" "$id" 2>&1)
+  status=$?
+  expect_code 2 "$status" "a redirected task artifact root should be refused: $out"
+  assert_contains "$out" "local artifact directory is redirected" \
+    "task artifact root refusal did not identify the redirected directory"
+  assert_absent "$escaped/report.md" "report escaped through the task artifact root symlink"
+  assert_absent "$home/state/$id.status" "redirected task artifact root emitted terminal status"
+  pass "a task artifact root symlink cannot redirect returned files"
+}
+
+test_visual_parent_symlink_is_refused_before_writes() {
+  local record root home repo id out status escaped
+  id=cloud-return-visual-parent-symlink
+  record=$(make_return_case visual-parent-symlink "$id" scout yes no no yes)
+  IFS='|' read -r root home repo <<EOF
+$record
+EOF
+  escaped="$root/escaped-visual-root"
+  mkdir "$escaped"
+  ln -s "$escaped" "$home/data/$id/visuals"
+  out=$(run_collect "$home" "$id" 2>&1)
+  status=$?
+  expect_code 2 "$status" "a redirected visual parent should be refused: $out"
+  assert_contains "$out" "local artifact directory is redirected" \
+    "visual parent refusal did not identify the redirected directory"
+  assert_absent "$escaped/nested/proof.txt" "visual escaped through a parent-directory symlink"
+  assert_absent "$home/data/$id/report.md" "visual redirect was detected after artifact writes began"
+  assert_absent "$home/data/$id/cloud-return.json" "visual redirect published a release manifest"
+  assert_absent "$home/state/$id.status" "redirected visual parent emitted terminal status"
+  pass "a visual parent symlink is refused before any artifact is installed"
+}
+
 test_cloud_custody_authority_reads_localized_return() {
   local record root home repo id out
   id=cloud-return-authority
@@ -471,6 +519,8 @@ test_absent_report_blocks_collection
 test_empty_report_section_blocks_collection
 test_local_divergence_retains_custody
 test_corrupt_bundle_refuses_before_artifacts
+test_task_artifact_root_symlink_is_refused
+test_visual_parent_symlink_is_refused_before_writes
 test_cloud_custody_authority_reads_localized_return
 test_lifecycle_accepts_only_exact_return_identity
 test_release_authority_requires_retained_scout_scratch

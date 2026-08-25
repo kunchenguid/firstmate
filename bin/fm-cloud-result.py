@@ -261,7 +261,8 @@ def substantive_report(body):
 
 
 def atomic_write(path, body):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise ReturnError("local artifact parent is redirected: {}".format(path.parent))
     if path.exists():
         if path.is_symlink() or not path.is_file():
             raise ReturnError("local artifact destination is redirected: {}".format(path))
@@ -283,10 +284,22 @@ def atomic_write(path, body):
             pass
 
 
-def extract_visuals(body, destination):
-    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+def check_directory(path):
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ReturnError("local artifact directory is redirected: {}".format(path))
+
+
+def ensure_directory(path):
+    check_directory(path)
+    if not path.exists():
+        os.mkdir(str(path), 0o700)
+    check_directory(path)
+
+
+def read_visuals(body):
     total = 0
     count = 0
+    entries = []
     try:
         with tarfile.open(fileobj=io.BytesIO(body), mode="r:") as archive:
             for member in archive.getmembers():
@@ -309,9 +322,33 @@ def extract_visuals(body, destination):
                 target_relative = Path(*relative.parts[visual_index + 1:])
                 if not target_relative.parts:
                     raise ReturnError("worker visual artifact has no file name")
-                atomic_write(destination / target_relative, content)
+                entries.append((target_relative, content))
     except tarfile.TarError as exc:
         raise ReturnError("worker visual artifact archive is corrupt: {}".format(exc))
+    return entries
+
+
+def check_visual_directories(destination, entries):
+    check_directory(destination)
+    if not destination.exists():
+        return
+    for relative, _content in entries:
+        current = destination
+        for part in relative.parent.parts:
+            current = current / part
+            check_directory(current)
+            if not current.exists():
+                break
+
+
+def extract_visuals(entries, destination):
+    ensure_directory(destination)
+    for relative, content in entries:
+        current = destination
+        for part in relative.parent.parts:
+            current = current / part
+            ensure_directory(current)
+        atomic_write(destination / relative, content)
 
 
 def branch_custody(worktree, task, result, kind):
@@ -437,8 +474,16 @@ def collect(args):
     expected_status = "state/{}.status".format(args.task)
     if manifest.get("report_path") != expected_report or manifest.get("status_path") != expected_status:
         raise ReturnError("worker return authorized paths differ from the local task contract")
-    data_dir = home / "data" / args.task
-    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data_root = home / "data"
+    data_dir = data_root / args.task
+    check_directory(data_root)
+    check_directory(data_dir)
+    visual_entries = None
+    if "visuals.tar" in artifacts:
+        visual_entries = read_visuals(artifacts["visuals.tar"])
+        check_visual_directories(data_dir / "visuals", visual_entries)
+    ensure_directory(data_root)
+    ensure_directory(data_dir)
     report = artifacts.get("report.md")
     report_valid = False
     report_reason = "worker returned no report"
@@ -466,8 +511,8 @@ def collect(args):
         atomic_write(data_dir / "cloud-scratch.patch", artifacts["scratch.patch"])
     if "scratch-untracked.tar" in artifacts:
         atomic_write(data_dir / "cloud-scratch-untracked.tar", artifacts["scratch-untracked.tar"])
-    if "visuals.tar" in artifacts:
-        extract_visuals(artifacts["visuals.tar"], data_dir / "visuals")
+    if visual_entries is not None:
+        extract_visuals(visual_entries, data_dir / "visuals")
     branch_custody(worktree, args.task, result, kind)
     succeeded = (
         result.get("exit_code") == 0 and result.get("timed_out") is False
