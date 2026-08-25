@@ -103,6 +103,16 @@ fm_branch_default_branch() {
   return 1
 }
 
+# fm_branch_is_default_branch <repo> <branch>: the resolved default branch is
+# protected from every ordinary cleanup path.  In particular, a content proof
+# comparing the default tip with itself is necessarily true, but must never
+# make that protected ref eligible for deletion.
+fm_branch_is_default_branch() {
+  local repo=$1 branch=$2 default
+  default=$(fm_branch_default_branch "$repo" 2>/dev/null || true)
+  [ -n "$default" ] && [ "$branch" = "$default" ]
+}
+
 # fm_branch_is_safely_merged <repo> <branch> <merged_into_ref> [expected_tip]:
 # the proof itself (see header). When <expected_tip> is supplied, it additionally
 # proves that is still the branch's current tip, binding a caller's later
@@ -145,6 +155,7 @@ fm_branch_is_safely_gone() {
 _fm_branch_delete_local_proven_tip_locked() {
   local repo=$1 branch=$2 expected_tip=$3 tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
+  fm_branch_is_default_branch "$repo" "$branch" && return 1
   tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch") || return 1
   [ "$tip" = "$expected_tip" ] || return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
@@ -220,6 +231,7 @@ fm_branch_fetch_remote_tip() {
 _fm_branch_delete_remote_proven_tip_locked() {
   local repo=$1 branch=$2 remote=$3 expected_tip=$4 current local_tip
   [ -n "$branch" ] && [ -n "$expected_tip" ] || return 1
+  fm_branch_is_default_branch "$repo" "$branch" && return 1
   fm_branch_worktree_has_branch "$repo" "$branch" && return 1
   current=$(fm_branch_remote_tip "$repo" "$remote" "$branch") || return 1
   [ "$current" = "$expected_tip" ] || return 1

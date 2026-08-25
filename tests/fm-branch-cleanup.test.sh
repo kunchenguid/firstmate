@@ -134,6 +134,31 @@ SH
   pass "on-demand cleanup reuses the merged-PR proof for squash-landed tips across both remotes"
 }
 
+test_full_sweep_never_deletes_an_fm_named_default_branch() {
+  local dir repo out
+  dir=$(make_project fm-default)
+  repo="$dir/project"
+
+  git -C "$repo" branch -m main fm/default
+  git -C "$repo" push -q origin refs/heads/fm/default:refs/heads/fm/default
+  git --git-dir="$dir/origin.git" symbolic-ref HEAD refs/heads/fm/default
+  git -C "$repo" fetch -q origin
+  git -C "$repo" remote set-head origin -a >/dev/null
+  git -C "$repo" push -q no-mistakes refs/heads/fm/default:refs/heads/fm/default
+  git -C "$repo" checkout -q --detach
+
+  out=$("$CLEANUP" "$repo")
+
+  assert_not_contains "$out" "pruned fm/default" "full sweep reported the protected default branch as pruned"
+  local_branch_exists "$repo" fm/default \
+    || fail "fm-default: full sweep deleted the local default branch"
+  remote_branch_exists "$dir/origin.git" fm/default \
+    || fail "fm-default: full sweep deleted origin's default branch"
+  remote_branch_exists "$dir/no-mistakes.git" fm/default \
+    || fail "fm-default: full sweep deleted no-mistakes' matching default branch"
+  pass "full sweep preserves an fm/* branch when it is the resolved default branch"
+}
+
 test_remote_advance_after_proof_is_preserved() {
   local dir repo fakebin old_tip new_tip real_git marker
   dir=$(make_project remote-race)
@@ -294,6 +319,7 @@ SH
 
 test_full_sweep_deletes_only_proven_inactive_branches
 test_squash_landed_branch_uses_shared_github_proof
+test_full_sweep_never_deletes_an_fm_named_default_branch
 test_remote_advance_after_proof_is_preserved
 test_remote_only_delete_serializes_a_linked_checkout
 test_pr_merge_delete_flag_drives_real_origin_deletion
