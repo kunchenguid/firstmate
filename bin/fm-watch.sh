@@ -2119,9 +2119,19 @@ EOF
                 # PERMANENTLY-WEDGED earlier is no longer authoritative.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
-                         rm -f "$STATE/.wedge-permanent-$key-${h:0:12}"
+                         # v8 (2026-08-25): reset the escalation counter on cap lift.
+                         # Greptile R7: without the reset, the counter stays at
+                         # (or above) FM_WEDGE_MAX_ESCALATIONS and the next
+                         # wedge_timer_check call would re-fire the cap
+                         # immediately, turning a worker that cycles between
+                         # wedged and recovered into a continuous wake source
+                         # - exactly the drain the cap was supposed to bound.
+                         # The reset means each new wedge episode has to climb
+                         # FM_WEDGE_MAX_ESCALATIONS escalations again before
+                         # the cap fires, bounding the per-episode wake count.
+                         rm -f "$STATE/.wedge-permanent-$key-${h:0:12}" "$STATE/.wedge-escalations-$key"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h"
-                         triage_log "absorbed non-terminal stale (provably working, lifted cap for hash $h): $w" ;;
+                         triage_log "absorbed non-terminal stale (provably working, lifted cap and reset counter for hash $h): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -2133,16 +2143,17 @@ EOF
               # later wedge on the same captured content. Lift the marker when
               # the worker is verifiably active again - pause_state_class is
               # the same gate v6 site 1/site 2 already use, so a recovery here
-              # is just as unambiguous. Counter is intentionally NOT reset;
-              # the next wedge episode starts from where the previous one
-              # left off, so the cap fires on the first wedge_timer_check call
-              # after this lift and the LLM sees one "PERMANENTLY-WEDGED" per
-              # wedge episode rather than a continuous drain.
+              # is just as unambiguous.
               if [ -e "$STATE/.wedge-permanent-$key-${h:0:12}" ] \
                 && ! afk_present \
                 && [ "$(pause_state_class "$w" "$task")" = working ]; then
-                rm -f "$STATE/.wedge-permanent-$key-${h:0:12}"
-                triage_log "lifted cap marker (same-hash worker recovery): hash=$h window=$w"
+                # v8 (2026-08-25): reset the escalation counter alongside the
+                # marker. Without this the counter stays at
+                # (or above) FM_WEDGE_MAX_ESCALATIONS and the next
+                # wedge_timer_check call re-fires the cap immediately,
+                # turning a wedge/recover cycle into a continuous wake drain.
+                rm -f "$STATE/.wedge-permanent-$key-${h:0:12}" "$STATE/.wedge-escalations-$key"
+                triage_log "lifted cap marker and reset counter (same-hash worker recovery): hash=$h window=$w"
               fi
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi

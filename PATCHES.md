@@ -7,15 +7,17 @@ Each patch has a unique ID, a clear revert procedure, and a status.
 
 ## patch-wedge-cap-2026-08-19
 
-**Status:** applied on branch `patch/wedge-cap-2026-08-19` (off main). v7 (2026-08-25) addresses Greptile review round 6: same-hash recovery WITHOUT a declared pause (v6 site 3). v6's two lift sites only fire when the worker has entered and left a declared pause (site 2) or when the pane content has changed (site 1). v7 adds a third lift when the same hash resumes with an active pipeline outside any declared pause - the worker has genuinely recovered via run-step/file activity.
+**Status:** applied on branch `patch/wedge-cap-2026-08-19` (off main). v8 (2026-08-25) addresses Greptile review round 7: cap is bounded across wedge-recover cycles by resetting the escalation counter alongside the marker. Without the reset, the counter stays at (or above) FM_WEDGE_MAX_ESCALATIONS and the next wedge_timer_check call after the lift re-fires the cap immediately, turning a wedge/recover cycle into a continuous wake drain - exactly what the cap was supposed to bound.
 
 **Problem:** `FM_WEDGE_DEMAND_INSPECT_COUNT` (default 3) adds a `demand-deep-inspection` marker to wedge-escalation wakes once a pane has re-wedged on the same stale hash. The design assumes a human or smart supervisor will act on the marker and break the loop. In LLM-supervised unattended setups (herdr + pi agent), the marker is read but never acted on: pi responds to every wake, the wedge never resolves, escalations keep incrementing (observed: 70, 112, 129 in a single session), and the agent loop hammers the model API until the quota is drained. Root-cause of the 2026-08-18 MiniMax subscription drain (~359M tokens).
 
 **Fix:** Add a new constant `FM_WEDGE_MAX_ESCALATIONS` (default 10). Once escalations reach it, `wedge_timer_check` emits ONE terminal wake with a `PERMANENTLY-WEDGED` marker and writes a durable `STATE/.wedge-permanent-<key>-<hash12>` file (per-hash, not per-window, so a fresh stale hash in the same window can still escalate). Subsequent polls for the SAME stale hash short-circuit (no more wakes). **The marker is lifted on unambiguous recovery only**: when `pause_state_class` returns `working` for a window that previously had a wedge marker. Three lift sites cover the production cases:
 
-  1. **v6 site 1** - new hash + working pipeline: the wedge was absorbed because an active pipeline exists for this window.
-  2. **v6 site 2** - same hash + was-paused + working: worker recovered on the SAME hash during a declared pause.
-  3. **v7 site 3** - same hash + working pipeline (no declared pause): worker recovered via run-step/file activity without `paused:` ever being declared.
+  1. **v6 site 1** - new hash + working pipeline: the wedge was absorbed because an active pipeline exists for this window. Resets counter via `clear_pause_tracking`.
+  2. **v6 site 2** - same hash + was-paused + working: worker recovered on the SAME hash during a declared pause. Resets counter explicitly.
+  3. **v7 site 3** - same hash + working pipeline (no declared pause): worker recovered via run-step/file activity without `paused:` ever being declared. Resets counter explicitly.
+
+**v8 cycle bound:** every lift site resets `STATE/.wedge-escalations-<key>` alongside the marker, so the next wedge episode starts from 0 again. Each wedge episode is bounded by `FM_WEDGE_MAX_ESCALATIONS` escalations + 1 cap wake, not by the LLM-loop-drain pattern the cap was created to fix. A worker that wedges/recover/wedges in cycles produces at most ONE cap wake per cycle, not a continuous drain.
 
 Other `clear_pause_tracking` / `handle_paused_stale` call sites do NOT clear the marker (those are automatic supervision-state transitions, not proof that the wedge resolved). Manual operator `rm STATE/.wedge-permanent-<key>-<hash12>` remains the escape hatch for ambiguous cases.
 

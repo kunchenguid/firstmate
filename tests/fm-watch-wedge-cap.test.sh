@@ -374,8 +374,11 @@ test_wedge_cap_lifts_on_same_hash_recovery() {
   reap "$pid"
   ack_stopped_cycle "$state" || true
   [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker was NOT lifted on same-hash recovery with active pipeline (v6 site 2 failed)"
+  # v8: counter is reset alongside the marker so the next wedge episode
+  # starts fresh (bounded per cycle, not a continuous drain).
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "wedge escalation counter was NOT reset on same-hash recovery (v8 cycle-bound failed)"
   unset FM_FAKE_CREW_STATE
-  pass "the cap marker is lifted when the same hash resumes with an active pipeline (v6 site 2)"
+  pass "the cap marker is lifted (and the escalation counter is reset) when the same hash resumes with an active pipeline during a declared pause (v6 site 2 + v8 counter reset)"
 }
 
 test_wedge_cap_lifts_on_unambiguous_recovery() {
@@ -446,6 +449,100 @@ test_wedge_cap_lifts_on_unambiguous_recovery() {
   [ ! -e "$state/.wedge-permanent-$key-${pane_hash_old:0:12}" ] || fail "cap marker for the old hash was NOT lifted on unambiguous recovery (v6 site 1 failed)"
   unset FM_FAKE_CREW_STATE
   pass "the cap marker is lifted when a new hash is detected with an active pipeline"
+}
+
+test_wedge_cap_bounded_across_wedge_recover_cycles() {
+  local dir state fakebin out capture_file window key pane_hash sig pid max
+  dir=$(make_case wedge-cap-cycle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-cycle"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-cycle.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-cycle.status"
+  sig=$(seen_sig "$state/wedge-cap-cycle.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-cycle_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Drive to cap on the first wedge episode.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "priming watch failed"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "round $n watch failed"; }
+    ack_stopped_cycle "$state" || fail "round $n ack failed"
+    n=$((n + 1))
+  done
+  # First wedge episode: cap fired, marker set, counter at FM_WEDGE_MAX_ESCALATIONS.
+  [ -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker missing before cycle test"
+  counter_after_cap=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+  [ "$counter_after_cap" -ge "$max" ] || fail "counter should be at or above $max after cap fire, got $counter_after_cap"
+
+  # Worker recovers (same hash, no declared pause). v7 site 3 lifts the
+  # marker AND v8 resets the counter. After this, the next wedge episode
+  # must climb from 0 again, not re-fire the cap immediately.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  # Wait for site 3 to lift: marker goes AND counter goes.
+  i=0
+  while [ "$i" -lt 150 ]; do
+    marker_gone=0
+    counter_gone=0
+    [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] && marker_gone=1
+    [ ! -e "$state/.wedge-escalations-$key" ] && counter_gone=1
+    [ "$marker_gone" -eq 1 ] && [ "$counter_gone" -eq 1 ] && break
+    is_live_non_zombie "$pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  ack_stopped_cycle "$state" || true
+  [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker was NOT lifted on recovery"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "wedge escalation counter was NOT reset on recovery (v8 cycle-bound failed)"
+
+  # Now drive a SECOND wedge episode. The cap must NOT fire on the first
+  # wedge_timer_check call after recovery - the counter is at 0, so the
+  # wedge has to climb FM_WEDGE_MAX_ESCALATIONS escalations again before
+  # the cap can fire. If the counter had NOT been reset, this would fire
+  # the cap immediately (defeating the cap's purpose - continuous drain).
+  n=1
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "second-episode round $n watch failed"; }
+    ack_stopped_cycle "$state" || fail "second-episode round $n ack failed"
+    n=$((n + 1))
+  done
+  # Verify the second-episode cap fired (FM_WEDGE_MAX_ESCALATIONS more
+  # escalations from 0 means the cap fired normally - the bounded per-cycle
+  # behavior is in effect, not the unbounded v7 cycle).
+  [ -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "second-episode cap marker missing"
+  unset FM_FAKE_CREW_STATE
+  pass "the cap is bounded across wedge-recover cycles (each episode bounded by FM_WEDGE_MAX_ESCALATIONS escalations + 1 cap; v7+v8 prevent continuous drain)"
 }
 
 test_wedge_cap_validates_invalid_override() {
@@ -556,8 +653,11 @@ test_wedge_cap_lifts_on_same_hash_worker_active_without_pause() {
   wait "$pid" 2>/dev/null || true
   ack_stopped_cycle "$state" || true
   [ ! -e "$state/.wedge-permanent-$key-${pane_hash:0:12}" ] || fail "cap marker was NOT lifted on same-hash worker-active recovery without a declared pause (v7 site 3 failed)"
+  # v8: counter is reset alongside the marker so the next wedge episode starts
+  # fresh (bounded by FM_WEDGE_MAX_ESCALATIONS per cycle, not a continuous drain).
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "wedge escalation counter was NOT reset on same-hash worker-active recovery (v8 cycle-bound failed)"
   unset FM_FAKE_CREW_STATE
-  pass "the cap marker is lifted when the same hash resumes with an active pipeline outside a declared pause (v7 site 3)"
+  pass "the cap marker is lifted (and the escalation counter is reset) when the same hash resumes with an active pipeline outside a declared pause (v7 site 3 + v8 counter reset)"
 }
 
 test_wedge_cap_fires_permanently_wedged_after_max_escalations
@@ -566,4 +666,5 @@ test_wedge_cap_persists_across_pause_class_transitions
 test_wedge_cap_lifts_on_unambiguous_recovery
 test_wedge_cap_lifts_on_same_hash_recovery
 test_wedge_cap_lifts_on_same_hash_worker_active_without_pause
+test_wedge_cap_bounded_across_wedge_recover_cycles
 test_wedge_cap_validates_invalid_override
