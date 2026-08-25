@@ -143,6 +143,10 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   The one exception is a pooled worktree of the firstmate repo itself - the
+#   repository the running bin/ scripts belong to (same git common dir): there
+#   origin is read-only and lags local main, so the fresh base is the LOCAL
+#   default-branch head, never origin/main.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1828,22 +1832,43 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  # A pooled worktree of the firstmate repo itself shares its repository with the
+  # running bin/ scripts. There origin is read-only and lags local main, so the
+  # only fresh base is the LOCAL default-branch head, resolved without origin;
+  # every other project keeps the fetched-tip-of-origin contract below.
+  local script_common wt_common
+  script_common=$(git -C "$SCRIPT_DIR/.." rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || script_common=""
+  wt_common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || wt_common=""
+  if [ -n "$script_common" ] && [ "$script_common" = "$wt_common" ]; then
+    target=""
+    for default in main master; do
+      if git -C "$worktree" show-ref --verify --quiet "refs/heads/$default"; then
+        target="refs/heads/$default"
+        break
+      fi
+    done
+    if [ -z "$target" ]; then
+      echo "error: could not determine the local default branch of the firstmate repo for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2

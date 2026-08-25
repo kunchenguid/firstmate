@@ -227,11 +227,71 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_firstmate_home_pool_bases_on_local_main_not_origin() {
+  # A firstmate home's crews take pooled worktrees of the home repo itself
+  # (docs/architecture.md): origin there is read-only and lags local main, so
+  # the fresh base must be the LOCAL default-branch head even though origin
+  # still sits at the older commit.
+  local id dir home origin pool fakebin initial local_main out status
+  id='pool-firstmate-local-r1'
+  dir="$TMP_ROOT/firstmate-home"
+  home="$dir/home"
+  origin="$dir/origin.git"
+  pool="$dir/pool"
+  mkdir -p "$dir" "$home"
+
+  # The home IS the repo checkout: tracked bin/, gitignored runtime dirs.
+  cp -R "$ROOT/bin" "$home/bin"
+  printf 'data/\nstate/\nconfig/\nprojects/\n' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+  git -C "$home" add .gitignore bin
+  git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'home baseline'
+  initial=$(git -C "$home" rev-parse HEAD)
+  fm_git_add_origin "$home" "$origin"
+  # Advance LOCAL main without ever pushing: origin stays one landing behind.
+  printf 'landed locally\n' > "$home/local-landing.txt"
+  git -C "$home" add local-landing.txt
+  git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'advance local main'
+  local_main=$(git -C "$home" rev-parse refs/heads/main)
+
+  # A stale detached pool slot like an unrefreshed treehouse handout.
+  git -C "$home" worktree add --quiet --detach "$pool" "$initial"
+
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+  fakebin=$(make_spawn_fakebin "$dir/fake")
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$pool" \
+    PATH="$fakebin:$PATH" \
+    "$home/bin/fm-spawn.sh" "$id" "$home" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "spawn into a firstmate-home pool worktree should succeed"
+  assert_contains "$out" "spawned $id" "the firstmate-home spawn did not report success"
+  [ "$(git -C "$pool" rev-parse HEAD)" = "$local_main" ] \
+    || fail "the pool worktree did not start at the current LOCAL main head"
+  [ "$(git -C "$pool" rev-parse origin/main)" != "$local_main" ] \
+    || fail "fixture broke: origin/main should lag local main"
+  grep -q 'landed locally' "$pool/local-landing.txt" \
+    || fail "the pool worktree is missing locally landed content"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed firstmate pool base: HEAD=%s local-main=%s origin/main=%s\n' \
+      "$(git -C "$pool" rev-parse HEAD)" "$local_main" "$(git -C "$pool" rev-parse origin/main)"
+    printf '# observed spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a firstmate-home pool worktree bases on current LOCAL main, never on lagging origin/main"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_firstmate_home_pool_bases_on_local_main_not_origin
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

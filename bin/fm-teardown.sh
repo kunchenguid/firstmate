@@ -1119,6 +1119,33 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# Local-only variant of content_in_default: the landing authority for local-only
+# work is the LOCAL default branch, not origin - a read-only origin can lag
+# local main indefinitely. True when the branch contributes a real diff of its
+# own (relative to its merge-base with the local default) AND merging HEAD into
+# the local default yields the default tree, so its content is fully contained
+# even though an automatic trivial-rebase landing (bin/fm-merge-local.sh)
+# rewrote its commits into unreachable originals. A branch contributing no diff
+# of its own - e.g. an empty marker commit that never landed - returns non-zero
+# so the conservative commit-level refusal below stays authoritative.
+content_in_local_default() {
+  local name ref default_tree merged_tree base
+  name=$(default_branch) || return 1
+  if git -C "$WT" show-ref --verify --quiet "refs/heads/$name"; then
+    ref="refs/heads/$name"
+  else
+    return 1
+  fi
+  base=$(git -C "$WT" merge-base HEAD "$ref" 2>/dev/null) || return 1
+  [ "$(git -C "$WT" rev-parse --verify --quiet "$base^{tree}" 2>/dev/null)" \
+    != "$(git -C "$WT" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null)" ] || return 1
+  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$default_tree" ] || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$default_tree" ]
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
@@ -1411,10 +1438,18 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    # Uncommitted changes are never landed. Rewritten-but-contained commits are:
+    # a trivial-rebase landing (bin/fm-merge-local.sh) fast-forwards local main
+    # to rebased commits, so the branch's original commits are no longer
+    # reachable from main while their content is fully contained in it.
+    if [ -n "$dirty" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      echo "uncommitted changes present" >&2
+      echo "Commit them, land them via bin/fm-merge-local.sh after the captain approves, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    elif [ -n "$unmerged" ] && ! content_in_local_default; then
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi

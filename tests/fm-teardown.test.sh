@@ -653,6 +653,42 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_rebase_landed_content_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case rebase-landed)
+  write_meta "$case_dir" local-only ship
+  # Real lane content so containment is non-trivial: the branch tree differs
+  # from main's base tree.
+  printf 'lane deliverable\n' > "$case_dir/wt/deliverable.txt"
+  git -C "$case_dir/wt" add deliverable.txt
+  wt_commit "$case_dir" "original lane work"
+  # A parallel landing advances local main past the lane's base, disjointly.
+  printf 'parallel advance\n' > "$case_dir/project/parallel.txt"
+  git -C "$case_dir/project" add parallel.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm "parallel local-main advance"
+  # Simulate bin/fm-merge-local.sh's automatic trivial-rebase landing exactly:
+  # replay the lane onto current main in a throwaway detached worktree and
+  # fast-forward local main to the replayed tip. The original branch commits are
+  # then NOT reachable from main; only their content is contained in it.
+  git -C "$case_dir/project" worktree add -q --detach "$case_dir/rebase-tmp" fm/task-x1
+  git -C "$case_dir/rebase-tmp" -c user.email=t@t -c user.name=t rebase -q main
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/rebase-tmp" rev-parse HEAD)"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/rebase-tmp"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  if git -C "$case_dir/wt" merge-base --is-ancestor "$wt_head" refs/heads/main 2>/dev/null; then
+    fail "fixture must leave the original branch commits unreachable from main"
+  fi
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "rebase-landed: teardown should succeed on contained content"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "rebase-landed: teardown printed a REFUSED line"
+  pass "local-only work whose content landed via trivial rebase is torn down (rewritten commits count as landed)"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2636,6 +2672,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_rebase_landed_content_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
