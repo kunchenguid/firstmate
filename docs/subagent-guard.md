@@ -181,6 +181,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
+| Hermes | `delegate_task` | The primary-only project plugin returns Hermes's native block directive and directs visible dispatch through `bin/fm-spawn.sh`; the plugin stays inert outside the primary checkout. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |

@@ -152,6 +152,7 @@ Prose may improve without changing adapter behavior.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
+- Hermes returns its native `{"action":"block","message":"..."}` directive only when the checker exits 2.
 
 ## Harness wiring
 
@@ -163,6 +164,7 @@ Prose may improve without changing adapter behavior.
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
+| Hermes | `args.command` | The tracked `firstmate-primary` plugin passes one `--command` argument, requires managed background plus completion notification for the watcher arm, and returns Hermes's native block directive only for exit 2. |
 
 Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
 
@@ -229,6 +231,18 @@ Native supervision paths were also validated in the same scratch project:
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
+
+## Hermes live integration record, 2026-08-25
+
+Hermes Agent 0.20.5 loaded the tracked `firstmate-primary` plugin in a real persistent classic CLI process under a PTY.
+The live guard verified the exact plugin digest and process identity without sending a model turn or requiring provider credentials.
+The portable plugin test separately invokes the registered native `pre_tool_call` callback and proves unrelated commands pass, `delegate_task` is blocked, unsafe arm shapes are blocked, and only `terminal(background=true, notify_on_complete=true)` admits the watcher arm.
+Refresh the installed-host evidence with:
+
+```sh
+FM_HERMES_PRIMARY_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh
+```
 
 ## Automated validation
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$SCRIPT_DIR/fm-harness-process-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -81,6 +83,11 @@ detect_own() {
       echo cursor
       return
     fi
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    if fm_process_is_hermes_primary "$args"; then
+      echo hermes
+      return
+    fi
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
@@ -97,7 +104,6 @@ detect_own() {
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;

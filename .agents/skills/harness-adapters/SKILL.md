@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and the primary-only Hermes integration.
 user-invocable: false
 metadata:
   internal: true
@@ -18,6 +18,7 @@ Optional dispatch profiles in `config/crew-dispatch.json` can override that stat
 When a matched rule or default is a profile array, load `quota-array-dispatch` for the completion-aware candidate choice after this skill establishes harness and model/provider facts.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
+A Hermes primary is the exception that requires an explicit verified worker value because Hermes is primary-only and `fm-spawn.sh` deliberately refuses it.
 
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
@@ -46,6 +47,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
+Hermes has no trusted environment marker in this integration, so it is recognized only from the official executable argv in a persistent primary launch.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -59,7 +61,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `hermes` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
@@ -69,15 +71,17 @@ muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin en
 cursor HAS a full hooks system: 20 lifecycle events configurable at project scope in `.cursor/hooks.json`, plus a Claude-Code compatibility name map that also loads `<project>/.claude/settings.json`.
 Its `stop` step cannot block - exit 2 there is a silent no-op - so `bin/fm-turnend-guard-cursor.sh` parks the turn boundary on the watcher and returns one bounded `followup_message` instead.
 Because Cursor loads the tracked Claude settings too, every Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload.
+Hermes uses the tracked `firstmate-primary` plugin's `post_llm_call` hook to inject one bounded recovery turn when the shared predicate detects a blind turn end.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `cursor`, and `hermes` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+Hermes returns its native `{"action":"block","message":"..."}` directive from the project plugin's `pre_tool_call` hook.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 ## Primary delegation-shape guard
@@ -106,6 +110,7 @@ Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenles
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
+Hermes uses one managed `terminal(background=true, notify_on_complete=true)` process and receives its completion in the persistent CLI session.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -358,6 +363,18 @@ The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.
 The tracked Claude hook entries whose event Grok already covers through its own `.grok/hooks/` registration skip themselves under `GROK_AGENT` or `GROK_HOOK_EVENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path; the exact marker set and why `GROK_SESSION_ID` is excluded are owned by `docs/turnend-guard.md` "Harness integrations".
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+
+## hermes (VERIFIED PRIMARY ONLY 2026-08-25, Hermes Agent 0.20.5)
+
+Hermes runs only the captain-facing primary Firstmate session.
+Launch it from the trusted checkout with `bin/fm-hermes-primary.sh`, after the one-time `bin/fm-hermes-primary.sh --setup` enables the tracked project plugin.
+The launcher forces the persistent classic CLI, preserves the checkout root on resume, and refuses one-shot, safe-mode, rule-skipping, user-config-skipping, worktree, alternate-directory, and TUI options that would disable or escape the integration.
+Detection and session-lock ownership require the structural Hermes executable argv plus a persistent `--cli` launch; `HERMES_HOME`, prompt text, and one-shot `-z` processes are not identity.
+The project plugin blocks `delegate_task`, so all implementation work continues through visible Firstmate workers.
+It also routes watcher-arm commands through the shared pre-tool checker and requires Hermes's managed background terminal with completion notification.
+`post_llm_call` runs the shared turn-end predicate and injects at most one recovery turn per blind boundary.
+Hermes is never a crewmate, scout, or secondmate runtime in this integration, so configure a concrete verified worker such as `pi` in both `config/crew-harness` and `config/secondmate-harness` when needed.
+The live drift guard is `FM_HERMES_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-primary-live-e2e.test.sh`.
 
 ## cursor (VERIFIED CREWMATE/SCOUT 2026-08-11 on tmux and 2026-08-12 on Herdr, and SECONDMATE/PRIMARY 2026-08-13, Cursor Agent CLI 2026.08.11-e8db854)
 

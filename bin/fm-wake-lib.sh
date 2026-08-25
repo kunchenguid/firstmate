@@ -168,18 +168,16 @@ fm_supervision_model() {
   esac
 }
 
-# Pi primary supervision evidence. The Pi extensions record, in their state
-# markers, the exact build they loaded and the session process that loaded it, so
-# "a live Pi session owns supervision" is provable from durable state without a
-# watcher process and without reading any vendor-rendered surface.
+# Primary-adapter load evidence. Tracked adapters record the exact build they
+# loaded and the session process that loaded it, so a current session can prove
+# its own integration is active without reading vendor-rendered output.
 #
-# fm_pi_extension_version <file>
-# Print the marker version string the Pi extensions record for <file>. Must stay
-# byte-identical to the "sha256:<hex>" digest .pi/extensions/fm-primary-pi-watch.ts
-# and .pi/extensions/fm-primary-turnend-guard.ts compute for themselves; a host
+# fm_adapter_file_version <file>
+# Print the marker version string a tracked adapter records for <file>. This must
+# stay byte-identical to the "sha256:<hex>" digest computed by the adapter. A host
 # with no SHA-256 tool falls back to a form no marker can match, which keeps every
 # consumer loud rather than silently satisfied.
-fm_pi_extension_version() {
+fm_adapter_file_version() {
   local file=$1
   [ -f "$file" ] || return 1
   if command -v shasum >/dev/null 2>&1; then
@@ -191,10 +189,10 @@ fm_pi_extension_version() {
   fi
 }
 
-# fm_pi_extension_loaded <marker> <expected-version> <session-lock>
+# fm_adapter_loaded_marker_matches <marker> <expected-version> <session-lock>
 # True when <marker> records <expected-version> and names the session process in
 # <session-lock>, i.e. the session holding this home loaded exactly this build.
-fm_pi_extension_loaded() {
+fm_adapter_loaded_marker_matches() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
@@ -202,6 +200,15 @@ fm_pi_extension_loaded() {
   lock_pid=$(sed -n '1p' "$lock")
   [ -n "$marker_pid" ] || return 1
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+}
+
+# Pi compatibility names retained for the extension-specific callers below.
+fm_pi_extension_version() {
+  fm_adapter_file_version "$@"
+}
+
+fm_pi_extension_loaded() {
+  fm_adapter_loaded_marker_matches "$@"
 }
 
 # fm_pi_extension_owns_supervision <state> <root>

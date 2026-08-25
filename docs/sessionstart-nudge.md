@@ -8,7 +8,7 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
 | Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
-| Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
+| Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, Hermes, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
 The run tier exists because the nudge can only ask.
@@ -75,6 +75,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
 | Cursor | Run | `.cursor/hooks.json` registers `sessionStart`, anchored through `$CURSOR_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-cursor.sh`. | Cursor's payload has no `source` field, so the registration supplies `--source` itself, and the adapter returns the digest as `additional_context`. Project hooks load only when the workspace is launched with `--trust`. |
 | Cursor compaction | Uncovered | None. | Cursor's `preCompact` response can return only `user_message` and is absent from Cursor's `additional_context` step set, so it cannot inject a re-emit digest. Delivering one needs its own design and is deliberately deferred to a follow-up; a Cursor primary does not re-emit its digest after a compaction. |
+| Hermes | Nudge | Hermes loads the checkout's `AGENTS.md`, whose section 3 requires the one full digest before work; the primary plugin does not add a second startup message. | The persistent classic CLI is supported. A native compaction re-emit channel has not been verified, so surviving context remains authoritative after compaction. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
 Cursor's compaction surface is uncovered in the same sense as Codex's interactive TUI above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.

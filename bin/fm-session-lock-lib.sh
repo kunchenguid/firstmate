@@ -15,6 +15,8 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
@@ -62,6 +64,13 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  # Hermes is primary-only and its official launcher execs a generic Python
+  # process. Match its structural argv and require a persistent launch instead
+  # of widening the generic harness-name regex.
+  if fm_process_is_hermes "$args"; then
+    fm_process_is_hermes_primary "$args"
+    return
+  fi
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0

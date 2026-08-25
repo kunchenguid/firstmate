@@ -53,6 +53,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+- Hermes registers `post_llm_call` in `.hermes/plugins/firstmate-primary`, calls the shared predicate after a persistent CLI turn, and uses `ctx.inject_message()` for one bounded recovery turn when the guard returns 2.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment: Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
@@ -93,12 +94,14 @@ The alarm cannot repeat during that failure episode, and a later unhealthy stop 
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
-OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
-Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
+OpenCode, Pi, pi-signed, and Hermes expose passive callbacks for this purpose.
+Their adapters step aside at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
 Each passive adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
+Hermes keeps a per-session latch only until the injected recovery turn reaches its own `post_llm_call`, then clears it so a later independent captain turn can detect a new blind boundary.
+The plugin is inert outside the checkout root, outside a persistent CLI launch, and inside child task worktrees.
 
 Grok makes exactly one typed capability decision from each running Stop payload.
 A boolean `stopHookActive` selects native blocking, including both false on the initial stop and true on the bounded continuation.
@@ -142,6 +145,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
 - Cursor's `preCompact` step is deliberately unregistered: its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).
+- Hermes is supported only through `bin/fm-hermes-primary.sh` in the persistent classic CLI; safe mode, ignored rules or user config, one-shot, TUI, gateway, desktop, ACP, and alternate-root launches are outside the integration.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
 - Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
@@ -158,6 +162,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
+`tests/fm-hermes-primary.test.sh` covers Hermes plugin scope, unsafe launch refusal, managed watcher command enforcement, built-in delegation denial, and bounded recovery.
+`FM_HERMES_PRIMARY_LIVE_E2E=1 tests/fm-hermes-primary-live-e2e.test.sh` proves plugin loading, process identity, and marker-to-lock agreement against the installed Hermes version without sending a model turn.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

@@ -28,6 +28,7 @@
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
+    "docs/hermes-primary.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
@@ -289,6 +290,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/hermes-primary.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -326,6 +331,10 @@
     },
     {
       "path": "docs/supervision-protocols/grok.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/hermes.md",
       "audience": "agent-runtime"
     },
     {

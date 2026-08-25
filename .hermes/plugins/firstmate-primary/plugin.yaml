@@ -1,0 +1,7 @@
+name: firstmate-primary
+version: "1.0.0"
+description: Firstmate primary-session watcher and turn-end supervision adapter.
+provides_hooks:
+  - pre_tool_call
+  - post_llm_call
+  - on_session_finalize
