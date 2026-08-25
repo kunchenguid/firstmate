@@ -95,9 +95,10 @@ const fs = require("node:fs");
 const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
 const words = ["env"];
 for (const name of manifest.unsetEnvironment) words.push("-u", name);
-for (const [name, value] of Object.entries(manifest.environment)) words.push(`${name}=${value}`);
+for (const [name, value] of Object.entries(manifest.environment)) words.push(name + "=" + value);
 words.push(...manifest.argv);
-process.stdout.write(words.join(" ") + " \"$(__OPINPUT__ encode launch-brief < __BRIEF__)\"");
+const dollar = String.fromCharCode(36);
+process.stdout.write(words.join(" ") + " \"" + dollar + "(__OPINPUT__ encode launch-brief < __BRIEF__)\"");
 '
 }
 

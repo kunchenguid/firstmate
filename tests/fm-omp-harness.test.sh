@@ -266,9 +266,10 @@ test_omp_accepts_only_the_exact_pinned_version() {
   read_case_record "$rec"
   stub_log="$CASE_DIR/omp-argv"
   : > "$stub_log"
-  out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  [ "$?" -ne 0 ] || fail "the pinned OMP build must remain dormant: $out"
+  if out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off); then
+    fail "the pinned OMP build must remain dormant: $out"
+  fi
   assert_contains "$out" "session-free omp/17.2.9 consumer" "the pinned build did not reach both mandatory gates: $out"
   [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
     || fail "adapter must invoke omp exactly once, with --version only, got: $(cat "$stub_log")"
@@ -1043,12 +1044,12 @@ SH
 }
 
 test_relaunch_lifecycle_lock_precedes_watcher_guard() {
-  local rec id=omp-relaunch-locked out status meta guard_marker lock ready release holder i=0
-  rec=$(make_omp_case "$id" claude "$id")
+  local rec task_id=omp-relaunch-locked out status meta guard_marker lock ready release holder i=0
+  rec=$(make_omp_case "$task_id" claude "$task_id")
   read_case_record "$rec"
-  meta="$HOME_DIR/state/$id.meta"
+  meta="$HOME_DIR/state/$task_id.meta"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
-  lock="$HOME_DIR/state/.control-$id.lock"
+  lock="$HOME_DIR/state/.control-$task_id.lock"
   ready="$CASE_DIR/control-ready"
   release="$CASE_DIR/control-release"
   fm_write_meta "$meta" \
@@ -1071,7 +1072,7 @@ test_relaunch_lifecycle_lock_precedes_watcher_guard() {
   done
   [ -e "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "could not stage the relaunch lifecycle lock"; }
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" --relaunch --model "$OMP_MODEL")
+    "$task_id" --relaunch --model "$OMP_MODEL")
   status=$?
   : > "$release"
   wait "$holder" || fail "relaunch lifecycle lock holder failed"
