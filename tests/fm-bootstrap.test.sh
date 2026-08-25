@@ -867,6 +867,28 @@ SH
   pass "bootstrap keeps origin-only local semantics and owns forge remediation"
 }
 
+test_forge_host_trailing_dot_is_canonicalized() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-trailing-dot"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com./example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] \
+  && [ "${4:-}" = github.com ] && exit 0
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a trailing-dot GitHub host must use canonical auth policy, got: $out"
+  pass "bootstrap canonicalizes trailing-dot forge hosts"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -1497,6 +1519,7 @@ test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_forge_provider_bootstrap_contracts
+test_forge_host_trailing_dot_is_canonicalized
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
