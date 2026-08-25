@@ -50,26 +50,11 @@ wake_context_enabled() {
     && [ ! -L "$CONFIG/wake-context-presentation" ]
 }
 
-cache_matches_queue() { # <cache>
-  local epoch sequence count
-  count=$(jq -r '.reason_queue | length' "$1" 2>/dev/null) || return 1
-  [ "$count" = 0 ] && [ ! -s "$STATE/.wake-queue" ] && return 0
-  epoch=$(jq -r '.reason_queue[0].epoch // empty' "$1" 2>/dev/null) || return 1
-  sequence=$(jq -r '.reason_queue[0].sequence // empty' "$1" 2>/dev/null) || return 1
-  [ -n "$epoch" ] && [ -n "$sequence" ] || return 1
-  awk -F '\t' -v epoch="$epoch" -v sequence="$sequence" \
-    '$1 == epoch && $2 == sequence { found=1 } END { exit !found }' "$STATE/.wake-queue" 2>/dev/null
-}
-
 replay_cached() {
   [ -e "$CACHE" ] || return 1
   [ -f "$CACHE" ] && [ ! -L "$CACHE" ] || fail_before_presentation "the replay cache is unsafe"
-  if cache_matches_queue "$CACHE"; then
-    printf 'Wake context packet (already presented; do not run the drain again):\n'; cat "$CACHE"
-    return 0
-  fi
-  rm -f -- "$CACHE" "$CACHE_CURSOR" || fail_before_presentation "the stale replay cache could not be retired"
-  return 1
+  printf 'Wake context packet (already presented; do not run the drain again):\n'
+  cat "$CACHE"
 }
 
 stage_status_cursor() {
@@ -380,7 +365,9 @@ prepare_presentation() {
     || fail_before_presentation "automatic wake context is disabled until config/wake-context-presentation exists"
   [ -e "$FALLBACK_RECEIPT" ] || [ ! -e "$CACHE_CURSOR" ] \
     || rm -f -- "$CACHE_CURSOR" || fail_before_presentation "an orphaned cursor stage could not be retired"
-  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || exit 1
+}
+
+preflight_presentation() {
   copy_queue "$TMP_DIR/queue" || fail_before_presentation "the wake queue could not be read safely"
   validate_queue "$TMP_DIR/queue" || fail_before_presentation "the queue is malformed"
   preflight "$TMP_DIR/queue"
@@ -394,11 +381,13 @@ drain_presentation() {
 }
 
 collect_presentation() {
+  preflight_presentation
   drain_presentation
   finish_presentation
 }
 
 run_collection() {
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-context.XXXXXX") || exit 1
   COLLECTION_DEADLINE=$((SECONDS + COLLECTION_TIMEOUT))
   FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
     fm_run_timed "$COLLECTION_TIMEOUT" collect_presentation

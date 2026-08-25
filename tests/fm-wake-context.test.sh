@@ -384,6 +384,24 @@ test_manual_empty_queue_identity_change_withholds_ack() {
   pass "manual empty queue withholds ACK until cursor staging succeeds"
 }
 
+test_manual_cursor_commit_error_withholds_ack() {
+  local home="$TMP_ROOT/manual-cursor-error" real_mv status=0
+  prepare_real_wake "$home"; cp "$home/state/.wake-queue" "$home/queue.before"
+  real_mv=$(command -v mv); mkdir "$home/path"
+  cat > "$home/path/mv" <<'SH'
+#!/usr/bin/env bash
+target=; for target do :; done
+case "$target" in *.status-presentation-cursor) exit 1 ;; *) exec "$FM_TEST_REAL_MV" "$@" ;; esac
+SH
+  chmod +x "$home/path/mv"
+  PATH="$home/path:$PATH" FM_TEST_REAL_MV="$real_mv" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" > "$home/out" 2> "$home/err" || status=$?
+  [ "$status" -ne 0 ] || fail "manual drain ignored cursor commit failure"
+  grep -F 'WAKE_ACK_REQUIRED' "$home/err" >/dev/null && fail "manual drain exposed ACK after cursor commit failure"
+  cmp -s "$home/queue.before" "$home/state/.wake-queue" || fail "cursor commit failure changed the durable queue"
+  pass "manual cursor commit failure withholds ACK and preserves the queue"
+}
+
 test_empty_status_set_stages_empty_cursor() {
   local home="$TMP_ROOT/empty-status-stage" packet
   install_real_drain_fixture "$home"
@@ -460,6 +478,18 @@ test_status_only_recovery_uses_zero_ack() {
   pass "status-only recovery preserves its zero acknowledgement"
 }
 
+test_zero_ack_replays_after_new_wake_and_opt_out() {
+  local home="$TMP_ROOT/status-only-new-wake"
+  install_fixture "$home"
+  FM_DRAIN_ACK_THROUGH=0 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/first" 2> "$home/first.err" || fail "zero-ACK presentation failed"
+  append_wake "$home" 1; rm "$home/config/wake-context-presentation"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/replay" 2> "$home/replay.err" || fail "zero-ACK transaction did not replay"
+  cmp -s "$home/first" "$home/replay" || fail "zero-ACK transaction changed after a new wake"
+  pass "zero-ACK transaction replays byte-identically after a new wake and opt-out"
+}
+
 test_post_drain_overflow_falls_back() {
   local home="$TMP_ROOT/post-drain-overflow" i=1
   install_fixture "$home"
@@ -514,6 +544,41 @@ test_collection_timeout_bounds_drain_before_ack() {
   pass "le drain partage la borne agrégée et retombe avant présentation"
 }
 
+write_blocked_copy_stub() { # <path>
+  cat > "$1" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_COPY_STARTED"
+sleep 20
+: > "$FM_TEST_COPY_COMPLETED"
+exec "$FM_TEST_REAL_CP" "$@"
+SH
+  chmod +x "$1"
+}
+
+assert_initial_copy_timeout() { # <home> <status> <elapsed>
+  [ "$2" -ne 0 ] || fail "initial queue copy ignored the aggregate deadline"
+  [ "$3" -lt 10 ] || fail "initial queue copy escaped the aggregate deadline"
+  [ -e "$1/copy.started" ] || fail "initial queue copy never reached the blocked executable"
+  [ ! -e "$1/copy.completed" ] || fail "initial queue copy completed after the aggregate deadline"
+  [ ! -e "$1/drain.calls" ] || fail "timed-out initial queue copy reached the drain"
+  grep -Fx 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: wake context collection timed out; run bin/fm-wake-drain.sh once.' "$1/out" >/dev/null \
+    || fail "timed-out initial queue copy lost its single manual-drain instruction"
+  [ "$(grep -Fc 'WAKE_CONTEXT_FALLBACK:' "$1/out")" -eq 1 ] || fail "timed-out initial queue copy duplicated its fallback"
+}
+
+test_collection_timeout_bounds_initial_queue_copy() {
+  local home="$TMP_ROOT/slow-copy" real_cp started elapsed status=0
+  install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1
+  real_cp=$(command -v cp); mkdir "$home/path"; write_blocked_copy_stub "$home/path/cp"
+  started=$SECONDS
+  PATH="$home/path:$PATH" FM_TEST_REAL_CP="$real_cp" FM_TEST_COPY_STARTED="$home/copy.started" \
+    FM_TEST_COPY_COMPLETED="$home/copy.completed" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=2 \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
+  elapsed=$((SECONDS - started)); assert_initial_copy_timeout "$home" "$status" "$elapsed"
+  pass "initial queue copy shares the aggregate collection deadline"
+}
+
 test_collection_timeout_falls_back_after_crew_state_hang() {
   local home="$TMP_ROOT/collection-timeout" started finished status=0
   install_fixture "$home"; cp "$ROOT/bin/fm-timeout-lib.sh" "$home/bin/"; append_wake "$home" 1; : > "$home/hang"
@@ -538,7 +603,7 @@ target=; for target do :; done
 case "$target" in *.wake-context-cache.status-cursor) "$FM_TEST_REAL_MV" "$@" && : > "$FM_TEST_CURSOR_MOVED" ;; *.wake-context-cache) : > "$FM_TEST_CACHE_ENTERED"; sleep 10; "$FM_TEST_REAL_MV" "$@" ;; *) "$FM_TEST_REAL_MV" "$@" ;; esac
 SH
   chmod +x "$home/path/mv"
-  PATH="$home/path:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_CURSOR_MOVED="$home/cursor.moved" FM_TEST_CACHE_ENTERED="$home/cache.entered" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=4 \
+  PATH="$home/path:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_CURSOR_MOVED="$home/cursor.moved" FM_TEST_CACHE_ENTERED="$home/cache.entered" FM_WAKE_CONTEXT_COLLECTION_TIMEOUT=8 \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/out" 2> "$home/err" || status=$?
   [ "$status" -ne 0 ] && [ -e "$home/cursor.moved" ] && [ -e "$home/cache.entered" ] || fail "le timeout n’a pas suivi le vrai staging du curseur"
   [ -f "$home/state/.wake-context-fallback-receipt" ] && [ -f "$home/state/.wake-context-cache.status-cursor" ] || fail "le fallback a publié l’ACK sans reçu et curseur durables"
@@ -622,23 +687,49 @@ test_utf8_fallback_ack_commits_unread_cursor() {
   pass "UTF-8 fallback acknowledgement commits its unread cursor exactly once"
 }
 
-test_manual_drain_supersedes_truncated_fallback_receipt() {
-  local home="$TMP_ROOT/manual-supersede" payload ack generation
+test_manual_drain_preserves_published_fallback() {
+  local home="$TMP_ROOT/manual-preserve" payload status=0
   prepare_real_wake "$home"; payload=$(head -c 60000 /dev/zero | tr '\0' x)
   printf '%s' "$payload" > "$home/state/alpha.status"; printf '%s' "$payload" > "$home/state/beta.status"
   printf '%s' "$payload" > "$home/state/gamma.status"; printf '\nnote: after-truncated\n' >> "$home/state/beta.status"
   jq -cn '{replay:{ack_through:1,recovery_generation:"old"}}' > "$home/state/.wake-context-fallback-receipt"
   cp "$home/cursor.before" "$home/state/.wake-context-cache.status-cursor"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-context.sh" --present > "$home/pi" 2>/dev/null || true
-  grep -Fx 'WAKE_CONTEXT_FALLBACK: wake context unavailable before presentation: status bytes exceed the packet bound; run bin/fm-wake-drain.sh once.' "$home/pi" >/dev/null || fail "Pi preflight did not return a complete bounded action"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" > "$home/manual" 2> "$home/manual.err"
-  grep -F 'after-truncated' "$home/manual" >/dev/null || fail "manual drain lost the post-truncation note"
-  [ ! -e "$home/state/.wake-context-fallback-receipt" ] && [ ! -e "$home/state/.wake-context-cache.status-cursor" ] || fail "manual drain retained stale fallback state"
-  ack=$(sed -n 's/.*--ack-through \([0-9][0-9]*\).*/\1/p' "$home/manual.err"); generation=$(sed -n 's/.*--recovery-generation \([^ ]*\).*/\1/p' "$home/manual.err")
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null || fail "manual fallback ACK failed"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-wake-drain.sh" > "$home/replay" 2>/dev/null
-  grep -F 'after-truncated' "$home/replay" >/dev/null && fail "manual fallback replayed its handled note"
-  pass "manual drain supersedes stale fallback state before presenting large status"
+  cp "$home/state/.wake-context-fallback-receipt" "$home/receipt.before"; cp "$home/state/.wake-context-cache.status-cursor" "$home/stage.before"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" > "$home/manual" 2> "$home/manual.err" || status=$?
+  [ "$status" -ne 0 ] || fail "manual drain superseded a published fallback"
+  cmp -s "$home/receipt.before" "$home/state/.wake-context-fallback-receipt" || fail "manual drain changed the published receipt"
+  cmp -s "$home/stage.before" "$home/state/.wake-context-cache.status-cursor" || fail "manual drain changed the staged cursor"
+  pass "manual drain preserves a published fallback until its exact ACK"
+}
+
+test_superseded_ack_fails_before_wake_mutation() {
+  local home="$TMP_ROOT/superseded-ack" ack generation status=0
+  prepare_real_wake "$home"
+  FM_CREW_STATE_LARGE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present >/dev/null 2>/dev/null || true
+  ack=$(jq -r '.replay.ack_through' "$home/state/.wake-context-fallback-receipt"); generation=$(jq -r '.replay.recovery_generation' "$home/state/.wake-context-fallback-receipt")
+  jq -cn --argjson ack "$((ack + 1))" --arg generation "$generation" '{replay:{ack_through:$ack,recovery_generation:$generation}}' > "$home/receipt.next"
+  mv "$home/receipt.next" "$home/state/.wake-context-fallback-receipt"; cp -R "$home/state" "$home/state.before"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null || status=$?
+  [ "$status" -ne 0 ] || fail "superseded ACK was accepted"
+  diff -qr "$home/state.before" "$home/state" >/dev/null || fail "superseded ACK mutated wake state"
+  pass "superseded ACK fails before queue, claim, recovery, cursor, or receipt mutation"
+}
+
+test_ack_selects_the_exact_published_receipt() {
+  local home="$TMP_ROOT/exact-receipt" ack generation
+  prepare_real_wake "$home"
+  FM_CREW_STATE_LARGE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-context.sh" --present >/dev/null 2>/dev/null || true
+  ack=$(jq -r '.replay.ack_through' "$home/state/.wake-context-fallback-receipt"); generation=$(jq -r '.replay.recovery_generation' "$home/state/.wake-context-fallback-receipt")
+  jq -cn --argjson ack "$((ack + 1))" --arg generation "$generation" '{replay:{ack_through:$ack,recovery_generation:$generation}}' > "$home/state/.wake-context-cache"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$home" \
+    "$home/bin/fm-wake-drain.sh" --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>/dev/null || fail "exact fallback receipt was ignored"
+  [ ! -e "$home/state/.wake-context-cache.status-cursor" ] || fail "exact ACK did not commit its staged cursor"
+  [ ! -e "$home/state/.wake-context-cache" ] && [ ! -e "$home/state/.wake-context-fallback-receipt" ] || fail "exact ACK did not retire transaction state"
+  pass "ACK selects its exact receipt before committing the transaction"
 }
 
 test_resolved_is_not_primary_actionable() {
@@ -658,21 +749,26 @@ test_unstageable_status_cursor_withholds_ack
 test_empty_queue_unstageable_status_cursor_withholds_ack
 test_manual_nonempty_queue_identity_change_withholds_ack
 test_manual_empty_queue_identity_change_withholds_ack
+test_manual_cursor_commit_error_withholds_ack
 test_empty_status_set_stages_empty_cursor
 test_cardinality_overflow_falls_back_before_drain
 test_stale_window_maps_to_affected_task
 test_packet_projects_unread_status_tail
 test_absolute_check_key_maps_to_task
 test_status_only_recovery_uses_zero_ack
+test_zero_ack_replays_after_new_wake_and_opt_out
 test_post_drain_overflow_falls_back
 test_backend_timeout_normalizes_to_a_positive_decimal
 test_collection_timeout_accepts_leading_zero_decimal
 test_collection_timeout_bounds_drain_before_ack
+test_collection_timeout_bounds_initial_queue_copy
 test_collection_timeout_falls_back_after_crew_state_hang
 test_timeout_after_cursor_stage_keeps_receipt_before_ack
 test_collection_timeout_spans_slow_crew_probes
 test_cursor_merge_follows_live_rotation_without_regression
 test_post_presentation_failure_preserves_human_ack
 test_utf8_fallback_ack_commits_unread_cursor
-test_manual_drain_supersedes_truncated_fallback_receipt
+test_manual_drain_preserves_published_fallback
+test_superseded_ack_fails_before_wake_mutation
+test_ack_selects_the_exact_published_receipt
 test_resolved_is_not_primary_actionable

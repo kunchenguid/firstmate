@@ -1035,6 +1035,14 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+WATCHER_EARLY_SIGNALLED=0
+watcher_early_cleanup() {
+  [ "$WATCHER_EARLY_SIGNALLED" -eq 1 ] || return 0
+  fm_lock_release "$WATCH_LOCK"
+}
+watcher_early_signal() { WATCHER_EARLY_SIGNALLED=1; exit 1; }
+trap watcher_early_cleanup EXIT
+trap watcher_early_signal HUP INT TERM
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1

@@ -1,8 +1,9 @@
 Mode: Pi extension background wake.
 
 When this session owns supervision and away mode is not active:
-1. On a manual recovery or handling turn with neither an attached packet nor an attached fallback presentation, drain first with `bin/fm-wake-drain.sh`.
+1. On a manual recovery or handling turn with neither an attached packet nor an attached fallback presentation, run `bin/fm-wake-drain.sh` only when the adapter emitted its single manual-drain instruction.
    An attached complete fallback presentation has already been drained, so handle it directly without draining again.
+   A published packet or fallback receipt remains the sole transaction through opt-out and later wakes; no manual drain may replace it before its exact acknowledgement.
    After handling the presented wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi` or `pi-signed`, after approving project trust once per clone); if not, restart the selected executable with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
 3. First cycle only: make the one required `fm_watch_arm_pi` call.
@@ -14,7 +15,7 @@ When this session owns supervision and away mode is not active:
    The generation-owner contract lives in `.pi/extensions/fm-primary-pi-watch.ts`.
 7. After an actionable child close that remains on the captain-facing path, the extension rechecks session-lock ownership, verifies one successor, and attaches one bounded `fm-wake-context.v1` packet when presentation succeeds.
    Handle an attached packet without draining or rebuilding the same context, then run its exact acknowledgement command.
-   When no packet is attached and the extension reports that presentation was unavailable, use `bin/fm-wake-drain.sh` once.
+   When no packet is attached and the extension prints the manual-drain instruction, use `bin/fm-wake-drain.sh` once.
 8. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_pi` again because continuity is extension-owned rather than model-memory-owned.
 9. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
 10. Missing, failed, or unhealthy cycle only: if a later notification explicitly reports one of those repair conditions, drain queued wakes, inspect the failure text, call `fm_watch_arm_pi`, and restart the selected Pi-family executable with both extensions loaded if needed.

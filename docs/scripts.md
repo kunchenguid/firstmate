@@ -92,8 +92,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor for the bootstrap diagnostic                  |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
-| `fm-wake-drain.sh`       | Own human wake presentation and post-handling acknowledgement; [architecture.md](architecture.md#event-driven-supervision) owns the transaction mechanism |
-| `fm-wake-context.sh`     | Provide the bounded adapter packet, replay, or manual-drain fallback; [configuration.md](configuration.md#wake-context-presentation-configwake-context-presentation) owns opt-in and [architecture.md](architecture.md#event-driven-supervision) owns mechanics |
+| `fm-wake-drain.sh`       | Own actor-scoped human presentation, row claims, and exact post-handling acknowledgement without superseding a published wake-context transaction |
+| `fm-wake-context.sh`     | Publish or byte-identically replay one bounded adapter transaction, or emit the nonmutating manual-drain instruction when no opt-in exists |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared wake-classification vocabulary, durable keyed-decision folds and scans, and unread informational status-line selection |
 | `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |

@@ -40,7 +40,7 @@ The optional local, gitignored `config/wake-context-presentation` presence flag 
 The effective config directory is `FM_CONFIG_OVERRIDE` when set, otherwise `$FM_HOME/config`.
 The flag must be a regular non-symlinked file, and an absent or unsafe flag keeps enriched presentation off by default.
 On those presentation paths, when disabled and no previously published packet remains unacknowledged, adapters preserve the actionable wake and direct the primary to one ordinary `bin/fm-wake-drain.sh` presentation without creating a wake-context cache, staged cursor, fallback receipt, or acknowledgement.
-A packet already published before the flag is removed remains replayable byte-identically until its exact acknowledgement retires it.
+A packet already published before the flag is removed remains the sole transaction and replays byte-identically until its exact acknowledgement retires it, including after a new wake or an attempted manual drain.
 This preference belongs to one Firstmate home and is not inherited into secondmate homes, so enabling one home never broadens the captain's grant implicitly.
 
 ## Pi supervision branch
