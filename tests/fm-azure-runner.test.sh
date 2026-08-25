@@ -2238,9 +2238,46 @@ PY
   pass "Azure runner bootstrap waits for apt/dpkg maintenance races and times out deterministically"
 }
 
+no_mistakes_yaml_test_route_contract() {
+  local tmp fixture command local_marker shard_marker
+  tmp=$(mktemp -d)
+  fixture="$tmp/repo"
+  local_marker="$tmp/local-route"
+  shard_marker="$tmp/shard-route"
+  mkdir -p "$fixture/bin"
+  command=$(ruby -e \
+    'require "yaml"; puts YAML.safe_load_file(ARGV.fetch(0)).fetch("commands").fetch("test")' \
+    "$ROOT/.no-mistakes.yaml") \
+    || fail "the no-mistakes test command could not be loaded from YAML"
+  [ -n "$command" ] || fail "the no-mistakes YAML has no test command"
+
+  printf '#!/usr/bin/env bash\nprintf "local\\n" >%q\n' "$local_marker" \
+    >"$fixture/bin/fm-no-mistakes-test-command.sh"
+  printf '#!/usr/bin/env bash\nprintf "shard\\n" >%q\n' "$shard_marker" \
+    >"$fixture/shard-bridge"
+  chmod +x "$fixture/bin/fm-no-mistakes-test-command.sh" "$fixture/shard-bridge"
+
+  (cd "$fixture" && env -u FM_AZURE_VALIDATION_CELL \
+    FM_AZURE_VALIDATION_SHARD_BRIDGE="$fixture/shard-bridge" bash -c "$command") \
+    || fail "the no-mistakes YAML local test route failed"
+  [ -e "$local_marker" ] || fail "the no-mistakes YAML local test route bypassed its wrapper"
+  [ ! -e "$shard_marker" ] || fail "the no-mistakes YAML local test route invoked the shard bridge"
+
+  rm -f "$local_marker" "$shard_marker"
+  (cd "$fixture" && env FM_AZURE_VALIDATION_CELL=1 \
+    FM_AZURE_VALIDATION_SHARD_BRIDGE="$fixture/shard-bridge" bash -c "$command") \
+    || fail "the no-mistakes YAML validation-cell test route failed"
+  [ -e "$shard_marker" ] || fail "the no-mistakes YAML validation-cell route bypassed the shard bridge"
+  [ ! -e "$local_marker" ] || fail "the no-mistakes YAML validation-cell route invoked the local wrapper"
+
+  rm -rf "$tmp"
+  pass "no-mistakes YAML test routing executes the local wrapper and validation shard bridge exclusively"
+}
+
 apt_lock_wait_contract
 dispatch_ambient_binding_contract
 no_mistakes_test_step_offload_contract
 routing_file_contract
+no_mistakes_yaml_test_route_contract
 
 echo "# fm-azure-runner.test.sh: all assertions passed"
