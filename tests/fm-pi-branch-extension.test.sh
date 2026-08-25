@@ -26,6 +26,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -39,6 +40,12 @@ import { writeFileSync } from "node:fs";
 export function getAgentDir() {
   return "/stub-agent-dir";
 }
+
+export function getMarkdownTheme() {
+  return {};
+}
+
+export class UserMessageComponent {}
 
 export class DefaultResourceLoader {
   constructor(options) {
@@ -124,6 +131,12 @@ export class Text {
     this.text = text;
     this.paddingX = paddingX;
     this.paddingY = paddingY;
+  }
+}
+
+export class Container {
+  render() {
+    return [];
   }
 }
 JS
@@ -271,7 +284,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
-const { fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
+const { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
@@ -382,6 +395,34 @@ if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not 
 // renderer.
 const outcomesTool = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
 if (!outcomesTool) throw new Error("fm_branch_outcomes was not registered on main");
+const renderTheme = {
+  fg(_color, text) { return text; },
+  bold(text) { return text; },
+};
+const renderContext = { state: {}, isError: false, isPartial: false };
+const stockResult = { content: [{ type: "text", text: "OUTCOME_DUMP" }] };
+const calmOffCall = outcomesTool.renderCall({}, renderTheme, renderContext);
+const calmOffResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
+if (calmOffCall.constructor.name !== "Text" || calmOffCall.text !== "fm_branch_outcomes") {
+  throw new Error("fm_branch_outcomes changed its ordinary call rendering");
+}
+if (calmOffResult.constructor.name !== "Text" || calmOffResult.text !== "OUTCOME_DUMP") {
+  throw new Error("fm_branch_outcomes changed its ordinary result rendering");
+}
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+const calmOnCall = outcomesTool.renderCall({}, renderTheme, renderContext);
+const calmOnResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
+if (calmOnCall.constructor.name !== "Container" || calmOnCall.render(100).length !== 0 || calmOnResult.constructor.name !== "Container" || calmOnResult.render(100).length !== 0) {
+  throw new Error("fm_branch_outcomes remained visible while Calm was on");
+}
+pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Text" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Text") {
+  throw new Error("fm_branch_outcomes did not restore ordinary rendering when Calm was turned off");
+}
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
+if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Text" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Text") {
+  throw new Error("fm_branch_outcomes was hidden during stock export rendering");
+}
 const listed = await outcomesTool.execute("call-4", { recent: 2 }, undefined, undefined, {});
 const listedText = listed.content[0].text;
 if (listedText.split("\n").length !== 2 || !listedText.includes("checks green")) {
