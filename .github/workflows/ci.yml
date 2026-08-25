@@ -19,6 +19,10 @@ jobs:
   # with nothing outside the doc surfaces takes the fast path. Pushes to main
   # never detect (they follow an approved merge), which routes them to the
   # full suite through the same rule.
+  # On code PRs each behavior lane additionally narrows itself to affected
+  # tests through bin/fm-test-run.sh's conservative path->family map
+  # (--changed --lane/--family): a lane whose diff maps to none of its tests
+  # prints "skipped: no affected tests" and reports success in seconds.
   # ASSUMPTION: main has no branch protection (verified 2026-08-24), so skipped
   # jobs can never block a merge; revisit this fast path before adding required
   # status checks.
@@ -107,29 +111,56 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Detect affected tests for portable parallel shard 1
+        id: affected
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Pushes to main follow an approved merge: run the complete lane.
+            echo "count=all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "$PR_BASE_SHA" HEAD)
+          count=$(bin/fm-test-run.sh --list --changed --base "$base" \
+            --lane portable-parallel-1 | wc -l | tr -d ' ')
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+      - name: Report skip when nothing is affected
+        if: steps.affected.outputs.count == '0'
+        run: |
+          echo "skipped: no affected tests"
       - name: Install pinned ShellCheck
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install pinned actionlint
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable parallel shard 1
+      - name: Run portable parallel shard 1 (affected tests only)
+        if: steps.affected.outputs.count != '0'
+        env:
+          FM_CHANGED_BASE: ${{ steps.affected.outputs.base }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-1 \
+            --changed --base "$FM_CHANGED_BASE" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
-        if: always()
+        if: always() && steps.affected.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-parallel-1
@@ -146,29 +177,56 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Detect affected tests for portable parallel shard 2
+        id: affected
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Pushes to main follow an approved merge: run the complete lane.
+            echo "count=all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "$PR_BASE_SHA" HEAD)
+          count=$(bin/fm-test-run.sh --list --changed --base "$base" \
+            --lane portable-parallel-2 | wc -l | tr -d ' ')
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+      - name: Report skip when nothing is affected
+        if: steps.affected.outputs.count == '0'
+        run: |
+          echo "skipped: no affected tests"
       - name: Install pinned ShellCheck
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install pinned actionlint
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable parallel shard 2
+      - name: Run portable parallel shard 2 (affected tests only)
+        if: steps.affected.outputs.count != '0'
+        env:
+          FM_CHANGED_BASE: ${{ steps.affected.outputs.base }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-2 \
+            --changed --base "$FM_CHANGED_BASE" \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
-        if: always()
+        if: always() && steps.affected.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-parallel-2
@@ -199,17 +257,41 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Detect affected tests for this serial shard
+        id: affected
+        env:
+          FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Pushes to main follow an approved merge: run the complete shard.
+            echo "count=all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "$PR_BASE_SHA" HEAD)
+          count=$(bin/fm-test-run.sh --list --changed --base "$base" \
+            --lane "$FM_SERIAL_LANE" | wc -l | tr -d ' ')
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+      - name: Report skip when nothing is affected
+        if: steps.affected.outputs.count == '0'
+        run: |
+          echo "skipped: no affected tests"
       - name: Install pinned ShellCheck
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install pinned actionlint
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Require tmux for e2e tests
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           command -v tmux >/dev/null || {
@@ -218,35 +300,42 @@ jobs:
           }
           tmux -V
       - name: Install tasks-axi for backlog-handoff delegation
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable serial shard ${{ matrix.shard }}
+        # Exactly one automatic retry of this same shard: a passing rerun counts
+        # as green and leaves a warning annotation as flake evidence. Never
+        # retried more than once, and no other step retries. The shard runs
+        # only its changed-selected intersection; the detect step above proved
+        # it is non-empty.
+        if: steps.affected.outputs.count != '0'
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
           # without matching bin/fm-test-run.sh is refused instead of quietly
           # leaving a shard of the required lane unrun.
           FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
           FM_SERIAL_SHARD: ${{ matrix.shard }}
-        # Exactly one automatic retry of this same shard: a passing rerun counts
-        # as green and leaves a warning annotation as flake evidence. Never
-        # retried more than once, and no other step retries.
+          FM_CHANGED_BASE: ${{ steps.affected.outputs.base }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           json="$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
-          if bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" --json "$json"; then
+          if bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+              --changed --base "$FM_CHANGED_BASE" --json "$json"; then
             exit 0
           fi
           echo "::warning::portable serial shard ${FM_SERIAL_SHARD} failed; re-running the same shard once"
-          if bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" --json "$json"; then
+          if bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+              --changed --base "$FM_CHANGED_BASE" --json "$json"; then
             echo "::warning::portable serial shard ${FM_SERIAL_SHARD} passed on retry; first failure kept as flake evidence"
             exit 0
           fi
           exit 1
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
-        if: always()
+        if: always() && steps.affected.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-serial-${{ matrix.shard }}
@@ -271,7 +360,28 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Detect affected tests for the real-Herdr lane
+        id: affected
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Pushes to main follow an approved merge: run the complete lane.
+            echo "count=all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "$PR_BASE_SHA" HEAD)
+          count=$(bin/fm-test-run.sh --list --changed --base "$base" \
+            --lane real-herdr-gated | wc -l | tr -d ' ')
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+      - name: Report skip when nothing is affected
+        if: steps.affected.outputs.count == '0'
+        run: |
+          echo "skipped: no affected tests"
       - name: Require tools for real Herdr
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
@@ -281,11 +391,13 @@ jobs:
           jq --version
           python3 --version
       - name: Install pinned Herdr
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install pinned Treehouse
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
@@ -293,6 +405,7 @@ jobs:
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
@@ -315,6 +428,7 @@ jobs:
             exit 1
           }
       - name: Start default Herdr session for fleet-state tripwire
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           # Lab provision requires exactly one running default session so the
@@ -341,6 +455,7 @@ jobs:
           cat "$RUNNER_TEMP/fm-herdr/default-server.log" || true
           exit 1
       - name: Snapshot pre-suite Herdr sessions
+        if: steps.affected.outputs.count != '0'
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-herdr"
@@ -348,17 +463,23 @@ jobs:
       - name: Run real-Herdr family (serial, required)
         # Comfortably above the ~7 min healthy wall and far below the 75 min
         # job backstop. A hang must fail this step so cleanup still runs.
+        # Runs only its changed-selected intersection; the detect step above
+        # proved it is non-empty.
         timeout-minutes: 20
+        if: steps.affected.outputs.count != '0'
+        env:
+          FM_CHANGED_BASE: ${{ steps.affected.outputs.base }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           # Serial only. Fail if any script reports herdr not found. Live
           # harness credential tests stay outside this family (opt-in env only).
           bin/fm-test-run.sh --family real-herdr-gated \
+            --changed --base "$FM_CHANGED_BASE" \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
-        if: always()
+        if: always() && steps.affected.outputs.count != '0'
         run: |
           set -eu
           bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
@@ -368,7 +489,7 @@ jobs:
             exit 1
           }
       - name: Upload Herdr timing and diagnostics
-        if: always()
+        if: always() && steps.affected.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-herdr
@@ -428,7 +549,39 @@ jobs:
     if: needs.changes.result != 'success' || needs.changes.outputs.other == 'true'
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so the lane can compute its own merge-base.
+          fetch-depth: 0
+      - name: Detect affected tests for the macOS snapshot lane
+        id: affected
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # Pushes to main follow an approved merge: run the complete lane.
+            echo "count=all" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "$PR_BASE_SHA" HEAD)
+          count=$(bin/fm-test-run.sh --list --changed --base "$base" \
+            --family snapshot-bearings | wc -l | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            # The stock-Bash parse sweep covers every tracked bin/*.sh, so any
+            # shell-script change re-runs this lane even when no snapshot test
+            # is affected.
+            if git diff --name-only "$base...HEAD" | grep -qE '^bin/.*\.sh$'; then
+              count=1
+            fi
+          fi
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+      - name: Report skip when nothing is affected
+        if: steps.affected.outputs.count == '0'
+        run: |
+          echo "skipped: no affected tests"
       - name: Run snapshot consumers with stock Bash
+        if: steps.affected.outputs.count != '0'
         shell: /bin/bash {0}
         env:
           PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin

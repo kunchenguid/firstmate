@@ -190,7 +190,9 @@ test_empty_selection_emits_summary() {
   printf 'documentation only\n' >"$repo/README.md"
   out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
-  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
+  printf '%s\n' "$out" | grep -Fqx 'skipped: no affected tests' \
+    || fail "empty changed selection must print the skip marker: $out"
+  printf '%s\n' "$out" | grep -Fqx 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0' \
     || fail "empty selection summary is missing or non-deterministic: $out"
   json="$tmp/artifacts/timing.json"
   python3 -c '
@@ -202,6 +204,56 @@ assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
   rm -rf "$tmp"
   pass "empty changed selection emits deterministic text and JSON summaries"
+}
+
+test_changed_lane_family_intersection_and_skip_marker() {
+  local tmp repo listed rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-lane.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  # A watcher-source change selects only the watcher family; its members live
+  # in the portable serial lane, never in the proven-isolated parallel shards.
+  : >"$repo/bin/fm-watch-extra.sh"
+  git -C "$repo" add bin/fm-watch-extra.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm watcher-change
+
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD~1 --lane portable-parallel-1)
+  [ -z "$listed" ] || fail "watcher change must not intersect portable-parallel-1: $listed"
+
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD~1 --lane portable-serial)
+  assert_contains "$listed" "tests/fm-daemon.test.sh" "serial lane intersection keeps watcher daemon coverage"
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "serial lane intersection keeps watcher extension coverage"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-brief.test.sh' \
+    && fail "serial lane intersection must stay inside the serial lane"
+
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD~1 --family watcher-wake-lock)
+  assert_contains "$listed" "tests/fm-daemon.test.sh" "family filter keeps daemon coverage"
+  listed_count=$(printf '%s\n' "$listed" | grep -c 'tests/' | tr -d ' ')
+  [ "$listed_count" -eq 2 ] \
+    || fail "family filter must select exactly the fixture watcher pair, got $listed_count"
+
+  # Flag order must not change semantics.
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --lane portable-parallel-1 --changed --base HEAD~1)
+  [ -z "$listed" ] || fail "reversed flag order must behave identically: $listed"
+
+  # An empty intersection is success with an explicit skip marker, not silence.
+  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD~1 --lane portable-parallel-1 2>/dev/null) \
+    || fail "empty changed+lane intersection must exit success"
+  printf '%s\n' "$out" | grep -Fqx 'skipped: no affected tests' \
+    || fail "empty changed+lane run must print the skip marker: $out"
+  printf '%s\n' "$out" | grep -Fqx 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0' \
+    || fail "empty changed+lane run must emit the empty summary: $out"
+
+  # Standalone modes keep refusing combinations; only --changed composes.
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --all --lane portable-parallel-1) >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--all combined with --lane must still be refused, got rc=$rc"
+
+  rm -rf "$tmp"
+  pass "changed selection intersects lanes and families; empty result skips with a marker"
 }
 
 test_timing_markers_and_json() {
@@ -708,6 +760,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_lane_family_intersection_and_skip_marker
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior

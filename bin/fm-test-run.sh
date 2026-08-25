@@ -7,9 +7,14 @@
 # --proven-isolated, or script paths):
 #   fm-test-run.sh --all
 #   fm-test-run.sh --family <name>
-#   fm-test-run.sh --changed [--base <git-ref>]
+#   fm-test-run.sh --changed [--base <git-ref>] [--lane <name>|--family <name>]
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
+#
+#   With --changed, a --lane or --family value stops being a standalone mode
+#   and becomes an intersection filter: only tests the change selected that
+#   also belong to that lane (or family) run. An empty final selection prints
+#   "skipped: no affected tests" and exits 0 so a CI lane reports success fast.
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -28,6 +33,11 @@
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
+#   --lane <name>, --family <name>
+#                   standalone: exclusive selection modes as above. Combined
+#                   with --changed (either flag order): intersect the changed
+#                   selection with that lane's composition or family membership
+#                   so each CI lane runs only its own affected tests.
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
@@ -56,6 +66,8 @@
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.
+# A --changed selection that ends up empty prints "skipped: no affected tests"
+# on stdout, emits the empty FM_TEST_SUMMARY line, and exits 0.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -73,6 +85,9 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Intersection filters usable only with MODE=changed; see register_lane_arg.
+FILTER_LANE=
+FILTER_FAMILY=
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
@@ -615,6 +630,66 @@ select_proven_isolated() {
     [ -n "$s" ] || continue
     add_script "$s"
   done < <(list_proven_isolated)
+}
+
+# Register a --lane value as a standalone selection mode, or as an
+# intersection filter over --changed when both are requested (either flag
+# order must behave identically).
+register_lane_arg() {
+  local value=$1
+  case "${MODE:-}" in
+    ""|lane)
+      MODE=lane
+      LANE=$value
+      ;;
+    changed)
+      FILTER_LANE=$value
+      ;;
+    *)
+      die "only one selection mode is allowed"
+      ;;
+  esac
+}
+
+register_family_arg() {
+  local value=$1
+  case "${MODE:-}" in
+    ""|family)
+      MODE=family
+      FAMILY=$value
+      ;;
+    changed)
+      FILTER_FAMILY=$value
+      ;;
+    *)
+      die "only one selection mode is allowed"
+      ;;
+  esac
+}
+
+# Accept --changed after a standalone --lane/--family by demoting that mode to
+# the matching intersection filter, so flag order never changes semantics.
+demote_standalone_selection_to_changed() {
+  case "${MODE:-}" in
+    "")
+      MODE=changed
+      ;;
+    lane)
+      FILTER_LANE=$LANE
+      LANE=
+      MODE=changed
+      ;;
+    family)
+      FILTER_FAMILY=$FAMILY
+      FAMILY=
+      MODE=changed
+      ;;
+    changed)
+      ;;
+    *)
+      die "only one selection mode is allowed"
+      ;;
+  esac
 }
 
 select_lane() {
@@ -1200,6 +1275,40 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# Narrow the current selection to a lane's exact composition. Lane membership
+# stays owned by select_lane; this only intersects what --changed already
+# selected so a CI lane runs just its own affected tests.
+filter_selection_to_lane() {
+  local want=$1 s t keep
+  local -a kept=()
+  local -a saved=()
+  local -a lane_scripts=()
+  saved=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
+  SCRIPTS=()
+  select_lane "$want"
+  lane_scripts=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
+  SCRIPTS=("${saved[@]+"${saved[@]}"}")
+  for s in "${SCRIPTS[@]}"; do
+    keep=0
+    for t in "${lane_scripts[@]}"; do
+      [ "$t" = "$s" ] && { keep=1; break; }
+    done
+    [ "$keep" -eq 1 ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
+}
+
+# Narrow the current selection to scripts whose primary family matches.
+filter_selection_to_family() {
+  local want=$1 s fam
+  local -a kept=()
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    fam=$(family_for_basename "$(basename "$s")")
+    [ "$fam" = "$want" ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
@@ -1298,29 +1407,21 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --family)
-      [ -z "$MODE" ] || die "only one selection mode is allowed"
       [ "$#" -gt 1 ] || die "--family requires a name"
-      MODE=family
-      FAMILY=$2
+      register_family_arg "$2"
       shift 2
       ;;
     --family=*)
-      [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=family
-      FAMILY=${1#--family=}
+      register_family_arg "${1#--family=}"
       shift
       ;;
     --lane)
-      [ -z "$MODE" ] || die "only one selection mode is allowed"
       [ "$#" -gt 1 ] || die "--lane requires a name (see --list-lanes)"
-      MODE=lane
-      LANE=$2
+      register_lane_arg "$2"
       shift 2
       ;;
     --lane=*)
-      [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=lane
-      LANE=${1#--lane=}
+      register_lane_arg "${1#--lane=}"
       shift
       ;;
     --proven-isolated)
@@ -1329,8 +1430,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --changed)
-      [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=changed
+      demote_standalone_selection_to_changed
       shift
       ;;
     --base)
@@ -1480,7 +1580,15 @@ case "${MODE:-}" in
     ;;
   changed)
     select_changed "$BASE_REF"
-    SELECTION_DESC="changed:base=$BASE_REF"
+    if [ -n "$FILTER_LANE" ]; then
+      filter_selection_to_lane "$FILTER_LANE"
+      SELECTION_DESC="changed:base=$BASE_REF;lane=$FILTER_LANE"
+    elif [ -n "$FILTER_FAMILY" ]; then
+      filter_selection_to_family "$FILTER_FAMILY"
+      SELECTION_DESC="changed:base=$BASE_REF;family=$FILTER_FAMILY"
+    else
+      SELECTION_DESC="changed:base=$BASE_REF"
+    fi
     ;;
   scripts)
     # Normalize and re-add through add_script for consistent paths.
@@ -1516,6 +1624,9 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
+  if [ "$MODE" = changed ]; then
+    printf 'skipped: no affected tests\n'
+  fi
   printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
   if [ -n "$JSON_PATH" ]; then
     empty_rec=$(mktemp)

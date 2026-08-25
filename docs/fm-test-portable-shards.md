@@ -98,6 +98,12 @@ bin/fm-test-run.sh --check-coverage
 It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 
+## Changed-based lane selection
+
+On code PRs each behavior lane intersects `--changed` with its own composition before running, so a diff that maps to none of that lane's tests prints "skipped: no affected tests" and reports success in seconds.
+`bin/fm-test-run.sh --help` owns the exact intersection flags and the empty-selection marker contract.
+`.github/workflows/ci.yml` owns the per-job detection steps and merge-base plumbing.
+
 ## Timing artifacts
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
