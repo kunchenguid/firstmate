@@ -22,7 +22,7 @@ commit_file() {
 }
 
 make_project() {
-  local name=$1 dir="$TMP_ROOT/$1"
+  local dir="$TMP_ROOT/$1"
   mkdir -p "$dir"
   git init -q "$dir/seed"
   git -C "$dir/seed" symbolic-ref HEAD refs/heads/main
