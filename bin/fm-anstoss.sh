@@ -33,10 +33,18 @@
 # passes vacuously for them and conditions 5/6 carry the liveness verdict.
 #
 # Failure-class separation (O-0018): a standing pane whose capture matches an
-# API-error signature ("API Error", cloudflare) is REPORTED once per incident
-# instead of silently nudged - a provider outage is firstmate's call, not a
-# worker motivation problem. The signature list lives in api_error_matches()
-# below and owns that vocabulary.
+# API-error signature ("API Error", cloudflare) runs its OWN two-nudge ladder
+# instead of being silently folded into the standing-lane ladder above
+# (captain's word, 25.08. mittags: "geht das nicht per waechter? Arbeiter
+# scannen und wenn die letzte ausgabe API-Error enthaellt einfach 'weiter
+# gehts' schreiben?!?" - EN: "can't the watcher do this? Scan workers and if
+# the last output contains API-Error just type 'keep going'?!?"). The
+# signature list lives in api_error_matches() below and owns that vocabulary.
+# The one exception: a pane whose capture ALSO shows an open interactive
+# choice (a numbered "N. Yes" menu, vocabulary owned by dialog_choice_pending()
+# below) is never typed into - reported once per distinct image instead,
+# exactly the pre-automation path, because a freeform nudge line typed into a
+# live selection is a fresh mistake, not a recovery.
 #
 # Ladder per lane, counted in state/.anstoss-count-<id>:
 #   Stage 1 (automatic, silent): one fm-send nudge carrying a written end
@@ -53,9 +61,25 @@
 #     makes the Automat quieter, never louder. A lane closing with a terminal
 #     verb resets everything.
 #
+# O-0018 ladder per lane, counted in state/.anstoss-o18n-<id> (separate from
+# the standing-lane counter above; a lane classifies as EITHER standing OR
+# O-0018 on a given sweep, never both):
+#   Nudges 1 and 2 (automatic, silent): the same fm-send path types a fixed
+#     API-recovery line - resume the work, measure the worktree instead of
+#     recalling it, close on a terminal status line. Spacing is the same
+#     FM_ANSTOSS_INTERVAL/backoff clock the standing ladder uses (shared per
+#     lane, so a refutation on this lane quiets both ladders together).
+#   From the third API failure (i.e. the second nudge proved ineffective): no
+#     further auto-nudge - one line wakes firstmate instead, repeating every
+#     spacing interval while the lane stays stuck (account re-routing stays
+#     supervisor business, O-0018).
+#   Refuted nudge and terminal close: identical L34/reset handling to the
+#     standing ladder, through the same shared note_liveness_recovery() path.
+#
 # Every sweep prints NOTHING unless firstmate must act: exactly one line for a
-# stage-2 escalation or a first-time O-0018 finding. Fleet stop
-# (state/.fleet-stop) silences all nudges and reports (U0.1).
+# standing-lane stage-2 escalation, an O-0018 escalation, or a dialog-blocked
+# O-0018 first sighting. Fleet stop (state/.fleet-stop) silences all nudges
+# and reports (U0.1).
 #
 # Commands:
 #   fm-anstoss.sh check            one detection-and-ladder sweep (default)
@@ -99,8 +123,9 @@ usage() {
   cat <<'EOF'
 Usage:
   fm-anstoss.sh check        one state-based sweep: detect silently exited
-                             lanes, run the two-step nudge ladder, report
-                             O-0018 API-error panes instead of nudging them
+                             lanes, run the two-step nudge ladder, run the
+                             O-0018 API-error ladder (two auto-nudges, then
+                             escalate; open dialogs are reported, never typed)
   fm-anstoss.sh arm          write and register state/anstoss.check.sh
   fm-anstoss.sh disarm       remove the check shim and its trust binding
   fm-anstoss.sh --selftest   verify the sources this check needs
@@ -141,6 +166,14 @@ api_error_matches() {  # <capture-text>
   printf '%s\n' "$1" | grep -Eim1 'API Error|[Cc]loudflare'
 }
 
+# An open interactive choice (a numbered "N. Yes" menu row - the verified
+# shape of a Yes/No-style confirmation, e.g. "1. Yes" or "  2. Yes, continue")
+# anywhere in the capture. This function owns that vocabulary; item 4 of the
+# anstoss-selbst-tippen brief: never type into one, report it instead.
+dialog_choice_pending() {  # <capture-text> -> 0 if a choice row is present
+  printf '%s\n' "$1" | grep -Eiq '[0-9]+\.[[:space:]]*Yes\b'
+}
+
 backoff_doublings() {  # <id> -> current doubling exponent
   local n
   n=$(cat "$STATE/.anstoss-backoff-$1" 2>/dev/null || echo 0)
@@ -158,7 +191,7 @@ effective_interval() {  # <id> -> minimum seconds between this lane's nudges
 # keeps biting after the counter itself is gone.
 anstoss_state_clear() {  # <id>
   rm -f "$STATE/.anstoss-count-$1" \
-    "$STATE/.anstoss-fp-$1" "$STATE/.anstoss-o0018-$1"
+    "$STATE/.anstoss-fp-$1" "$STATE/.anstoss-o0018-$1" "$STATE/.anstoss-o18n-$1"
 }
 
 anstoss_state_reset_all() {  # <id>
@@ -190,18 +223,31 @@ Anstoss-Automat (#$2): dieser Posten wirkt still ausgestiegen ($3). Endbedingung
 EOF
 }
 
+# Fixed text per the O-0023 ladder end condition (sinngemaess captain's word,
+# 25.08. mittags). Typed identically on nudge 1 and 2; only the counter in the
+# prefix changes, matching stage1_nudge_message's own numbering convention.
+o18_nudge_message() {  # <id> <count>
+  cat <<EOF
+Anstoss nach API-Abbruch (#$2, O-0018): nimm die Arbeit wieder auf - miss den Stand am Worktree, statt ihn zu erinnern. Endbedingung: eine terminale Statuszeile (done:/blocked:/needs-decision:). Weitere API-Abbrueche dieser Bahn werden erneut angestossen.
+EOF
+}
+
 # Refutation bookkeeping (L34): a lane proven working right after a nudge
 # doubles that lane's spacing, anchored on the contact epoch. A terminal
-# status closes cleanly and resets everything instead.
+# status closes cleanly and resets everything instead. Checks BOTH ladder
+# counters (standing and O-0018) - either one having sent a real nudge makes
+# this a genuine refutation, not just an unmeasured first sighting.
 note_liveness_recovery() {  # <id> <terminal-seen(0/1)>
-  local count n
+  local count count_o18 n
   if [ "${2:-0}" = 1 ]; then
     anstoss_state_reset_all "$1"
     return 0
   fi
   count=$(cat "$STATE/.anstoss-count-$1" 2>/dev/null || echo 0)
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  [ "$count" -ge 1 ] || {
+  count_o18=$(cat "$STATE/.anstoss-o18n-$1" 2>/dev/null || echo 0)
+  case "$count_o18" in '' | *[!0-9]*) count_o18=0 ;; esac
+  { [ "$count" -ge 1 ] || [ "$count_o18" -ge 1 ]; } || {
     anstoss_state_clear "$1"
     return 0
   }
@@ -263,23 +309,32 @@ classify_lane() {  # <id> <meta> ; sets globals: LANE_VERDICT LANE_DETAIL CAPTUR
 
   # O-0018 separation BEFORE the work-evidence gates: an alive endpoint, no
   # working marker, and an API-error image anywhere in the FULL capture is the
-  # incident shape itself (2026-08-24). It is reported, not nudged - retries
-  # burning CPU behind a dead stream must not reclassify the stall as work,
-  # and an old transcript error in a recovered lane costs one surplus report,
-  # never an automatic action. Reported on first sighting; identical images
-  # stay quiet through the fingerprint marker.
+  # incident shape itself (2026-08-24). It runs the O-0018 ladder
+  # (run_o18_ladder, header owns the contract) instead of the CPU/no-mistakes
+  # work-evidence gates below - retries burning CPU behind a dead stream must
+  # not reclassify the stall as work. An open interactive choice is the one
+  # exception: reported once per distinct image, never typed into.
   err_line=$(api_error_matches "$capture" || true)
   if [ -n "$err_line" ]; then
-    local fp_err
-    fp_err=$(printf '%s' "$err_line" | _anstoss_hash)
-    if [ "$(cat "$STATE/.anstoss-o0018-$id" 2>/dev/null || true)" != "$fp_err" ]; then
-      printf '%s\n' "$fp_err" > "$STATE/.anstoss-o0018-$id" || return 0
-      LANE_VERDICT=o0018
-      LANE_DETAIL="O-0018-API-Fehlerbild an $id: $(printf '%s' "$err_line" | cut -c1-100) - nicht automatisch angestossen, Erstbefund bei Firstmate"
+    if dialog_choice_pending "$capture"; then
+      # An open interactive choice is never typed into (item 4): reported
+      # once per distinct image, exactly the pre-automation O-0018 path.
+      local fp_err
+      fp_err=$(printf '%s' "$err_line" | _anstoss_hash)
+      rm -f "$STATE/.anstoss-o18n-$id"
+      if [ "$(cat "$STATE/.anstoss-o0018-$id" 2>/dev/null || true)" != "$fp_err" ]; then
+        printf '%s\n' "$fp_err" > "$STATE/.anstoss-o0018-$id" || return 0
+        LANE_VERDICT=o0018
+        LANE_DETAIL="O-0018-API-Fehlerbild an $id (Dialog offen, nicht angetippt): $(printf '%s' "$err_line" | cut -c1-100) - Erstbefund bei Firstmate"
+      fi
+      return 0
     fi
+    rm -f "$STATE/.anstoss-o0018-$id"
+    LANE_VERDICT=o0018auto
+    LANE_DETAIL=$err_line
     return 0
   fi
-  rm -f "$STATE/.anstoss-o0018-$id"
+  rm -f "$STATE/.anstoss-o0018-$id" "$STATE/.anstoss-o18n-$id"
 
   # Condition 5a: CPU delta across the sweep interval (child processes).
   # The very first sample only seeds the delta's baseline: an unmeasured pane
@@ -363,6 +418,41 @@ run_ladder() {  # <id> <detail> ; reads CAPTURE_TEXT from classify_lane
   return 0
 }
 
+# The O-0018 ladder (captain's word, 25.08. mittags): nudges 1 and 2 type the
+# fixed API-recovery line automatically; from the third API failure of this
+# lane (the second nudge already proved ineffective) no further auto-nudge
+# happens - one line wakes firstmate instead, repeating every spacing
+# interval while the lane stays stuck. One counter, state/.anstoss-o18n-<id>,
+# carries both halves: values 1-2 are nudges already sent, values 3+ are
+# escalation reports already printed. Spacing reuses the SAME
+# .anstoss-last-<id>/.anstoss-backoff-<id> clock the standing ladder uses, so
+# a refutation elsewhere on this lane (note_liveness_recovery) quiets this
+# ladder too.
+run_o18_ladder() {  # <id> <err-line> ; the standing ladder's counterpart
+  local id=$1 err_line=$2 now count last next
+  now=$(date +%s)
+  count=$(cat "$STATE/.anstoss-o18n-$id" 2>/dev/null || echo 0)
+  case "$count" in '' | *[!0-9]*) count=0 ;; esac
+  last=$(cat "$STATE/.anstoss-last-$id" 2>/dev/null || echo 0)
+  case "$last" in '' | *[!0-9]*) last=0 ;; esac
+  [ "$((now - last))" -ge "$(effective_interval "$id")" ] || return 0
+  next=$((count + 1))
+
+  if [ "$count" -lt 2 ]; then
+    if FM_HOME="$FM_HOME" "$SEND_BIN" "$id" "$(o18_nudge_message "$id" "$next")" >/dev/null 2>&1; then
+      printf '%s\n' "$next" > "$STATE/.anstoss-o18n-$id"
+      printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
+    fi
+    return 0
+  fi
+
+  printf '%s\n' "$next" > "$STATE/.anstoss-o18n-$id"
+  printf '%s\n' "$now" > "$STATE/.anstoss-last-$id"
+  printf 'anstoss: Bahn %s bleibt nach API-Abbruch still (%d. Anstoss wirkungslos, O-0018) - Weckruf an Firstmate: Neustart-Entscheid faellen. Letzter Fehlerbefund: %s\n' \
+    "$id" "$next" "$(printf '%s' "$err_line" | cut -c1-100)"
+  return 0
+}
+
 action_check() {
   # Fleet stop silences every nudge and report (U0.1: automations read the
   # order states before revival).
@@ -387,6 +477,9 @@ action_check() {
       o0018)
         printf '%s\n' "$LANE_DETAIL"
         ;;
+      o0018auto)
+        run_o18_ladder "$id" "$LANE_DETAIL"
+        ;;
     esac
   done
 
@@ -399,7 +492,7 @@ action_check() {
     b=${b#.anstoss-}
     kind2=${b%%-*}
     case "$kind2" in
-      count | last | fp | backoff | o0018) ;;
+      count | last | fp | backoff | o0018 | o18n) ;;
       *) continue ;;
     esac
     id=${b#"$kind2"-}

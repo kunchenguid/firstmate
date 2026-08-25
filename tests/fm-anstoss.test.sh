@@ -275,7 +275,7 @@ test_terminal_status_closes_the_lane() {
   pass "a lane whose status ends on a terminal verb is left alone"
 }
 
-test_api_error_far_above_prompt_is_reported_not_nudged() {
+test_api_error_far_above_prompt_is_auto_nudged() {
   local dir id=oxfehler out
   dir=$(make_anstoss_case api-error-positive)
   write_lane_meta "$dir" "$id"
@@ -284,7 +284,8 @@ test_api_error_far_above_prompt_is_reported_not_nudged() {
   # POSITIVE fixture from the 2026-08-24 ~17:5x CEST incident class: the API
   # Error banner renders far above the input box, where the hand-sweep's tail
   # cut was blind for 2 of 3 standing windows. Sixty blank lines sit between
-  # error and composer to prove the FULL surface is read.
+  # error and composer to prove the FULL surface is read. No dialog is on
+  # screen, so this must reach the auto-nudge ladder, not the report-only path.
   {
     printf 'API Error (Request timed out, no request id received)\n'
     for _ in $(seq 1 60); do printf '\n'; done
@@ -295,19 +296,90 @@ test_api_error_far_above_prompt_is_reported_not_nudged() {
   } > "$dir/capture.txt"
 
   out=$(sweep "$dir")
+  [ -s "$dir/sent.log" ] || fail "a full-surface API-error pane was not auto-nudged on first sighting"
+  grep -q "^$id	" "$dir/sent.log" || fail "the auto-nudge was not addressed to the erroring lane"
+  grep -q "Anstoss nach API-Abbruch" "$dir/sent.log" || fail "the auto-nudge lacks the fixed O-0018 recovery line"
+  grep -q "Endbedingung" "$dir/sent.log" || fail "the auto-nudge lacks its written end condition"
+  [ "$(cat "$dir/state/.anstoss-o18n-$id")" = 1 ] || fail "the O-0018 counter is not 1 after the first auto-nudge"
+  [ -z "$out" ] || fail "an effective first auto-nudge woke firstmate anyway: $out"
+
+  pass "a full-surface API-error pane with no open dialog is auto-nudged with the fixed recovery line"
+}
+
+test_api_error_second_nudge_is_spaced_and_counted() {
+  local dir id=oxfehler2
+  dir=$(make_anstoss_case api-error-second-nudge)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  sweep "$dir" >/dev/null                             # nudge #1 (default interval)
+  sweep "$dir" >/dev/null                             # too soon: spacing not yet passed
+  [ "$(wc -l < "$dir/sent.log")" = 1 ] || fail "a second nudge was sent before the spacing interval passed"
+
+  sleep 1.1
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null       # nudge #2, spacing satisfied
+  [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "the second auto-nudge was not sent once spacing passed"
+  [ "$(cat "$dir/state/.anstoss-o18n-$id")" = 2 ] || fail "the counter is not 2 after the second auto-nudge"
+
+  pass "the O-0018 ladder's second auto-nudge waits out the spacing interval, then counts to 2"
+}
+
+test_api_error_escalates_after_two_ineffective_nudges() {
+  local dir id=eskaloxid out
+  dir=$(make_anstoss_case api-error-escalation)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # nudge #1
+  [ -z "$out" ] || fail "the first auto-nudge printed a captain-facing line: $out"
+
+  sleep 1.1
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # nudge #2 (nudge #1 was ineffective)
+  [ -z "$out" ] || fail "the second auto-nudge printed a captain-facing line: $out"
+  [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "two auto-nudges were not both sent before escalation"
+
+  sleep 1.1
+  out=$(sweep "$dir" FM_ANSTOSS_INTERVAL=1)                       # 3rd API failure: nudge #2 was ineffective too
+  printf '%s\n' "$out" | grep -q "O-0018" || fail "the third API failure did not wake firstmate"
+  printf '%s\n' "$out" | grep -q "$id" || fail "the escalation does not name the lane"
+  [ "$(wc -l < "$dir/sent.log")" = 2 ] || fail "the third failure typed a third nudge instead of escalating"
+  [ "$(cat "$dir/state/.anstoss-o18n-$id")" = 3 ] || fail "the counter is not 3 after the escalation"
+
+  pass "the O-0018 ladder auto-nudges twice, then wakes firstmate instead of typing a third time"
+}
+
+test_api_error_dialog_is_reported_not_typed() {
+  local dir id=dialogoxid out
+  dir=$(make_anstoss_case api-error-dialog)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+
+  # An open interactive choice must never receive typed text (item 4): the
+  # capture carries BOTH the API-error signature and a numbered Yes/No menu.
+  {
+    printf 'API Error (Request timed out)\n'
+    printf 'Retry the request?\n'
+    printf '  1. Yes, retry\n'
+    printf '  2. No, cancel\n'
+  } > "$dir/capture.txt"
+
+  out=$(sweep "$dir")
   sweep "$dir" >/dev/null
   sweep "$dir" >/dev/null
-  [ ! -s "$dir/sent.log" ] || fail "an O-0018 API-error pane was silently nudged"
-  printf '%s\n' "$out" | grep -q "O-0018" || fail "the API-error finding was not reported to firstmate"
-  printf '%s\n' "$out" | grep -q "API Error" || fail "the report does not carry the evidence line"
+  [ ! -s "$dir/sent.log" ] || fail "an open interactive choice was typed into"
+  printf '%s\n' "$out" | grep -q "O-0018" || fail "the dialog-blocked finding was not reported to firstmate"
+  printf '%s\n' "$out" | grep -qi "Dialog offen" || fail "the report does not say typing was withheld"
+  [ ! -e "$dir/state/.anstoss-o18n-$id" ] || fail "a dialog pane advanced the auto-nudge counter"
 
   # One report per incident: the identical image stays quiet on re-reads.
   out=$(sweep "$dir")
   if printf '%s' "$out" | grep -q "O-0018"; then
-    fail "the same incident was reported twice"
+    fail "the same dialog incident was reported twice"
   fi
 
-  pass "a full-surface API-error pane is co-reported as O-0018 exactly once, never nudged"
+  pass "an open interactive choice is reported once, never typed into, even with an API-error signature present"
 }
 
 test_dead_endpoint_is_skipped_entirely() {
@@ -404,6 +476,43 @@ test_refuted_nudge_extends_the_interval_l34() {
   pass "a refuted nudge doubles that lane's interval before the next automatic nudge"
 }
 
+# L34 for the O-0018 ladder specifically (item 3 of the anstoss-selbst-tippen
+# brief): a lane auto-nudged after an API-error pane, then found genuinely
+# working, must double its spacing exactly like a refuted standing-lane
+# nudge - through the SAME shared backoff clock (note_liveness_recovery
+# checks both ladder counters, not only the standing one).
+test_api_error_refuted_nudge_extends_the_interval() {
+  local dir id=oxwiderlegt sends_before sends_after
+  dir=$(make_anstoss_case api-error-refuted-interval)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  sweep "$dir" >/dev/null                        # auto-nudge #1
+  sends_before=$(wc -l < "$dir/sent.log")
+  [ "$sends_before" = 1 ] || fail "the O-0018 auto-nudge was not sent before the refutation"
+
+  # The lane turns out WORKING right after our nudge: refuted (L34).
+  printf 'esc to interrupt\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+  sweep "$dir" >/dev/null
+  sends_after=$(wc -l < "$dir/sent.log")
+  [ "$sends_before" = "$sends_after" ] || fail "recovery itself produced another nudge"
+  [ "$(cat "$dir/state/.anstoss-backoff-$id")" = 1 ] || fail "the O-0018 refutation did not record one doubling"
+  [ ! -e "$dir/state/.anstoss-o18n-$id" ] || fail "refutation did not clear the O-0018 counter"
+
+  # Erroring again immediately: the doubled interval must keep quiet...
+  printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null
+  [ "$(wc -l < "$dir/sent.log")" = "$sends_after" ] || fail "the extended interval did not silence the immediate re-nudge"
+
+  # ...until the doubled interval has actually passed.
+  sleep 2.1
+  sweep "$dir" FM_ANSTOSS_INTERVAL=1 >/dev/null
+  [ "$(wc -l < "$dir/sent.log")" -gt "$sends_after" ] || fail "no auto-nudge even after the doubled interval passed"
+
+  pass "a refuted O-0018 auto-nudge doubles that lane's interval through the shared L34 backoff clock"
+}
+
 test_terminal_close_resets_counter_and_backoff() {
   local dir id=schluss
   dir=$(make_anstoss_case terminal-reset)
@@ -422,6 +531,22 @@ test_terminal_close_resets_counter_and_backoff() {
   [ ! -e "$dir/state/.anstoss-count-$id" ] || fail "terminal close kept the counter"
 
   pass "a terminal close resets counter, fingerprint, and interval extension"
+}
+
+test_terminal_close_resets_the_o0018_counter_too() {
+  local dir id=oxschluss
+  dir=$(make_anstoss_case api-error-terminal-reset)
+  write_lane_meta "$dir" "$id"
+  seed_lane "$dir" "$id"
+  printf 'API Error (upstream 529)\n╭───╮\n│ > │\n╰───╯\n' > "$dir/capture.txt"
+
+  sweep "$dir" >/dev/null                        # auto-nudge #1
+  [ "$(cat "$dir/state/.anstoss-o18n-$id")" = 1 ] || fail "auto-nudge #1 did not count"
+  printf 'done: landed with evidence\n' >> "$dir/state/$id.status"
+  sweep "$dir" >/dev/null                        # terminal close resets everything
+  [ ! -e "$dir/state/.anstoss-o18n-$id" ] || fail "terminal close kept the O-0018 counter"
+
+  pass "a terminal close also resets the O-0018 auto-nudge counter"
 }
 
 test_fleet_stop_silences_everything() {
@@ -466,12 +591,17 @@ for t in \
   test_ci_waiting_children_are_work_evidence \
   test_declared_wait_silences_the_lane \
   test_terminal_status_closes_the_lane \
-  test_api_error_far_above_prompt_is_reported_not_nudged \
+  test_api_error_far_above_prompt_is_auto_nudged \
+  test_api_error_second_nudge_is_spaced_and_counted \
+  test_api_error_escalates_after_two_ineffective_nudges \
+  test_api_error_dialog_is_reported_not_typed \
   test_dead_endpoint_is_skipped_entirely \
   test_secondmate_windows_are_out_of_scope \
   test_counter_and_stage2_escalation_fire_together \
   test_refuted_nudge_extends_the_interval_l34 \
+  test_api_error_refuted_nudge_extends_the_interval \
   test_terminal_close_resets_counter_and_backoff \
+  test_terminal_close_resets_the_o0018_counter_too \
   test_fleet_stop_silences_everything \
   test_arm_writes_and_registers_the_shim; do
   "$t"
