@@ -190,6 +190,14 @@ Before changing it, inspect the current file and curate the matching bullet in p
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
 
+## Captain style preferences (config/captain-style.json)
+
+`config/captain-style.json` is an optional local, gitignored JSON object holding two compact captain-style axes: `language`, the language firstmate uses in its own chat and captain-facing artifacts, and `response_tone`, a free-text description of the desired vibe.
+It is the canonical source for those two axes; `data/captain.md`'s "Address and tone" and "Language" sections are short pointers here, and any deeper narrative preference that does not fit a single tone string stays as `data/captain.md` prose instead.
+The captain-invocable `/helm` command is the intended way to read and write it; [`bin/fm-helm.sh`](../bin/fm-helm.sh)'s header owns the exact schema, partial-field merge semantics, and atomic-write mechanics behind its `show` and `set` subcommands.
+`language` governs only firstmate's own personal-facing chat and artifacts for the captain - never a project's tracked code, comments, commit messages, PR descriptions, or checked-in documentation, and never what language a crewmate uses in its own work.
+Unlike `config/crew-dispatch.json`, this file is not part of the inherited local material `secondmate-provisioning` propagates to secondmate homes; a secondmate wanting the same values needs its own `/helm` invocation in its own home.
+
 ## Operational learnings (data/learnings.md)
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
