@@ -28,7 +28,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STYLE_FILE="$CONFIG/captain-style.json"
 
 usage() {
-  sed -n '2,20{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,21{s/^# \{0,1\}//;p;}' "$0"
 }
 
 print_error() {
