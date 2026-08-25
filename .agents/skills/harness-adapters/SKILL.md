@@ -189,9 +189,13 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+The per-folder workspace-trust confirmation ("Is this a project you created or one you trust?") is pre-accepted by `bin/fm-spawn.sh` before every claude launch, so it cannot appear in a successfully launched firstmate-spawned worktree.
+[`docs/configuration.md`](../../../docs/configuration.md#harness-support) owns the trust-store location, scope, and fail-closed behavior.
+Captured incident evidence showed that `--dangerously-skip-permissions` did not suppress this dialog, but a fresh-directory attempt on Claude Code 2.1.231 did not reproduce it; the pre-accept remains defense in depth against version or account differences.
+A separate bypass-permissions mode warning ("WARNING: Claude Code running in Bypass Permissions mode") is a distinct, later dialog that this pre-accept step does not address; see issue #2325 for its two-dialog sequencing and the destructive default on its second option.
+First ever launch on a machine may still show its own onboarding confirmation.
 After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+If a dialog is showing, read it before sending any key: accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the exact choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.

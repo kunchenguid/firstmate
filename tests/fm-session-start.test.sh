@@ -37,7 +37,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# Keep the real jq available inside the narrowed PATH because Herdr endpoint
+# recovery parses structured responses with it. A no-op jq test double would
+# turn valid replacement endpoints into unreadable ones.
+JQ_DIR=$(command -v jq >/dev/null 2>&1 && dirname "$(command -v jq)" || true)
+BASE_PATH=${FM_TEST_BASE_PATH:-${JQ_DIR:+$JQ_DIR:}/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
