@@ -50,7 +50,7 @@ assert data["variables"]["resourcesDeploymentName"] == "[format('firstmate-pilot
 nested = next(
     item for item in data["resources"]
     if item["type"] == "Microsoft.Resources/deployments"
-    and "firstmate-pilot-resources" in json.dumps(item["name"])
+    and item["name"] == "[variables('resourcesDeploymentName')]"
 )
 assert nested["name"] == "[variables('resourcesDeploymentName')]"
 assert data["outputs"]["blobPrivateEndpointNicId"]["value"] == "[reference(variables('resourcesDeploymentName')).outputs.blobPrivateEndpointNicId.value]"
@@ -745,6 +745,116 @@ PY
   pass "10-vCPU Dav6 commissioning and 128-vCPU mixed production pass while unavailable homogeneous full capacity refuses"
 }
 
+run_worker_create_replay_quota_checks() {
+  local sourceable output status
+  sourceable=$(mktemp)
+  write_sourceable_script "$sourceable"
+  set +e
+  output=$(
+    (
+      set --
+      # shellcheck source=bin/fm-azure-pilot.sh
+      . "$sourceable"
+      export FM_AZURE_TENANT_ID FM_AZURE_SUBSCRIPTION_ID FM_AZURE_ADMIN_EMAIL
+      export FM_AZURE_ADMIN_USERNAME FM_AZURE_ADMIN_SSH_PUBLIC_KEY FM_AZURE_RUNNER_OPERATOR_OBJECT_ID
+      export FM_AZURE_OWNER_TAG FM_AZURE_NAMING_PREFIX FM_AZURE_STORAGE_NAME FM_AZURE_KEY_VAULT_NAME
+      export FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_BUDGET_START_DATE
+      FM_AZURE_TENANT_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+      FM_AZURE_SUBSCRIPTION_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+      FM_AZURE_ADMIN_EMAIL=private-notification
+      FM_AZURE_ADMIN_USERNAME=privateadmin
+      FM_AZURE_ADMIN_SSH_PUBLIC_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPrivateOverlayKey'
+      FM_AZURE_RUNNER_OPERATOR_OBJECT_ID=$FM_AZURE_TENANT_ID
+      FM_AZURE_OWNER_TAG=owner
+      FM_AZURE_NAMING_PREFIX=fmtest
+      FM_AZURE_STORAGE_NAME=fmteststorage0001
+      FM_AZURE_KEY_VAULT_NAME=fm-test-vault-001
+      FM_AZURE_DEPLOYMENT_GENERATION=test-generation
+      FM_AZURE_BUDGET_START_DATE=2026-08-01
+      FM_AZURE_CAPACITY_PROFILE=full
+      FM_AZURE_AUTHOR_CAPACITY_MODE=mixed-current
+      FM_AZURE_WORKER_HOME_BINDING='home-binding'
+      FM_AZURE_WORKER_TASK_BINDING='task-binding'
+      FM_AZURE_WORKER_INVOCATION_BINDING='assignment-binding'
+      FM_AZURE_WORKER_SNAPSHOT_DIGEST=unbound
+      FM_AZURE_WORKER_COST_ATTRIBUTION=author
+      require_cloud_environment
+      COMMAND=worker-create
+      SLOT=5
+      validate_slot
+      WORKER_SLOTS_JSON='[5]'
+      WORKER_SKUS_JSON='["Standard_D4s_v6"]'
+      fake_usage='[{"name":{"value":"cores"},"currentValue":68,"limit":262},{"name":{"value":"standardDav6Family"},"currentValue":0,"limit":2},{"name":{"value":"StandardDsv6Family"},"currentValue":8,"limit":10}]'
+      expected_id="/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Compute/virtualMachines/$WORKER_NAME"
+      exact_vms=$(jq -cn \
+        --arg id "$expected_id" --arg name "$WORKER_NAME" \
+        --arg deployment "$FM_AZURE_DEPLOYMENT_GENERATION" --arg owner "$FM_AZURE_OWNER_TAG" \
+        --arg slot "$SLOT" --arg home "$WORKER_HOME_BINDING" --arg task "$WORKER_TASK_BINDING" \
+        --arg invocation "$WORKER_INVOCATION_BINDING" --arg snapshot "$WORKER_SNAPSHOT_DIGEST" \
+        '[{id:$id,name:$name,location:"eastus",powerState:"VM deallocated",hardwareProfile:{vmSize:"Standard_D4s_v6"},tags:{
+          workload:"firstmate","firstmate-role":"worker","deployment-generation":$deployment,
+          "cleanup-owner":$owner,"worker-slot":$slot,"home-binding":$home,
+          "task-binding":$task,"invocation-binding":$invocation,"snapshot-digest":$snapshot,
+          "selected-sku":"Standard_D4s_v6","cost-attribution":"author"}}]')
+      fake_vms='[]'
+      replay_read_fails=0
+      # shellcheck disable=SC2329
+      run_bounded_az_capture() {
+        local operation=$1
+        shift
+        if [ "$operation" = gate-quota ]; then
+          printf '%s\n' "$fake_usage"
+        elif [ "$operation" = gate-quota-worker-replay ]; then
+          [ "$replay_read_fails" -eq 0 ] || return 1
+          printf '%s\n' "$fake_vms"
+        else
+          return 99
+        fi
+      }
+
+      set +e
+      absent_output=$( (quota_gate) 2>&1 )
+      absent_status=$?
+      set -e
+      [ "$absent_status" -eq 2 ]
+      [[ "$absent_output" == *"lacks its required free family vCPUs"* ]]
+
+      fake_vms=$exact_vms
+      quota_gate
+
+      fake_vms=$(jq '.[0].tags["invocation-binding"] = "foreign"' <<<"$exact_vms")
+      set +e
+      foreign_output=$( (quota_gate) 2>&1 )
+      foreign_status=$?
+      set -e
+      [ "$foreign_status" -eq 2 ]
+      [[ "$foreign_output" == *"differs from the exact pilot binding"* ]]
+
+      fake_vms=$(jq '.[0].location = "westus"' <<<"$exact_vms")
+      set +e
+      wrong_region_output=$( (quota_gate) 2>&1 )
+      wrong_region_status=$?
+      set -e
+      [ "$wrong_region_status" -eq 2 ]
+      [[ "$wrong_region_output" == *"differs from the exact pilot binding"* ]]
+
+      fake_vms=$exact_vms
+      replay_read_fails=1
+      set +e
+      unreadable_output=$( (quota_gate) 2>&1 )
+      unreadable_status=$?
+      set -e
+      [ "$unreadable_status" -eq 2 ]
+      [[ "$unreadable_output" == *"replay inventory is unreadable"* ]]
+    ) 2>&1
+  )
+  status=$?
+  set -e
+  rm -f "$sourceable"
+  [ "$status" -eq 0 ] || fail "worker-create replay quota accounting is not exact: $output"
+  pass "worker-create replay charges zero new family cores only for the exact landed slot VM"
+}
+
 run_documentation_contract_checks() {
   assert_grep 'https://portal.azure.com' "$DOC" "portal-only quota fallback URL is missing"
   assert_grep 'InvalidSupportPlan' "$DOC" "support API blocker is missing"
@@ -773,6 +883,7 @@ run_destroy_deadline_check
 run_bounded_mutation_deadline_checks
 run_subscription_deployment_cli_shape_check
 run_capacity_contract_checks
+run_worker_create_replay_quota_checks
 run_documentation_contract_checks
 
 run_guest_run_bound_check() {
@@ -851,6 +962,7 @@ action = {
     "bindings": bindings, "request": request,
     "request_digest": request["request_digest"], "idempotency_key": "e" * 64,
     "payload_dir": str(payload_dir), "account_dir": str(account_dir),
+    "resources": {"staging-result": {"immutable_id": "assignment-result-etag"}},
 }
 execution = {
     "schema": "fm.worker-execution-result/v1",

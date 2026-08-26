@@ -57,6 +57,7 @@ REQUEST_SCHEMA = "fm.worker-request/v1"
 EXECUTION_SCHEMA = "fm.worker-execution/v1"
 EXECUTION_RESULT_SCHEMA = "fm.worker-execution-result/v1"
 EXECUTION_TERMINAL_SCHEMA = "fm.worker-execution-terminal/v1"
+EXECUTE_ABANDON_MARKER = "execute-abandon-action"
 RELEASE_SCHEMA = "fm.worker-release/v2"
 AUTHORITY_SCHEMA = "fm.worker-authority/v1"
 CAPACITY_RESERVATION_SCHEMA = "fm.capacity-reservation/v1"
@@ -495,6 +496,135 @@ def provider_mutate(env, action, lease):
     result = response.get("result")
     if not isinstance(result, dict) or result.get("idempotency_key") != action["idempotency_key"]:
         raise LifecycleError("provider mutation result is not bound to the exact idempotency key")
+    return result
+
+
+def validate_abandon_execute_result(action, result):
+    expected_task_command_id = (
+        ((action.get("resources") or {}).get("task-command") or {}).get("id")
+    )
+    execution = result.get("execution") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or result.get("idempotency_key") != action.get("idempotency_key")
+        or result.get("action") != "abandon-execute"
+        or not isinstance(execution, dict)
+        or execution.get("schema") != EXECUTION_TERMINAL_SCHEMA
+        or execution.get("request_digest") != action.get("request_digest")
+        or execution.get("idempotency_key") != action.get("idempotency_key")
+        or execution.get("disposition") != "provider-never-started-retired"
+        or execution.get("provisioning_state") != "retired"
+        or execution.get("task_command_id") != expected_task_command_id
+        or execution.get("abandon_marker") != EXECUTE_ABANDON_MARKER
+        or execution.get("retired") is not True
+    ):
+        raise LifecycleError("provider never-started execution retirement is not exact")
+    worker = result.get("worker")
+    resources = worker.get("resources") if isinstance(worker, dict) else None
+    claimed_resources = action.get("resources") or {}
+    expected_resource_kinds = set(claimed_resources) - {"task-command"}
+    if (
+        not isinstance(worker, dict)
+        or worker.get("slot") != action.get("slot")
+        or not isinstance(resources, dict)
+        or set(resources) != expected_resource_kinds
+        or resources.get("task-command") is not None
+        or "deallocated" not in str((resources.get("vm") or {}).get("power_state", "")).lower()
+        or (resources.get("state-container") or {}).get("tags", {}).get(
+            EXECUTE_ABANDON_MARKER
+        ) != action.get("idempotency_key")
+    ):
+        raise LifecycleError("provider never-started retirement custody proof is incomplete")
+    stable_immutable_kinds = expected_resource_kinds - MUTABLE_PROVISIONING_CHILD_KINDS - {
+        "state-container", "staging-request", "staging-result",
+    }
+    for kind in expected_resource_kinds:
+        returned = resources[kind]
+        claimed = claimed_resources.get(kind) or {}
+        if not isinstance(returned, dict) or returned.get("id") != claimed.get("id"):
+            raise LifecycleError(
+                "provider never-started retirement {} resource ID is not claimed".format(kind)
+            )
+        if (
+            kind in stable_immutable_kinds
+            and returned.get("immutable_id") != claimed.get("immutable_id")
+        ):
+            raise LifecycleError(
+                "provider never-started retirement {} immutable identity differs".format(kind)
+            )
+    if (resources.get("vm") or {}).get("immutable_id") != action.get("cloud_instance_id"):
+        raise LifecycleError("provider never-started retirement VM identity is not claimed")
+    tag_worker = {
+        "deployment_generation": action.get("deployment_generation"),
+        "owner": action.get("owner"),
+        "slot": action.get("slot"),
+        "role": action.get("role", "author"),
+        "bindings": action.get("bindings") or {},
+    }
+    required_tags = expected_tags(tag_worker)
+    partial_tag_kinds = {
+        "role-assignment", "state-container", "global-reservation",
+        "staging-request", "staging-result",
+    }
+    for kind, returned in resources.items():
+        tags = returned.get("tags") or {}
+        for key, expected in required_tags.items():
+            if kind in partial_tag_kinds and key not in tags:
+                continue
+            if tags.get(key) != expected:
+                raise LifecycleError(
+                    "provider never-started retirement {} assignment tag differs".format(kind)
+                )
+    return execution
+
+
+def validate_durable_abandon_execute_worker(action, worker):
+    if not isinstance(worker, dict):
+        raise LifecycleError("durable worker for execute abandonment is absent")
+    for field, expected in (
+        ("slot", action.get("slot")),
+        ("deployment_generation", action.get("deployment_generation")),
+        ("owner", action.get("owner")),
+        ("role", action.get("role", "author")),
+        ("sku", action.get("sku")),
+        ("sku_family", action.get("sku_family")),
+        ("cloud_generation", action.get("cloud_generation")),
+        ("cloud_instance_id", action.get("cloud_instance_id")),
+    ):
+        if worker.get(field) != expected:
+            raise LifecycleError(
+                "durable worker {} differs from the retired execute claim".format(field)
+            )
+    if (
+        worker.get("assignment_generation")
+        != (action.get("bindings") or {}).get("assignment_generation")
+        or worker.get("bindings") != action.get("bindings")
+    ):
+        raise LifecycleError("durable worker bindings differ from the retired execute claim")
+    durable_resources = worker.get("resources") or {}
+    claimed_resources = action.get("resources") or {}
+    if set(durable_resources) != set(claimed_resources):
+        raise LifecycleError("durable worker resource set differs from the retired execute claim")
+    for kind, claimed in claimed_resources.items():
+        durable = durable_resources.get(kind) or {}
+        if (
+            durable.get("id") != (claimed or {}).get("id")
+            or durable.get("immutable_id") != (claimed or {}).get("immutable_id")
+        ):
+            raise LifecycleError(
+                "durable worker {} identity differs from the retired execute claim".format(kind)
+            )
+
+
+def provider_abandon_execute(env, action, lease):
+    """Operator-only retirement of one exact crash-before-submit execute."""
+    if not isinstance(lease, SlotLease) or lease.slot != str(action.get("slot")):
+        raise LifecycleError("execute abandonment is not covered by its slot's lease")
+    if action.get("type") != "execute":
+        raise LifecycleError("execute abandonment requires an execute claim")
+    response = _provider_call_raw(env, "abandon-execute", action)
+    result = response.get("result")
+    validate_abandon_execute_result(action, result)
     return result
 
 
@@ -1913,6 +2043,8 @@ def make_action(env, action_type, worker=None, item=None, **fields):
             "cloud_instance_id": worker.get("cloud_instance_id"),
             "reservation_usd": worker.get("reservation_usd"),
         })
+        if worker.get("retired_execute_key") is not None:
+            action["retired_execute_key"] = worker["retired_execute_key"]
     if item is not None:
         action["request"] = item
     action.update(fields)
@@ -4836,7 +4968,10 @@ def command_abandon_claim(env, args):
     foreign terminal resource identity retains the claim.
     An exact-key ProviderIdentityRefused replay is recorded verbatim before
     clearing because that recorded resource identity can never bind again.
-    Every other provider failure leaves the claim untouched.
+    The one crash-before-submit exception uses the provider's distinct
+    abandon-execute operation: two fresh Azure views must bracket a durable
+    marker and prove the empty command never started before its exact child is
+    deleted. Every other provider failure leaves the claim untouched.
     """
     if not args.confirm_abandon:
         raise LifecycleError("--confirm-abandon is required")
@@ -4864,10 +4999,45 @@ def command_abandon_claim(env, args):
         if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
             raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
         identity_refusal = None
+        replay_failure = None
         try:
             result = provider_mutate(env, action, lease)
         except ProviderIdentityRefused as exc:
             identity_refusal = exc
+        except LifecycleError as exc:
+            replay_failure = exc
+        if replay_failure is not None and action.get("type") == "execute":
+            try:
+                result = provider_abandon_execute(env, action, lease)
+            except (LifecycleError, ProviderIdentityRefused):
+                raise replay_failure
+            validate_abandon_execute_result(action, result)
+            with controller_lock(env):
+                clean = load_state(env)
+                current = (clean.get("pending_actions") or {}).get(slot)
+                if (
+                    not isinstance(current, dict)
+                    or current.get("idempotency_key") != action["idempotency_key"]
+                ):
+                    raise LifecycleError(
+                        "slot {} claim changed while abandoning; retry".format(slot)
+                    )
+                worker = clean["workers"].get(slot)
+                validate_durable_abandon_execute_worker(action, worker)
+                worker.setdefault("resources", {}).pop("task-command", None)
+                worker["retired_execute_key"] = action["idempotency_key"]
+                record_refusal(clean, worker, LifecycleError(
+                    "claim abandoned by operator: exact never-started execute retired"
+                ))
+                clean["pending_actions"].pop(slot, None)
+                save_state(env, clean)
+            print("FM-ABANDONED-CLAIM {} {}".format(
+                slot, action["idempotency_key"]
+            ))
+            print("never-started execute retired; the slot plans normally again")
+            return
+        if replay_failure is not None:
+            raise replay_failure
         if identity_refusal is not None:
             with controller_lock(env):
                 clean = load_state(env)

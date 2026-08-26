@@ -383,7 +383,11 @@ sku_gate() {
 }
 
 quota_gate() {
-  local usage regional_free regional_limit worker_count declared_author_vcpus required_regional_free requirements family required family_limit family_free
+  local usage regional_free regional_limit worker_count declared_author_vcpus required_regional_free quota_contract requirements worker_family family required family_limit family_free replay_vcpus
+  replay_vcpus=0
+  if [ "$COMMAND" = worker-create ]; then
+    replay_vcpus=$(worker_create_replay_vcpus)
+  fi
   usage=$(run_bounded_az_capture gate-quota vm list-usage --subscription "$FM_AZURE_SUBSCRIPTION_ID" --location "$REGION" --output json --only-show-errors) || \
     refuse "quota gate timed out or failed; retained operation state requires reconciliation"
   regional_limit=$(jq -r '[.[] | select(.name.value == "cores")][0].limit // 0 | tonumber' <<<"$usage")
@@ -391,7 +395,7 @@ quota_gate() {
   worker_count=$(jq 'length' <<<"$WORKER_SLOTS_JSON")
   declared_author_vcpus=$((2 + 4 * worker_count))
   required_regional_free=$((RESERVED_LANDING_VCPUS + declared_author_vcpus))
-  requirements=$(python3 - "$CAPACITY_PROFILE" "$FAMILY_QUOTA_NAME" "$WORKER_SKUS_JSON" <<'PY'
+  quota_contract=$(python3 - "$CAPACITY_PROFILE" "$FAMILY_QUOTA_NAME" "$WORKER_SKUS_JSON" <<'PY'
 import collections
 import json
 import sys
@@ -414,12 +418,21 @@ if profile != "foundation":
     required[supervisor_family] = 2
 for sku in skus:
     required[families[sku]] += 4
-print(json.dumps(required, separators=(",", ":")))
+print(json.dumps({
+    "requirements": required,
+    "worker_family": families[skus[0]] if len(skus) == 1 else "",
+}, separators=(",", ":")))
 PY
 )
+  requirements=$(jq -c '.requirements' <<<"$quota_contract")
+  worker_family=$(jq -r '.worker_family' <<<"$quota_contract")
   while IFS= read -r family; do
     [ -n "$family" ] || continue
     required=$(jq -r --arg family "$family" '.[$family]' <<<"$requirements")
+    if [ "$family" = "$worker_family" ]; then
+      required=$((required - replay_vcpus))
+    fi
+    [ "$required" -ge 0 ] || refuse "worker-create replay capacity delta is invalid"
     family_limit=$(jq -r --arg family "$family" '[.[] | select((.name.value | ascii_downcase) == ($family | ascii_downcase))][0].limit // 0 | tonumber' <<<"$usage")
     family_free=$(jq -r --arg family "$family" '[.[] | select((.name.value | ascii_downcase) == ($family | ascii_downcase))][0] | (((.limit // 0) | tonumber) - ((.currentValue // 0) | tonumber))' <<<"$usage")
     [ "$family_free" -ge "$required" ] || refuse "selected capacity pool lacks its required free family vCPUs"
@@ -439,6 +452,56 @@ PY
     [ "$regional_limit" -ge "$REQUIRED_REGIONAL_VCPUS" ] && [ "$regional_free" -ge "$required_regional_free" ] || \
       refuse "full profile requires East US Total Regional quota of at least 128 with 66 author and 62 landing vCPUs free"
   fi
+}
+
+worker_create_replay_vcpus() {
+  local vms matches count expected_id selected_sku
+  vms=$(run_bounded_az_capture gate-quota-worker-replay vm list \
+    --subscription "$FM_AZURE_SUBSCRIPTION_ID" \
+    --resource-group "$RESOURCE_GROUP" \
+    --output json \
+    --only-show-errors) || \
+    refuse "worker-create replay inventory is unreadable; retained operation state requires reconciliation"
+  matches=$(jq -c --arg name "$WORKER_NAME" '[.[] | select(.name == $name)]' <<<"$vms") || \
+    refuse "worker-create replay inventory is malformed"
+  count=$(jq 'length' <<<"$matches")
+  [ "$count" -le 1 ] || refuse "worker-create replay inventory contains duplicate slot VMs"
+  if [ "$count" -eq 0 ]; then
+    printf '0\n'
+    return 0
+  fi
+  selected_sku=$(jq -r '.[0]' <<<"$WORKER_SKUS_JSON")
+  expected_id="/subscriptions/$FM_AZURE_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Compute/virtualMachines/$WORKER_NAME"
+  jq -e \
+    --arg id "$expected_id" \
+    --arg sku "$selected_sku" \
+    --arg region "$REGION" \
+    --arg deployment "$FM_AZURE_DEPLOYMENT_GENERATION" \
+    --arg owner "$FM_AZURE_OWNER_TAG" \
+    --arg slot "$SLOT" \
+    --arg home "$WORKER_HOME_BINDING" \
+    --arg task "$WORKER_TASK_BINDING" \
+    --arg invocation "$WORKER_INVOCATION_BINDING" \
+    --arg snapshot "$WORKER_SNAPSHOT_DIGEST" \
+    --arg cost "$WORKER_COST_ATTRIBUTION" \
+    'length == 1
+      and (.[0].id | ascii_downcase) == ($id | ascii_downcase)
+      and (.[0].location | ascii_downcase) == ($region | ascii_downcase)
+      and .[0].hardwareProfile.vmSize == $sku
+      and .[0].tags.workload == "firstmate"
+      and .[0].tags["firstmate-role"] == "worker"
+      and .[0].tags["deployment-generation"] == $deployment
+      and .[0].tags["cleanup-owner"] == $owner
+      and .[0].tags["worker-slot"] == $slot
+      and .[0].tags["home-binding"] == $home
+      and .[0].tags["task-binding"] == $task
+      and .[0].tags["invocation-binding"] == $invocation
+      and .[0].tags["snapshot-digest"] == $snapshot
+      and .[0].tags["selected-sku"] == $sku
+      and .[0].tags["cost-attribution"] == $cost' \
+    >/dev/null <<<"$matches" || \
+    refuse "existing worker-create replay VM differs from the exact pilot binding"
+  printf '4\n'
 }
 
 name_gate() {
