@@ -28,11 +28,13 @@
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
-# once itself. A later re-run is idempotent only through the printed
-# FM_PENDING_REPLY_EXISTING_CORR=<corr> command: it preserves the same
-# correlation, body, and record, while a plain re-run mints a new correlation
-# and delivers a separate record. A still-unconfirmed marked request keeps its
-# reply expectation preserved for the record that may have landed.
+# once itself. For an ordinary reply-bearing request, a later re-run is
+# idempotent only through the printed FM_PENDING_REPLY_EXISTING_CORR=<corr>
+# command: it preserves the same correlation, body, and record, while a plain
+# re-run mints a new correlation and delivers a separate record. An explicit
+# fire-and-forget request instead retries with its same caller-supplied delivery
+# id. A still-unconfirmed reply-bearing request keeps its reply expectation
+# preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
 # and with both the commit and the marker lost the send prints a distinct
@@ -40,14 +42,15 @@
 # because a resend-inviting status there would duplicate a delivered
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
-# "was the message acted on" is, and that is answered asynchronously by the
-# worker's acknowledgement move into handled/, with the watcher re-ringing an
-# unacknowledged message and escalating a stuck one. bin/fm-task-inbox-lib.sh
-# owns the record format, the doorbell line, and the re-ring ladder. The
-# composer pre-check before the ring is ADVISORY only: when the composer
-# visibly holds pending text the ring is skipped with a notice and the watcher
-# re-rings later; no composer verdict is delivery proof on this plane, and a
-# failed ring never fails the send.
+# "was the message acted on" is, and that is answered asynchronously for an
+# ordinary record by the worker's acknowledgement move into handled/, with the
+# watcher re-ringing an unacknowledged message and escalating a stuck one. An
+# explicit fire-and-forget record is excluded from that ladder.
+# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
+# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
+# the composer visibly holds pending text the ring is skipped with a notice and
+# the watcher re-rings an ordinary record later; no composer verdict is
+# delivery proof on this plane, and a failed ring never fails the send.
 #
 # TYPED - the LOCAL text that must reach the terminal itself: a harness-native
 # invocation (a leading "/", or a leading "$" to a codex target) must reach
@@ -123,14 +126,15 @@
 # own stderr attached. Transport loss (ssh exit 255) means completion unknown,
 # so fm-send retries the identical leg once - safe because the remote write
 # deduplicates the same request onto the same record - and a still-lost
-# transport exits nonzero while preserving a marked request's reply
+# transport exits nonzero while preserving a reply-bearing marked request's
 # expectation, since the record may have landed. Its error prints the exact
 # FM_PENDING_REPLY_EXISTING_CORR=<id> resend command that preserves the body
-# and makes a later remote enqueue deduplicate onto that same record. The
-# remote host runs no re-ring ladder of
-# its own: a swallowed remote doorbell surfaces through the parent's
-# pending-reply recovery and escalation, whose recovery request re-rings the
-# remote doorbell when it is enqueued.
+# and makes a later remote enqueue deduplicate onto that same record. An
+# unconfirmed fire-and-forget request exits 3 and names the same delivery id to
+# retry. The remote host runs no re-ring ladder of its own: a swallowed ordinary
+# doorbell surfaces through the parent's pending-reply recovery and escalation,
+# whose recovery request re-rings the remote doorbell when it is enqueued;
+# fire-and-forget delivery deliberately arms neither mechanism.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -739,7 +743,8 @@ else
     # home's steering inbox, written idempotently by the host-local leg, then
     # the remote doorbell rings, best-effort. One identical retry after ssh
     # 255 is safe by that idempotence; a still-lost transport preserves a
-    # marked request's reply expectation because the record may have landed.
+    # reply-bearing request's expectation, while fire-and-forget reports the
+    # delivery id that must be reused, because the record may have landed.
     REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$REMOTE_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then

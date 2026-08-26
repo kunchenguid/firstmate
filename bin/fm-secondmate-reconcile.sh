@@ -39,7 +39,7 @@
 # Output, one line per home considered:
 #   sent: <mate-id> <episode>       one reconcile instruction was recorded
 #   dedupe: <mate-id> <episode>     same episode already notified; nothing sent
-#   cleared: <mate-id>              the mismatch is gone; the record was dropped
+#   cleared: <mate-id>              the mismatch is gone; atomic state records clear
 #   unconfirmed: <mate-id> <episode> transport completion is unknown
 #   stale: <mate-id> <generation>   an older observation was ignored
 #   failed: <mate-id> <episode>     the steer could not be recorded
