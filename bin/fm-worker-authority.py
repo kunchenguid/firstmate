@@ -143,7 +143,7 @@ def endpoint_evidence(home, task, values):
     # disappear before it can free the remote lease. The terminal status is
     # produced only after report and branch custody, and unknown still refuses.
     placement = values.get("placement", [])
-    if result.returncode == 0 and endpoint_state == "alive" and placement == ["azure"]:
+    if result.returncode == 0 and endpoint_state == "present" and placement == ["azure"]:
         status = home / "state" / (task + ".status")
         if status.is_symlink() or not status.is_file():
             raise AuthorityError("cloud endpoint authority has no local terminal custody status")

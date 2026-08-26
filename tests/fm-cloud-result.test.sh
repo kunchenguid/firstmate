@@ -417,6 +417,59 @@ PY
   pass "release authority proves exact local bundle, report, status, and task-branch custody"
 }
 
+test_endpoint_authority_uses_backend_oracle_vocabulary() {
+  local root home shim
+  root=$(fm_test_tmproot fm-cloud-return-endpoint-oracle)
+  home="$root/home"
+  shim="$root/shim"
+  mkdir -p "$home/state" "$shim"
+  cat > "$shim/tmux" <<'SH'
+#!/bin/sh
+case "${FAKE_TMUX_STATE:-unknown}" in
+  present) exit 0 ;;
+  *) printf 'fixture transport failure\n' >&2; exit 2 ;;
+esac
+SH
+  chmod +x "$shim/tmux"
+  PATH="$shim:$PATH" python3 - "$ROOT/bin/fm-worker-authority.py" "$home" <<'PY' \
+    || fail "endpoint authority did not use the production backend oracle vocabulary"
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("worker_authority", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+home = Path(sys.argv[2])
+status = home / "state" / "task-x.status"
+values = {
+    "backend": ["tmux"], "window": ["fixture:fm-task-x"],
+    "placement": ["azure"],
+}
+status.write_text("failed: actual returned report was invalid\n", encoding="utf-8")
+os.environ["FAKE_TMUX_STATE"] = "present"
+evidence = module.endpoint_evidence(home, "task-x", values)
+assert b"cloud-return-localized" in evidence, evidence
+status.write_text("working: return not localized yet\n", encoding="utf-8")
+try:
+    module.endpoint_evidence(home, "task-x", values)
+except module.AuthorityError as exc:
+    assert "terminal custody status" in str(exc), exc
+else:
+    raise AssertionError("present endpoint without terminal custody was accepted")
+status.write_text("failed: actual returned report was invalid\n", encoding="utf-8")
+os.environ["FAKE_TMUX_STATE"] = "unknown"
+try:
+    module.endpoint_evidence(home, "task-x", values)
+except module.AuthorityError as exc:
+    assert "absent or return-localized" in str(exc), exc
+else:
+    raise AssertionError("unknown endpoint state was accepted")
+PY
+  pass "endpoint authority accepts production present only with terminal cloud custody and refuses unknown"
+}
+
 test_lifecycle_accepts_only_exact_return_identity() {
   local record root home repo id
   id=cloud-return-lifecycle
@@ -574,6 +627,7 @@ test_task_artifact_root_symlink_is_refused
 test_visual_parent_symlink_is_refused_before_writes
 test_state_directory_symlink_is_refused_before_writes
 test_cloud_custody_authority_reads_localized_return
+test_endpoint_authority_uses_backend_oracle_vocabulary
 test_lifecycle_accepts_only_exact_return_identity
 test_release_authority_requires_retained_scout_scratch
 test_monitor_retries_release_and_removes_credentials
