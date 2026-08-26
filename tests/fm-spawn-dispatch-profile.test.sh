@@ -30,7 +30,13 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   capture-pane) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"; exit 0 ;;
   list-windows)
     [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
@@ -758,6 +764,39 @@ test_codex_threads_model_and_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
+}
+
+test_codex_initial_and_resume_share_full_launch_posture() {
+  local rec id out status initial resumed brief
+  id=codex-resume-posture-z31
+  rec=$(make_spawn_case codex-resume-posture codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "ordinary Codex launch should succeed"
+  initial=$(cat "$LAUNCH_LOG")
+  brief=$(shell_quote_value "$HOME_DIR/data/$id/brief.md")
+
+  out=$(FM_FAKE_TMUX_WINDOWS="fm-$id" FM_FAKE_PANE_COMMAND=bash \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" --relaunch --resume-session session-123)
+  status=$?
+  expect_code 0 "$status" "resumed Codex launch should succeed"
+  resumed=$(cat "$LAUNCH_LOG")
+
+  assert_contains "$initial" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "ordinary Codex launch lost model, effort, autonomy, or notification arguments"
+  assert_contains "$initial" "launch-brief < $brief" \
+    "ordinary Codex launch lost its prompt argument"
+  assert_contains "$resumed" "codex resume --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox -c \"notify=" \
+    "resumed Codex launch lost model, effort, autonomy, or notification arguments"
+  assert_contains "$resumed" "'session-123' \"" \
+    "resumed Codex launch lost the supplied session identity"
+  assert_contains "$resumed" "launch-brief < $brief" \
+    "resumed Codex launch lost its prompt argument"
+  pass "Codex initial and resumed launches share full lifecycle posture"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -3441,6 +3480,7 @@ test_missing_axis_refusal_names_the_flags_spawn_accepts
 test_cooldown_protects_the_static_crew_harness_path
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_initial_and_resume_share_full_launch_posture
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

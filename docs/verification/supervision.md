@@ -67,6 +67,23 @@ Codex's interactive TUI fired no project `SessionStart` hook at all in the same 
 Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
 The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
+The Codex resume posture was rechecked on 2026-08-26 with the following exact commands and output.
+
+```text
+$ codex --version
+codex-cli 0.149.1
+$ codex resume --help | grep -E '^(Usage:|      --dangerously-bypass-approvals-and-sandbox$)'
+Usage: codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+      --dangerously-bypass-approvals-and-sandbox
+$ codex resume --dangerously-bypass-approvals-and-sandbox --help | grep '^Usage:'
+Usage: codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+$ codex --dangerously-bypass-approvals-and-sandbox resume --help | grep '^Usage:'
+Usage: codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+```
+
+Each help command exited 0.
+The portable owner regression is `tests/fm-spawn-dispatch-profile.test.sh`, which executes `bin/fm-spawn.sh` for an ordinary initial launch and a same-task `--relaunch --resume-session` and proves both commands retain the full launch posture and supplied session identity.
+
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
 Both preconditions are load-bearing: the stock 20,000-token keep window exceeds a small lab session, and `AgentSession.compact()` aborts an in-flight turn before measuring compactable history, which otherwise discards that turn and reports `Nothing to compact (session too small)`.

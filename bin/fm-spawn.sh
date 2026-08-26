@@ -23,7 +23,7 @@
 #   when every configured reviewer is blocked. The explicit
 #   --allow-no-mistakes-without-reviewer-quota flag records a captain-authorized
 #   exception in the invocation and is valid only for a no-mistakes ship.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--resume-session <codex-session-id>] [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -39,6 +39,11 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
+#   --resume-session <codex-session-id> is Codex-only and valid only with
+#   --relaunch. It resumes that vendor session through this same lifecycle
+#   owner while preserving the task's recorded model and effort unless either
+#   is explicitly overridden; autonomy, notification, prompt, co-author
+#   sanitation, routing, worktree, and endpoint handling remain unchanged.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -256,6 +261,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __RESUME__    empty for an initial launch or `resume ` for Codex resume
+#     __SESSION__   the shell-quoted supplied Codex session identity
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the task root.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a task-root pointer excluded from Git for writer worktrees.
@@ -489,6 +496,7 @@ ACCESS_SET=0
 KIND_SET=0
 HARNESS_ARG=
 MODEL=
+RESUME_SESSION=
 EFFORT=
 ACCOUNT_PROFILE=
 TASK_CLASS=unresolved
@@ -518,6 +526,7 @@ QUOTA_HEADROOM_SET=0
 QUOTA_RUNWAY_SET=0
 HARNESS_SET=0
 MODEL_SET=0
+RESUME_SESSION_SET=0
 EFFORT_SET=0
 ACCOUNT_PROFILE_SET=0
 TASK_CLASS_SET=0
@@ -538,6 +547,7 @@ for a in "$@"; do
       access) ACCESS=$a; ACCESS_SET=1 ;;
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
+      resume-session) RESUME_SESSION=$a; RESUME_SESSION_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       account-profile) ACCOUNT_PROFILE=$a; ACCOUNT_PROFILE_SET=1 ;;
       task-class) TASK_CLASS=$a; TASK_CLASS_SET=1 ;;
@@ -570,6 +580,8 @@ for a in "$@"; do
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
+    --resume-session) want_value=resume-session ;;
+    --resume-session=*) RESUME_SESSION=${a#--resume-session=}; RESUME_SESSION_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --account-profile) want_value=account-profile ;;
@@ -614,6 +626,7 @@ done
 [ "$ACCESS_SET" -eq 0 ] || [ -n "$ACCESS" ] || { echo "error: --access requires a non-empty value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_SESSION_SET" -eq 0 ] || [ -n "$RESUME_SESSION" ] || { echo "error: --resume-session requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$ACCOUNT_PROFILE_SET" -eq 0 ] || [ -n "$ACCOUNT_PROFILE" ] || { echo "error: --account-profile requires a non-empty value" >&2; exit 1; }
 if [ "$ACCOUNT_PROFILE_SET" -eq 1 ] && ! fm_claude_account_profile_name_valid "$ACCOUNT_PROFILE"; then
@@ -763,6 +776,10 @@ else
     }
   fi
 fi
+[ "$RESUME_SESSION_SET" -eq 0 ] || [ "$RELAUNCH" -eq 1 ] || {
+  echo "error: --resume-session requires --relaunch for an existing task" >&2
+  exit 1
+}
 # Reader/writer access axis (scouts only): closed-set validated here so an
 # unknown value or a misapplied kind refuses before any fleet mutation.
 case "$ACCESS" in
@@ -1413,6 +1430,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  [ "$RESUME_SESSION_SET" -eq 0 ] || { echo "error: --resume-session is single-task only" >&2; exit 1; }
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     fm_record_spawn_failure validation "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)."
@@ -1617,6 +1635,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$RESUME_SESSION_SET" -eq 1 ]; then
+    [ "$MODEL_SET" -eq 1 ] || MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+    [ "$EFFORT_SET" -eq 1 ] || EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1705,9 +1727,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __RESUME____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __SESSION__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __RESUME____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __SESSION__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1807,6 +1829,11 @@ fi
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac
+
+if [ "$RESUME_SESSION_SET" -eq 1 ] && { [ "$RAW_LAUNCH" -eq 1 ] || [ "$HARNESS" != codex ]; }; then
+  echo "error: --resume-session is supported only by the Codex lifecycle owner" >&2
+  exit 1
+fi
 
 # Muse has a verified ordinary-worker adapter but no primary supervision
 # protocol, so a persistent supervisor cannot run safely under it.
@@ -4032,6 +4059,14 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+RESUMEFLAG=
+SESSIONFLAG=
+if [ "$RESUME_SESSION_SET" -eq 1 ]; then
+  RESUMEFLAG='resume '
+  SESSIONFLAG="$(shell_quote "$RESUME_SESSION") "
+fi
+LAUNCH=${LAUNCH//__RESUME__/$RESUMEFLAG}
+LAUNCH=${LAUNCH//__SESSION__/$SESSIONFLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

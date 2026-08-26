@@ -262,7 +262,8 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
-Resume after exit with `codex resume <session-id>`.
+Resume an exited Firstmate task with `bin/fm-spawn.sh <task-id> --relaunch --resume-session <session-id>`.
+That owner preserves the task's launch posture, and `tests/fm-spawn-dispatch-profile.test.sh` covers the executable contract.
 The session id is printed on quit.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
