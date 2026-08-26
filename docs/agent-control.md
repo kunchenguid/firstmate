@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `recover-missing`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -33,6 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `recover-missing` | With `--captain-authorized`, create one fresh Herdr endpoint for an ordinary ship/scout task whose recorded Herdr endpoint is authoritatively missing, then launch the existing brief in the exact recorded local copy. | The new Herdr endpoint is alive, the task identity and recorded copy are unchanged, and the replacement record is atomically published only after that proof. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -53,7 +54,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 
 ## Transactional relaunch
 
-`relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
+`relaunch` and `recover-missing` are the verbs that change durable records, so each runs as a transaction with its own journal, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
@@ -73,6 +74,35 @@ It is not deterministic across the verified adapters: codex and grok resume only
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+## Explicit missing-endpoint recovery
+
+The exact command is `bin/fm-control.sh <task-id> recover-missing --captain-authorized --note "<what the replacement must know>"`.
+The `--captain-authorized` flag is required on every invocation, so this path is never inferred from a dead pane, a standing autonomy posture, or an automatic recovery sweep.
+The note is required for both ship and scout tasks because the replacement reads the durable brief rather than the vanished conversation.
+
+Before this operation existed, the ordinary `fm-spawn.sh <task-id> --relaunch` path refused a recorded Herdr endpoint classified as `missing`, because that path is reserved for a positively agent-free endpoint and does not allocate a new one.
+This operation is eligible only when the exact task record in this home is valid, local, `kind=ship` or `kind=scout`, `backend=herdr`, and points at an existing Git worktree root and project.
+A remote route, secondmate, malformed record, missing worktree, missing brief, or non-Herdr backend is refused.
+The recorded endpoint must classify as `missing`, which means Herdr positively says the recorded pane is absent.
+A present pane with no registered agent classifies as `dead` and remains the ordinary `relaunch` case, while a live, ambiguous, or unreadable result refuses this operation.
+
+A missing pane is not ownership proof by itself.
+Before creating anything, the control plane scans every running Herdr session, task-labeled tab, and foreground process path for a live registered agent carrying the exact task label or the recorded worktree.
+A live match or any incomplete or contradictory inventory read refuses the operation.
+A pane with no native registration is considered clear only when Herdr's strict process inventory proves it is one idle bare shell; an unregistered non-shell or unreadable process shape remains ambiguous.
+The launch owner repeats the ownership proof immediately before allocating the fresh endpoint, then creates exactly one new tab in the recorded Herdr session and workspace.
+It moves that new pane into the exact recorded worktree without invoking a fresh worktree provider or creating a second project copy.
+
+The durable transaction is recorded at `state/<id>.control-recover-missing` and the launch attempt keeps exact new endpoint evidence at `state/<id>.recover-missing.<transaction>.attempt`.
+The prior metadata remains authoritative while the new pane is created, moved into the existing copy, wired to the recorded harness, and positively classified as alive.
+Only then does the launch owner atomically publish a replacement metadata file carrying the same task id, project, worktree, kind, and a fresh Herdr endpoint.
+A launch or publication failure never claims recovery, keeps the prior record when it was not published, and retains the attempt evidence for reconciliation.
+A replacement record that was published before a later failure is kept rather than rewritten to the disappeared endpoint.
+
+The `fm-spawn.sh --recover-missing` half is internal and accepts only the live parent transaction owned by `fm-control.sh`; direct invocation is refused before endpoint allocation.
+This operation does not alter normal `relaunch`, automatic recovery, watcher behavior, secondmate recovery, teardown, or discard semantics.
+It is not a force, discard, endpoint-search, fresh-task, or generic bypass mechanism.
+
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
@@ -88,6 +118,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - A remotely placed secondmate is refused by name.
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
+- `recover-missing` requires the exact task id and the explicit `--captain-authorized` flag.
+  It refuses secondmates, remote routes, malformed records, missing copies, and every backend other than a recorded Herdr endpoint.
+- A present but agent-free Herdr pane is `dead`, not `missing`, so ordinary `relaunch` remains the only recovery path for that case.
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
@@ -118,5 +151,8 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the explicit missing-Herdr recovery path.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-backend-herdr.test.sh` - Herdr's missing, dead, live, and ambiguous pane-state classifier.
+- `tests/fm-control-relaunch.test.sh` - the recovery ownership proof, endpoint replacement, copy preservation, rollback, refusal boundaries, and relaunch/secondmate non-regressions.
+- The real lifecycle opt-in for this recovery path must use `bin/fm-herdr-lab.sh` with a generated non-default session and verify the default-session tripwire after teardown.

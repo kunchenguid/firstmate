@@ -1937,6 +1937,165 @@ fm_backend_herdr_agent_state() {  # <target>
   esac
 }
 
+# fm_backend_herdr_recovery_path_contains: compare one live foreground cwd
+# with a recorded worktree, accepting the worktree root and descendants after
+# physical-path resolution. An unreadable path is never treated as a match.
+fm_backend_herdr_recovery_path_contains() {  # <worktree> <foreground-cwd>
+  local worktree=$1 foreground=$2 worktree_real foreground_real
+  [ -n "$worktree" ] && [ -n "$foreground" ] || return 1
+  worktree_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 1
+  foreground_real=$(cd "$foreground" 2>/dev/null && pwd -P) || return 1
+  [ "$foreground_real" = "$worktree_real" ] && return 0
+  case "$foreground_real" in
+    "$worktree_real"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_herdr_recovery_ownership_state: scan every running Herdr session,
+# tab, and pane for a live registered agent in the exact task-labeled tab or a
+# foreground cwd inside the recorded worktree. A missing recorded pane is only
+# an eligibility signal; this independent scan is the ownership proof. Any
+# incomplete or contradictory read returns ambiguous, so callers never launch
+# through an uncertain inventory.
+fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <worktree>
+  local recorded_session=$1 task_id=$2 worktree=$3 sessions session_names session
+  local tabs tab_id tab_label workspace_id panes pane_id pane_info pane_code
+  local pane_tab_id pane_workspace_id foreground candidate agent_info agent_code
+  local agent_status recorded_seen=0
+  local tab_row pane_row
+  [ -n "$recorded_session" ] && [ -n "$task_id" ] && [ -n "$worktree" ] || {
+    printf 'unreadable'
+    return 0
+  }
+  sessions=$(fm_backend_herdr_cli "$recorded_session" session list --json 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  if ! printf '%s' "$sessions" | jq -e '(.sessions | type) == "array"' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  session_names=$(printf '%s' "$sessions" | jq -r '
+    .sessions[]
+    | select(.running == true)
+    | (if (.name | type) == "string" then .name else "" end)
+  ' 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  while IFS= read -r session; do
+    [ -n "$session" ] || {
+      printf 'ambiguous'
+      return 0
+    }
+    [ "$session" = "$recorded_session" ] && recorded_seen=1
+    tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || {
+      printf 'unreadable'
+      return 0
+    }
+    if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      printf 'unreadable'
+      return 0
+    fi
+    while IFS=$'\t' read -r tab_row; do
+      [ -n "$tab_row" ] || continue
+      tab_id=${tab_row%%$'\t'*}
+      tab_label=${tab_row#*$'\t'}
+      workspace_id=${tab_label##*$'\t'}
+      tab_label=${tab_label%$'\t'*}
+      [ -n "$tab_id" ] && [ -n "$tab_label" ] && [ -n "$workspace_id" ] || {
+        printf 'ambiguous'
+        return 0
+      }
+      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace_id" 2>/dev/null) || {
+        printf 'unreadable'
+        return 0
+      }
+      if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
+        printf 'unreadable'
+        return 0
+      fi
+      while IFS= read -r pane_row; do
+        [ -n "$pane_row" ] || continue
+        pane_id=$pane_row
+        pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
+          printf 'ambiguous'
+          return 0
+        }
+        pane_code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
+        [ -z "$pane_code" ] || {
+          printf 'ambiguous'
+          return 0
+        }
+        if ! printf '%s' "$pane_info" | jq -e --arg pane "$pane_id" --arg workspace "$workspace_id" '
+          .result.pane.pane_id == $pane
+          and ((.result.pane.tab_id | type) == "string")
+          and ((.result.pane.workspace_id | type) == "string")
+          and .result.pane.workspace_id == $workspace
+          and ((.result.pane.foreground_cwd | type) == "string")
+          and ((.result.pane.foreground_cwd | length) > 0)
+        ' >/dev/null 2>&1; then
+          printf 'unreadable'
+          return 0
+        fi
+        pane_tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id' 2>/dev/null)
+        pane_workspace_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id' 2>/dev/null)
+        foreground=$(printf '%s' "$pane_info" | jq -r '.result.pane.foreground_cwd' 2>/dev/null)
+        [ "$pane_workspace_id" = "$workspace_id" ] && [ "$pane_tab_id" = "$tab_id" ] || {
+          printf 'ambiguous'
+          return 0
+        }
+        candidate=0
+        [ "$tab_label" = "fm-$task_id" ] && candidate=1
+        fm_backend_herdr_recovery_path_contains "$worktree" "$foreground" && candidate=1
+        [ "$candidate" = 1 ] || continue
+        agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || {
+          printf 'ambiguous'
+          return 0
+        }
+        agent_code=$(printf '%s' "$agent_info" | jq -r '.error.code // empty' 2>/dev/null)
+        if [ "$agent_code" = agent_not_found ]; then
+          # A missing native registration is not enough to call a pane clear:
+          # a manually started agent can still be running in a Herdr pane that
+          # Firstmate did not register. Only the adapter's strict process
+          # inventory may downgrade this to an idle bare shell; every other
+          # shape remains ambiguous and refuses recovery.
+          fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1 || {
+            printf 'ambiguous'
+            return 0
+          }
+          continue
+        fi
+        [ -z "$agent_code" ] || {
+          printf 'ambiguous'
+          return 0
+        }
+        agent_status=$(printf '%s' "$agent_info" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+        case "$agent_status" in
+          working|idle|done|blocked)
+            printf 'live'
+            return 0
+            ;;
+          *)
+            printf 'ambiguous'
+            return 0
+            ;;
+        esac
+      done < <(printf '%s' "$panes" | jq -r '.result.panes[]? | if (.pane_id | type) == "string" then .pane_id else "" end' 2>/dev/null)
+    done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | [
+      (if (.tab_id | type) == "string" then .tab_id else "" end),
+      (if (.label | type) == "string" then .label else "" end),
+      (if (.workspace_id | type) == "string" then .workspace_id else "" end)
+    ] | @tsv' 2>/dev/null)
+  done <<< "$session_names"
+  [ "$recorded_seen" = 1 ] || {
+    printf 'unreadable'
+    return 0
+  }
+  printf 'clear'
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_herdr_agent_alive() {  # <target>

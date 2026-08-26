@@ -7,6 +7,8 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> recover-missing --captain-authorized
+#                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -50,6 +52,16 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#
+#   recover-missing
+#              An explicit captain-authorized continuation for an ordinary
+#              ship/scout task whose recorded Herdr endpoint is authoritatively
+#              missing. It creates one fresh verified Herdr endpoint in the
+#              recorded Herdr workspace, launches the existing brief in the
+#              exact recorded local copy, and keeps the task identity. It refuses
+#              live, dead, ambiguous, unreadable, remote, secondmate, malformed,
+#              or missing-copy cases. It is not a force, discard, or fresh-task
+#              escape hatch.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -150,12 +162,18 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+RECOVERY_ACTIVE=0
+RECOVERY_PHASE=start
 
 control_cleanup() {
   local status=$?
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if [ "$RECOVERY_ACTIVE" = 1 ] \
+     && declare -F recover_missing_rollback >/dev/null 2>&1; then
+    recover_missing_rollback || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -195,6 +213,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+CAPTAIN_AUTH_SET=0
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
@@ -224,6 +243,7 @@ for a in "$@"; do
     --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --note) want_value=note ;;
     --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
+    --captain-authorized) CAPTAIN_AUTH_SET=1 ;;
     --note-file) want_value=note-file ;;
     --note-file=*)
       [ -f "${a#--note-file=}" ] || die "--note-file '${a#--note-file=}' is not a readable file"
@@ -235,9 +255,16 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || die "--$want_value requires a value"
 
-if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+if [ "$VERB" = recover-missing ]; then
+  [ "$CAPTAIN_AUTH_SET" = 1 ] \
+    || die "recover-missing requires the explicit --captain-authorized approval"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] \
+    || die "recover-missing uses the exact recorded harness and profile; --harness, --model, and --effort are refused"
+elif [ "$VERB" != relaunch ]; then
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$CAPTAIN_AUTH_SET" = 0 ] \
+    || die "--harness, --model, --effort, and --note apply to 'relaunch' only; --captain-authorized applies to 'recover-missing' only"
+elif [ "$CAPTAIN_AUTH_SET" = 1 ]; then
+  die "--captain-authorized applies only to 'recover-missing'"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -504,6 +531,13 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+RECOVERY_JOURNAL="$STATE/$ID.control-recover-missing"
+RECOVERY_META_PRIOR="$RECOVERY_JOURNAL.meta-prior"
+RECOVERY_BRIEF_PRIOR="$RECOVERY_JOURNAL.brief-prior"
+RECOVERY_NOTE_FILE="$RECOVERY_JOURNAL.note"
+RECOVERY_BRIEF="$DATA/$ID/brief.md"
+RECOVERY_TX=
+RECOVERY_ATTEMPT=
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -519,9 +553,9 @@ TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
 
-journal_write() {  # <phase> [extra-line]...
-  local phase=$1
-  shift
+transaction_journal_write() {  # <path> <phase> [extra-line]...
+  local path=$1 phase=$2 line
+  shift 2
   if {
     echo "v1"
     echo "task=$ID"
@@ -537,15 +571,27 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
-    local line
     for line in "$@"; do
       echo "$line"
     done
-  } > "$JOURNAL.tmp" && mv -f "$JOURNAL.tmp" "$JOURNAL"; then
-    RELAUNCH_PHASE=$phase
+  } > "$path.tmp" && mv -f "$path.tmp" "$path"; then
     return 0
   fi
   return 1
+}
+
+journal_write() {  # <phase> [extra-line]...
+  local phase=$1
+  shift
+  transaction_journal_write "$JOURNAL" "$phase" "$@" || return 1
+  RELAUNCH_PHASE=$phase
+}
+
+recovery_journal_write() {  # <phase> [extra-line]...
+  local phase=$1
+  shift
+  transaction_journal_write "$RECOVERY_JOURNAL" "$phase" "$@" || return 1
+  RECOVERY_PHASE=$phase
 }
 
 relaunch_rollback() {
@@ -745,37 +791,38 @@ safe_checkpoint() {
   fi
 }
 
-# record_note: put the required progress note somewhere durable, and - for a
-# ship or scout, whose only record of the interrupted reasoning is the
-# conversation about to be discarded - into the instructions the replacement
-# actually reads. A secondmate's charter is a durable standing document and is
-# never rewritten: a secondmate reconciles its own home's records at startup,
-# so the note stays parent-side audit evidence.
-record_note() {
-  local stamp
+# record_note_to: put the required progress note somewhere durable, and - for
+# a ship or scout whose only record of interrupted reasoning is the discarded
+# conversation - into the instructions the replacement actually reads.
+record_note_to() {  # <brief> <prior-brief> <note-file> <action-word>
+  local brief=$1 prior_brief=$2 note_file=$3 action=$4 stamp
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  printf '%s\n' "$NOTE" > "$NOTE_FILE"
+  printf '%s\n' "$NOTE" > "$note_file"
   case "$KIND" in
     ship|scout)
-      cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
+      cp -p "$brief" "$prior_brief" \
         || die "could not preserve task $ID's instructions before recording the progress note"
       {
         echo
         echo "## Progress note ($stamp)"
         echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
+        echo "This task was $action. Continue from here; the local copy and every"
         echo "uncommitted change are exactly as the previous worker left them."
         echo
         echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
         echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo "$STATE/$ID.inbox/handled/. A steer sent before this replacement survives there."
         echo
         printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
+      } >> "$brief" \
         || die "could not append the progress note to task $ID's instructions"
       ;;
   esac
+}
+
+record_note() {
+  record_note_to "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" "$NOTE_FILE" "relaunched"
 }
 
 do_relaunch() {
@@ -846,6 +893,117 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+recover_missing_rollback() {
+  [ "$RECOVERY_ACTIVE" = 1 ] || return 0
+  [ "$RECOVERY_PHASE" != complete ] || return 0
+  RECOVERY_ACTIVE=0
+  case "$RECOVERY_PHASE" in
+    checkpoint|noted|ownership-cleared)
+      if [ -f "$RECOVERY_BRIEF_PRIOR" ]; then
+        cp -p "$RECOVERY_BRIEF_PRIOR" "$RECOVERY_BRIEF" 2>/dev/null || true
+      fi
+      recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
+      echo "error: missing-endpoint recovery of $ID was refused before a replacement endpoint was published; the recorded task copy and durable record were preserved" >&2
+      ;;
+    launching)
+      if [ "$(fm_meta_get "$META" control_recover_missing_tx)" = "$RECOVERY_TX" ]; then
+        recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=new-record-kept" || true
+        echo "error: missing-endpoint recovery of $ID published a replacement record but did not complete its transaction; the replacement evidence and local copy were retained for reconciliation" >&2
+      else
+        recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
+        echo "error: missing-endpoint recovery of $ID did not publish a replacement; the recorded task copy and durable record were preserved" >&2
+      fi
+      ;;
+    *)
+      recovery_journal_write "failed:$RECOVERY_PHASE" "rollback=prior-record-kept" || true
+      echo "error: missing-endpoint recovery of $ID stopped at phase '$RECOVERY_PHASE'; its durable evidence was retained" >&2
+      ;;
+  esac
+}
+
+do_recover_missing() {
+  local state ownership note_line old_target new_target
+  local -a spawn_args
+  [ "$CAPTAIN_AUTH_SET" = 1 ] || die "recover-missing requires explicit --captain-authorized approval"
+  [ "$BACKEND" = herdr ] || die "recover-missing is limited to a recorded Herdr endpoint"
+  case "$KIND" in
+    ship|scout) ;;
+    secondmate) die "recover-missing refuses secondmate tasks; use secondmate recovery" ;;
+    *) die "recover-missing refuses malformed task kind '$KIND'" ;;
+  esac
+  [ -z "$(fm_meta_get "$META" remote_host)" ] || die "recover-missing refuses remote task routes"
+  require_state_verified_backend recover-missing
+  resolve_relaunch_profile
+  RECOVERY_BRIEF="$DATA/$ID/brief.md"
+  [ -f "$RECOVERY_BRIEF" ] \
+    || die "task $ID has no instructions at $RECOVERY_BRIEF; refusing to launch a worker with nothing to work from"
+  [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
+    || die "recover-missing of a $KIND task requires --note (or --note-file)"
+  safe_checkpoint
+  state=$(agent_state)
+  [ "$state" = missing ] \
+    || die "recover-missing requires the recorded Herdr endpoint to read missing, got '$state'"
+  ownership=$(fm_backend_recovery_ownership_state \
+    herdr "$(fm_meta_get "$META" herdr_session)" "$ID" "$WT")
+  [ "$ownership" = clear ] \
+    || die "recover-missing ownership proof reads '$ownership'; refusing to launch while task or copy ownership is not unambiguous"
+  [ ! -e "$RECOVERY_JOURNAL" ] && [ ! -L "$RECOVERY_JOURNAL" ] \
+    || die "task $ID has prior missing-endpoint recovery evidence at $RECOVERY_JOURNAL; reconcile it before starting another attempt"
+
+  old_target=$T
+  RECOVERY_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  RECOVERY_ATTEMPT="$STATE/$ID.recover-missing.$RECOVERY_TX.attempt"
+  [ ! -e "$RECOVERY_ATTEMPT" ] && [ ! -L "$RECOVERY_ATTEMPT" ] \
+    || die "task $ID's recovery attempt evidence path already exists; refusing an ambiguous retry"
+  cp -p "$META" "$RECOVERY_META_PRIOR" \
+    || die "could not preserve task $ID's durable record before missing-endpoint recovery"
+  RECOVERY_ACTIVE=1
+  note_line="note_file=$RECOVERY_NOTE_FILE"
+  recovery_journal_write checkpoint \
+    "authorization=captain-authorized" "old_endpoint=$old_target" \
+    "${CHECKPOINT_LINES[@]}" "$note_line"
+  record_note_to "$RECOVERY_BRIEF" "$RECOVERY_BRIEF_PRIOR" \
+    "$RECOVERY_NOTE_FILE" "recovered into a fresh Herdr endpoint after its recorded endpoint disappeared"
+  recovery_journal_write noted \
+    "authorization=captain-authorized" "old_endpoint=$old_target" \
+    "${CHECKPOINT_LINES[@]}" "$note_line"
+  recovery_journal_write ownership-cleared \
+    "authorization=captain-authorized" "old_endpoint=$old_target" \
+    "ownership=$ownership" "${CHECKPOINT_LINES[@]}" "$note_line"
+  recovery_journal_write launching \
+    "authorization=captain-authorized" "old_endpoint=$old_target" \
+    "attempt=$RECOVERY_ATTEMPT" "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  spawn_args=("$ID" --recover-missing --harness "$TARGET_HARNESS")
+  if FM_CONTROL_RECOVER_MISSING_TX="$RECOVERY_TX" \
+      FM_CONTROL_RECOVER_MISSING_ATTEMPT="$RECOVERY_ATTEMPT" \
+      FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT="$LAUNCH_WAIT" \
+      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+    :
+  else
+    die "the authorized missing-endpoint replacement for $ID could not be launched; its prior record and recovery evidence were retained"
+  fi
+
+  fm_backend_validate_task_endpoint "$META" "$ID" || \
+    die "replacement metadata for $ID could not be validated after missing-endpoint recovery"
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  new_target=$FM_BACKEND_VALIDATED_TARGET
+  [ "$BACKEND" = herdr ] && [ "$new_target" != "$old_target" ] \
+    || die "missing-endpoint recovery for $ID did not publish a fresh Herdr endpoint"
+  [ "$(fm_meta_get "$META" control_recover_missing_tx)" = "$RECOVERY_TX" ] \
+    || die "replacement metadata for $ID is not bound to this recovery transaction"
+  state=$(fm_backend_agent_state "$BACKEND" "$new_target")
+  [ "$state" = alive ] \
+    || die "replacement endpoint for $ID reads '$state' after publication; the task was not declared recovered"
+  T=$new_target
+  recovery_journal_write complete \
+    "authorization=captain-authorized" "old_endpoint=$old_target" \
+    "new_endpoint=$new_target" "attempt=$RECOVERY_ATTEMPT" \
+    "${CHECKPOINT_LINES[@]}" "$note_line"
+  RECOVERY_ACTIVE=0
+  echo "recovered $ID harness=$TARGET_HARNESS backend=herdr old_endpoint=$old_target endpoint=$new_target worktree=$WT"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -871,5 +1029,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  recover-missing)
+    do_recover_missing
     ;;
 esac
