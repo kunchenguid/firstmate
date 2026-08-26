@@ -463,11 +463,43 @@ kill_started
 # is the costly direction - it condemns work that is merely starved.
 TURN_WT="$TMP_ROOT/turnover-wt"; mkdir -p "$TURN_WT"
 SNAP_M="$TMP_ROOT/snap-turnover"
-( cd "$TURN_WT" && exec bash -c 'while :; do ( sleep 0.2 ); done' ) &
+TURN_FIFO="$TMP_ROOT/turnover.fifo"
+TURN_BARRIER="$TMP_ROOT/turnover-barrier"
+TURN_OUT="$TMP_ROOT/turnover.out"
+mkfifo "$TURN_FIFO"
+mkdir -p "$TURN_BARRIER"
+# Keep one flat parent blocked in a shell builtin. Once the probe has captured
+# that exact membership, release the parent to launch its child. This proves
+# child turnover without relying on a short sleep being scheduled inside the
+# sample window.
+( cd "$TURN_WT" && exec bash -c 'read -r _ < "$1"; sleep 120 & wait' _ "$TURN_FIFO" ) &
 TURNOVER=$!
 STARTED_PIDS="$STARTED_PIDS $TURNOVER"
-sleep 0.5
-out=$(FM_NM_SNAP_DIR="$SNAP_M" "$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 1)
+out=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  out=$("$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 0)
+  case "$out" in *"procs: 1"*) break ;; esac
+  sleep 0.2
+done
+assert_contains "$out" "procs: 1" "the flat turnover parent was not observable"
+FM_NM_SNAP_DIR="$SNAP_M" \
+  FM_NM_TEST_BARRIER_DIR="$TURN_BARRIER" \
+  FM_NM_TEST_BARRIER_PHASE=before-progress-sample \
+  "$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 1 >"$TURN_OUT" &
+TURN_PROBE=$!
+STARTED_PIDS="$STARTED_PIDS $TURN_PROBE"
+wait_for_barrier "$TURN_BARRIER" "$TURN_PROBE" \
+  || fail "the turnover probe never captured its flat parent"
+printf 'go\n' >"$TURN_FIFO"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  out=$("$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 0)
+  case "$out" in *"procs: 2"*) break ;; esac
+  sleep 0.2
+done
+assert_contains "$out" "procs: 2" "the turnover child was not observable before the sample"
+printf 'before-progress-sample\n' >"$TURN_BARRIER/release"
+wait "$TURN_PROBE" || fail "the turnover probe failed after release"
+out=$(cat "$TURN_OUT")
 [ "$(verdict_of "$out")" = alive ] \
   || fail "REGRESSION: one-shot child turnover with a flat parent must read alive, got: $out"
 assert_contains "$out" "process membership changed in 1s" \
