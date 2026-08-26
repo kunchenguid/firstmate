@@ -107,8 +107,15 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # Pi process. That must never park a second watcher: Pi's tracked extensions own
 # continuity via fm_watch_arm_pi. A Cursor park under PI_CODING_AGENT races the
 # extension arm, emits rearm-resurface wakes, and aborts in-flight asks.
-# Native cursor-agent primaries clear PI_CODING_AGENT at launch, so they still park.
-[ "${PI_CODING_AGENT:-}" = "true" ] && exit 0
+# fm-spawn's cursor launch clears PI_CODING_AGENT; a hand-started cursor-agent may
+# still inherit it (same multiplexer inheritance class as CLAUDECODE). Stand down
+# only for a Pi host with no Cursor identity markers. If CURSOR_AGENT or
+# CURSOR_INVOKED_AS is present, park despite a leaked PI_CODING_AGENT.
+if [ "${PI_CODING_AGENT:-}" = "true" ] \
+  && [ -z "${CURSOR_AGENT:-}" ] \
+  && [ -z "${CURSOR_INVOKED_AS:-}" ]; then
+  exit 0
+fi
 
 lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0

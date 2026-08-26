@@ -477,11 +477,38 @@ test_park_inert_under_pi_coding_agent() {
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
   payload=$(printf '{"session_id":"sess-cursor","generation_id":"gen-0","loop_count":0,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}')
-  out=$(printf '%s' "$payload" | FM_HOME="$dir" PI_CODING_AGENT=true FM_CURSOR_PARK_POLL=1 \
+  # No Cursor identity markers: Pi host alone must stand the park down.
+  out=$(printf '%s' "$payload" | env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_HOME="$dir" PI_CODING_AGENT=true FM_CURSOR_PARK_POLL=1 \
     "$FAKE_CURSOR" -c "$PARK_CHILD" 2>/dev/null)
   [ -z "$out" ] || fail "Pi-hosted Cursor SDK must not park or wake: $out"
   [ ! -e "$dir/state/arm-ran" ] || fail "the park armed under PI_CODING_AGENT=true"
   pass "cursor park: inert when PI_CODING_AGENT marks a Pi host session"
+}
+
+test_park_still_parks_with_pi_leak_and_cursor_identity() {
+  local dir out body payload
+  dir=$(make_primary_dir "$TMP_ROOT/park-pi-leak-cursor")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  payload=$(printf '{"session_id":"sess-cursor","generation_id":"gen-0","loop_count":0,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}')
+  # Hand-started cursor-agent may inherit PI_CODING_AGENT; Cursor identity wins.
+  out=$(printf '%s' "$payload" | env -u CURSOR_INVOKED_AS \
+    FM_HOME="$dir" PI_CODING_AGENT=true CURSOR_AGENT=1 FM_CURSOR_PARK_POLL=1 \
+    "$FAKE_CURSOR" -c "$PARK_CHILD" 2>/dev/null)
+  [ -e "$dir/state/arm-ran" ] || fail "CURSOR_AGENT must still park despite PI_CODING_AGENT leak"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "CURSOR_AGENT park must deliver the wake despite PI leak: $out"
+  body=$(followup_of "$out")
+  case "$body" in *'stale: fixture-win needs a look'*) ;; *) fail "CURSOR_AGENT wake reason missing: $body" ;; esac
+  rm -f "$dir/state/arm-ran"
+  out=$(printf '%s' "$payload" | env -u CURSOR_AGENT \
+    FM_HOME="$dir" PI_CODING_AGENT=true CURSOR_INVOKED_AS=cursor-agent FM_CURSOR_PARK_POLL=1 \
+    "$FAKE_CURSOR" -c "$PARK_CHILD" 2>/dev/null)
+  [ -e "$dir/state/arm-ran" ] || fail "CURSOR_INVOKED_AS must still park despite PI_CODING_AGENT leak"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "CURSOR_INVOKED_AS park must deliver the wake despite PI leak: $out"
+  pass "cursor park: parks when PI_CODING_AGENT leaks alongside Cursor identity"
 }
 
 test_park_stands_down_when_away_mode_activates_before_commit() {
@@ -669,6 +696,7 @@ test_park_serializes_supersession_with_followup_commit
 test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
 test_park_inert_under_pi_coding_agent
+test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
