@@ -59,7 +59,7 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-lock-declaration.XXXXXX") || fail "c
 trap cleanup_all EXIT
 
 VERSION=$("$CLAUDE_BIN" --version 2>/dev/null | head -1)
-note "claude: ${VERSION:-unknown version} ($CLAUDE_BIN)"
+note "claude: ${VERSION:-unknown version}"
 
 # A pid no live process can hold, planted in the launch environment. The harness
 # must override it; anything that lets it through is the drift this guard exists

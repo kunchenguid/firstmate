@@ -309,7 +309,7 @@ FM_SESSION_LOCK_DECLARATION_DRIFT=1 bin/fm-test-run.sh tests/fm-session-lock-dec
 ```
 
 ```text
-# claude: 2.1.241 (Claude Code) (/Users/tom/.local/bin/claude)
+# claude: 2.1.241 (Claude Code)
 # print-mode session: declared 45547, ancestry [45547 ], planted 2147483646
 # background agent: declared 37066, ancestry [37066 36968 90256 ], planted 2147483646
 # background agent: without the declaration the writer would have recorded 90256, the shared plumbing above this session
