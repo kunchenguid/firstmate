@@ -37,6 +37,24 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 WRIT_DATA_DIR="${WRIT_DATA_DIR:-$FM_HOME/state/writ-fm}"
 WRIT_MODEL_DIR="${WRIT_MODEL_DIR:-$HOME/.local/share/writ-fm/model}"
 WRIT_RULES_DIR="${WRIT_RULES_DIR:-$FM_HOME/regeln}"
+# The Lehren-Ledger (anchor authority) lives only in the PRIMARY home's
+# untracked data/ - one owner, every copy is a pointer (M3). A secondmate
+# home therefore reads the parent's ledger via its durable parent binding;
+# WRIT_LEDGER_PATH stays the explicit override for tests and odd layouts.
+if [ -z "${WRIT_LEDGER_PATH:-}" ] \
+  && [ ! -f "$FM_HOME/data/forensik-2026-08/lehren-ledger.md" ]; then
+  _parent_record="$FM_HOME/.fm-secondmate-parent"
+  if [ -f "$_parent_record" ] && [ -f "$SCRIPT_DIR/fm-secondmate-parent-lib.sh" ]; then
+    # shellcheck source=bin/fm-secondmate-parent-lib.sh
+    . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+    if fm_secondmate_parent_record_parse "$_parent_record" 2>/dev/null \
+      && [ -n "${FM_SECONDMATE_PARENT_HOME:-}" ] \
+      && [ -f "$FM_SECONDMATE_PARENT_HOME/data/forensik-2026-08/lehren-ledger.md" ]; then
+      WRIT_LEDGER_PATH="$FM_SECONDMATE_PARENT_HOME/data/forensik-2026-08/lehren-ledger.md"
+      export WRIT_LEDGER_PATH
+    fi
+  fi
+fi
 export WRIT_DATA_DIR WRIT_MODEL_DIR WRIT_RULES_DIR
 
 WRIT_FM_SRC="$FM_ROOT/tools/writ-fm"
