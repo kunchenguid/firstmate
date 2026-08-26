@@ -540,6 +540,54 @@ else:
 module.az = original_az
 inventory_source = inspect.getsource(module.inventory)
 assert inventory_source.count("if value is None:") == 3
+assert "transient_not_found_attempts=4" in inventory_source
+
+# Azure CLI can fail `vm list --show-details` when a VM disappears during its
+# internal instance-view expansion. Only the explicitly opted-in list retries
+# explicit ResourceNotFound, and the retry count stays bounded.
+missing = "ERROR: (ResourceNotFound) VM disappeared\nCode: ResourceNotFound\n"
+calls = []
+responses = iter(((None, 3, missing), ([], 0, "")))
+original_sleep = module.time.sleep
+module.time.sleep = lambda _seconds: None
+module.az = lambda *_args, **_kwargs: calls.append(True) or next(responses)
+assert module.list_json(
+    controller, ["vm", "list", "--show-details"], transient_not_found_attempts=2,
+) == []
+assert len(calls) == 2, calls
+calls.clear()
+module.az = lambda *_args, **_kwargs: calls.append(True) or (None, 3, missing)
+try:
+    module.list_json(controller, ["vm", "list", "--show-details"])
+except module.ProviderError as exc:
+    assert "ResourceNotFound" in str(exc), exc
+else:
+    raise AssertionError("default list inventory retried or softened ResourceNotFound")
+assert len(calls) == 1, calls
+calls.clear()
+module.az = lambda *_args, **_kwargs: calls.append(True) or (
+    None, 3, "ERROR: (AuthorizationFailed) denied",
+)
+try:
+    module.list_json(
+        controller, ["vm", "list", "--show-details"], transient_not_found_attempts=4,
+    )
+except module.ProviderError as exc:
+    assert "AuthorizationFailed" in str(exc), exc
+else:
+    raise AssertionError("list inventory retried a non-absence provider error")
+assert len(calls) == 1, calls
+module.az = lambda *_args, **_kwargs: ({}, 0, "")
+try:
+    module.list_json(
+        controller, ["vm", "list", "--show-details"], transient_not_found_attempts=4,
+    )
+except module.ProviderError as exc:
+    assert "malformed" in str(exc), exc
+else:
+    raise AssertionError("list inventory retried a malformed successful read")
+module.az = original_az
+module.time.sleep = original_sleep
 
 # Replacement compute advances the worker generation without rewriting the
 # durable slot reservation. Cleanup accepts only that reservation's canonical
