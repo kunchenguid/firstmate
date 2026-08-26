@@ -58,4 +58,19 @@ short_out=$(FM_BACKEND_HERDR_SESSION=default FM_BACKEND_HERDR_PANE=w1:p2 \
 grep -F 'SHORT-TAIL' "$FM_FAKE_HERDR_LOG" >/dev/null
 grep -F $'\u2063' "$FM_FAKE_HERDR_LOG" >/dev/null
 
+: > "$FM_FAKE_HERDR_LOG"
+launch_like=$(printf 'x%.0s' $(seq 1 600))
+if FM_BACKEND_HERDR_SESSION=default FM_BACKEND_HERDR_PANE=w1:p2 \
+  bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_send_literal "default:w1:p2" "$2"' _ "$ROOT" "$launch_like"; then
+  echo "general literal send was not failed closed for a realistic LAUNCH-sized (600 byte) message" >&2
+  exit 1
+fi
+! grep -F 'pane send-text' "$FM_FAKE_HERDR_LOG" >/dev/null
+
+: > "$FM_FAKE_HERDR_LOG"
+FM_BACKEND_HERDR_SESSION=default FM_BACKEND_HERDR_PANE=w1:p2 \
+  bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_send_literal_command "default:w1:p2" "$2"' _ "$ROOT" "$launch_like"
+grep -F 'pane send-text w1:p2' "$FM_FAKE_HERDR_LOG" >/dev/null
+grep -F "$launch_like" "$FM_FAKE_HERDR_LOG" >/dev/null
+
 echo 'ok: Herdr long sends use atomic agent prompt without literal PTY insertion'

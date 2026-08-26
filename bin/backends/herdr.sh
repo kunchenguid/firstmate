@@ -2558,15 +2558,34 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # Long text fails closed here rather than falling back to the atomic
 # agent-prompt route: that route submits as part of the call, which would
 # break this function's unsubmitted contract, and it targets a running
-# agent's composer - not available for pre-launch shell sends (e.g. the
-# spawn LAUNCH command), which is this primitive's only long-text caller.
+# agent's composer - not available for pre-launch shell sends.
 fm_backend_herdr_send_literal() {  # <target> <text>
+  fm_backend_herdr_send_literal_impl "$1" "$2" 0
+}
+
+# fm_backend_herdr_send_literal_command: like fm_backend_herdr_send_literal,
+# but exempt from the long-text guard. Reserved for fm-spawn.sh's fixed,
+# code-constructed LAUNCH command line, sent to a bare pre-agent shell prompt
+# before any agent is running - not the agent composer widget the documented
+# head-loss failure mode was reproduced against - and whose length tracks
+# path/env lengths rather than arbitrary long user-authored content. The
+# submit step for that send must stay a separate, later call (never folded
+# into an atomic type+submit primitive): fm-spawn.sh's herdr presentation
+# order lock is released in the window between typing and Enter, and an
+# atomic primitive would collapse that window.
+fm_backend_herdr_send_literal_command() {  # <target> <text>
+  fm_backend_herdr_send_literal_impl "$1" "$2" 1
+}
+
+fm_backend_herdr_send_literal_impl() {  # <target> <text> <allow-long>
   local text_bytes
   fm_backend_herdr_target_ready "$1" || return 1
-  text_bytes=$(LC_ALL=C printf '%s' "$2" | wc -c | tr -d '[:space:]')
-  if [ "$text_bytes" -gt "$FM_BACKEND_HERDR_LONG_TEXT_BYTES" ]; then
-    echo "error: refusing unsafe Herdr literal send (${text_bytes} bytes); Herdr's PTY paste can silently drop the head of long input and no atomic unsubmitted primitive exists" >&2
-    return 1
+  if [ "$3" -ne 1 ]; then
+    text_bytes=$(LC_ALL=C printf '%s' "$2" | wc -c | tr -d '[:space:]')
+    if [ "$text_bytes" -gt "$FM_BACKEND_HERDR_LONG_TEXT_BYTES" ]; then
+      echo "error: refusing unsafe Herdr literal send (${text_bytes} bytes); Herdr's PTY paste can silently drop the head of long input and no atomic unsubmitted primitive exists" >&2
+      return 1
+    fi
   fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }

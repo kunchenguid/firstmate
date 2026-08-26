@@ -210,7 +210,7 @@ Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; or
 Typed Herdr messages larger than 200 bytes use the atomic `agent prompt` operation on protocol 19 or newer, which submits the complete text and Enter together.
 On older or unreadable Herdr releases, a long typed message fails closed before any text is inserted rather than risking silent prefix loss.
 The adapter submit function is the authoritative transport boundary for both secondmate and ordinary explicit-target typed sends, while durable inbox sends remain lossless and unchanged.
-The unsubmitted literal-send primitive used by spawn-time commands, such as the crewmate and secondmate launch line, fails closed over the same byte threshold instead of risking the same silent prefix loss, since it has no atomic unsubmitted equivalent to fall back to.
+The crewmate and secondmate LAUNCH command line is exempt from that byte threshold: it targets a bare pre-agent shell prompt rather than the agent composer widget the documented head-loss failure mode was reproduced against, and its length tracks fixed path and env content rather than arbitrary long user-authored text.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
